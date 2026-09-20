@@ -3579,6 +3579,100 @@ mod tests {
     }
 
     #[test]
+    fn typed_priority_queue_aot_storage_plan_and_symbols_match_jit_lanes() {
+        for policy in ["error", "drop_newest"] {
+            for capacity in [3_u32, 0_u32] {
+                let mut process = AotProcess::new();
+                process.upsert_file(
+                    "typed_priority_queue_storage.stasis",
+                    format!(
+                        "global actors: priority_queue<i32, {capacity}, {policy}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed priority-queue AOT compile");
+
+                let snapshot = process
+                    .program_snapshot()
+                    .expect("typed priority-queue AOT snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed priority-queue descriptor");
+                assert_eq!(descriptor.capacity, capacity);
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("priority_queue<i32, {capacity}, {policy}>")
+                );
+                let bindings = build_aot_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                )
+                .expect("typed priority-queue AOT direct storage plan");
+                for metadata in ["count", "next_order"] {
+                    let path = format!("actors.{metadata}");
+                    assert!(matches!(
+                        bindings.scalars.get(&path),
+                        Some(DirectStorageBinding::Symbol(symbol))
+                            if symbol == &aot_storage_symbol(
+                                AotStorageSymbolKind::Scalar,
+                                &path,
+                                "",
+                            )
+                    ));
+                }
+                assert_eq!(bindings.scalars.len(), 2);
+                for field in ["priority", "order", "values"] {
+                    let lane = bindings
+                        .arrays
+                        .get(&(String::from("actors"), String::from(field)))
+                        .unwrap_or_else(|| panic!("missing priority-queue {field} lane"));
+                    assert!(matches!(
+                        &lane.slot,
+                        DirectStorageBinding::Symbol(symbol)
+                            if symbol == &aot_storage_symbol(
+                                AotStorageSymbolKind::Array,
+                                "actors",
+                                field,
+                            )
+                    ));
+                    assert_eq!(lane.static_len, Some(capacity as usize));
+                    assert_eq!(lane.storage_bytes, 4);
+                }
+                assert_eq!(bindings.arrays.len(), 3);
+
+                let (bytes, _) = process
+                    .compile_standalone_storage_object("aot_fn_0")
+                    .expect("standalone typed priority-queue storage object")
+                    .expect("typed priority-queue storage required");
+                let object = File::parse(bytes.as_slice())
+                    .expect("parse typed priority-queue storage object");
+                let symbols: BTreeSet<String> = object
+                    .symbols()
+                    .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                    .collect();
+                for expected in [
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.count", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.next_order", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "priority"),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "order"),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values"),
+                ] {
+                    assert!(
+                        symbols.contains(&expected),
+                        "typed priority-queue storage object missing '{expected}' for {policy}, capacity {capacity}: {symbols:?}"
+                    );
+                }
+                assert!(
+                    symbols.contains("stasis_jit_register_global_i32_array"),
+                    "typed priority-queue i32 array registration symbol missing: {symbols:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn typed_ring_buffer_aot_storage_plan_and_symbols_match_jit_lanes() {
         for policy in ["error", "drop_newest", "overwrite_oldest"] {
             for capacity in [2_u32, 0_u32] {
@@ -4281,6 +4375,168 @@ function zero_capacity(): i32 {
                 assert_eq!(
                     linked, expected,
                     "linked AOT/JIT typed queue operation parity for {root}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_priority_queue_linked_aot_matches_jit_operation_sequence() {
+        const SOURCE: &str = r#"global typed_priority_queue_error_parity_147: priority_queue<i32, 5, error>;
+global typed_priority_queue_drop_parity_147: priority_queue<i32, 2, drop_newest>;
+global typed_priority_queue_zero_parity_147: priority_queue<i32, 0, drop_newest>;
+function signed_order(): i32 {
+    typed_priority_queue_error_parity_147.clear();
+    typed_priority_queue_error_parity_147.push(7, 70);
+    typed_priority_queue_error_parity_147.push(-2, 20);
+    typed_priority_queue_error_parity_147.push(7, 71);
+    typed_priority_queue_error_parity_147.push(0, 0);
+    typed_priority_queue_error_parity_147.push(-2, 21);
+    let first: i32 = typed_priority_queue_error_parity_147.peek();
+    typed_priority_queue_error_parity_147.pop();
+    let second: i32 = typed_priority_queue_error_parity_147.peek();
+    typed_priority_queue_error_parity_147.pop();
+    let third: i32 = typed_priority_queue_error_parity_147.peek();
+    typed_priority_queue_error_parity_147.pop();
+    let fourth: i32 = typed_priority_queue_error_parity_147.peek();
+    typed_priority_queue_error_parity_147.pop();
+    let fifth: i32 = typed_priority_queue_error_parity_147.peek();
+    typed_priority_queue_error_parity_147.pop();
+    return first * 1000000 + second * 10000 + third * 100 + fourth * 10 + fifth
+        + typed_priority_queue_error_parity_147.count() * 100000000;
+}
+function full_error(): i32 {
+    typed_priority_queue_error_parity_147.clear();
+    typed_priority_queue_error_parity_147.push(3, 30);
+    typed_priority_queue_error_parity_147.push(1, 10);
+    typed_priority_queue_error_parity_147.push(2, 20);
+    typed_priority_queue_error_parity_147.push(0, 40);
+    typed_priority_queue_error_parity_147.push(-1, 50);
+    let accepted: i32 = 0;
+    if (typed_priority_queue_error_parity_147.push(-9, 90)) { accepted = 1; }
+    return accepted * 1000 + typed_priority_queue_error_parity_147.count() * 100
+        + typed_priority_queue_error_parity_147.peek();
+}
+function full_drop(): i32 {
+    typed_priority_queue_drop_parity_147.clear();
+    typed_priority_queue_drop_parity_147.push(3, 30);
+    typed_priority_queue_drop_parity_147.push(1, 10);
+    let accepted: i32 = 0;
+    if (typed_priority_queue_drop_parity_147.push(-9, 90)) { accepted = 1; }
+    return accepted * 1000 + typed_priority_queue_drop_parity_147.count() * 100
+        + typed_priority_queue_drop_parity_147.peek();
+}
+function zero_capacity(): i32 {
+    typed_priority_queue_zero_parity_147.clear();
+    let pushed: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.push(-1, 7)) { pushed = 1; }
+    let popped: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.pop()) { popped = 1; }
+    return pushed * 1000 + popped * 100 + typed_priority_queue_zero_parity_147.count() * 10
+        + typed_priority_queue_zero_parity_147.peek()
+        + typed_priority_queue_zero_parity_147.capacity();
+}
+function clear_reset(): i32 {
+    typed_priority_queue_error_parity_147.clear();
+    typed_priority_queue_error_parity_147.push(-1, 9);
+    typed_priority_queue_error_parity_147.push(1, 8);
+    typed_priority_queue_error_parity_147.clear();
+    let popped: i32 = 0;
+    if (typed_priority_queue_error_parity_147.pop()) { popped = 1; }
+    return typed_priority_queue_error_parity_147.count() * 100
+        + typed_priority_queue_error_parity_147.peek() * 10 + popped;
+}
+function preflight_empty(): i32 {
+    typed_priority_queue_error_parity_147.clear();
+    let can_push: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { can_peek = 1; }
+    let popped: i32 = 0;
+    if (typed_priority_queue_error_parity_147.pop()) { popped = 1; }
+    return can_push * 100 + can_pop * 10 + can_peek + popped * 1000
+        + typed_priority_queue_error_parity_147.peek();
+}
+function preflight_full(): i32 {
+    typed_priority_queue_error_parity_147.clear();
+    typed_priority_queue_error_parity_147.push(3, 30);
+    typed_priority_queue_error_parity_147.push(1, 10);
+    typed_priority_queue_error_parity_147.push(2, 20);
+    typed_priority_queue_error_parity_147.push(0, 40);
+    typed_priority_queue_error_parity_147.push(-1, 50);
+    let can_push: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { can_peek = 1; }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_error_parity_147.push(-9, 90)) { accepted = 1; }
+    return can_push * 100 + can_pop * 10 + can_peek + accepted * 1000;
+}
+function preflight_zero(): i32 {
+    typed_priority_queue_zero_parity_147.clear();
+    let can_push: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.can_peek()) { can_peek = 1; }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.push(-9, 90)) { accepted = 1; }
+    return can_push * 100 + can_pop * 10 + can_peek + accepted * 1000;
+}
+"#;
+        const ROOTS: [&str; 8] = [
+            "signed_order",
+            "full_error",
+            "full_drop",
+            "zero_capacity",
+            "clear_reset",
+            "preflight_empty",
+            "preflight_full",
+            "preflight_zero",
+        ];
+        const EXPECTED: [i32; 8] = [20_210_771, 550, 210, 0, 0, 100, 11, 0];
+
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&ROOTS.map(str::to_string));
+        jit.upsert_file("typed_priority_queue_parity_147.stasis", SOURCE);
+        jit.compile()
+            .expect("typed priority-queue JIT parity compile");
+        for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+            assert_eq!(
+                jit.execute_i32_noarg_by_name(root)
+                    .unwrap_or_else(|_| panic!("typed priority-queue JIT root {root}")),
+                expected,
+                "typed priority-queue JIT operation oracle for {root}"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let mut aot = AotProcess::new();
+            aot.set_required_emit_roots(&ROOTS.map(str::to_string));
+            aot.upsert_file("typed_priority_queue_parity_147.stasis", SOURCE);
+            aot.compile()
+                .expect("typed priority-queue AOT parity compile");
+
+            for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+                let linked = run_linked_i32_noarg_fixture(
+                    &aot,
+                    root,
+                    &format!("typed_priority_queue_{root}_parity"),
+                    &link_config,
+                )
+                .unwrap_or_else(|| panic!("linked typed priority-queue root {root}"));
+                assert_eq!(
+                    linked, expected,
+                    "linked AOT/JIT typed priority-queue operation parity for {root}"
                 );
             }
         }

@@ -3099,6 +3099,25 @@ pub(crate) fn emit_simple_statements(
                     {
                         continue;
                     }
+                    if try_emit_typed_priority_queue_call(
+                        builder,
+                        target,
+                        args,
+                        values_by_name,
+                        runtime_call_refs,
+                        internal_calls,
+                        call_signatures,
+                        type_table,
+                        global_path_types,
+                        constant_values,
+                        collection_infos,
+                        named_struct_field_types,
+                        foreach_bindings,
+                    )?
+                    .is_some()
+                    {
+                        continue;
+                    }
                     if try_emit_typed_ring_buffer_call(
                         builder,
                         target,
@@ -5511,6 +5530,1570 @@ fn try_emit_typed_queue_call(
             emit_typed_circular_clear(builder, count_ref, head_ref, values_ref, capacity)?;
             Ok(Some(TypedCircularCallResult::Void))
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TypedPriorityQueueCallResult {
+    Value(ValueBinding),
+    Void,
+}
+
+#[derive(Clone, Copy)]
+enum TypedPriorityQueueCallKind {
+    Push,
+    Pop,
+    Peek,
+    PeekPriority,
+    Count,
+    Capacity,
+    Clear,
+    CanPush,
+    CanPop,
+    CanPeek,
+}
+
+impl TypedPriorityQueueCallKind {
+    fn from_target(target: &str) -> Option<Self> {
+        match target {
+            "push" => Some(Self::Push),
+            "pop" => Some(Self::Pop),
+            "peek" => Some(Self::Peek),
+            "peek_priority" => Some(Self::PeekPriority),
+            "count" => Some(Self::Count),
+            "capacity" => Some(Self::Capacity),
+            "clear" => Some(Self::Clear),
+            "can_push" => Some(Self::CanPush),
+            "can_pop" => Some(Self::CanPop),
+            "can_peek" => Some(Self::CanPeek),
+            _ => None,
+        }
+    }
+
+    fn expected_arity(self) -> usize {
+        match self {
+            Self::Push => 3,
+            Self::Pop
+            | Self::Peek
+            | Self::PeekPriority
+            | Self::Count
+            | Self::Capacity
+            | Self::Clear
+            | Self::CanPush
+            | Self::CanPop
+            | Self::CanPeek => 1,
+        }
+    }
+}
+
+fn typed_priority_queue_storage_bindings(
+    target: &str,
+    args: &[SimpleExpr],
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+) -> Result<
+    (
+        String,
+        usize,
+        DirectStorageRef,
+        DirectStorageRef,
+        DirectArrayStorageRef,
+        DirectArrayStorageRef,
+        DirectArrayStorageRef,
+    ),
+    String,
+> {
+    let Some(SimpleExpr::Identifier(path)) = args.first() else {
+        return Err(format!(
+            "{target} first argument must be an exact persistent typed collection path"
+        ));
+    };
+    let root = path.split('.').next().unwrap_or(path);
+    if values_by_name.contains_key(root) {
+        return Err(format!(
+            "{target} first argument must be an exact persistent typed collection path"
+        ));
+    }
+    let type_id = global_path_types.get(path).copied().ok_or_else(|| {
+        format!(
+            "{target} first argument '{}' is not a persistent typed collection path",
+            path
+        )
+    })?;
+    if !type_table.is_typed_collection_type(type_id) {
+        return Err(format!(
+            "{target} requires persistent priority_queue path '{}', found non-typed state type {}",
+            path, type_id
+        ));
+    }
+    let type_name = type_table
+        .type_info(type_id)
+        .map(|info| info.name.as_str())
+        .ok_or_else(|| format!("{target} path '{}' has unknown type {}", path, type_id))?;
+    let descriptor = type_table
+        .parse_typed_collection_descriptor(type_name)?
+        .ok_or_else(|| {
+            format!(
+                "{target} path '{}' has no compiler-owned typed collection descriptor",
+                path
+            )
+        })?;
+    if descriptor.kind != TypedCollectionKind::PriorityQueue {
+        return Err(format!(
+            "{target} requires persistent priority_queue path '{}', found {}",
+            path,
+            descriptor.kind_name()
+        ));
+    }
+    if descriptor.element_type != Some(TYPE_ID_I32) {
+        return Err(format!(
+            "{target} requires priority_queue path '{}' with i32 payload",
+            path
+        ));
+    }
+    let capacity = usize::try_from(descriptor.capacity).map_err(|_| {
+        format!(
+            "{target} priority_queue path '{}' capacity {} does not fit the target index type",
+            path, descriptor.capacity
+        )
+    })?;
+    let lanes_match = descriptor.lanes.len() == 5
+        && descriptor.lanes[0].name == "count"
+        && descriptor.lanes[0].type_id == TYPE_ID_I32
+        && descriptor.lanes[0].element_count == 1
+        && descriptor.lanes[1].name == "next_order"
+        && descriptor.lanes[1].type_id == TYPE_ID_U32
+        && descriptor.lanes[1].element_count == 1
+        && descriptor.lanes[2].name == "priority"
+        && descriptor.lanes[2].type_id == TYPE_ID_I32
+        && descriptor.lanes[2].element_count == u64::from(descriptor.capacity)
+        && descriptor.lanes[3].name == "order"
+        && descriptor.lanes[3].type_id == TYPE_ID_U32
+        && descriptor.lanes[3].element_count == u64::from(descriptor.capacity)
+        && descriptor.lanes[4].name == "values"
+        && descriptor.lanes[4].type_id == TYPE_ID_I32
+        && descriptor.lanes[4].element_count == u64::from(descriptor.capacity);
+    if !lanes_match {
+        return Err(format!(
+            "{target} priority_queue path '{}' requires exact count:i32, next_order:u32, priority:i32[N], order:u32[N], and values:i32[N] lanes",
+            path
+        ));
+    }
+    let direct_storage = runtime_call_refs.direct_storage.as_ref().ok_or_else(|| {
+        format!(
+            "{target} for typed priority_queue '{}' requires direct storage bindings",
+            path
+        )
+    })?;
+    let scalar = |name: &str| {
+        let lane_path = format!("{path}.{name}");
+        direct_storage
+            .scalars
+            .get(&lane_path)
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                "{target} for typed priority_queue '{}' is missing direct scalar binding '{}.{}'",
+                path, path, name
+            )
+            })
+    };
+    let array = |name: &str, type_name: &str| {
+        let binding = direct_storage
+            .arrays
+            .get(&(path.to_string(), name.to_string()))
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                    "{target} for typed priority_queue '{}' is missing direct array binding '{}.{}'",
+                    path, path, name
+                )
+            })?;
+        if binding.storage_bytes != 4 || binding.static_len != Some(capacity) {
+            return Err(format!(
+                "{target} for typed priority_queue '{}' requires a {} binding with static length {}, found {} bytes and length {:?}",
+                path,
+                type_name,
+                capacity,
+                binding.storage_bytes,
+                binding.static_len
+            ));
+        }
+        Ok(binding)
+    };
+    Ok((
+        path.clone(),
+        capacity,
+        scalar("count")?,
+        scalar("next_order")?,
+        array("priority", "i32")?,
+        array("order", "u32")?,
+        array("values", "i32")?,
+    ))
+}
+
+fn is_priority_queue_receiver(
+    args: &[SimpleExpr],
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+) -> Result<bool, String> {
+    let Some(SimpleExpr::Identifier(path)) = args.first() else {
+        return Ok(false);
+    };
+    let root = path.split('.').next().unwrap_or(path);
+    if values_by_name.contains_key(root) {
+        return Ok(false);
+    }
+    let Some(type_id) = global_path_types.get(path).copied() else {
+        return Ok(false);
+    };
+    if !type_table.is_typed_collection_type(type_id) {
+        return Ok(false);
+    }
+    let Some(type_name) = type_table.type_info(type_id).map(|info| info.name.as_str()) else {
+        return Ok(false);
+    };
+    Ok(type_table
+        .parse_typed_collection_descriptor(type_name)?
+        .is_some_and(|descriptor| descriptor.kind == TypedCollectionKind::PriorityQueue))
+}
+
+fn emit_typed_priority_queue_metadata_valid(
+    builder: &mut FunctionBuilder<'_>,
+    count: Value,
+    capacity: i32,
+) -> Value {
+    let count_non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, count, 0);
+    let count_within_capacity =
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedLessThanOrEqual, count, i64::from(capacity));
+    builder
+        .ins()
+        .band(count_non_negative, count_within_capacity)
+}
+
+fn emit_typed_priority_queue_before(
+    builder: &mut FunctionBuilder<'_>,
+    priority: Value,
+    order: Value,
+    other_priority: Value,
+    other_order: Value,
+) -> Value {
+    let priority_less = builder
+        .ins()
+        .icmp(IntCC::SignedLessThan, priority, other_priority);
+    let priority_equal = builder.ins().icmp(IntCC::Equal, priority, other_priority);
+    let order_less = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, order, other_order);
+    let tie_less = builder.ins().band(priority_equal, order_less);
+    builder.ins().bor(priority_less, tie_less)
+}
+
+fn emit_typed_priority_queue_sift_up(
+    builder: &mut FunctionBuilder<'_>,
+    index: Value,
+    priority_ref: DirectArrayStorageRef,
+    order_ref: DirectArrayStorageRef,
+    values_ref: DirectArrayStorageRef,
+    type_table: &TypeTable,
+) -> Result<(), String> {
+    let condition_block = builder.create_block();
+    builder.append_block_param(condition_block, types::I32);
+    let body_block = builder.create_block();
+    builder.append_block_param(body_block, types::I32);
+    let swap_block = builder.create_block();
+    for _ in 0..8 {
+        builder.append_block_param(swap_block, types::I32);
+    }
+    let exit_block = builder.create_block();
+
+    builder.ins().jump(condition_block, &[index]);
+
+    builder.switch_to_block(condition_block);
+    let current_index = builder.block_params(condition_block)[0];
+    let has_parent = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThan, current_index, 0);
+    builder
+        .ins()
+        .brif(has_parent, body_block, &[current_index], exit_block, &[]);
+
+    builder.seal_block(body_block);
+    builder.switch_to_block(body_block);
+    let current_index = builder.block_params(body_block)[0];
+    let parent_minus_one = builder.ins().iadd_imm(current_index, -1);
+    let two = builder.ins().iconst(types::I32, 2);
+    let parent = builder.ins().udiv(parent_minus_one, two);
+    let current_priority = emit_direct_array_load(
+        builder,
+        priority_ref.slot,
+        current_index,
+        TYPE_ID_I32,
+        type_table,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    let current_order = emit_direct_array_load(
+        builder,
+        order_ref.slot,
+        current_index,
+        TYPE_ID_U32,
+        type_table,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    let current_value = emit_direct_array_load(
+        builder,
+        values_ref.slot,
+        current_index,
+        TYPE_ID_I32,
+        type_table,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let parent_priority = emit_direct_array_load(
+        builder,
+        priority_ref.slot,
+        parent,
+        TYPE_ID_I32,
+        type_table,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    let parent_order = emit_direct_array_load(
+        builder,
+        order_ref.slot,
+        parent,
+        TYPE_ID_U32,
+        type_table,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    let parent_value = emit_direct_array_load(
+        builder,
+        values_ref.slot,
+        parent,
+        TYPE_ID_I32,
+        type_table,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let should_swap = emit_typed_priority_queue_before(
+        builder,
+        current_priority,
+        current_order,
+        parent_priority,
+        parent_order,
+    );
+    builder.ins().brif(
+        should_swap,
+        swap_block,
+        &[
+            current_index,
+            parent,
+            current_priority,
+            current_order,
+            current_value,
+            parent_priority,
+            parent_order,
+            parent_value,
+        ],
+        exit_block,
+        &[],
+    );
+
+    builder.seal_block(swap_block);
+    builder.switch_to_block(swap_block);
+    let params = builder.block_params(swap_block).to_vec();
+    let current_index = params[0];
+    let parent = params[1];
+    let current_priority = params[2];
+    let current_order = params[3];
+    let current_value = params[4];
+    let parent_priority = params[5];
+    let parent_order = params[6];
+    let parent_value = params[7];
+    emit_direct_array_store(
+        builder,
+        priority_ref.slot,
+        parent,
+        current_priority,
+        TYPE_ID_I32,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        order_ref.slot,
+        parent,
+        current_order,
+        TYPE_ID_U32,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        parent,
+        current_value,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        priority_ref.slot,
+        current_index,
+        parent_priority,
+        TYPE_ID_I32,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        order_ref.slot,
+        current_index,
+        parent_order,
+        TYPE_ID_U32,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        current_index,
+        parent_value,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    builder.ins().jump(condition_block, &[parent]);
+
+    builder.seal_block(condition_block);
+    builder.seal_block(exit_block);
+    builder.switch_to_block(exit_block);
+    Ok(())
+}
+
+fn emit_typed_priority_queue_sift_down(
+    builder: &mut FunctionBuilder<'_>,
+    index: Value,
+    limit: Value,
+    priority_ref: DirectArrayStorageRef,
+    order_ref: DirectArrayStorageRef,
+    values_ref: DirectArrayStorageRef,
+    type_table: &TypeTable,
+) -> Result<(), String> {
+    let condition_block = builder.create_block();
+    builder.append_block_param(condition_block, types::I32);
+    builder.append_block_param(condition_block, types::I32);
+    let body_block = builder.create_block();
+    builder.append_block_param(body_block, types::I32);
+    builder.append_block_param(body_block, types::I32);
+    let children_block = builder.create_block();
+    for _ in 0..6 {
+        builder.append_block_param(children_block, types::I32);
+    }
+    let choose_block = builder.create_block();
+    for _ in 0..9 {
+        builder.append_block_param(choose_block, types::I32);
+    }
+    let right_block = builder.create_block();
+    for _ in 0..9 {
+        builder.append_block_param(right_block, types::I32);
+    }
+    let swap_block = builder.create_block();
+    for _ in 0..9 {
+        builder.append_block_param(swap_block, types::I32);
+    }
+    let exit_block = builder.create_block();
+
+    builder.ins().jump(condition_block, &[index, limit]);
+
+    builder.switch_to_block(condition_block);
+    let current_index = builder.block_params(condition_block)[0];
+    let current_limit = builder.block_params(condition_block)[1];
+    let has_current = builder
+        .ins()
+        .icmp(IntCC::SignedLessThan, current_index, current_limit);
+    builder.ins().brif(
+        has_current,
+        body_block,
+        &[current_index, current_limit],
+        exit_block,
+        &[],
+    );
+
+    builder.seal_block(body_block);
+    builder.switch_to_block(body_block);
+    let current_index = builder.block_params(body_block)[0];
+    let current_limit = builder.block_params(body_block)[1];
+    let current_priority = emit_direct_array_load(
+        builder,
+        priority_ref.slot,
+        current_index,
+        TYPE_ID_I32,
+        type_table,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    let current_order = emit_direct_array_load(
+        builder,
+        order_ref.slot,
+        current_index,
+        TYPE_ID_U32,
+        type_table,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    let current_value = emit_direct_array_load(
+        builder,
+        values_ref.slot,
+        current_index,
+        TYPE_ID_I32,
+        type_table,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let current_index_i64 = builder.ins().sextend(types::I64, current_index);
+    let shifted_index = builder.ins().ishl_imm(current_index_i64, 1);
+    let left_i64 = builder.ins().iadd_imm(shifted_index, 1);
+    let limit_i64 = builder.ins().sextend(types::I64, current_limit);
+    let has_left = builder
+        .ins()
+        .icmp(IntCC::UnsignedLessThan, left_i64, limit_i64);
+    let left = builder.ins().ireduce(types::I32, left_i64);
+    builder.ins().brif(
+        has_left,
+        children_block,
+        &[
+            current_index,
+            current_limit,
+            left,
+            current_priority,
+            current_order,
+            current_value,
+        ],
+        exit_block,
+        &[],
+    );
+
+    builder.seal_block(children_block);
+    builder.switch_to_block(children_block);
+    let children_args = builder.block_params(children_block).to_vec();
+    let current_index = children_args[0];
+    let current_limit = children_args[1];
+    let left = children_args[2];
+    let current_priority = children_args[3];
+    let current_order = children_args[4];
+    let current_value = children_args[5];
+    let right = builder.ins().iadd_imm(left, 1);
+    let has_right = builder
+        .ins()
+        .icmp(IntCC::SignedLessThan, right, current_limit);
+    let left_priority = emit_direct_array_load(
+        builder,
+        priority_ref.slot,
+        left,
+        TYPE_ID_I32,
+        type_table,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    let left_order = emit_direct_array_load(
+        builder,
+        order_ref.slot,
+        left,
+        TYPE_ID_U32,
+        type_table,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    let left_value = emit_direct_array_load(
+        builder,
+        values_ref.slot,
+        left,
+        TYPE_ID_I32,
+        type_table,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let child_args = [
+        current_index,
+        current_limit,
+        left,
+        current_priority,
+        current_order,
+        current_value,
+        left_priority,
+        left_order,
+        left_value,
+    ];
+    builder.ins().brif(
+        has_right,
+        right_block,
+        &child_args,
+        choose_block,
+        &child_args,
+    );
+
+    builder.seal_block(right_block);
+    builder.switch_to_block(right_block);
+    let right_args = builder.block_params(right_block).to_vec();
+    let current_index = right_args[0];
+    let current_limit = right_args[1];
+    let left = right_args[2];
+    let current_priority = right_args[3];
+    let current_order = right_args[4];
+    let current_value = right_args[5];
+    let left_priority = right_args[6];
+    let left_order = right_args[7];
+    let left_value = right_args[8];
+    let right = builder.ins().iadd_imm(left, 1);
+    let right_priority = emit_direct_array_load(
+        builder,
+        priority_ref.slot,
+        right,
+        TYPE_ID_I32,
+        type_table,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    let right_order = emit_direct_array_load(
+        builder,
+        order_ref.slot,
+        right,
+        TYPE_ID_U32,
+        type_table,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    let right_value = emit_direct_array_load(
+        builder,
+        values_ref.slot,
+        right,
+        TYPE_ID_I32,
+        type_table,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let right_before_left = emit_typed_priority_queue_before(
+        builder,
+        right_priority,
+        right_order,
+        left_priority,
+        left_order,
+    );
+    let child_index = builder.ins().select(right_before_left, right, left);
+    let child_priority = builder
+        .ins()
+        .select(right_before_left, right_priority, left_priority);
+    let child_order = builder
+        .ins()
+        .select(right_before_left, right_order, left_order);
+    let child_value = builder
+        .ins()
+        .select(right_before_left, right_value, left_value);
+    builder.ins().jump(
+        choose_block,
+        &[
+            current_index,
+            current_limit,
+            child_index,
+            current_priority,
+            current_order,
+            current_value,
+            child_priority,
+            child_order,
+            child_value,
+        ],
+    );
+
+    builder.seal_block(choose_block);
+    builder.switch_to_block(choose_block);
+    let choose_args = builder.block_params(choose_block).to_vec();
+    let current_index = choose_args[0];
+    let current_limit = choose_args[1];
+    let child_index = choose_args[2];
+    let current_priority = choose_args[3];
+    let current_order = choose_args[4];
+    let current_value = choose_args[5];
+    let child_priority = choose_args[6];
+    let child_order = choose_args[7];
+    let child_value = choose_args[8];
+    let should_swap = emit_typed_priority_queue_before(
+        builder,
+        child_priority,
+        child_order,
+        current_priority,
+        current_order,
+    );
+    builder.ins().brif(
+        should_swap,
+        swap_block,
+        &[
+            current_index,
+            current_limit,
+            child_index,
+            current_priority,
+            current_order,
+            current_value,
+            child_priority,
+            child_order,
+            child_value,
+        ],
+        exit_block,
+        &[],
+    );
+
+    builder.seal_block(swap_block);
+    builder.switch_to_block(swap_block);
+    let swap_args = builder.block_params(swap_block).to_vec();
+    let current_index = swap_args[0];
+    let current_limit = swap_args[1];
+    let child_index = swap_args[2];
+    let current_priority = swap_args[3];
+    let current_order = swap_args[4];
+    let current_value = swap_args[5];
+    let child_priority = swap_args[6];
+    let child_order = swap_args[7];
+    let child_value = swap_args[8];
+    emit_direct_array_store(
+        builder,
+        priority_ref.slot,
+        current_index,
+        child_priority,
+        TYPE_ID_I32,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        order_ref.slot,
+        current_index,
+        child_order,
+        TYPE_ID_U32,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        current_index,
+        child_value,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        priority_ref.slot,
+        child_index,
+        current_priority,
+        TYPE_ID_I32,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        order_ref.slot,
+        child_index,
+        current_order,
+        TYPE_ID_U32,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        child_index,
+        current_value,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    builder
+        .ins()
+        .jump(condition_block, &[child_index, current_limit]);
+
+    builder.seal_block(condition_block);
+    builder.seal_block(exit_block);
+    builder.switch_to_block(exit_block);
+    Ok(())
+}
+
+fn emit_typed_priority_queue_push(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    next_order_ref: DirectStorageRef,
+    priority_ref: DirectArrayStorageRef,
+    order_ref: DirectArrayStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+    priority: Value,
+    value: Value,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
+    })?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_BOOL,
+        });
+    }
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let next_order = emit_direct_scalar_load(builder, next_order_ref, TYPE_ID_U32, type_table)?;
+    let count_valid = emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32);
+    let has_room = builder
+        .ins()
+        .icmp_imm(IntCC::SignedLessThan, count, i64::from(capacity_i32));
+    let order_available = builder.ins().icmp_imm(IntCC::NotEqual, next_order, -1);
+    let can_insert = builder.ins().band(count_valid, has_room);
+    let can_insert = builder.ins().band(can_insert, order_available);
+    let insert_block = builder.create_block();
+    let reject_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(can_insert, insert_block, &[], reject_block, &[]);
+
+    builder.seal_block(reject_block);
+    builder.switch_to_block(reject_block);
+    let rejected = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(merge_block, &[rejected]);
+
+    builder.seal_block(insert_block);
+    builder.switch_to_block(insert_block);
+    emit_direct_array_store(
+        builder,
+        priority_ref.slot,
+        count,
+        priority,
+        TYPE_ID_I32,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        order_ref.slot,
+        count,
+        next_order,
+        TYPE_ID_U32,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        count,
+        value,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    emit_typed_priority_queue_sift_up(
+        builder,
+        count,
+        priority_ref,
+        order_ref,
+        values_ref,
+        type_table,
+    )?;
+    let next_count = builder.ins().iadd_imm(count, 1);
+    let next_sequence = builder.ins().iadd_imm(next_order, 1);
+    emit_direct_i32_store(builder, count_ref, next_count);
+    emit_direct_i32_store(builder, next_order_ref, next_sequence);
+    let accepted = builder.ins().iconst(types::I32, 1);
+    builder.ins().jump(merge_block, &[accepted]);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "typed priority_queue push merge block missing result".to_string())?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_BOOL,
+    })
+}
+
+fn emit_typed_priority_queue_pop(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    priority_ref: DirectArrayStorageRef,
+    order_ref: DirectArrayStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
+    })?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_BOOL,
+        });
+    }
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let count_valid = emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32);
+    let nonempty = builder.ins().icmp_imm(IntCC::SignedGreaterThan, count, 0);
+    let can_pop = builder.ins().band(count_valid, nonempty);
+    let pop_block = builder.create_block();
+    let reject_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(can_pop, pop_block, &[], reject_block, &[]);
+
+    builder.seal_block(reject_block);
+    builder.switch_to_block(reject_block);
+    let rejected = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(merge_block, &[rejected]);
+
+    builder.seal_block(pop_block);
+    builder.switch_to_block(pop_block);
+    let last_index = builder.ins().iadd_imm(count, -1);
+    let zero = builder.ins().iconst(types::I32, 0);
+    let single = builder.ins().icmp_imm(IntCC::Equal, count, 1);
+    let single_block = builder.create_block();
+    let multi_block = builder.create_block();
+    builder
+        .ins()
+        .brif(single, single_block, &[], multi_block, &[]);
+
+    builder.seal_block(single_block);
+    builder.switch_to_block(single_block);
+    emit_direct_array_store(
+        builder,
+        priority_ref.slot,
+        last_index,
+        zero,
+        TYPE_ID_I32,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        order_ref.slot,
+        last_index,
+        zero,
+        TYPE_ID_U32,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        last_index,
+        zero,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    emit_direct_i32_store(builder, count_ref, zero);
+    let accepted = builder.ins().iconst(types::I32, 1);
+    builder.ins().jump(merge_block, &[accepted]);
+
+    builder.seal_block(multi_block);
+    builder.switch_to_block(multi_block);
+    let last_priority = emit_direct_array_load(
+        builder,
+        priority_ref.slot,
+        last_index,
+        TYPE_ID_I32,
+        type_table,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    let last_order = emit_direct_array_load(
+        builder,
+        order_ref.slot,
+        last_index,
+        TYPE_ID_U32,
+        type_table,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    let last_value = emit_direct_array_load(
+        builder,
+        values_ref.slot,
+        last_index,
+        TYPE_ID_I32,
+        type_table,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        priority_ref.slot,
+        zero,
+        last_priority,
+        TYPE_ID_I32,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        order_ref.slot,
+        zero,
+        last_order,
+        TYPE_ID_U32,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        zero,
+        last_value,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        priority_ref.slot,
+        last_index,
+        zero,
+        TYPE_ID_I32,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        order_ref.slot,
+        last_index,
+        zero,
+        TYPE_ID_U32,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        last_index,
+        zero,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let next_count = builder.ins().iadd_imm(count, -1);
+    emit_direct_i32_store(builder, count_ref, next_count);
+    emit_typed_priority_queue_sift_down(
+        builder,
+        zero,
+        next_count,
+        priority_ref,
+        order_ref,
+        values_ref,
+        type_table,
+    )?;
+    let accepted = builder.ins().iconst(types::I32, 1);
+    builder.ins().jump(merge_block, &[accepted]);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "typed priority_queue pop merge block missing result".to_string())?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_BOOL,
+    })
+}
+
+fn emit_typed_priority_queue_can_push(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    next_order_ref: DirectStorageRef,
+    capacity: usize,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
+    })?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_BOOL,
+        });
+    }
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let next_order = emit_direct_scalar_load(builder, next_order_ref, TYPE_ID_U32, type_table)?;
+    let count_valid = emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32);
+    let has_room = builder
+        .ins()
+        .icmp_imm(IntCC::SignedLessThan, count, i64::from(capacity_i32));
+    let order_available = builder.ins().icmp_imm(IntCC::NotEqual, next_order, -1);
+    let can_push = builder.ins().band(count_valid, has_room);
+    let can_push = builder.ins().band(can_push, order_available);
+    Ok(ValueBinding {
+        value: can_push,
+        type_id: TYPE_ID_BOOL,
+    })
+}
+
+fn emit_typed_priority_queue_can_pop_or_peek(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    capacity: usize,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
+    })?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_BOOL,
+        });
+    }
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let metadata_valid = emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32);
+    let nonempty = builder.ins().icmp_imm(IntCC::SignedGreaterThan, count, 0);
+    Ok(ValueBinding {
+        value: builder.ins().band(metadata_valid, nonempty),
+        type_id: TYPE_ID_BOOL,
+    })
+}
+
+fn emit_typed_priority_queue_count(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    capacity: usize,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
+    })?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_I32,
+        });
+    }
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let valid = emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32);
+    let zero = builder.ins().iconst(types::I32, 0);
+    Ok(ValueBinding {
+        value: builder.ins().select(valid, count, zero),
+        type_id: TYPE_ID_I32,
+    })
+}
+
+fn emit_typed_priority_queue_peek(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
+    })?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_I32,
+        });
+    }
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let valid = emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32);
+    let nonempty = builder.ins().icmp_imm(IntCC::SignedGreaterThan, count, 0);
+    let can_peek = builder.ins().band(valid, nonempty);
+    let valid_block = builder.create_block();
+    let invalid_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(can_peek, valid_block, &[], invalid_block, &[]);
+
+    builder.seal_block(invalid_block);
+    builder.switch_to_block(invalid_block);
+    let zero = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(merge_block, &[zero]);
+
+    builder.seal_block(valid_block);
+    builder.switch_to_block(valid_block);
+    let root_index = builder.ins().iconst(types::I32, 0);
+    let value = emit_direct_array_load(
+        builder,
+        values_ref.slot,
+        root_index,
+        TYPE_ID_I32,
+        type_table,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    builder.ins().jump(merge_block, &[value]);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "typed priority_queue peek merge block missing result".to_string())?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_I32,
+    })
+}
+
+fn emit_typed_priority_queue_peek_priority(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    priority_ref: DirectArrayStorageRef,
+    capacity: usize,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
+    })?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_I32,
+        });
+    }
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let valid = emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32);
+    let nonempty = builder.ins().icmp_imm(IntCC::SignedGreaterThan, count, 0);
+    let can_peek = builder.ins().band(valid, nonempty);
+    let valid_block = builder.create_block();
+    let invalid_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(can_peek, valid_block, &[], invalid_block, &[]);
+
+    builder.seal_block(invalid_block);
+    builder.switch_to_block(invalid_block);
+    let zero = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(merge_block, &[zero]);
+
+    builder.seal_block(valid_block);
+    builder.switch_to_block(valid_block);
+    let root_index = builder.ins().iconst(types::I32, 0);
+    let value = emit_direct_array_load(
+        builder,
+        priority_ref.slot,
+        root_index,
+        TYPE_ID_I32,
+        type_table,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    builder.ins().jump(merge_block, &[value]);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| {
+            "typed priority_queue peek_priority merge block missing result".to_string()
+        })?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_I32,
+    })
+}
+
+fn emit_typed_priority_queue_clear(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    next_order_ref: DirectStorageRef,
+    priority_ref: DirectArrayStorageRef,
+    order_ref: DirectArrayStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+) -> Result<(), String> {
+    let zero = builder.ins().iconst(types::I32, 0);
+    emit_direct_i32_store(builder, count_ref, zero);
+    emit_direct_i32_store(builder, next_order_ref, zero);
+    if capacity == 0 {
+        return Ok(());
+    }
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
+    })?;
+    let condition_block = builder.create_block();
+    builder.append_block_param(condition_block, types::I32);
+    let body_block = builder.create_block();
+    let exit_block = builder.create_block();
+    builder.ins().jump(condition_block, &[zero]);
+
+    builder.switch_to_block(condition_block);
+    let index = builder.block_params(condition_block)[0];
+    let more = builder
+        .ins()
+        .icmp_imm(IntCC::SignedLessThan, index, i64::from(capacity_i32));
+    builder.ins().brif(more, body_block, &[], exit_block, &[]);
+
+    builder.seal_block(body_block);
+    builder.switch_to_block(body_block);
+    emit_direct_array_store(
+        builder,
+        priority_ref.slot,
+        index,
+        zero,
+        TYPE_ID_I32,
+        priority_ref.storage_bytes,
+        priority_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        order_ref.slot,
+        index,
+        zero,
+        TYPE_ID_U32,
+        order_ref.storage_bytes,
+        order_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        index,
+        zero,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let next = builder.ins().iadd_imm(index, 1);
+    builder.ins().jump(condition_block, &[next]);
+
+    builder.seal_block(condition_block);
+    builder.seal_block(exit_block);
+    builder.switch_to_block(exit_block);
+    Ok(())
+}
+
+fn try_emit_typed_priority_queue_call(
+    builder: &mut FunctionBuilder<'_>,
+    target: &str,
+    args: &[SimpleExpr],
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<Option<TypedPriorityQueueCallResult>, String> {
+    let Some(kind) = TypedPriorityQueueCallKind::from_target(target) else {
+        return Ok(None);
+    };
+    if !is_priority_queue_receiver(args, values_by_name, global_path_types, type_table)? {
+        return Ok(None);
+    }
+    let expected_arity = kind.expected_arity();
+    if args.len() != expected_arity {
+        return Err(format!(
+            "{target} expects {expected_arity} argument(s), found {}",
+            args.len()
+        ));
+    }
+    let (path, capacity, count_ref, next_order_ref, priority_ref, order_ref, values_ref) =
+        typed_priority_queue_storage_bindings(
+            target,
+            args,
+            values_by_name,
+            runtime_call_refs,
+            global_path_types,
+            type_table,
+        )?;
+    match kind {
+        TypedPriorityQueueCallKind::Push => {
+            let priority = emit_simple_expression(
+                builder,
+                &args[1],
+                Some(TYPE_ID_I32),
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )?;
+            if priority.type_id != TYPE_ID_I32 {
+                return Err(format!(
+                    "{target} priority argument must have exact i32 type, found {}",
+                    priority.type_id
+                ));
+            }
+            let value = emit_simple_expression(
+                builder,
+                &args[2],
+                Some(TYPE_ID_I32),
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )?;
+            if value.type_id != TYPE_ID_I32 {
+                return Err(format!(
+                    "{target} value argument must have exact i32 type, found {}",
+                    value.type_id
+                ));
+            }
+            Ok(Some(TypedPriorityQueueCallResult::Value(
+                emit_typed_priority_queue_push(
+                    builder,
+                    count_ref,
+                    next_order_ref,
+                    priority_ref,
+                    order_ref,
+                    values_ref,
+                    capacity,
+                    priority.value,
+                    value.value,
+                    type_table,
+                )?,
+            )))
+        }
+        TypedPriorityQueueCallKind::Pop => Ok(Some(TypedPriorityQueueCallResult::Value(
+            emit_typed_priority_queue_pop(
+                builder,
+                count_ref,
+                priority_ref,
+                order_ref,
+                values_ref,
+                capacity,
+                type_table,
+            )?,
+        ))),
+        TypedPriorityQueueCallKind::Peek => Ok(Some(TypedPriorityQueueCallResult::Value(
+            emit_typed_priority_queue_peek(builder, count_ref, values_ref, capacity, type_table)?,
+        ))),
+        TypedPriorityQueueCallKind::PeekPriority => Ok(Some(TypedPriorityQueueCallResult::Value(
+            emit_typed_priority_queue_peek_priority(
+                builder,
+                count_ref,
+                priority_ref,
+                capacity,
+                type_table,
+            )?,
+        ))),
+        TypedPriorityQueueCallKind::Count => Ok(Some(TypedPriorityQueueCallResult::Value(
+            emit_typed_priority_queue_count(builder, count_ref, capacity, type_table)?,
+        ))),
+        TypedPriorityQueueCallKind::Capacity => {
+            let capacity = i32::try_from(capacity).map_err(|_| {
+                format!(
+                    "{target} priority_queue path '{path}' capacity exceeds i32 operation range"
+                )
+            })?;
+            Ok(Some(TypedPriorityQueueCallResult::Value(ValueBinding {
+                value: builder.ins().iconst(types::I32, i64::from(capacity)),
+                type_id: TYPE_ID_I32,
+            })))
+        }
+        TypedPriorityQueueCallKind::Clear => {
+            emit_typed_priority_queue_clear(
+                builder,
+                count_ref,
+                next_order_ref,
+                priority_ref,
+                order_ref,
+                values_ref,
+                capacity,
+            )?;
+            Ok(Some(TypedPriorityQueueCallResult::Void))
+        }
+        TypedPriorityQueueCallKind::CanPush => Ok(Some(TypedPriorityQueueCallResult::Value(
+            emit_typed_priority_queue_can_push(
+                builder,
+                count_ref,
+                next_order_ref,
+                capacity,
+                type_table,
+            )?,
+        ))),
+        TypedPriorityQueueCallKind::CanPop | TypedPriorityQueueCallKind::CanPeek => Ok(Some(
+            TypedPriorityQueueCallResult::Value(emit_typed_priority_queue_can_pop_or_peek(
+                builder, count_ref, capacity, type_table,
+            )?),
+        )),
     }
 }
 
@@ -8296,6 +9879,29 @@ pub(crate) fn emit_simple_expression(
                 return match result {
                     TypedCircularCallResult::Value(value) => Ok(value),
                     TypedCircularCallResult::Void => Err(format!(
+                        "void call target '{}' cannot be used in value expression",
+                        target
+                    )),
+                };
+            }
+            if let Some(result) = try_emit_typed_priority_queue_call(
+                builder,
+                target,
+                args,
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )? {
+                return match result {
+                    TypedPriorityQueueCallResult::Value(value) => Ok(value),
+                    TypedPriorityQueueCallResult::Void => Err(format!(
                         "void call target '{}' cannot be used in value expression",
                         target
                     )),

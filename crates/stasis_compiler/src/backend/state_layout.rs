@@ -759,12 +759,14 @@ fn validate_typed_collection_placement(
             | TypedCollectionKind::StablePool
             | TypedCollectionKind::Queue
             | TypedCollectionKind::RingBuffer
+            | TypedCollectionKind::PriorityQueue
             | TypedCollectionKind::Map
             | TypedCollectionKind::Set
     );
     let supported_policy = match descriptor.kind {
         TypedCollectionKind::Pool
         | TypedCollectionKind::StablePool
+        | TypedCollectionKind::PriorityQueue
         | TypedCollectionKind::Map
         | TypedCollectionKind::Set => matches!(
             descriptor.policy,
@@ -783,6 +785,7 @@ fn validate_typed_collection_placement(
         | TypedCollectionKind::StablePool
         | TypedCollectionKind::Queue
         | TypedCollectionKind::RingBuffer => descriptor.element_type == Some(TYPE_ID_I32),
+        TypedCollectionKind::PriorityQueue => descriptor.element_type == Some(TYPE_ID_I32),
         TypedCollectionKind::Map => {
             descriptor.key_type == Some(TYPE_ID_I32) && descriptor.value_type == Some(TYPE_ID_I32)
         }
@@ -791,7 +794,7 @@ fn validate_typed_collection_placement(
     };
     if !supported_kind || !supported_payload || !supported_policy {
         return Err(format!(
-            "typed collection state path '{path}' is not yet supported for production layout: only pool<i32,N,error|drop_newest>, stable_pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, ring_buffer<i32,N,error|drop_newest|overwrite_oldest>, map<i32,i32,N,error|drop_newest>, and set<i32,N,error|drop_newest> have a descriptor-defined state contract; got {}",
+            "typed collection state path '{path}' is not yet supported for production layout: only pool<i32,N,error|drop_newest>, stable_pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, ring_buffer<i32,N,error|drop_newest|overwrite_oldest>, priority_queue<i32,N,error|drop_newest>, map<i32,i32,N,error|drop_newest>, and set<i32,N,error|drop_newest> have a descriptor-defined state contract; got {}",
             descriptor.canonical_type_name(type_table)
         ));
     }
@@ -811,6 +814,13 @@ fn validate_typed_collection_placement(
     if descriptor.kind == TypedCollectionKind::Set && !set_lane_schema_matches(descriptor) {
         return Err(format!(
             "typed collection state path '{path}' set descriptor must use exact count:i32@0, occupied:u8[N], and aligned keys:i32[N] lanes"
+        ));
+    }
+    if descriptor.kind == TypedCollectionKind::PriorityQueue
+        && !priority_queue_lane_schema_matches(descriptor)
+    {
+        return Err(format!(
+            "typed collection state path '{path}' priority_queue descriptor must use exact count:i32@0, next_order:u32@4, priority:i32[N]@8, order:u32[N], and values:i32[N] lanes"
         ));
     }
 
@@ -984,6 +994,29 @@ fn set_lane_schema_matches(descriptor: &TypedCollectionDescriptor) -> bool {
         && i32_array_lane_schema_matches(keys, "keys", capacity, keys_offset)
 }
 
+fn priority_queue_lane_schema_matches(descriptor: &TypedCollectionDescriptor) -> bool {
+    if descriptor.lanes.len() != 5 {
+        return false;
+    }
+
+    let [count, next_order, priority, order, values] = descriptor.lanes.as_slice() else {
+        return false;
+    };
+    let capacity = u64::from(descriptor.capacity);
+    let Some(order_offset) = 8u64.checked_add(capacity.checked_mul(4).unwrap_or(u64::MAX)) else {
+        return false;
+    };
+    let Some(values_offset) = 8u64.checked_add(capacity.checked_mul(8).unwrap_or(u64::MAX)) else {
+        return false;
+    };
+
+    count_lane_schema_matches(count)
+        && next_order_lane_schema_matches(next_order)
+        && i32_array_lane_schema_matches(priority, "priority", capacity, 8)
+        && u32_array_lane_schema_matches(order, "order", capacity, order_offset)
+        && i32_array_lane_schema_matches(values, "values", capacity, values_offset)
+}
+
 fn map_set_array_offset(capacity: u64) -> Option<u64> {
     let end_of_occupied = 4u64.checked_add(capacity)?;
     align_state_layout_offset(end_of_occupied, 4).ok()
@@ -1018,6 +1051,29 @@ fn i32_array_lane_schema_matches(
 ) -> bool {
     lane.name == name
         && lane.type_id == TYPE_ID_I32
+        && lane.element_count == capacity
+        && lane.offset_bytes == offset
+        && lane.byte_size == capacity.saturating_mul(4)
+        && lane.alignment_bytes == 4
+}
+
+fn next_order_lane_schema_matches(lane: &crate::frontend::types::TypedCollectionLane) -> bool {
+    lane.name == "next_order"
+        && lane.type_id == TYPE_ID_U32
+        && lane.element_count == 1
+        && lane.offset_bytes == 4
+        && lane.byte_size == 4
+        && lane.alignment_bytes == 4
+}
+
+fn u32_array_lane_schema_matches(
+    lane: &crate::frontend::types::TypedCollectionLane,
+    name: &str,
+    capacity: u64,
+    offset: u64,
+) -> bool {
+    lane.name == name
+        && lane.type_id == TYPE_ID_U32
         && lane.element_count == capacity
         && lane.offset_bytes == offset
         && lane.byte_size == capacity.saturating_mul(4)
@@ -1424,6 +1480,72 @@ mod tests {
     }
 
     #[test]
+    fn typed_priority_queue_layout_has_exact_metadata_and_soa_lanes() {
+        for policy in ["error", "drop_newest"] {
+            for capacity in [0, 1, 3] {
+                let layout = typed_layout(&format!("priority_queue<i32, {capacity}, {policy}>"));
+                assert_eq!(
+                    layout
+                        .scalars
+                        .iter()
+                        .map(|scalar| scalar.path.as_str())
+                        .collect::<Vec<_>>(),
+                    ["actors.count", "actors.next_order"]
+                );
+                let count = layout
+                    .scalars
+                    .iter()
+                    .find(|scalar| scalar.path == "actors.count")
+                    .expect("priority queue count scalar");
+                assert_eq!(count.storage_type_name(), "i32");
+                let next_order = layout
+                    .scalars
+                    .iter()
+                    .find(|scalar| scalar.path == "actors.next_order")
+                    .expect("priority queue next_order scalar");
+                assert_eq!(next_order.storage_type_name(), "u32");
+
+                let queue = layout
+                    .collections
+                    .iter()
+                    .find(|collection| collection.path == "actors")
+                    .expect("priority queue collection layout");
+                assert_eq!(queue.capacity, capacity);
+                assert!(!queue.fully_migratable);
+                assert_eq!(
+                    queue
+                        .fields
+                        .iter()
+                        .map(|field| field.field.as_str())
+                        .collect::<Vec<_>>(),
+                    ["priority", "order", "values"]
+                );
+                let (static_size, lanes) = match capacity {
+                    0 => (
+                        8,
+                        "count:i32:1:0:4:4,next_order:u32:1:4:4:4,priority:i32:0:8:0:4,order:u32:0:8:0:4,values:i32:0:8:0:4",
+                    ),
+                    1 => (
+                        20,
+                        "count:i32:1:0:4:4,next_order:u32:1:4:4:4,priority:i32:1:8:4:4,order:u32:1:12:4:4,values:i32:1:16:4:4",
+                    ),
+                    3 => (
+                        44,
+                        "count:i32:1:0:4:4,next_order:u32:1:4:4:4,priority:i32:3:8:12:4,order:u32:3:20:12:4,values:i32:3:32:12:4",
+                    ),
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    queue.element_shape,
+                    format!(
+                        "typed_collection{{type=priority_queue<i32, {capacity}, {policy}>;kind=priority_queue;policy={policy};capacity={capacity};width=-;height=-;static_size={static_size};lanes=[{lanes}]}}"
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
     fn typed_queue_layout_keeps_count_and_head_metadata_for_every_policy() {
         for policy in ["error", "drop_newest", "overwrite_oldest"] {
             let layout = typed_layout(&format!("queue<i32, 2, {policy}>"));
@@ -1719,12 +1841,74 @@ mod tests {
     }
 
     #[test]
+    fn typed_priority_queue_memory_reports_each_lane_and_metadata_exactly() {
+        for policy in ["error", "drop_newest"] {
+            for capacity in [0_u64, 1, 3] {
+                let layout = typed_layout(&format!("priority_queue<i32, {capacity}, {policy}>"));
+                let active_counts = BTreeMap::from([("actors".to_string(), 1)]);
+                let capacity_overrides = BTreeMap::from([("actors".to_string(), capacity + 1)]);
+                let report = build_state_memory_report(
+                    &layout,
+                    &active_counts,
+                    &capacity_overrides,
+                    u64::MAX,
+                )
+                .expect("priority queue memory report");
+
+                assert_eq!(report.entries.len(), 5);
+                for path in ["actors.count", "actors.next_order"] {
+                    let scalar = report
+                        .entries
+                        .iter()
+                        .find(|entry| entry.path == path)
+                        .unwrap_or_else(|| panic!("priority queue scalar report entry {path}"));
+                    assert_eq!(scalar.element_bytes, 4);
+                    assert_eq!(scalar.capacity, 1);
+                    assert_eq!(scalar.capacity_bytes, 4);
+                }
+
+                let active_capacity = capacity.min(1);
+                for field in ["priority", "order", "values"] {
+                    let entry = report
+                        .entries
+                        .iter()
+                        .find(|entry| entry.path == "actors" && entry.field == field)
+                        .unwrap_or_else(|| panic!("priority queue {field} report entry"));
+                    assert_eq!(entry.element_bytes, 4);
+                    assert_eq!(entry.capacity, capacity);
+                    assert_eq!(entry.active_count, Some(active_capacity));
+                    assert_eq!(entry.capacity_bytes, capacity * 4);
+                    assert_eq!(entry.active_bytes, Some(active_capacity * 4));
+                }
+
+                let pool = report
+                    .largest_pools
+                    .iter()
+                    .find(|pool| pool.path == "actors")
+                    .expect("priority queue pool report");
+                assert_eq!(pool.capacity, capacity);
+                assert_eq!(pool.active_count, Some(active_capacity));
+                assert_eq!(pool.bytes_per_element, 12);
+                assert_eq!(pool.capacity_bytes, capacity * 12);
+                assert_eq!(pool.active_bytes, Some(active_capacity * 12));
+                assert_eq!(report.total_capacity_bytes, 8 + capacity * 12);
+                assert_eq!(report.projected_capacity_bytes, 8 + (capacity + 1) * 12);
+                assert_eq!(report.capacity_changes.len(), 1);
+                assert_eq!(report.capacity_changes[0].old_capacity, capacity);
+                assert_eq!(report.capacity_changes[0].new_capacity, capacity + 1);
+                assert_eq!(report.capacity_changes[0].bytes_per_element, 12);
+                assert_eq!(report.capacity_changes[0].delta_bytes, 12);
+            }
+        }
+    }
+
+    #[test]
     fn unsupported_typed_collection_kinds_are_rejected_at_state_layout_boundary() {
         let bitset = typed_layout_result("bitset<8, error>")
             .expect_err("bitset layout must not claim pool-shaped storage");
         assert!(
             bitset.contains(
-                "only pool<i32,N,error|drop_newest>, stable_pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, ring_buffer<i32,N,error|drop_newest|overwrite_oldest>, map<i32,i32,N,error|drop_newest>, and set<i32,N,error|drop_newest>"
+                "only pool<i32,N,error|drop_newest>, stable_pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, ring_buffer<i32,N,error|drop_newest|overwrite_oldest>, priority_queue<i32,N,error|drop_newest>, map<i32,i32,N,error|drop_newest>, and set<i32,N,error|drop_newest>"
             ),
             "{bitset}"
         );
@@ -1733,7 +1917,7 @@ mod tests {
             .expect_err("non-i32 pool payload layout must be rejected");
         assert!(
             wide_pool.contains(
-                "only pool<i32,N,error|drop_newest>, stable_pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, ring_buffer<i32,N,error|drop_newest|overwrite_oldest>, map<i32,i32,N,error|drop_newest>, and set<i32,N,error|drop_newest>"
+                "only pool<i32,N,error|drop_newest>, stable_pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, ring_buffer<i32,N,error|drop_newest|overwrite_oldest>, priority_queue<i32,N,error|drop_newest>, map<i32,i32,N,error|drop_newest>, and set<i32,N,error|drop_newest>"
             ),
             "{wide_pool}"
         );

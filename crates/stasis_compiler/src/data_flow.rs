@@ -731,6 +731,16 @@ enum TypedCollectionOperation {
     RingBufferCount,
     RingBufferCapacity,
     RingBufferClear,
+    PriorityQueuePush,
+    PriorityQueuePop,
+    PriorityQueuePeek,
+    PriorityQueuePeekPriority,
+    PriorityQueueCount,
+    PriorityQueueCapacity,
+    PriorityQueueClear,
+    PriorityQueueCanPush,
+    PriorityQueueCanPop,
+    PriorityQueueCanPeek,
 }
 
 impl TypedCollectionOperation {
@@ -771,6 +781,26 @@ impl TypedCollectionOperation {
         }
     }
 
+    /// Priority queue operations are receiver methods.  Keep these names out
+    /// of `from_target`: unlike the compiler-owned, prefixed collection
+    /// helpers, names such as `push` and `count` are valid ordinary function
+    /// names and must not be claimed without an exact priority_queue receiver.
+    fn from_priority_queue_receiver_target(target: &str) -> Option<Self> {
+        match target {
+            "push" => Some(Self::PriorityQueuePush),
+            "pop" => Some(Self::PriorityQueuePop),
+            "peek" => Some(Self::PriorityQueuePeek),
+            "peek_priority" => Some(Self::PriorityQueuePeekPriority),
+            "count" => Some(Self::PriorityQueueCount),
+            "capacity" => Some(Self::PriorityQueueCapacity),
+            "clear" => Some(Self::PriorityQueueClear),
+            "can_push" => Some(Self::PriorityQueueCanPush),
+            "can_pop" => Some(Self::PriorityQueueCanPop),
+            "can_peek" => Some(Self::PriorityQueueCanPeek),
+            _ => None,
+        }
+    }
+
     fn return_type(self) -> TypeId {
         match self {
             Self::PoolPush
@@ -786,7 +816,11 @@ impl TypedCollectionOperation {
             | Self::RingBufferPeek
             | Self::RingBufferPhysicalIndex
             | Self::RingBufferCount
-            | Self::RingBufferCapacity => TYPE_ID_I32,
+            | Self::RingBufferCapacity
+            | Self::PriorityQueuePeek
+            | Self::PriorityQueuePeekPriority
+            | Self::PriorityQueueCount
+            | Self::PriorityQueueCapacity => TYPE_ID_I32,
             Self::MapGet => TYPE_ID_I32,
             Self::PoolRemove
             | Self::StablePoolRemove
@@ -799,10 +833,17 @@ impl TypedCollectionOperation {
             | Self::QueuePush
             | Self::QueuePop
             | Self::RingBufferPush
-            | Self::RingBufferPop => TYPE_ID_BOOL,
-            Self::PoolClear | Self::StablePoolClear | Self::QueueClear | Self::RingBufferClear => {
-                TYPE_ID_VOID
-            }
+            | Self::RingBufferPop
+            | Self::PriorityQueuePush
+            | Self::PriorityQueuePop
+            | Self::PriorityQueueCanPush
+            | Self::PriorityQueueCanPop
+            | Self::PriorityQueueCanPeek => TYPE_ID_BOOL,
+            Self::PoolClear
+            | Self::StablePoolClear
+            | Self::QueueClear
+            | Self::RingBufferClear
+            | Self::PriorityQueueClear => TYPE_ID_VOID,
         }
     }
 
@@ -836,6 +877,16 @@ impl TypedCollectionOperation {
             | Self::RingBufferCount
             | Self::RingBufferCapacity
             | Self::RingBufferClear => TypedCollectionKind::RingBuffer,
+            Self::PriorityQueuePush
+            | Self::PriorityQueuePop
+            | Self::PriorityQueuePeek
+            | Self::PriorityQueuePeekPriority
+            | Self::PriorityQueueCount
+            | Self::PriorityQueueCapacity
+            | Self::PriorityQueueClear
+            | Self::PriorityQueueCanPush
+            | Self::PriorityQueueCanPop
+            | Self::PriorityQueueCanPeek => TypedCollectionKind::PriorityQueue,
         }
     }
 
@@ -855,7 +906,7 @@ impl TypedCollectionOperation {
             | Self::SetAdd
             | Self::SetContains
             | Self::SetRemove => 2,
-            Self::MapPut => 3,
+            Self::MapPut | Self::PriorityQueuePush => 3,
             Self::PoolCount
             | Self::PoolCapacity
             | Self::PoolClear
@@ -869,8 +920,16 @@ impl TypedCollectionOperation {
             | Self::RingBufferPop
             | Self::RingBufferCount
             | Self::RingBufferCapacity
-            | Self::RingBufferClear => 1,
+            | Self::RingBufferClear
+            | Self::PriorityQueuePop
+            | Self::PriorityQueueCount
+            | Self::PriorityQueueCapacity
+            | Self::PriorityQueueClear
+            | Self::PriorityQueueCanPush
+            | Self::PriorityQueueCanPop
+            | Self::PriorityQueueCanPeek => 1,
             Self::QueuePeek | Self::QueuePhysicalIndex => 2,
+            Self::PriorityQueuePeek | Self::PriorityQueuePeekPriority => 1,
         }
     }
 
@@ -886,6 +945,7 @@ impl TypedCollectionOperation {
             Self::RingBufferPush => Some((1, "value")),
             Self::RingBufferPeek => Some((1, "logical_index")),
             Self::RingBufferPhysicalIndex => Some((1, "logical_index")),
+            Self::PriorityQueuePush => Some((1, "priority")),
             Self::PoolCount
             | Self::PoolCapacity
             | Self::PoolClear
@@ -907,12 +967,22 @@ impl TypedCollectionOperation {
             | Self::RingBufferCount
             | Self::RingBufferCapacity
             | Self::RingBufferClear => None,
+            Self::PriorityQueuePop
+            | Self::PriorityQueuePeek
+            | Self::PriorityQueuePeekPriority
+            | Self::PriorityQueueCount
+            | Self::PriorityQueueCapacity
+            | Self::PriorityQueueClear
+            | Self::PriorityQueueCanPush
+            | Self::PriorityQueueCanPop
+            | Self::PriorityQueueCanPeek => None,
         }
     }
 
     fn argument_specs(self) -> Vec<(usize, &'static str)> {
         match self {
             Self::MapPut => vec![(1, "key"), (2, "value")],
+            Self::PriorityQueuePush => vec![(1, "priority"), (2, "value")],
             Self::MapGet
             | Self::MapContains
             | Self::MapRemove
@@ -982,8 +1052,29 @@ fn typed_collection_descriptor_supports_operation(
                         | TypedCollectionOverflowPolicy::DropNewest
                 )
         }
+        TypedCollectionKind::PriorityQueue => {
+            descriptor.element_type == Some(TYPE_ID_I32)
+                && matches!(
+                    descriptor.policy,
+                    TypedCollectionOverflowPolicy::Error
+                        | TypedCollectionOverflowPolicy::DropNewest
+                )
+        }
         _ => descriptor.element_type == Some(TYPE_ID_I32),
     }
+}
+
+fn typed_collection_operation_for_call(
+    target: &str,
+    args: &[SimpleExpr],
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Option<TypedCollectionOperation> {
+    TypedCollectionOperation::from_target(target).or_else(|| {
+        let operation = TypedCollectionOperation::from_priority_queue_receiver_target(target)?;
+        let (_, descriptor) = exact_typed_collection_path(args.first()?, context, local_types)?;
+        (descriptor.kind == TypedCollectionKind::PriorityQueue).then_some(operation)
+    })
 }
 
 #[cfg(test)]
@@ -1002,7 +1093,8 @@ fn typed_collection_operation(
     context: &AnalysisContext<'_>,
     local_types: &BTreeMap<String, TypeId>,
 ) -> Result<Option<TypedCollectionOperation>, String> {
-    let Some(operation) = TypedCollectionOperation::from_target(target) else {
+    let Some(operation) = typed_collection_operation_for_call(target, args, context, local_types)
+    else {
         return Ok(None);
     };
 
@@ -1048,6 +1140,16 @@ fn typed_collection_operation(
                 }
                 return Err(format!(
                     "{target} requires set path '{path}' with error or drop_newest policy"
+                ));
+            }
+            TypedCollectionKind::PriorityQueue => {
+                if descriptor.element_type != Some(TYPE_ID_I32) {
+                    return Err(format!(
+                        "{target} requires priority_queue path '{path}' with i32 payload"
+                    ));
+                }
+                return Err(format!(
+                    "{target} requires priority_queue path '{path}' with error or drop_newest policy"
                 ));
             }
             _ => {
@@ -1254,7 +1356,9 @@ fn validate_expression_access(
             validate_property_access(path, context, local_types)
         }
         SimpleExpr::Call { target, args } => {
-            if TypedCollectionOperation::from_target(target).is_some() {
+            if TypedCollectionOperation::from_target(target).is_some()
+                || typed_collection_operation_for_call(target, args, context, local_types).is_some()
+            {
                 for (index, argument) in args.iter().enumerate() {
                     if index == 0 && matches!(argument, SimpleExpr::Identifier(_)) {
                         continue;
@@ -2568,7 +2672,8 @@ fn analyze_typed_collection_operation(
     aliases: &BTreeMap<String, String>,
     effects: &mut EffectSets,
 ) -> bool {
-    let Some(operation) = TypedCollectionOperation::from_target(target) else {
+    let Some(operation) = typed_collection_operation_for_call(target, args, context, local_types)
+    else {
         return false;
     };
     let expected_arity = operation.expected_arity();
@@ -2741,6 +2846,57 @@ fn analyze_typed_collection_operation(
                 effects.insert_write(format!("{path}.count"));
                 effects.insert_write(format!("{path}.head"));
                 effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::PriorityQueuePush => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.next_order"));
+                effects.insert_read(format!("{path}.priority[*]"));
+                effects.insert_read(format!("{path}.order[*]"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.next_order"));
+                effects.insert_write(format!("{path}.priority[*]"));
+                effects.insert_write(format!("{path}.order[*]"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::PriorityQueuePop => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.priority[*]"));
+                effects.insert_read(format!("{path}.order[*]"));
+                effects.insert_read(format!("{path}.values[*]"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.priority[*]"));
+                effects.insert_write(format!("{path}.order[*]"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::PriorityQueuePeek => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.priority[*]"));
+                effects.insert_read(format!("{path}.order[*]"));
+                effects.insert_read(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::PriorityQueuePeekPriority => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.priority[*]"));
+                effects.insert_read(format!("{path}.order[*]"));
+            }
+            TypedCollectionOperation::PriorityQueueCount => {
+                effects.insert_read(format!("{path}.count"));
+            }
+            TypedCollectionOperation::PriorityQueueCapacity => {}
+            TypedCollectionOperation::PriorityQueueClear => {
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.next_order"));
+                effects.insert_write(format!("{path}.priority[*]"));
+                effects.insert_write(format!("{path}.order[*]"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::PriorityQueueCanPush => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.next_order"));
+            }
+            TypedCollectionOperation::PriorityQueueCanPop
+            | TypedCollectionOperation::PriorityQueueCanPeek => {
+                effects.insert_read(format!("{path}.count"));
             }
         }
         for argument in args.iter().skip(1) {
@@ -3027,7 +3183,9 @@ fn expression_type(
             field_suffix_type(element, suffix, &context.field_types)
         }
         SimpleExpr::Call { target, args } => {
-            if let Some(operation) = TypedCollectionOperation::from_target(target) {
+            if let Some(operation) =
+                typed_collection_operation_for_call(target, args, context, local_types)
+            {
                 return Some(operation.return_type());
             }
             match target.as_str() {
@@ -3724,6 +3882,39 @@ mod tests {
 
     fn queue_context<'a>(types: &'a TypeTable, files: &[SourceFile]) -> AnalysisContext<'a> {
         build_context(files, &[], types).expect("typed queue analysis context")
+    }
+
+    fn typed_priority_queue_fixture(extra: &str) -> (TypeTable, Vec<SourceFile>) {
+        let source = format!(
+            "global events: priority_queue<i32, 2, error>;\nglobal dropped_events: priority_queue<i32, 2, drop_newest>;\nglobal empty_events: priority_queue<i32, 0, error>;\nglobal float_events: priority_queue<f32, 2, error>;\nglobal queue: queue<i32, 2, error>;\n{extra}"
+        );
+        let mut types = TypeTable::new();
+        for type_name in [
+            "priority_queue<i32, 2, error>",
+            "priority_queue<i32, 2, drop_newest>",
+            "priority_queue<i32, 0, error>",
+            "priority_queue<f32, 2, error>",
+            "queue<i32, 2, error>",
+        ] {
+            types
+                .resolve_or_intern(type_name)
+                .expect("typed priority queue fixture type");
+        }
+        let file = SourceFile {
+            path: "priority_queue_semantics.stasis".to_string(),
+            content: source.clone(),
+            original_content: source,
+            hash: 0,
+            functions: Vec::new(),
+        };
+        (types, vec![file])
+    }
+
+    fn priority_queue_context<'a>(
+        types: &'a TypeTable,
+        files: &[SourceFile],
+    ) -> AnalysisContext<'a> {
+        build_context(files, &[], types).expect("typed priority queue analysis context")
     }
 
     fn typed_ring_buffer_fixture(extra: &str) -> (TypeTable, Vec<SourceFile>) {
@@ -4478,6 +4669,336 @@ mod tests {
         )
         .expect_err("queue_pop must not accept an output argument");
         assert!(pop_arity.contains("queue_pop expects 1 arguments"));
+    }
+
+    #[test]
+    fn typed_priority_queue_operations_have_fixed_return_types_and_explicit_effects() {
+        let (types, files) = typed_priority_queue_fixture("");
+        let context = priority_queue_context(&types, &files);
+        assert!(context
+            .typed_collection_descriptors
+            .contains_key("empty_events"));
+        assert_eq!(
+            context.typed_collection_descriptors["empty_events"].capacity,
+            0
+        );
+        let local_types = BTreeMap::new();
+        let locals = BTreeSet::new();
+        let aliases = BTreeMap::new();
+        let operations = [
+            (
+                "push",
+                vec![
+                    SimpleExpr::Identifier("events".to_string()),
+                    SimpleExpr::Int(1),
+                    SimpleExpr::Int(7),
+                ],
+                TYPE_ID_BOOL,
+                vec![
+                    "events.count",
+                    "events.next_order",
+                    "events.order[*]",
+                    "events.priority[*]",
+                ],
+                vec![
+                    "events.count",
+                    "events.next_order",
+                    "events.order[*]",
+                    "events.priority[*]",
+                    "events.values[*]",
+                ],
+            ),
+            (
+                "pop",
+                vec![SimpleExpr::Identifier("events".to_string())],
+                TYPE_ID_BOOL,
+                vec![
+                    "events.count",
+                    "events.order[*]",
+                    "events.priority[*]",
+                    "events.values[*]",
+                ],
+                vec![
+                    "events.count",
+                    "events.order[*]",
+                    "events.priority[*]",
+                    "events.values[*]",
+                ],
+            ),
+            (
+                "peek",
+                vec![SimpleExpr::Identifier("events".to_string())],
+                TYPE_ID_I32,
+                vec![
+                    "events.count",
+                    "events.order[*]",
+                    "events.priority[*]",
+                    "events.values[*]",
+                ],
+                Vec::<&str>::new(),
+            ),
+            (
+                "peek_priority",
+                vec![SimpleExpr::Identifier("events".to_string())],
+                TYPE_ID_I32,
+                vec!["events.count", "events.order[*]", "events.priority[*]"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "count",
+                vec![SimpleExpr::Identifier("events".to_string())],
+                TYPE_ID_I32,
+                vec!["events.count"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "capacity",
+                vec![SimpleExpr::Identifier("events".to_string())],
+                TYPE_ID_I32,
+                Vec::<&str>::new(),
+                Vec::<&str>::new(),
+            ),
+            (
+                "clear",
+                vec![SimpleExpr::Identifier("events".to_string())],
+                TYPE_ID_VOID,
+                Vec::<&str>::new(),
+                vec![
+                    "events.count",
+                    "events.next_order",
+                    "events.order[*]",
+                    "events.priority[*]",
+                    "events.values[*]",
+                ],
+            ),
+            (
+                "can_push",
+                vec![SimpleExpr::Identifier("events".to_string())],
+                TYPE_ID_BOOL,
+                vec!["events.count", "events.next_order"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "can_pop",
+                vec![SimpleExpr::Identifier("events".to_string())],
+                TYPE_ID_BOOL,
+                vec!["events.count"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "can_peek",
+                vec![SimpleExpr::Identifier("events".to_string())],
+                TYPE_ID_BOOL,
+                vec!["events.count"],
+                Vec::<&str>::new(),
+            ),
+        ];
+
+        for (target, args, expected_type, expected_reads, expected_writes) in operations {
+            let expression = pool_call(target, args);
+            assert_eq!(
+                expression_type(&expression, &context, &local_types, &aliases),
+                Some(expected_type),
+                "{target} return type"
+            );
+            validate_expression_access(&expression, &context, &local_types)
+                .expect("valid typed priority queue operation");
+            let mut effects = EffectSets::default();
+            analyze_expression(
+                &expression,
+                &context,
+                &locals,
+                &local_types,
+                &aliases,
+                &mut effects,
+            );
+            let reads: Vec<_> = effects.reads.iter().map(String::as_str).collect();
+            let writes: Vec<_> = effects.writes.iter().map(String::as_str).collect();
+            assert_eq!(reads, expected_reads, "{target} reads");
+            assert_eq!(writes, expected_writes, "{target} writes");
+            assert!(effects.calls.is_empty(), "{target} became an internal call");
+            assert!(effects.host_calls.is_empty(), "{target} leaked a host call");
+            assert!(
+                effects.host_effects.is_empty(),
+                "{target} leaked a host capability"
+            );
+        }
+
+        for target in [
+            "push",
+            "pop",
+            "peek",
+            "peek_priority",
+            "count",
+            "capacity",
+            "clear",
+            "can_push",
+            "can_pop",
+            "can_peek",
+        ] {
+            let args = if target == "push" {
+                vec![
+                    SimpleExpr::Identifier("empty_events".to_string()),
+                    SimpleExpr::Int(1),
+                    SimpleExpr::Int(7),
+                ]
+            } else {
+                vec![SimpleExpr::Identifier("empty_events".to_string())]
+            };
+            typed_collection_operation(target, &args, &context, &local_types)
+                .expect("zero-capacity priority queue operation must be valid")
+                .expect("priority queue operation should be compiler-owned");
+        }
+    }
+
+    #[test]
+    fn typed_priority_queue_operations_require_exact_persistent_i32_paths_and_arguments() {
+        let (types, files) = typed_priority_queue_fixture("");
+        let context = priority_queue_context(&types, &files);
+        let mut local_types = BTreeMap::new();
+        local_types.insert(
+            "events".to_string(),
+            types
+                .resolve("priority_queue<i32, 2, error>")
+                .expect("priority queue type id"),
+        );
+
+        let local_result = typed_collection_operation(
+            "count",
+            &[SimpleExpr::Identifier("events".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect("local priority queue value must remain an ordinary receiver");
+        assert!(local_result.is_none());
+
+        local_types.clear();
+        assert!(typed_collection_operation(
+            "count",
+            &[SimpleExpr::Identifier("events.values".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect("descendant receiver must remain an ordinary call")
+        .is_none());
+        assert!(typed_collection_operation(
+            "count",
+            &[SimpleExpr::Identifier("queue".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect("wrong collection receiver must not be hijacked")
+        .is_none());
+        let payload_error = typed_collection_operation(
+            "push",
+            &[
+                SimpleExpr::Identifier("float_events".to_string()),
+                SimpleExpr::Int(1),
+                SimpleExpr::Int(7),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect_err("invalid priority queue payload must be rejected");
+        assert!(payload_error.contains("with i32 payload"));
+
+        for (target, args, expected) in [
+            (
+                "push",
+                vec![
+                    SimpleExpr::Identifier("events".to_string()),
+                    SimpleExpr::Int(1),
+                ],
+                "push expects 3 arguments",
+            ),
+            (
+                "push",
+                vec![
+                    SimpleExpr::Identifier("events".to_string()),
+                    SimpleExpr::Bool(true),
+                    SimpleExpr::Int(7),
+                ],
+                "push priority argument",
+            ),
+            (
+                "push",
+                vec![
+                    SimpleExpr::Identifier("events".to_string()),
+                    SimpleExpr::Int(1),
+                    SimpleExpr::Bool(true),
+                ],
+                "push value argument",
+            ),
+            (
+                "pop",
+                vec![
+                    SimpleExpr::Identifier("events".to_string()),
+                    SimpleExpr::Int(0),
+                ],
+                "pop expects 1 arguments",
+            ),
+            (
+                "peek",
+                vec![
+                    SimpleExpr::Identifier("events".to_string()),
+                    SimpleExpr::Int(0),
+                ],
+                "peek expects 1 arguments",
+            ),
+            (
+                "can_push",
+                vec![
+                    SimpleExpr::Identifier("events".to_string()),
+                    SimpleExpr::Int(0),
+                ],
+                "can_push expects 1 arguments",
+            ),
+        ] {
+            let error = typed_collection_operation(target, &args, &context, &local_types)
+                .expect_err("invalid priority queue operation must be rejected");
+            assert!(error.contains(expected), "{target}: {error}");
+        }
+
+        assert!(typed_collection_operation(
+            "module.count",
+            &[SimpleExpr::Identifier("events".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect("qualified name should be treated as an ordinary target")
+        .is_none());
+        assert!(typed_collection_operation(
+            "priority_queue_count",
+            &[SimpleExpr::Identifier("events".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect("prefixed priority queue aliases are not compiler-owned")
+        .is_none());
+        assert!(typed_collection_operation(
+            "push",
+            &[
+                SimpleExpr::Identifier("queue".to_string()),
+                SimpleExpr::Int(1),
+                SimpleExpr::Int(7),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect("wrong-kind receiver must not be hijacked")
+        .is_none());
+        assert!(typed_collection_operation(
+            "push",
+            &[
+                SimpleExpr::Identifier("ordinary_value".to_string()),
+                SimpleExpr::Int(1),
+                SimpleExpr::Int(7),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect("noncollection receiver must not be hijacked")
+        .is_none());
     }
 
     #[test]

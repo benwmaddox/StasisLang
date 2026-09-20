@@ -5287,6 +5287,70 @@ function main(): i32 {
     }
 
     #[test]
+    fn typed_priority_queue_jit_storage_plan_provisions_exact_lanes() {
+        for policy in ["error", "drop_newest"] {
+            for capacity in [3_u32, 0_u32] {
+                let mut process = JitProcess::new();
+                process.upsert_file(
+                    "typed_priority_queue_storage.stasis",
+                    format!(
+                        "global actors: priority_queue<i32, {capacity}, {policy}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed priority-queue JIT compile");
+
+                let snapshot = process
+                    .program_snapshot()
+                    .expect("typed priority-queue snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed priority-queue descriptor");
+                assert_eq!(descriptor.capacity, capacity);
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("priority_queue<i32, {capacity}, {policy}>")
+                );
+                let bindings = build_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                    false,
+                )
+                .expect("typed priority-queue JIT direct storage plan");
+                for metadata in ["count", "next_order"] {
+                    assert!(bindings.scalars.contains_key(&format!("actors.{metadata}")));
+                }
+                assert_eq!(bindings.scalars.len(), 2);
+                let expected_arrays = [
+                    ("priority", stasis_dynload::JitStorageKind::I32),
+                    ("order", stasis_dynload::JitStorageKind::I32),
+                    ("values", stasis_dynload::JitStorageKind::I32),
+                ];
+                assert_eq!(bindings.arrays.len(), expected_arrays.len());
+                for (field, storage_kind) in expected_arrays {
+                    let lane = bindings
+                        .arrays
+                        .get(&(String::from("actors"), String::from(field)))
+                        .unwrap_or_else(|| panic!("missing priority-queue {field} lane"));
+                    assert_eq!(lane.static_len, Some(capacity as usize));
+                    assert_eq!(lane.storage_bytes, 4);
+                    assert_eq!(
+                        stasis_dynload::direct_array_storage_slot_len_for_test(
+                            storage_kind,
+                            hash_global_path("actors"),
+                            crate::backend::emit::hash_foreach_field_suffix(field),
+                        ),
+                        Some(capacity as usize),
+                        "JIT provisioned priority-queue {field} lane must retain descriptor capacity"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn typed_ring_buffer_jit_storage_plan_provisions_metadata_and_values_lanes() {
         for policy in ["error", "drop_newest", "overwrite_oldest"] {
             for capacity in [2_u32, 0_u32] {
@@ -6361,6 +6425,291 @@ function set_zero_run(): i32 {
                 JitScalarValue::I32(0)
             );
         }
+    }
+
+    #[test]
+    fn typed_priority_queue_operations_execute_ordering_drain_and_rejection_semantics() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&[
+            "priority_queue_ordering".to_string(),
+            "priority_queue_full_error".to_string(),
+            "priority_queue_full_drop".to_string(),
+            "priority_queue_zero".to_string(),
+            "priority_queue_clear_reset".to_string(),
+            "priority_queue_max_order".to_string(),
+            "priority_queue_preflight_empty".to_string(),
+            "priority_queue_preflight_full".to_string(),
+            "priority_queue_preflight_zero".to_string(),
+            "priority_queue_preflight_max_order".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_priority_queue_execution.stasis",
+            r#"global typed_priority_queue_error_exec_147: priority_queue<i32, 5, error>;
+global typed_priority_queue_drop_exec_147: priority_queue<i32, 2, drop_newest>;
+global typed_priority_queue_zero_exec_147: priority_queue<i32, 0, drop_newest>;
+function priority_queue_ordering(): i32 {
+    typed_priority_queue_error_exec_147.clear();
+    typed_priority_queue_error_exec_147.push(7, 70);
+    typed_priority_queue_error_exec_147.push(-2, 20);
+    typed_priority_queue_error_exec_147.push(7, 71);
+    typed_priority_queue_error_exec_147.push(0, 0);
+    typed_priority_queue_error_exec_147.push(-2, 21);
+    let first: i32 = typed_priority_queue_error_exec_147.peek();
+    let first_priority: i32 = typed_priority_queue_error_exec_147.peek_priority();
+    typed_priority_queue_error_exec_147.pop();
+    let second: i32 = typed_priority_queue_error_exec_147.peek();
+    typed_priority_queue_error_exec_147.pop();
+    let third: i32 = typed_priority_queue_error_exec_147.peek();
+    typed_priority_queue_error_exec_147.pop();
+    let fourth: i32 = typed_priority_queue_error_exec_147.peek();
+    typed_priority_queue_error_exec_147.pop();
+    let fifth: i32 = typed_priority_queue_error_exec_147.peek();
+    typed_priority_queue_error_exec_147.pop();
+    return first * 1000000 + second * 10000 + third * 100 + fourth * 10 + fifth + first_priority
+        + typed_priority_queue_error_exec_147.count() * 100000000;
+}
+function priority_queue_full_error(): i32 {
+    typed_priority_queue_error_exec_147.clear();
+    typed_priority_queue_error_exec_147.push(3, 30);
+    typed_priority_queue_error_exec_147.push(1, 10);
+    typed_priority_queue_error_exec_147.push(2, 20);
+    typed_priority_queue_error_exec_147.push(0, 40);
+    typed_priority_queue_error_exec_147.push(-1, 50);
+    let accepted: i32 = 0;
+    if (typed_priority_queue_error_exec_147.push(-9, 90)) { accepted = 1; }
+    return accepted * 1000 + typed_priority_queue_error_exec_147.count() * 100
+        + typed_priority_queue_error_exec_147.peek();
+}
+function priority_queue_full_drop(): i32 {
+    typed_priority_queue_drop_exec_147.clear();
+    typed_priority_queue_drop_exec_147.push(3, 30);
+    typed_priority_queue_drop_exec_147.push(1, 10);
+    let accepted: i32 = 0;
+    if (typed_priority_queue_drop_exec_147.push(-9, 90)) { accepted = 1; }
+    return accepted * 1000 + typed_priority_queue_drop_exec_147.count() * 100
+        + typed_priority_queue_drop_exec_147.peek();
+}
+function priority_queue_zero(): i32 {
+    typed_priority_queue_zero_exec_147.clear();
+    let pushed: i32 = 0;
+    if (typed_priority_queue_zero_exec_147.push(-1, 7)) { pushed = 1; }
+    let popped: i32 = 0;
+    if (typed_priority_queue_zero_exec_147.pop()) { popped = 1; }
+    return pushed * 1000 + popped * 100 + typed_priority_queue_zero_exec_147.count() * 10
+        + typed_priority_queue_zero_exec_147.peek()
+        + typed_priority_queue_zero_exec_147.capacity();
+}
+function priority_queue_clear_reset(): i32 {
+    typed_priority_queue_error_exec_147.clear();
+    typed_priority_queue_error_exec_147.push(-1, 9);
+    typed_priority_queue_error_exec_147.push(1, 8);
+    typed_priority_queue_error_exec_147.clear();
+    let popped: i32 = 0;
+    if (typed_priority_queue_error_exec_147.pop()) { popped = 1; }
+    return typed_priority_queue_error_exec_147.count() * 100
+        + typed_priority_queue_error_exec_147.peek() * 10 + popped;
+}
+function priority_queue_max_order(): i32 {
+    let accepted: i32 = 0;
+    if (typed_priority_queue_error_exec_147.push(1, 99)) { accepted = 1; }
+    return accepted;
+}
+function priority_queue_preflight_empty(): i32 {
+    typed_priority_queue_error_exec_147.clear();
+    let can_push: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { can_peek = 1; }
+    let popped: i32 = 0;
+    if (typed_priority_queue_error_exec_147.pop()) { popped = 1; }
+    return can_push * 100 + can_pop * 10 + can_peek + popped * 1000
+        + typed_priority_queue_error_exec_147.peek();
+}
+function priority_queue_preflight_full(): i32 {
+    typed_priority_queue_error_exec_147.clear();
+    typed_priority_queue_error_exec_147.push(3, 30);
+    typed_priority_queue_error_exec_147.push(1, 10);
+    typed_priority_queue_error_exec_147.push(2, 20);
+    typed_priority_queue_error_exec_147.push(0, 40);
+    typed_priority_queue_error_exec_147.push(-1, 50);
+    let can_push: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { can_peek = 1; }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_error_exec_147.push(-9, 90)) { accepted = 1; }
+    return can_push * 100 + can_pop * 10 + can_peek + accepted * 1000;
+}
+function priority_queue_preflight_zero(): i32 {
+    typed_priority_queue_zero_exec_147.clear();
+    let can_push: i32 = 0;
+    if (typed_priority_queue_zero_exec_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_zero_exec_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_zero_exec_147.can_peek()) { can_peek = 1; }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_zero_exec_147.push(-9, 90)) { accepted = 1; }
+    return can_push * 100 + can_pop * 10 + can_peek + accepted * 1000;
+}
+function priority_queue_preflight_max_order(): i32 {
+    let can_push: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { can_peek = 1; }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_error_exec_147.push(1, 99)) { accepted = 1; }
+    return can_push * 100 + can_pop * 10 + can_peek + accepted * 1000;
+}
+"#,
+        );
+        process.compile().expect("typed priority-queue JIT compile");
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_ordering")
+                .unwrap(),
+            20_210_769
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.next_order") as u32,
+            5
+        );
+        for field in ["priority", "order", "values"] {
+            for index in 0..5 {
+                assert_eq!(
+                    process.read_global_collection_scalar(
+                        "typed_priority_queue_error_exec_147",
+                        field,
+                        index,
+                    ),
+                    Ok(match field {
+                        "order" => JitScalarValue::U32(0),
+                        _ => JitScalarValue::I32(0),
+                    }),
+                    "drain must zero released priority-queue {field} lane"
+                );
+            }
+        }
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_full_error")
+                .unwrap(),
+            550
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.count"),
+            5
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_full_drop")
+                .unwrap(),
+            210
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_drop_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_zero")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_clear_reset")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.next_order") as u32,
+            0
+        );
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_preflight_empty")
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.next_order") as u32,
+            0
+        );
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_preflight_full")
+                .unwrap(),
+            11
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.count"),
+            5
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_preflight_zero")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_zero_exec_147.count"),
+            0
+        );
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_clear_reset")
+                .unwrap(),
+            0
+        );
+        process.write_i32_global_path("typed_priority_queue_error_exec_147.next_order", -1);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_max_order")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.next_order") as u32,
+            u32::MAX
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_preflight_max_order")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.next_order") as u32,
+            u32::MAX
+        );
     }
 
     #[test]
