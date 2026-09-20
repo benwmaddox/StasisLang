@@ -4,6 +4,7 @@ pub(crate) mod compile_analysis;
 pub mod development_swap;
 pub(crate) mod emit;
 pub mod hot_render;
+pub mod input_usage;
 pub mod jit;
 pub mod patch_plan;
 pub mod program_snapshot;

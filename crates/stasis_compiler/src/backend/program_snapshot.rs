@@ -12,6 +12,9 @@ use crate::backend::compile_analysis::{
     resolve_preferred_extern_call_signatures, CompileAnalysisCache,
 };
 use crate::backend::hot_render::{analyze_hot_render_images, HotRenderImageMetadata};
+use crate::backend::input_usage::{
+    analyze_host_frame_input_usage_with_functions, HostFrameInputUsage,
+};
 use crate::backend::reachability::compute_reachable_function_ids;
 use crate::backend::state_layout::{
     build_state_layout, state_layout_digest, typed_collection_layout_metadata, StateLayout,
@@ -61,6 +64,17 @@ pub struct ProgramFunction {
     pub dependents: Vec<FunctionId>,
 }
 
+/// Resolved host import retained for consumers that must audit an exact runtime
+/// contract rather than trusting a source-level effect label or function name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramExternImport {
+    pub name: String,
+    pub symbol: String,
+    pub params: Vec<TypeId>,
+    pub return_type: TypeId,
+    pub returns_void: bool,
+}
+
 impl From<&FunctionMeta> for ProgramFunction {
     fn from(function: &FunctionMeta) -> Self {
         Self {
@@ -100,6 +114,8 @@ pub struct ProgramSnapshot {
     module_graph: ModuleGraph,
     functions: Vec<ProgramFunction>,
     reachable_function_ids: BTreeSet<FunctionId>,
+    extern_imports: Vec<ProgramExternImport>,
+    host_frame_input_usage: HostFrameInputUsage,
     asset_references: Vec<AssetReference>,
     hot_render_images: Vec<HotRenderImageMetadata>,
     state_layout: StateLayout,
@@ -247,6 +263,23 @@ impl ProgramSnapshot {
         collections.sort_by(|left, right| left.path.cmp(&right.path));
         let literal_table = collect_program_literals(files)?;
         let reachable_function_ids = compute_reachable_function_ids(functions, required_emit_roots);
+        let extern_imports = analysis
+            .resolved_extern_signatures
+            .iter()
+            .map(|signature| ProgramExternImport {
+                name: signature.name.clone(),
+                symbol: signature.symbol.clone(),
+                params: signature.params.clone(),
+                return_type: signature.return_type,
+                returns_void: signature.return_type == crate::frontend::types::TYPE_ID_VOID,
+            })
+            .collect();
+        let host_frame_input_usage = analyze_host_frame_input_usage_with_functions(
+            function_hirs,
+            &reachable_function_ids,
+            &analysis.constant_values,
+            functions,
+        );
         let asset_references = discover_asset_references(
             files,
             functions,
@@ -270,6 +303,8 @@ impl ProgramSnapshot {
             module_graph: module_graph.clone(),
             functions: functions.iter().map(ProgramFunction::from).collect(),
             reachable_function_ids,
+            extern_imports,
+            host_frame_input_usage,
             asset_references,
             hot_render_images,
             state_layout,
@@ -310,6 +345,14 @@ impl ProgramSnapshot {
     pub fn reachable_function_ids(&self) -> &BTreeSet<FunctionId> {
         &self.reachable_function_ids
     }
+    pub fn extern_imports(&self) -> &[ProgramExternImport] {
+        &self.extern_imports
+    }
+    /// Raw HostFrame values read by the whole reachable game, including tick,
+    /// render, and called helper/wrapper bodies.
+    pub fn host_frame_input_usage(&self) -> &HostFrameInputUsage {
+        &self.host_frame_input_usage
+    }
     pub fn asset_references(&self) -> &[AssetReference] {
         &self.asset_references
     }
@@ -325,7 +368,7 @@ impl ProgramSnapshot {
     /// Digest of compiler-visible storage and type layouts that may be embedded in machine code.
     /// This is intentionally distinct from `layout_digest`, which versions persistent state and
     /// governs migration compatibility.
-    pub(crate) fn compiler_layout_digest(&self) -> [u8; 32] {
+    pub fn compiler_layout_digest(&self) -> [u8; 32] {
         self.compiler_layout_digest
     }
     pub fn data_flow_summaries(&self) -> &[FunctionDataFlowSummary] {

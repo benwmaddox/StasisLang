@@ -1332,6 +1332,7 @@ fn read_graphics_runtime_string(
 
 pub struct StasisGraphicsApi {
     _lib: Library,
+    runtime_path: PathBuf,
     stasis_init_window: usize,
     stasis_set_asset_root: usize,
     stasis_host_get_frame: usize,
@@ -1372,22 +1373,23 @@ impl StasisGraphicsApi {
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {
-        let lib = Library::load(path)?;
-        verify_graphics_runtime_abi(&lib, path)?;
+        let runtime_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let lib = Library::load(&runtime_path)?;
+        verify_graphics_runtime_abi(&lib, &runtime_path)?;
         if let Some(expected) = option_env!("STASIS_BUILD_FINGERPRINT") {
-            verify_graphics_runtime_build_fingerprint_on_library(&lib, path, expected)?;
+            verify_graphics_runtime_build_fingerprint_on_library(&lib, &runtime_path, expected)?;
         }
         if let Some(expected) = option_env!("STASIS_RELEASE_ID") {
             let actual = read_graphics_runtime_string(
                 &lib,
-                path,
+                &runtime_path,
                 "stasis_graphics_release_id",
                 "release identity",
             )?;
             if actual != expected {
                 return Err(format!(
                     "toolchain release mismatch: stasis is '{expected}' but {} is '{actual}'",
-                    path.display()
+                    runtime_path.display()
                 ));
             }
         }
@@ -1428,6 +1430,7 @@ impl StasisGraphicsApi {
         let stasis_sleep_ms = lib.symbol_address("stasis_sleep_ms")?;
         Ok(Self {
             _lib: lib,
+            runtime_path,
             stasis_init_window,
             stasis_set_asset_root,
             stasis_host_get_frame,
@@ -1448,6 +1451,10 @@ impl StasisGraphicsApi {
             stasis_host_get_monitor_usable_bounds,
             stasis_sleep_ms,
         })
+    }
+
+    pub fn runtime_path(&self) -> &Path {
+        &self.runtime_path
     }
 
     pub fn init_window(&self, width: i32, height: i32, title: &str) -> Result<bool, String> {

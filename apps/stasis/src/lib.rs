@@ -54,10 +54,14 @@ use compiler_backend::{IncrementalCompilerBackend, PreparedJitSwap};
 use frame_pacer::FramePacer;
 use live_workspace::LiveWorkspace;
 use play_error_toasts::{EmbeddedToastFont, PlayErrorToasts};
-use record_replay::{ReplayPlayer, ReplayRecorder};
+use record_replay::{
+    compact_observed_fields, validate_compact_replay_contract, CompactReplayMetadata, ReplayPlayer,
+    ReplayRecorder,
+};
 use runtime_exec::RuntimeLauncher;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, AssetLimits, DEFAULT_ASSET_MANIFEST_PATH,
 };
@@ -1850,6 +1854,61 @@ fn prepared_play_asset_root(project_root: &Path, asset_working_dir: &Path) -> Op
         .then_some(prepared_root)
 }
 
+fn compact_replay_metadata(
+    jit: &JitProcess,
+    gfx: &stasis_dynload::StasisGraphicsApi,
+    renderer_asset_root: &Path,
+) -> Result<CompactReplayMetadata, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("failed to resolve replay toolchain executable: {error}"))?;
+    let executable_bytes = fs::read(&executable).map_err(|error| {
+        format!(
+            "failed to hash replay toolchain executable {}: {error}",
+            executable.display()
+        )
+    })?;
+    let runtime_bytes = fs::read(gfx.runtime_path()).map_err(|error| {
+        format!(
+            "failed to hash replay graphics runtime {}: {error}",
+            gfx.runtime_path().display()
+        )
+    })?;
+    let mut runtime = Sha256::new();
+    runtime.update(b"stasis.replay.runtime-artifacts.v1\0");
+    runtime.update((executable_bytes.len() as u64).to_le_bytes());
+    runtime.update(&executable_bytes);
+    runtime.update((runtime_bytes.len() as u64).to_le_bytes());
+    runtime.update(&runtime_bytes);
+
+    let manifest_path = renderer_asset_root.join(DEFAULT_ASSET_MANIFEST_PATH);
+    let asset_manifest_sha256 = if manifest_path.is_file() {
+        let bytes = fs::read(&manifest_path).map_err(|error| {
+            format!(
+                "failed to hash effective replay asset manifest {}: {error}",
+                manifest_path.display()
+            )
+        })?;
+        Some(stasis_assets::sha256_bytes(&bytes))
+    } else {
+        let has_assets = jit
+            .program_snapshot()
+            .is_some_and(|snapshot| !snapshot.asset_references().is_empty());
+        if has_assets {
+            return Err(format!(
+                "compact replay requires an effective asset manifest at {} for reachable assets",
+                manifest_path.display()
+            ));
+        }
+        None
+    };
+
+    Ok(CompactReplayMetadata {
+        runtime_sha256: format!("{:x}", runtime.finalize()),
+        asset_manifest_sha256,
+        ..CompactReplayMetadata::default()
+    })
+}
+
 fn refresh_play_asset_file(
     project_root: &Path,
     prepared_asset_root: Option<&Path>,
@@ -2685,6 +2744,15 @@ fn run_play_in_process_inner(
     let package = jit
         .build_engine_package(&EngineEntrypoints::runtime_default())
         .map_err(|error| format!("failed to build engine package: {error}"))?;
+    let uses_compact_replay = matches!(replay, Some(PlayReplayConfig::Record(_)))
+        || replay_player.as_ref().is_some_and(ReplayPlayer::is_compact);
+    let replay_metadata = uses_compact_replay
+        .then(|| {
+            validate_compact_replay_contract(&jit)?;
+            compact_replay_metadata(&jit, &gfx, &renderer_asset_root)
+        })
+        .transpose()?;
+    let default_replay_metadata = CompactReplayMetadata::default();
 
     // Establish the request sequence baseline before guest startup. Otherwise the
     // runtime's first apply call treats main()'s request as its baseline and drops it.
@@ -2708,15 +2776,28 @@ fn run_play_in_process_inner(
     }
 
     if let Some(player) = replay_player.as_ref() {
-        player.initialize(&jit)?;
-    }
-    let mut replay_recorder = match replay.as_ref() {
-        Some(PlayReplayConfig::Record(path)) => Some(ReplayRecorder::start(
-            path.clone(),
+        player.initialize_with_metadata(
             &jit,
             host_i32.len(),
             host_f32.len(),
-        )?),
+            replay_metadata.as_ref().unwrap_or(&default_replay_metadata),
+        )?;
+    }
+    let mut replay_recorder = match replay.as_ref() {
+        Some(PlayReplayConfig::Record(path)) => {
+            let (observed_i32, observed_f32) = compact_observed_fields(&jit)?;
+            Some(ReplayRecorder::start_compact(
+                path.clone(),
+                &jit,
+                host_i32.len(),
+                host_f32.len(),
+                &observed_i32,
+                &observed_f32,
+                replay_metadata
+                    .clone()
+                    .ok_or_else(|| "compact replay metadata was not prepared".to_string())?,
+            )?)
+        }
         _ => None,
     };
 
@@ -3086,7 +3167,7 @@ fn run_play_in_process_inner(
         if let Some(recorder) = replay_recorder.as_mut() {
             recorder.finish_tick(&jit)?;
         }
-        if let Some(player) = replay_player.as_ref() {
+        if let Some(player) = replay_player.as_mut() {
             player.verify_tick(next_tick, &jit)?;
         }
 
