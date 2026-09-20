@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::backend::state_layout::{StateLayout, StateMemoryEntry, StateMemoryReport};
+use crate::backend::state_layout::{
+    collection_field_element_count, StateLayout, StateMemoryEntry, StateMemoryReport,
+};
 use crate::compiler::SourceFile;
 use crate::data_flow::{FunctionBoundedIteration, FunctionDataFlowSummary, FunctionHostCallCost};
 use crate::frontend::parser::{parse_top_level_functions, ParsedFunctionAnnotationArgumentKind};
@@ -321,11 +323,27 @@ fn collection_layout_choices(
             }
             let aos_stride = align_up(offset, max_alignment)?;
             let aos_padding = aos_stride.saturating_sub(soa_stride);
-            let soa_bytes = soa_stride
-                .checked_mul(capacity)
-                .ok_or_else(|| "SoA byte estimate overflow".to_string())?;
+            let mut soa_bytes = 0u64;
+            let mut aos_record_count = 0u64;
+            for (field, entry) in collection.fields.iter().filter_map(|field| {
+                memory
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == collection.path && entry.field == field.field)
+                    .map(|entry| (field, entry))
+            }) {
+                let field_count = collection_field_element_count(collection, field, capacity);
+                soa_bytes = soa_bytes
+                    .checked_add(
+                        field_count
+                            .checked_mul(entry.element_bytes)
+                            .ok_or_else(|| "SoA byte estimate overflow".to_string())?,
+                    )
+                    .ok_or_else(|| "SoA byte estimate overflow".to_string())?;
+                aos_record_count = aos_record_count.max(field_count);
+            }
             let aos_bytes = aos_stride
-                .checked_mul(capacity)
+                .checked_mul(aos_record_count)
                 .ok_or_else(|| "AoS byte estimate overflow".to_string())?;
             let (recommendation, reason) = if aos_padding == 0 && entries.len() <= 2 {
                 (

@@ -1,4 +1,5 @@
 use super::jit::{JitProcess, JitScalarValue, JitStateLayout};
+use super::state_layout::collection_field_element_count;
 pub use super::state_layout::state_layout_version;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -516,13 +517,30 @@ fn capture_runtime_state(
     let mut collection_sources = Vec::new();
     for (source, layout) in [(active, &active_layout), (candidate, &candidate_layout)] {
         for collection in &layout.collections {
+            let logical_capacity = u64::try_from(collection.capacity).map_err(|_| {
+                format!(
+                    "collection '{}' has negative capacity {}",
+                    collection.path, collection.capacity
+                )
+            })?;
             for field in &collection.fields {
                 if collection_keys.insert((collection.path.clone(), field.field.clone())) {
+                    let capacity = u32::try_from(collection_field_element_count(
+                        collection,
+                        field,
+                        logical_capacity,
+                    ))
+                    .map_err(|_| {
+                        format!(
+                            "collection '{}' field '{}' has capacity exceeding u32 runtime index capacity",
+                            collection.path, field.field
+                        )
+                    })?;
                     collection_sources.push((
                         source,
                         collection.path.clone(),
                         field.field.clone(),
-                        collection.capacity,
+                        capacity,
                     ));
                 }
             }
@@ -555,6 +573,12 @@ fn capture_runtime_state(
     for (source, path, field, capacity) in collection_sources {
         let mut values = Vec::with_capacity(capacity as usize);
         for index in 0..capacity {
+            let index = i32::try_from(index).map_err(|_| {
+                format!(
+                    "collection '{}.{}' index {index} exceeds i32 range",
+                    path, field
+                )
+            })?;
             values.push(source.read_global_collection_scalar(&path, &field, index)?);
         }
         collections.push((path, field, values));
@@ -602,12 +626,23 @@ fn collection_field_layouts(
             )
         })?;
         for field in &collection.fields {
+            let field_capacity = u32::try_from(collection_field_element_count(
+                collection,
+                field,
+                u64::from(capacity),
+            ))
+            .map_err(|_| {
+                format!(
+                    "collection '{}' field '{}' has capacity exceeding u32 migration capacity",
+                    collection.path, field.field
+                )
+            })?;
             fields.insert(
                 (collection.path.clone(), field.field.clone()),
                 CollectionFieldLayout {
                     type_name: field.type_name.clone(),
                     storage_type_name: field.storage_type_name().to_string(),
-                    capacity,
+                    capacity: field_capacity,
                 },
             );
         }
@@ -1112,6 +1147,7 @@ mod tests {
                 field: "value".to_string(),
                 type_name: "i32".to_string(),
                 storage_type_name: "i32".to_string(),
+                element_count: None,
             }],
         };
         let active = JitStateLayout {

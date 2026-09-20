@@ -146,6 +146,37 @@ pub fn plan_patch(
                 insert_seed(&mut reasons, &mut queue, key.clone(), reason);
             }
         }
+        // Required helpers are compile-time expansion templates and are
+        // intentionally absent from the reachable runtime graph. A template
+        // edit still changes the caller's embedded HIR, so seed that caller
+        // directly without ever scheduling the helper for code generation.
+        for caller in &graph.reachable {
+            if reasons.contains_key(caller) {
+                continue;
+            }
+            let Some(current_caller) = graph.by_key.get(caller) else {
+                continue;
+            };
+            let changed_template = current_caller.dependencies.iter().find(|dependency| {
+                graph.by_key.get(*dependency).is_some_and(|current| {
+                    current.compile_time_only
+                        && accepted
+                            .functions
+                            .get(*dependency)
+                            .is_none_or(|previous| previous.body_hash != current.body_hash)
+                })
+            });
+            if let Some(callee) = changed_template {
+                insert_seed(
+                    &mut reasons,
+                    &mut queue,
+                    caller.clone(),
+                    PatchReason::DirectCaller {
+                        callee: callee.clone(),
+                    },
+                );
+            }
+        }
         let removed_reachable: BTreeSet<FunctionKey> = removed
             .iter()
             .filter(|key| accepted.reachable.contains(*key))
@@ -323,6 +354,7 @@ struct CurrentFunction {
     id: FunctionId,
     body_hash: u64,
     dependencies: BTreeSet<FunctionKey>,
+    compile_time_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -363,6 +395,7 @@ impl CurrentGraph {
             .collect();
         let host_entries = functions
             .iter()
+            .filter(|function| function.requires_contract.is_none())
             .filter(|function| {
                 required_names.contains(function.name.as_str())
                     && LIFECYCLE_ROOTS
@@ -397,6 +430,7 @@ impl CurrentGraph {
                     id: function.id,
                     body_hash: function.body_hash,
                     dependencies,
+                    compile_time_only: function.requires_contract.is_some(),
                 },
             );
         }
@@ -644,6 +678,7 @@ mod tests {
                         id: index as FunctionId,
                         body_hash: index as u64,
                         dependencies: BTreeSet::from([keys[(index + 1) % keys.len()].clone()]),
+                        compile_time_only: false,
                     },
                 )
             })
@@ -680,6 +715,7 @@ mod tests {
                             .iter()
                             .map(|dependency| keys[*dependency].clone())
                             .collect(),
+                        compile_time_only: false,
                     },
                 )
             })

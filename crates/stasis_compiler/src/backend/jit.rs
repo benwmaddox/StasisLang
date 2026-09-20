@@ -3,7 +3,7 @@ use crate::backend::compile_analysis::{
     compute_files_fingerprint, resolve_extern_call_signatures_with_index, CallSignatureMap,
     CollectionInfoMap, CompileAnalysisCache, ConstantValueMap, ExternCallSignature,
     ExternSymbolAddressMap, GlobalPathTypeMap, NamedStructFieldTypeMap,
-    ResolvedExternCallSignature,
+    ResolvedExternCallSignature, TypedCollectionInfoMap,
 };
 use crate::backend::emit::{
     debug_variable_slot, DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage,
@@ -986,6 +986,7 @@ impl JitProcess {
         let direct_storage = build_direct_storage_bindings(
             &analysis.global_path_types,
             &analysis.collection_infos,
+            snapshot.typed_collection_descriptors(),
             self.compiler.types(),
             false,
         )
@@ -1351,18 +1352,19 @@ impl JitProcess {
     }
 
     fn is_host_export(&self, function: &FunctionMeta) -> bool {
-        matches!(
-            function.name.as_str(),
-            "main"
-                | "render"
-                | "on_code_swap"
-                | "gfx_cmd_construction_reset"
-                | "gfx_cmd_construction_finish"
-        ) || matches_root(function, "tick")
-            || self
-                .required_emit_roots
-                .iter()
-                .any(|root| matches_root(function, root))
+        function.requires_contract.is_none()
+            && (matches!(
+                function.name.as_str(),
+                "main"
+                    | "render"
+                    | "on_code_swap"
+                    | "gfx_cmd_construction_reset"
+                    | "gfx_cmd_construction_finish"
+            ) || matches_root(function, "tick")
+                || self
+                    .required_emit_roots
+                    .iter()
+                    .any(|root| matches_root(function, root)))
     }
 
     pub fn clif_for_function_name(&self, name: &str) -> Option<&str> {
@@ -1395,6 +1397,7 @@ impl JitProcess {
         build_direct_storage_bindings(
             &analysis.global_path_types,
             &analysis.collection_infos,
+            &analysis.typed_collection_descriptors,
             self.compiler.types(),
             true,
         )?;
@@ -1536,20 +1539,20 @@ impl JitProcess {
     pub fn global_collection_capacity(&self, path: &str) -> Option<i32> {
         self.program_snapshot
             .as_ref()?
-            .analysis
-            .collection_infos
-            .get(path)
-            .map(|info| info.len)
+            .collections()
+            .iter()
+            .find(|collection| collection.path == path)
+            .map(|collection| collection.capacity)
     }
 
     pub fn global_collection_field_type(&self, path: &str, field: &str) -> Option<&'static str> {
         let type_id = self
             .program_snapshot
             .as_ref()?
-            .analysis
-            .collection_infos
-            .get(path)?
-            .field_types
+            .collections()
+            .iter()
+            .find(|collection| collection.path == path)?
+            .field_type_ids
             .get(field)?;
         scalar_type_name(*type_id)
     }
@@ -1593,6 +1596,20 @@ impl JitProcess {
                         .and_then(jit_value_as_nonnegative_u64)
                         .unwrap_or(0)
                         .min(capacity)
+                } else if self.program_snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot
+                        .typed_collection_descriptors()
+                        .get(&collection.path)
+                        .is_some_and(|descriptor| {
+                            descriptor.lanes.iter().any(|lane| lane.name == "count")
+                        })
+                }) {
+                    u64::try_from(
+                        self.read_i32_global_path(&format!("{}.count", collection.path))
+                            .max(0),
+                    )
+                    .unwrap_or(0)
+                    .min(capacity)
                 } else {
                     capacity
                 };
@@ -2035,11 +2052,11 @@ impl JitProcess {
     }
 
     fn global_collection_value_type(&self, path: &str, field: &str) -> Result<(u16, i32), String> {
-        let analysis = &self
+        let snapshot = self
             .program_snapshot
             .as_ref()
-            .ok_or_else(|| "JIT collection metadata is unavailable".to_string())?
-            .analysis;
+            .ok_or_else(|| "JIT collection metadata is unavailable".to_string())?;
+        let analysis = &snapshot.analysis;
         if let Some(info) = analysis.collection_infos.get(path) {
             let type_id = if field.is_empty() {
                 info.element_type
@@ -2050,6 +2067,32 @@ impl JitProcess {
                 format!("global collection path '{path}' field '{field}' was not found")
             })?;
             return Ok((type_id, info.len));
+        }
+        if let Some(descriptor) = snapshot.typed_collection_descriptors().get(path) {
+            if let Some(lane) = descriptor.lanes.iter().find(|lane| lane.name == field) {
+                let length = i32::try_from(lane.element_count).map_err(|_| {
+                    format!(
+                        "typed collection '{path}' lane '{field}' element count {} exceeds i32 bounds",
+                        lane.element_count
+                    )
+                })?;
+                return Ok((lane.type_id, length));
+            }
+        }
+        if let Some(collection) = snapshot
+            .collections()
+            .iter()
+            .find(|collection| collection.path == path)
+        {
+            let type_id = if field.is_empty() {
+                collection.element_type_id
+            } else {
+                collection.field_type_ids.get(field).copied()
+            }
+            .ok_or_else(|| {
+                format!("global collection path '{path}' field '{field}' was not found")
+            })?;
+            return Ok((type_id, collection.capacity));
         }
         if field.is_empty() {
             if let Some(capacity) = self.global_fixed_text_capacity(path) {
@@ -2915,10 +2958,12 @@ fn array_storage_kind(
 fn build_direct_storage_bindings(
     global_path_types: &crate::backend::compile_analysis::GlobalPathTypeMap,
     collection_infos: &crate::backend::compile_analysis::CollectionInfoMap,
+    typed_collection_descriptors: &TypedCollectionInfoMap,
     type_table: &TypeTable,
     provision: bool,
 ) -> Result<DirectStorageBindings, String> {
     let mut bindings = DirectStorageBindings::default();
+    let mut claimed_slots = BTreeMap::<(u8, i32, i32), String>::new();
     for (path, type_id) in global_path_types {
         if collection_infos.contains_key(path) {
             continue;
@@ -2929,13 +2974,23 @@ fn build_direct_storage_bindings(
         });
         if let Some(kind) = kind {
             let path_hash = crate::backend::emit::hash_global_path(path);
+            claim_jit_storage_slot(
+                &mut claimed_slots,
+                kind,
+                path_hash,
+                0,
+                &format!("scalar path '{path}'"),
+            )?;
             let address = stasis_dynload::direct_scalar_storage_slot_address(kind, path_hash)?;
             if provision {
                 stasis_dynload::provision_direct_scalar_storage(kind, path_hash)?;
             }
-            bindings
-                .scalars
-                .insert(path.clone(), DirectStorageBinding::Absolute(address));
+            insert_jit_scalar_binding(
+                &mut bindings,
+                path.clone(),
+                DirectStorageBinding::Absolute(address),
+                &format!("scalar path '{path}'"),
+            )?;
         }
     }
     for (path, info) in collection_infos {
@@ -2959,6 +3014,13 @@ fn build_direct_storage_bindings(
                 format!("unsupported direct storage element type {type_id} for '{path}'")
             })?;
             let address = stasis_dynload::direct_array_storage_slot_address(kind, path_hash, 0)?;
+            claim_jit_storage_slot(
+                &mut claimed_slots,
+                kind,
+                path_hash,
+                0,
+                &format!("array lane '{path}'"),
+            )?;
             if provision {
                 stasis_dynload::provision_direct_array_storage(
                     kind,
@@ -2967,20 +3029,29 @@ fn build_direct_storage_bindings(
                     info.len as usize,
                 )?;
             }
-            bindings.arrays.insert(
+            insert_jit_array_binding(
+                &mut bindings,
                 (path.clone(), String::new()),
                 crate::backend::emit::DirectArrayStorageBinding {
                     slot: DirectStorageBinding::Absolute(address),
                     storage_bytes: storage_kind_bytes(kind),
                     static_len: Some(info.len as usize),
                 },
-            );
+                &format!("array lane '{path}'"),
+            )?;
         }
         for (field, type_id) in &info.field_types {
             let kind = array_storage_kind(type_table, *type_id).ok_or_else(|| {
                 format!("unsupported direct storage field type {type_id} for '{path}.{field}'")
             })?;
             let field_hash = crate::backend::emit::hash_foreach_field_suffix(field);
+            claim_jit_storage_slot(
+                &mut claimed_slots,
+                kind,
+                path_hash,
+                field_hash,
+                &format!("array lane '{path}.{field}'"),
+            )?;
             let address =
                 stasis_dynload::direct_array_storage_slot_address(kind, path_hash, field_hash)?;
             if provision {
@@ -2991,17 +3062,147 @@ fn build_direct_storage_bindings(
                     info.len as usize,
                 )?;
             }
-            bindings.arrays.insert(
+            insert_jit_array_binding(
+                &mut bindings,
                 (path.clone(), field.clone()),
                 crate::backend::emit::DirectArrayStorageBinding {
                     slot: DirectStorageBinding::Absolute(address),
                     storage_bytes: storage_kind_bytes(kind),
                     static_len: Some(info.len as usize),
                 },
-            );
+                &format!("array lane '{path}.{field}'"),
+            )?;
+        }
+    }
+    for (path, descriptor) in typed_collection_descriptors {
+        for lane in &descriptor.lanes {
+            let lane_path = format!("{path}.{}", lane.name);
+            let path_hash = crate::backend::emit::hash_global_path(&lane_path);
+            let lane_label = format!("typed collection lane '{lane_path}'");
+            if matches!(lane.name.as_str(), "count" | "head" | "next_order") {
+                let kind = scalar_storage_kind(type_table, lane.type_id).ok_or_else(|| {
+                    format!(
+                        "unsupported direct storage metadata type {} for '{lane_path}'",
+                        lane.type_id
+                    )
+                })?;
+                claim_jit_storage_slot(&mut claimed_slots, kind, path_hash, 0, &lane_label)?;
+                let address = stasis_dynload::direct_scalar_storage_slot_address(kind, path_hash)?;
+                if provision {
+                    stasis_dynload::provision_direct_scalar_storage(kind, path_hash)?;
+                }
+                insert_jit_scalar_binding(
+                    &mut bindings,
+                    lane_path,
+                    DirectStorageBinding::Absolute(address),
+                    &lane_label,
+                )?;
+            } else {
+                let kind = array_storage_kind(type_table, lane.type_id).ok_or_else(|| {
+                    format!(
+                        "unsupported direct storage lane type {} for '{lane_path}'",
+                        lane.type_id
+                    )
+                })?;
+                let field_hash = crate::backend::emit::hash_foreach_field_suffix(&lane.name);
+                let length = usize::try_from(lane.element_count).map_err(|_| {
+                    format!(
+                        "typed collection '{path}' lane '{}' element count {} does not fit usize",
+                        lane.name, lane.element_count
+                    )
+                })?;
+                claim_jit_storage_slot(
+                    &mut claimed_slots,
+                    kind,
+                    crate::backend::emit::hash_global_path(path),
+                    field_hash,
+                    &lane_label,
+                )?;
+                let address = stasis_dynload::direct_array_storage_slot_address(
+                    kind,
+                    crate::backend::emit::hash_global_path(path),
+                    field_hash,
+                )?;
+                if provision {
+                    stasis_dynload::provision_direct_array_storage(
+                        kind,
+                        crate::backend::emit::hash_global_path(path),
+                        field_hash,
+                        length,
+                    )?;
+                }
+                insert_jit_array_binding(
+                    &mut bindings,
+                    (path.clone(), lane.name.clone()),
+                    crate::backend::emit::DirectArrayStorageBinding {
+                        slot: DirectStorageBinding::Absolute(address),
+                        storage_bytes: storage_kind_bytes(kind),
+                        static_len: Some(length),
+                    },
+                    &lane_label,
+                )?;
+            }
         }
     }
     Ok(bindings)
+}
+
+fn claim_jit_storage_slot(
+    claimed_slots: &mut BTreeMap<(u8, i32, i32), String>,
+    kind: stasis_dynload::JitStorageKind,
+    collection_hash: i32,
+    field_hash: i32,
+    semantic_lane: &str,
+) -> Result<(), String> {
+    let key = (jit_storage_kind_tag(kind), collection_hash, field_hash);
+    if let Some(previous_lane) = claimed_slots.get(&key) {
+        return Err(format!(
+            "JIT direct storage slot collision for ({kind:?}, {collection_hash}, {field_hash}): semantic lanes '{previous_lane}' and '{semantic_lane}'"
+        ));
+    }
+    claimed_slots.insert(key, semantic_lane.to_string());
+    Ok(())
+}
+
+fn jit_storage_kind_tag(kind: stasis_dynload::JitStorageKind) -> u8 {
+    match kind {
+        stasis_dynload::JitStorageKind::I32 => 0,
+        stasis_dynload::JitStorageKind::F32 => 1,
+        stasis_dynload::JitStorageKind::F64 => 2,
+        stasis_dynload::JitStorageKind::U8 => 3,
+        stasis_dynload::JitStorageKind::U16 => 4,
+    }
+}
+
+fn insert_jit_scalar_binding(
+    bindings: &mut DirectStorageBindings,
+    path: String,
+    binding: DirectStorageBinding,
+    semantic_lane: &str,
+) -> Result<(), String> {
+    if bindings.scalars.contains_key(&path) {
+        return Err(format!(
+            "JIT direct storage scalar binding collision for '{path}': semantic lane '{semantic_lane}'"
+        ));
+    }
+    bindings.scalars.insert(path, binding);
+    Ok(())
+}
+
+fn insert_jit_array_binding(
+    bindings: &mut DirectStorageBindings,
+    key: (String, String),
+    binding: crate::backend::emit::DirectArrayStorageBinding,
+    semantic_lane: &str,
+) -> Result<(), String> {
+    if bindings.arrays.contains_key(&key) {
+        return Err(format!(
+            "JIT direct storage array binding collision for '{}.{}': semantic lane '{semantic_lane}'",
+            key.0, key.1
+        ));
+    }
+    bindings.arrays.insert(key, binding);
+    Ok(())
 }
 
 fn storage_kind_bytes(kind: stasis_dynload::JitStorageKind) -> u8 {
@@ -4846,6 +5047,2423 @@ function main(): i32 {
     }
 
     #[test]
+    fn typed_pool_jit_storage_plan_keeps_count_scalar_separate_from_values_array() {
+        for capacity in [2_u32, 0_u32] {
+            let mut process = JitProcess::new();
+            process.upsert_file(
+                "typed_pool_storage.stasis",
+                format!(
+                    "global actors: pool<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
+                ),
+            );
+            process.compile().expect("typed pool JIT compile");
+
+            let snapshot = process.program_snapshot().expect("typed pool snapshot");
+            let descriptors = snapshot.typed_collection_descriptors();
+            let descriptor = descriptors.get("actors").expect("typed pool descriptor");
+            assert_eq!(descriptor.capacity, capacity);
+            assert_eq!(
+                descriptor.canonical_type_name(snapshot.types()),
+                format!("pool<i32, {capacity}>")
+            );
+
+            let bindings = build_direct_storage_bindings(
+                &snapshot.analysis.global_path_types,
+                &snapshot.analysis.collection_infos,
+                descriptors,
+                snapshot.types(),
+                false,
+            )
+            .expect("typed pool JIT direct storage plan");
+            assert!(bindings.scalars.contains_key("actors.count"));
+            assert!(!bindings.scalars.contains_key("actors"));
+            assert_eq!(bindings.scalars.len(), 1);
+            let values = bindings
+                .arrays
+                .get(&(String::from("actors"), String::from("values")))
+                .expect("typed pool values array binding");
+            assert_eq!(values.static_len, Some(capacity as usize));
+            assert_eq!(values.storage_bytes, 4);
+            assert_eq!(bindings.arrays.len(), 1);
+
+            assert_eq!(
+                stasis_dynload::direct_array_storage_slot_len_for_test(
+                    stasis_dynload::JitStorageKind::I32,
+                    hash_global_path("actors"),
+                    crate::backend::emit::hash_foreach_field_suffix("values"),
+                ),
+                Some(capacity as usize),
+                "JIT provisioned typed pool values lane must retain descriptor capacity"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_stable_pool_jit_storage_plan_provisions_count_occupancy_and_values_lanes() {
+        for _ in [()] {
+            for capacity in [2_u32, 0_u32] {
+                let mut process = JitProcess::new();
+                process.upsert_file(
+                    "typed_stable_pool_storage.stasis",
+                    format!(
+                        "global actors: stable_pool<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed stable-pool JIT compile");
+
+                let snapshot = process
+                    .program_snapshot()
+                    .expect("typed stable-pool snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed stable-pool descriptor");
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("stable_pool<i32, {capacity}>")
+                );
+                let bindings = build_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                    false,
+                )
+                .expect("typed stable-pool JIT direct storage plan");
+                assert!(bindings.scalars.contains_key("actors.count"));
+                assert_eq!(bindings.scalars.len(), 1);
+                let occupied = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("occupied")))
+                    .expect("typed stable-pool occupied array binding");
+                assert_eq!(occupied.static_len, Some(capacity as usize));
+                assert_eq!(occupied.storage_bytes, 1);
+                let values = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("values")))
+                    .expect("typed stable-pool values array binding");
+                assert_eq!(values.static_len, Some(capacity as usize));
+                assert_eq!(values.storage_bytes, 4);
+                assert_eq!(bindings.arrays.len(), 2);
+                assert_eq!(
+                    stasis_dynload::direct_array_storage_slot_len_for_test(
+                        stasis_dynload::JitStorageKind::U8,
+                        hash_global_path("actors"),
+                        crate::backend::emit::hash_foreach_field_suffix("occupied"),
+                    ),
+                    Some(capacity as usize),
+                    "JIT provisioned stable-pool occupied lane must retain descriptor capacity"
+                );
+                assert_eq!(
+                    stasis_dynload::direct_array_storage_slot_len_for_test(
+                        stasis_dynload::JitStorageKind::I32,
+                        hash_global_path("actors"),
+                        crate::backend::emit::hash_foreach_field_suffix("values"),
+                    ),
+                    Some(capacity as usize),
+                    "JIT provisioned stable-pool values lane must retain descriptor capacity"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_map_and_set_jit_storage_plan_provisions_exact_lanes() {
+        for kind in ["map", "set"] {
+            for _ in [()] {
+                for capacity in [3_u32, 0_u32] {
+                    let mut process = JitProcess::new();
+                    let declaration = match kind {
+                        "map" => format!("global collection: map<i32, i32, {capacity}>;"),
+                        "set" => format!("global collection: set<i32, {capacity}>;"),
+                        _ => unreachable!(),
+                    };
+                    process.upsert_file(
+                        "typed_map_set_storage.stasis",
+                        format!("{declaration}\nfunction main(): i32 {{ return 0; }}\n"),
+                    );
+                    process.compile().expect("typed map/set JIT compile");
+
+                    let snapshot = process.program_snapshot().expect("typed map/set snapshot");
+                    let descriptor = snapshot
+                        .typed_collection_descriptors()
+                        .get("collection")
+                        .expect("typed map/set descriptor");
+                    assert_eq!(
+                        descriptor.canonical_type_name(snapshot.types()),
+                        match kind {
+                            "map" => format!("map<i32, i32, {capacity}>"),
+                            "set" => format!("set<i32, {capacity}>"),
+                            _ => unreachable!(),
+                        }
+                    );
+
+                    let bindings = build_direct_storage_bindings(
+                        &snapshot.analysis.global_path_types,
+                        &snapshot.analysis.collection_infos,
+                        snapshot.typed_collection_descriptors(),
+                        snapshot.types(),
+                        false,
+                    )
+                    .expect("typed map/set JIT direct storage plan");
+                    assert!(bindings.scalars.contains_key("collection.count"));
+                    assert_eq!(bindings.scalars.len(), 1);
+
+                    let expected_arrays: &[(&str, u8)] = match kind {
+                        "map" => &[("occupied", 1), ("keys", 4), ("values", 4)],
+                        "set" => &[("occupied", 1), ("keys", 4)],
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(bindings.arrays.len(), expected_arrays.len());
+                    for (field, storage_bytes) in expected_arrays {
+                        let lane = bindings
+                            .arrays
+                            .get(&(String::from("collection"), String::from(*field)))
+                            .unwrap_or_else(|| panic!("missing {kind} {field} lane"));
+                        assert_eq!(lane.static_len, Some(capacity as usize));
+                        assert_eq!(lane.storage_bytes, *storage_bytes);
+                        let storage_kind = if *storage_bytes == 1 {
+                            stasis_dynload::JitStorageKind::U8
+                        } else {
+                            stasis_dynload::JitStorageKind::I32
+                        };
+                        assert_eq!(
+                            stasis_dynload::direct_array_storage_slot_len_for_test(
+                                storage_kind,
+                                hash_global_path("collection"),
+                                crate::backend::emit::hash_foreach_field_suffix(field),
+                            ),
+                            Some(capacity as usize),
+                            "JIT provisioned {kind} {field} lane must retain descriptor capacity"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_queue_jit_storage_plan_provisions_metadata_and_values_lanes() {
+        for _ in [()] {
+            for capacity in [2_u32, 0_u32] {
+                let mut process = JitProcess::new();
+                process.upsert_file(
+                    "typed_queue_storage.stasis",
+                    format!(
+                        "global actors: queue<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed queue JIT compile");
+
+                let snapshot = process.program_snapshot().expect("typed queue snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed queue descriptor");
+                assert_eq!(descriptor.capacity, capacity);
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("queue<i32, {capacity}>")
+                );
+                let bindings = build_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                    false,
+                )
+                .expect("typed queue JIT direct storage plan");
+                for metadata in ["count", "head"] {
+                    assert!(bindings.scalars.contains_key(&format!("actors.{metadata}")));
+                }
+                assert!(!bindings.scalars.contains_key("actors"));
+                assert_eq!(bindings.scalars.len(), 2);
+                let values = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("values")))
+                    .expect("typed queue values array binding");
+                assert_eq!(values.static_len, Some(capacity as usize));
+                assert_eq!(values.storage_bytes, 4);
+                assert_eq!(bindings.arrays.len(), 1);
+                assert_eq!(
+                    stasis_dynload::direct_array_storage_slot_len_for_test(
+                        stasis_dynload::JitStorageKind::I32,
+                        hash_global_path("actors"),
+                        crate::backend::emit::hash_foreach_field_suffix("values"),
+                    ),
+                    Some(capacity as usize),
+                    "JIT provisioned typed queue values lane must retain descriptor capacity"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_priority_queue_jit_storage_plan_provisions_exact_lanes() {
+        for _ in [()] {
+            for capacity in [3_u32, 0_u32] {
+                let mut process = JitProcess::new();
+                process.upsert_file(
+                    "typed_priority_queue_storage.stasis",
+                    format!(
+                        "global actors: priority_queue<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed priority-queue JIT compile");
+
+                let snapshot = process
+                    .program_snapshot()
+                    .expect("typed priority-queue snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed priority-queue descriptor");
+                assert_eq!(descriptor.capacity, capacity);
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("priority_queue<i32, {capacity}>")
+                );
+                let bindings = build_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                    false,
+                )
+                .expect("typed priority-queue JIT direct storage plan");
+                for metadata in ["count", "next_order"] {
+                    assert!(bindings.scalars.contains_key(&format!("actors.{metadata}")));
+                }
+                assert_eq!(bindings.scalars.len(), 2);
+                let expected_arrays = [
+                    ("priority", stasis_dynload::JitStorageKind::I32),
+                    ("order", stasis_dynload::JitStorageKind::I32),
+                    ("values", stasis_dynload::JitStorageKind::I32),
+                ];
+                assert_eq!(bindings.arrays.len(), expected_arrays.len());
+                for (field, storage_kind) in expected_arrays {
+                    let lane = bindings
+                        .arrays
+                        .get(&(String::from("actors"), String::from(field)))
+                        .unwrap_or_else(|| panic!("missing priority-queue {field} lane"));
+                    assert_eq!(lane.static_len, Some(capacity as usize));
+                    assert_eq!(lane.storage_bytes, 4);
+                    assert_eq!(
+                        stasis_dynload::direct_array_storage_slot_len_for_test(
+                            storage_kind,
+                            hash_global_path("actors"),
+                            crate::backend::emit::hash_foreach_field_suffix(field),
+                        ),
+                        Some(capacity as usize),
+                        "JIT provisioned priority-queue {field} lane must retain descriptor capacity"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_ring_buffer_jit_storage_plan_provisions_metadata_and_values_lanes() {
+        for _ in [()] {
+            for capacity in [2_u32, 0_u32] {
+                let mut process = JitProcess::new();
+                process.upsert_file(
+                    "typed_ring_buffer_storage.stasis",
+                    format!(
+                        "global actors: ring_buffer<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed ring-buffer JIT compile");
+
+                let snapshot = process
+                    .program_snapshot()
+                    .expect("typed ring-buffer snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed ring-buffer descriptor");
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("ring_buffer<i32, {capacity}>")
+                );
+                let bindings = build_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                    false,
+                )
+                .expect("typed ring-buffer JIT direct storage plan");
+                for metadata in ["count", "head"] {
+                    assert!(bindings.scalars.contains_key(&format!("actors.{metadata}")));
+                }
+                assert!(!bindings.scalars.contains_key("actors"));
+                assert_eq!(bindings.scalars.len(), 2);
+                let values = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("values")))
+                    .expect("typed ring-buffer values array binding");
+                assert_eq!(values.static_len, Some(capacity as usize));
+                assert_eq!(values.storage_bytes, 4);
+                assert_eq!(bindings.arrays.len(), 1);
+                assert_eq!(
+                    stasis_dynload::direct_array_storage_slot_len_for_test(
+                        stasis_dynload::JitStorageKind::I32,
+                        hash_global_path("actors"),
+                        crate::backend::emit::hash_foreach_field_suffix("values"),
+                    ),
+                    Some(capacity as usize),
+                    "JIT provisioned typed ring-buffer values lane must retain descriptor capacity"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_grid_and_bitset_jit_storage_and_inspection_use_lane_lengths() {
+        for (path, type_name, field, logical_capacity, expected_len, expected_type) in [
+            ("grid_storage_147", "grid<i32, 2, 3>", "values", 6, 6, "i32"),
+            ("bitset_storage_147", "bitset<33>", "words", 33, 2, "u32"),
+        ] {
+            let mut process = JitProcess::new();
+            process.upsert_file(
+                "typed_grid_bitset_storage.stasis",
+                format!("global {path}: {type_name};\nfunction main(): i32 {{ return 0; }}\n"),
+            );
+            process.compile().expect("typed grid/bitset JIT compile");
+
+            assert_eq!(
+                process.global_collection_capacity(path),
+                Some(logical_capacity),
+                "logical capacity must remain independent of lane length for {path}"
+            );
+            assert_eq!(
+                process.global_collection_field_type(path, field),
+                Some(expected_type),
+                "typed lane binding type for {path}.{field}"
+            );
+            let (_, value_length) = process
+                .global_collection_value_type(path, field)
+                .expect("typed lane inspection metadata");
+            assert_eq!(
+                value_length, expected_len,
+                "inspection bound for {path}.{field}"
+            );
+
+            let snapshot = process
+                .program_snapshot()
+                .expect("typed collection snapshot");
+            let bindings = build_direct_storage_bindings(
+                &snapshot.analysis.global_path_types,
+                &snapshot.analysis.collection_infos,
+                snapshot.typed_collection_descriptors(),
+                snapshot.types(),
+                false,
+            )
+            .expect("typed grid/bitset JIT direct storage plan");
+            let binding = bindings
+                .arrays
+                .get(&(path.to_string(), field.to_string()))
+                .expect("typed lane direct storage binding");
+            assert_eq!(binding.static_len, Some(expected_len as usize));
+            assert_eq!(binding.storage_bytes, 4);
+            assert_eq!(
+                stasis_dynload::direct_array_storage_slot_len_for_test(
+                    stasis_dynload::JitStorageKind::I32,
+                    hash_global_path(path),
+                    crate::backend::emit::hash_foreach_field_suffix(field),
+                ),
+                Some(expected_len as usize),
+                "provisioned storage length must match {path}.{field} descriptor lane"
+            );
+
+            assert!(process
+                .read_global_collection_scalar(path, field, expected_len - 1)
+                .is_ok());
+            let error = process
+                .read_global_collection_scalar(path, field, expected_len)
+                .expect_err("lane index at element_count must be rejected");
+            assert!(
+                error.contains(&format!("outside capacity {expected_len}")),
+                "unexpected exact-lane-bound diagnostic: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_grid_and_bitset_operations_execute_with_exact_guards() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "typed_grid_bitset_operations.stasis",
+            "global grid_ops_147: grid<i32, 2, 3>;\n\
+             global bits_ops_147: bitset<33>;\n\
+             @requires(grid_ops_147.can_access(x, y))\n\
+             function write_grid(x: i32, y: i32, value: i32): void { grid_ops_147.set(x, y, value); }\n\
+             @requires(grid_ops_147.can_access(x, y))\n\
+             function read_grid(x: i32, y: i32): i32 { return grid_ops_147.get(x, y); }\n\
+             @requires(bits_ops_147.can_access(index))\n\
+             function write_bit(index: i32, value: bool): void { bits_ops_147.set(index, value); }\n\
+             @requires(bits_ops_147.can_access(index))\n\
+             function read_bit(index: i32): bool { return bits_ops_147.test(index); }\n\
+             function grid_result(): i32 {\n\
+                 grid_ops_147.clear();\n\
+                 let result: i32 = grid_ops_147.capacity();\n\
+                 if (grid_ops_147.can_access(1, 2)) { write_grid(1, 2, 41); }\n\
+                 if (grid_ops_147.can_access(1, 2)) { result += read_grid(1, 2); }\n\
+                 if (grid_ops_147.can_access(-1, 0)) { result += 1000; }\n\
+                 if (grid_ops_147.can_access(2, 3)) { result += 2000; }\n\
+                 grid_ops_147.clear();\n\
+                 if (grid_ops_147.can_access(1, 2)) { result += grid_ops_147.get(1, 2); }\n\
+                 return result;\n\
+             }\n\
+             function bitset_result(): i32 {\n\
+                 bits_ops_147.clear();\n\
+                 let result: i32 = bits_ops_147.capacity();\n\
+                 if (bits_ops_147.can_access(0)) { write_bit(0, true); }\n\
+                 if (bits_ops_147.can_access(31)) { bits_ops_147.set(31, true); }\n\
+                 if (bits_ops_147.can_access(32)) { bits_ops_147.set(32, true); }\n\
+                 if (bits_ops_147.can_access(0)) { if (read_bit(0)) { result += 1; } }\n\
+                 if (bits_ops_147.can_access(31)) { if (bits_ops_147.test(31)) { result += 10; } }\n\
+                 if (bits_ops_147.can_access(32)) { if (bits_ops_147.test(32)) { result += 100; } }\n\
+                 if (bits_ops_147.can_access(-1)) { result += 1000; }\n\
+                 if (bits_ops_147.can_access(33)) { result += 2000; }\n\
+                 bits_ops_147.clear();\n\
+                 if (bits_ops_147.can_access(0)) { if (bits_ops_147.test(0)) { result += 4000; } }\n\
+                 if (bits_ops_147.can_access(31)) { if (bits_ops_147.test(31)) { result += 8000; } }\n\
+                 if (bits_ops_147.can_access(32)) { if (bits_ops_147.test(32)) { result += 16000; } }\n\
+                 return result;\n\
+             }\n\
+             function main(): i32 { return grid_result() + bitset_result(); }\n",
+        );
+        process
+            .compile()
+            .expect("typed grid/bitset operation JIT compile");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("grid_result")
+                .expect("grid operations"),
+            47,
+            "grid set/get, capacity, clear, and rejected bounds"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("bitset_result")
+                .expect("bitset operations"),
+            144,
+            "bitset bits 0/31/32, capacity, clear, and rejected bounds"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("combined typed grid/bitset operations"),
+            191
+        );
+    }
+
+    #[test]
+    fn zero_capacity_grid_and_bitset_clear_and_reject_access() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "zero_grid_bitset_operations.stasis",
+            "global empty_grid: grid<i32, 0, 3>;\n\
+             global empty_bits: bitset<0>;\n\
+             function main(): i32 {\n\
+                 empty_grid.clear();\n\
+                 empty_bits.clear();\n\
+                 let result: i32 = empty_grid.capacity() + empty_bits.capacity();\n\
+                 if (empty_grid.can_access(0, 0)) { result += 1; }\n\
+                 if (empty_bits.can_access(0)) { result += 2; }\n\
+                 return result;\n\
+             }\n",
+        );
+        process
+            .compile()
+            .expect("zero-capacity grid/bitset JIT compile");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("zero-capacity grid/bitset execution"),
+            0
+        );
+    }
+
+    #[test]
+    fn typed_pool_operations_execute_with_bounded_swap_remove_and_clear_semantics() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&[
+            "fill".to_string(),
+            "remove_first".to_string(),
+            "remove_invalid".to_string(),
+            "clear_all".to_string(),
+            "pool_capacity".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_pool_execution.stasis",
+            "global typed_pool_exec_147: pool<i32, 2>;\n\
+             function fill(): i32 { let first: i32 = -1; if (typed_pool_exec_147.can_push()) { first = typed_pool_exec_147.push(10); } let second: i32 = -1; if (typed_pool_exec_147.can_push()) { second = typed_pool_exec_147.push(20); } let rejected: i32 = -1; if (typed_pool_exec_147.can_push()) { rejected = typed_pool_exec_147.push(30); } return first * 100 + second * 10 + rejected; }\n\
+             function remove_first(): i32 { if (typed_pool_exec_147.can_remove(0)) { typed_pool_exec_147.remove(0); return 1; } return 0; }\n\
+             function remove_invalid(): i32 { if (typed_pool_exec_147.can_remove(9)) { typed_pool_exec_147.remove(9); return 1; } return 0; }\n\
+             function clear_all(): i32 { typed_pool_exec_147.clear(); return typed_pool_exec_147.count(); }\n\
+             function pool_capacity(): i32 { return typed_pool_exec_147.capacity(); }\n",
+        );
+        process.compile().expect("typed pool operation JIT compile");
+
+        assert_eq!(process.read_i32_global_path("typed_pool_exec_147.count"), 0);
+        let initial_memory = process
+            .state_memory_report(&BTreeMap::new(), u64::MAX)
+            .expect("typed pool memory report");
+        assert_eq!(
+            initial_memory
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_pool_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(0)
+        );
+        assert_eq!(
+            process.global_collection_capacity("typed_pool_exec_147"),
+            Some(2)
+        );
+        assert_eq!(
+            process.global_collection_field_type("typed_pool_exec_147", "values"),
+            Some("i32")
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("pool_capacity").unwrap(),
+            2
+        );
+        assert_eq!(process.execute_i32_noarg_by_name("fill").unwrap(), 9);
+        assert_eq!(process.read_i32_global_path("typed_pool_exec_147.count"), 2);
+        let full_memory = process
+            .state_memory_report(&BTreeMap::new(), u64::MAX)
+            .expect("full typed pool memory report");
+        assert_eq!(
+            full_memory
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_pool_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(2)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_pool_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(10)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_pool_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(20)
+        );
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("remove_first").unwrap(),
+            1
+        );
+        assert_eq!(process.read_i32_global_path("typed_pool_exec_147.count"), 1);
+        let reduced_memory = process
+            .state_memory_report(&BTreeMap::new(), u64::MAX)
+            .expect("reduced typed pool memory report");
+        assert_eq!(
+            reduced_memory
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_pool_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(1)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_pool_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(20)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_pool_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("remove_invalid").unwrap(),
+            0
+        );
+        assert_eq!(process.read_i32_global_path("typed_pool_exec_147.count"), 1);
+
+        assert_eq!(process.execute_i32_noarg_by_name("clear_all").unwrap(), 0);
+        assert_eq!(process.read_i32_global_path("typed_pool_exec_147.count"), 0);
+        for index in 0..2 {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_pool_exec_147", "values", index)
+                    .unwrap(),
+                JitScalarValue::I32(0)
+            );
+        }
+    }
+
+    #[test]
+    fn typed_stable_pool_operations_execute_with_tombstones_and_clear_semantics() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&[
+            "stable_error_seed".to_string(),
+            "stable_error_observe".to_string(),
+            "stable_error_remove".to_string(),
+            "stable_error_invalid".to_string(),
+            "stable_error_reinsert".to_string(),
+            "stable_error_clear".to_string(),
+            "stable_drop_run".to_string(),
+            "stable_drop_clear".to_string(),
+            "stable_zero_run".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_stable_pool_execution.stasis",
+            r#"global typed_stable_error_exec_147: stable_pool<i32, 3>;
+global typed_stable_drop_exec_147: stable_pool<i32, 2>;
+global typed_stable_zero_exec_147: stable_pool<i32, 0>;
+function stable_error_seed(): i32 {
+    typed_stable_error_exec_147.clear();
+    let first: i32 = -1;
+    if (typed_stable_error_exec_147.can_insert()) { first = typed_stable_error_exec_147.insert(10); }
+    let second: i32 = -1;
+    if (typed_stable_error_exec_147.can_insert()) { second = typed_stable_error_exec_147.insert(20); }
+    let third: i32 = -1;
+    if (typed_stable_error_exec_147.can_insert()) { third = typed_stable_error_exec_147.insert(30); }
+    let full: i32 = -1;
+    if (typed_stable_error_exec_147.can_insert()) { full = typed_stable_error_exec_147.insert(40); }
+    return first * 1000 + second * 100 + third * 10 + full;
+}
+function stable_error_observe(): i32 {
+    return typed_stable_error_exec_147.count() * 100
+        + typed_stable_error_exec_147.capacity();
+}
+function stable_error_remove(): i32 {
+    if (typed_stable_error_exec_147.can_remove(1)) { typed_stable_error_exec_147.remove(1); return 1; }
+    return 0;
+}
+function stable_error_invalid(): i32 {
+    let result: i32 = 0;
+    if (typed_stable_error_exec_147.can_remove(1)) { typed_stable_error_exec_147.remove(1); result += 100; }
+    if (typed_stable_error_exec_147.can_remove(-1)) { typed_stable_error_exec_147.remove(-1); result += 10; }
+    if (typed_stable_error_exec_147.can_remove(9)) { typed_stable_error_exec_147.remove(9); result += 1; }
+    return result;
+}
+function stable_error_reinsert(): i32 {
+    let inserted: i32 = -1;
+    if (typed_stable_error_exec_147.can_insert()) { inserted = typed_stable_error_exec_147.insert(40); }
+    return inserted;
+}
+function stable_error_clear(): i32 {
+    typed_stable_error_exec_147.clear();
+    return typed_stable_error_exec_147.count();
+}
+function stable_drop_run(): i32 {
+    typed_stable_drop_exec_147.clear();
+    let first: i32 = -1;
+    if (typed_stable_drop_exec_147.can_insert()) { first = typed_stable_drop_exec_147.insert(1); }
+    let second: i32 = -1;
+    if (typed_stable_drop_exec_147.can_insert()) { second = typed_stable_drop_exec_147.insert(2); }
+    let rejected: i32 = -1;
+    if (typed_stable_drop_exec_147.can_insert()) { rejected = typed_stable_drop_exec_147.insert(3); }
+    return first * 1000 + second * 100 + rejected;
+}
+function stable_drop_clear(): i32 {
+    typed_stable_drop_exec_147.clear();
+    return typed_stable_drop_exec_147.count();
+}
+function stable_zero_run(): i32 {
+    typed_stable_zero_exec_147.clear();
+    let inserted: i32 = -1;
+    if (typed_stable_zero_exec_147.can_insert()) { inserted = typed_stable_zero_exec_147.insert(7); }
+    let removed: i32 = 0;
+    if (typed_stable_zero_exec_147.can_remove(0)) { typed_stable_zero_exec_147.remove(0); removed = 1; }
+    return inserted + removed * 10
+        + typed_stable_zero_exec_147.count() * 100
+        + typed_stable_zero_exec_147.capacity();
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("typed stable-pool operation JIT compile");
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_error_seed")
+                .unwrap(),
+            119
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_stable_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_error_observe")
+                .unwrap(),
+            303
+        );
+        assert_eq!(
+            process.global_collection_capacity("typed_stable_error_exec_147"),
+            Some(3)
+        );
+        assert_eq!(
+            process.global_collection_field_type("typed_stable_error_exec_147", "values"),
+            Some("i32")
+        );
+        for (index, expected) in [1_u8, 1, 1].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_stable_error_exec_147",
+                        "occupied",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::U8(expected)
+            );
+        }
+        for (index, expected) in [10, 20, 30].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_stable_error_exec_147",
+                        "values",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(expected)
+            );
+        }
+        let memory = process
+            .state_memory_report(&BTreeMap::new(), u64::MAX)
+            .expect("typed stable-pool memory report");
+        assert_eq!(
+            memory
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_stable_error_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(3)
+        );
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_error_remove")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_stable_error_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "occupied", 0)
+                .unwrap(),
+            JitScalarValue::U8(1)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "occupied", 1)
+                .unwrap(),
+            JitScalarValue::U8(0)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "occupied", 2)
+                .unwrap(),
+            JitScalarValue::U8(1)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(10)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "values", 2)
+                .unwrap(),
+            JitScalarValue::I32(30)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_error_invalid")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_error_reinsert")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_stable_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "occupied", 1)
+                .unwrap(),
+            JitScalarValue::U8(1)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(40)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_error_clear")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_stable_error_exec_147.count"),
+            0
+        );
+        for index in 0..3 {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_stable_error_exec_147",
+                        "occupied",
+                        index,
+                    )
+                    .unwrap(),
+                JitScalarValue::U8(0)
+            );
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_stable_error_exec_147", "values", index)
+                    .unwrap(),
+                JitScalarValue::I32(0)
+            );
+        }
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_drop_run")
+                .unwrap(),
+            99
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_stable_drop_exec_147.count"),
+            2
+        );
+        for (index, expected) in [1_u8, 1].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_stable_drop_exec_147",
+                        "occupied",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::U8(expected)
+            );
+        }
+        for (index, expected) in [1, 2].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_stable_drop_exec_147",
+                        "values",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(expected)
+            );
+        }
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_drop_clear")
+                .unwrap(),
+            0
+        );
+        for index in 0..2 {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_stable_drop_exec_147", "occupied", index,)
+                    .unwrap(),
+                JitScalarValue::U8(0)
+            );
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_stable_drop_exec_147", "values", index)
+                    .unwrap(),
+                JitScalarValue::I32(0)
+            );
+        }
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_zero_run")
+                .unwrap(),
+            -1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_stable_zero_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::U8,
+                hash_global_path("typed_stable_zero_exec_147"),
+                crate::backend::emit::hash_foreach_field_suffix("occupied"),
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::I32,
+                hash_global_path("typed_stable_zero_exec_147"),
+                crate::backend::emit::hash_foreach_field_suffix("values"),
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn typed_map_and_set_operations_execute_with_holes_duplicates_and_zero_capacity() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&[
+            "map_seed".to_string(),
+            "map_update_full".to_string(),
+            "map_missing".to_string(),
+            "map_remove_run".to_string(),
+            "map_reuse".to_string(),
+            "map_drop_run".to_string(),
+            "map_zero_run".to_string(),
+            "set_seed".to_string(),
+            "set_full".to_string(),
+            "set_remove_run".to_string(),
+            "set_reuse".to_string(),
+            "set_drop_run".to_string(),
+            "set_zero_run".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_map_set_execution.stasis",
+            r#"global typed_map_error_exec_147: map<i32, i32, 3>;
+global typed_map_drop_exec_147: map<i32, i32, 3>;
+global typed_map_zero_exec_147: map<i32, i32, 0>;
+global typed_set_error_exec_147: set<i32, 3>;
+global typed_set_drop_exec_147: set<i32, 3>;
+global typed_set_zero_exec_147: set<i32, 0>;
+function map_seed(): i32 {
+    if (typed_map_error_exec_147.can_put(1)) { typed_map_error_exec_147.put(1, 10); }
+    if (typed_map_error_exec_147.can_put(2)) { typed_map_error_exec_147.put(2, 20); }
+    if (typed_map_error_exec_147.can_put(3)) { typed_map_error_exec_147.put(3, 30); }
+    let result: i32 = 0;
+    if (typed_map_error_exec_147.can_get(2)) { result = typed_map_error_exec_147.get(2); }
+    return result;
+}
+function map_update_full(): i32 {
+    if (typed_map_error_exec_147.can_put(2)) { typed_map_error_exec_147.put(2, 25); }
+    if (typed_map_error_exec_147.can_put(4)) { typed_map_error_exec_147.put(4, 40); }
+    let existing: i32 = 0;
+    if (typed_map_error_exec_147.can_get(2)) { existing = typed_map_error_exec_147.get(2); }
+    let rejected: i32 = 0;
+    if (typed_map_error_exec_147.can_get(4)) { rejected = typed_map_error_exec_147.get(4); }
+    return existing * 1000 + rejected;
+}
+function map_missing(): i32 {
+    let result: i32 = 0;
+    if (typed_map_error_exec_147.can_get(99)) { result = typed_map_error_exec_147.get(99); }
+    if (typed_map_error_exec_147.contains(99)) { result += 100; }
+    if (typed_map_error_exec_147.contains(2)) { result += 10; }
+    return result;
+}
+function map_remove_run(): i32 {
+    if (typed_map_error_exec_147.can_remove(2)) { typed_map_error_exec_147.remove(2); return 1; }
+    return 0;
+}
+function map_reuse(): i32 {
+    if (typed_map_error_exec_147.can_put(4)) { typed_map_error_exec_147.put(4, 40); }
+    let result: i32 = 0;
+    if (typed_map_error_exec_147.can_get(4)) { result = typed_map_error_exec_147.get(4); }
+    return result;
+}
+function map_drop_run(): i32 {
+    if (typed_map_drop_exec_147.can_put(1)) { typed_map_drop_exec_147.put(1, 10); }
+    if (typed_map_drop_exec_147.can_put(2)) { typed_map_drop_exec_147.put(2, 20); }
+    if (typed_map_drop_exec_147.can_put(3)) { typed_map_drop_exec_147.put(3, 30); }
+    if (typed_map_drop_exec_147.can_put(2)) { typed_map_drop_exec_147.put(2, 25); }
+    if (typed_map_drop_exec_147.can_put(4)) { typed_map_drop_exec_147.put(4, 40); }
+    let existing: i32 = 0;
+    if (typed_map_drop_exec_147.can_get(2)) { existing = typed_map_drop_exec_147.get(2); }
+    let rejected: i32 = 0;
+    if (typed_map_drop_exec_147.can_get(4)) { rejected = typed_map_drop_exec_147.get(4); }
+    return existing * 100 + rejected;
+}
+function map_zero_run(): i32 {
+    if (typed_map_zero_exec_147.can_put(1)) { typed_map_zero_exec_147.put(1, 7); }
+    if (typed_map_zero_exec_147.can_remove(1)) { typed_map_zero_exec_147.remove(1); }
+    let result: i32 = 0;
+    if (typed_map_zero_exec_147.can_get(1)) { result = typed_map_zero_exec_147.get(1); }
+    if (typed_map_zero_exec_147.contains(1)) { result += 100; }
+    return result;
+}
+function set_seed(): i32 {
+    if (typed_set_error_exec_147.can_add(1)) { typed_set_error_exec_147.add(1); }
+    if (typed_set_error_exec_147.can_add(2)) { typed_set_error_exec_147.add(2); }
+    if (typed_set_error_exec_147.can_add(3)) { typed_set_error_exec_147.add(3); }
+    if (typed_set_error_exec_147.can_add(2)) { typed_set_error_exec_147.add(2); }
+    if (typed_set_error_exec_147.contains(2)) { return 1; }
+    return 0;
+}
+function set_full(): i32 {
+    if (typed_set_error_exec_147.can_add(4)) { typed_set_error_exec_147.add(4); }
+    if (typed_set_error_exec_147.contains(4)) { return 1; }
+    return 0;
+}
+function set_remove_run(): i32 {
+    if (typed_set_error_exec_147.can_remove(2)) { typed_set_error_exec_147.remove(2); return 1; }
+    return 0;
+}
+function set_reuse(): i32 {
+    if (typed_set_error_exec_147.can_add(4)) { typed_set_error_exec_147.add(4); }
+    if (typed_set_error_exec_147.contains(4)) { return 1; }
+    return 0;
+}
+function set_drop_run(): i32 {
+    if (typed_set_drop_exec_147.can_add(1)) { typed_set_drop_exec_147.add(1); }
+    if (typed_set_drop_exec_147.can_add(2)) { typed_set_drop_exec_147.add(2); }
+    if (typed_set_drop_exec_147.can_add(3)) { typed_set_drop_exec_147.add(3); }
+    if (typed_set_drop_exec_147.can_add(4)) { typed_set_drop_exec_147.add(4); }
+    if (typed_set_drop_exec_147.contains(4)) { return 1; }
+    return 0;
+}
+function set_zero_run(): i32 {
+    if (typed_set_zero_exec_147.can_add(1)) { typed_set_zero_exec_147.add(1); }
+    if (typed_set_zero_exec_147.can_remove(1)) { typed_set_zero_exec_147.remove(1); }
+    if (typed_set_zero_exec_147.contains(1)) { return 100; }
+    return 0;
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("typed map/set operation JIT compile");
+
+        assert_eq!(
+            process.read_i32_global_path("typed_map_error_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_set_error_exec_147.count"),
+            0
+        );
+        for path in ["typed_map_error_exec_147", "typed_set_error_exec_147"] {
+            assert_eq!(
+                process
+                    .state_memory_report(&BTreeMap::new(), u64::MAX)
+                    .expect("typed map/set initial memory report")
+                    .largest_pools
+                    .iter()
+                    .find(|pool| pool.path == path)
+                    .and_then(|pool| pool.active_count),
+                Some(0),
+                "initial active count for {path}"
+            );
+        }
+
+        assert_eq!(process.execute_i32_noarg_by_name("map_seed").unwrap(), 20);
+        assert_eq!(
+            process.read_i32_global_path("typed_map_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process.global_collection_capacity("typed_map_error_exec_147"),
+            Some(3)
+        );
+        assert_eq!(
+            process.global_collection_field_type("typed_map_error_exec_147", "keys"),
+            Some("i32")
+        );
+        assert_eq!(
+            process.global_collection_field_type("typed_map_error_exec_147", "values"),
+            Some("i32")
+        );
+        assert_eq!(
+            process
+                .state_memory_report(&BTreeMap::new(), u64::MAX)
+                .expect("full map memory report")
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_map_error_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(3)
+        );
+        for (index, (key, value)) in [(1, 10), (2, 20), (3, 30)].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_map_error_exec_147",
+                        "occupied",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::U8(1)
+            );
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_map_error_exec_147",
+                        "keys",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(key)
+            );
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_map_error_exec_147",
+                        "values",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(value)
+            );
+        }
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("map_update_full")
+                .unwrap(),
+            25_000,
+            "existing key updates even when map is full; new key is rejected"
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_map_error_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(25)
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("map_missing").unwrap(),
+            10,
+            "missing map get is zero and contains distinguishes a present key"
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("map_remove_run").unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_map_error_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process
+                .state_memory_report(&BTreeMap::new(), u64::MAX)
+                .expect("reduced map memory report")
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_map_error_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(2)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_map_error_exec_147", "occupied", 1)
+                .unwrap(),
+            JitScalarValue::U8(0)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_map_error_exec_147", "keys", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_map_error_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(process.execute_i32_noarg_by_name("map_reuse").unwrap(), 40);
+        assert_eq!(
+            process.read_i32_global_path("typed_map_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_map_error_exec_147", "keys", 1)
+                .unwrap(),
+            JitScalarValue::I32(4)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_map_error_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(40)
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("map_drop_run").unwrap(),
+            2_500
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_map_drop_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("map_zero_run").unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_map_zero_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::U8,
+                hash_global_path("typed_map_zero_exec_147"),
+                crate::backend::emit::hash_foreach_field_suffix("occupied"),
+            ),
+            Some(0)
+        );
+
+        assert_eq!(process.execute_i32_noarg_by_name("set_seed").unwrap(), 1);
+        assert_eq!(
+            process.read_i32_global_path("typed_set_error_exec_147.count"),
+            3
+        );
+        for (index, key) in [1, 2, 3].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_set_error_exec_147",
+                        "occupied",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::U8(1)
+            );
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_set_error_exec_147",
+                        "keys",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(key)
+            );
+        }
+        assert_eq!(process.execute_i32_noarg_by_name("set_full").unwrap(), 0);
+        assert_eq!(
+            process.read_i32_global_path("typed_set_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("set_remove_run").unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_set_error_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_set_error_exec_147", "occupied", 1)
+                .unwrap(),
+            JitScalarValue::U8(0)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_set_error_exec_147", "keys", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(process.execute_i32_noarg_by_name("set_reuse").unwrap(), 1);
+        assert_eq!(
+            process.read_i32_global_path("typed_set_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_set_error_exec_147", "keys", 1)
+                .unwrap(),
+            JitScalarValue::I32(4)
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("set_drop_run").unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_set_drop_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("set_zero_run").unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_set_zero_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::U8,
+                hash_global_path("typed_set_zero_exec_147"),
+                crate::backend::emit::hash_foreach_field_suffix("occupied"),
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn zero_capacity_typed_pool_operations_are_write_free() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&["exercise_zero".to_string()]);
+        process.upsert_file(
+            "typed_pool_zero_execution.stasis",
+            "global typed_pool_zero_exec_147: pool<i32, 0>;\n\
+             function exercise_zero(): i32 { let pushed: i32 = -1; if (typed_pool_zero_exec_147.can_push()) { pushed = typed_pool_zero_exec_147.push(7); } if (typed_pool_zero_exec_147.can_remove(0)) { typed_pool_zero_exec_147.remove(0); return 99; } typed_pool_zero_exec_147.clear(); return pushed + typed_pool_zero_exec_147.count() + typed_pool_zero_exec_147.capacity(); }\n",
+        );
+        process
+            .compile()
+            .expect("zero-capacity typed pool JIT compile");
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("exercise_zero").unwrap(),
+            -1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_pool_zero_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::I32,
+                hash_global_path("typed_pool_zero_exec_147"),
+                crate::backend::emit::hash_foreach_field_suffix("values"),
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn typed_queue_error_operations_execute_wraparound_and_inspection_semantics() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&[
+            "queue_error_seed".to_string(),
+            "queue_error_observe".to_string(),
+            "queue_error_invalid_peek".to_string(),
+            "queue_error_invalid_physical".to_string(),
+            "queue_error_pop".to_string(),
+            "queue_error_push_wrap".to_string(),
+            "queue_error_push_second_wrap".to_string(),
+            "queue_error_pop_second_wrap".to_string(),
+            "queue_error_clear".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_queue_error_execution.stasis",
+            "global typed_queue_error_exec_147: queue<i32, 3>;\n\
+             function queue_error_seed(): i32 { typed_queue_error_exec_147.clear(); let accepted: i32 = 0; if (typed_queue_error_exec_147.can_push()) { typed_queue_error_exec_147.push(10); accepted += 1; } if (typed_queue_error_exec_147.can_push()) { typed_queue_error_exec_147.push(20); accepted += 1; } if (typed_queue_error_exec_147.can_push()) { typed_queue_error_exec_147.push(30); accepted += 1; } if (typed_queue_error_exec_147.can_push()) { typed_queue_error_exec_147.push(40); accepted += 100; } return accepted; }\n\
+             function queue_error_observe(): i32 { let first: i32 = 0; if (typed_queue_error_exec_147.can_peek(0)) { first = typed_queue_error_exec_147.peek(0); } let third: i32 = 0; if (typed_queue_error_exec_147.can_peek(2)) { third = typed_queue_error_exec_147.peek(2); } let physical_first: i32 = -1; if (typed_queue_error_exec_147.can_peek(0)) { physical_first = typed_queue_error_exec_147.physical_index(0); } let physical_third: i32 = -1; if (typed_queue_error_exec_147.can_peek(2)) { physical_third = typed_queue_error_exec_147.physical_index(2); } return typed_queue_error_exec_147.count() * 100000 + typed_queue_error_exec_147.capacity() * 10000 + first * 1000 + third * 100 + physical_first * 10 + physical_third; }\n\
+             function queue_error_invalid_peek(): i32 { let result: i32 = 0; if (typed_queue_error_exec_147.can_peek(9)) { result = typed_queue_error_exec_147.peek(9); } return result; }\n\
+             function queue_error_invalid_physical(): i32 { if (typed_queue_error_exec_147.can_peek(-1)) { return typed_queue_error_exec_147.physical_index(-1); } return -1; }\n\
+             function queue_error_pop(): i32 { if (typed_queue_error_exec_147.can_pop()) { typed_queue_error_exec_147.pop(); return 1; } return 0; }\n\
+             function queue_error_push_wrap(): i32 { if (typed_queue_error_exec_147.can_push()) { typed_queue_error_exec_147.push(40); return 1; } return 0; }\n\
+             function queue_error_push_second_wrap(): i32 { if (typed_queue_error_exec_147.can_push()) { typed_queue_error_exec_147.push(50); return 1; } return 0; }\n\
+             function queue_error_pop_second_wrap(): i32 { if (typed_queue_error_exec_147.can_pop()) { typed_queue_error_exec_147.pop(); return 1; } return 0; }\n\
+             function queue_error_clear(): i32 { typed_queue_error_exec_147.clear(); return typed_queue_error_exec_147.count(); }\n",
+        );
+        process.compile().expect("typed queue error JIT compile");
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_error_seed")
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_error_exec_147.head"),
+            0
+        );
+        for (index, expected) in [10, 20, 30].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_queue_error_exec_147",
+                        "values",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(expected)
+            );
+        }
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_error_observe")
+                .unwrap(),
+            343002
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_error_invalid_peek")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_error_invalid_physical")
+                .unwrap(),
+            -1
+        );
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_error_pop")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_error_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_error_exec_147.head"),
+            1
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_queue_error_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_error_push_wrap")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_error_observe")
+                .unwrap(),
+            354010
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_queue_error_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(40)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_error_pop")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_error_exec_147.head"),
+            2
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_queue_error_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+
+        // The next push lands in physical slot one while the head is two;
+        // the following pop then wraps the head back to zero.
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_error_push_second_wrap")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_error_pop_second_wrap")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_error_exec_147.head"),
+            0
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_queue_error_exec_147", "values", 2)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_error_clear")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_error_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_error_exec_147.head"),
+            0
+        );
+        for index in 0..3 {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_queue_error_exec_147", "values", index,)
+                    .unwrap(),
+                JitScalarValue::I32(0)
+            );
+        }
+    }
+
+    #[test]
+    fn typed_priority_queue_operations_execute_ordering_drain_and_rejection_semantics() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&[
+            "priority_queue_ordering".to_string(),
+            "priority_queue_full_error".to_string(),
+            "priority_queue_full_drop".to_string(),
+            "priority_queue_zero".to_string(),
+            "priority_queue_clear_reset".to_string(),
+            "priority_queue_max_order".to_string(),
+            "priority_queue_preflight_empty".to_string(),
+            "priority_queue_preflight_full".to_string(),
+            "priority_queue_preflight_zero".to_string(),
+            "priority_queue_preflight_max_order".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_priority_queue_execution.stasis",
+            r#"global typed_priority_queue_error_exec_147: priority_queue<i32, 5>;
+global typed_priority_queue_drop_exec_147: priority_queue<i32, 2>;
+global typed_priority_queue_zero_exec_147: priority_queue<i32, 0>;
+function priority_queue_ordering(): i32 {
+    typed_priority_queue_error_exec_147.clear();
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(7, 70); }
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(-2, 20); }
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(7, 71); }
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(0, 0); }
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(-2, 21); }
+    let first: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { first = typed_priority_queue_error_exec_147.peek(); }
+    let first_priority: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { first_priority = typed_priority_queue_error_exec_147.peek_priority(); }
+    if (typed_priority_queue_error_exec_147.can_pop()) { typed_priority_queue_error_exec_147.pop(); }
+    let second: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { second = typed_priority_queue_error_exec_147.peek(); }
+    if (typed_priority_queue_error_exec_147.can_pop()) { typed_priority_queue_error_exec_147.pop(); }
+    let third: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { third = typed_priority_queue_error_exec_147.peek(); }
+    if (typed_priority_queue_error_exec_147.can_pop()) { typed_priority_queue_error_exec_147.pop(); }
+    let fourth: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { fourth = typed_priority_queue_error_exec_147.peek(); }
+    if (typed_priority_queue_error_exec_147.can_pop()) { typed_priority_queue_error_exec_147.pop(); }
+    let fifth: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { fifth = typed_priority_queue_error_exec_147.peek(); }
+    if (typed_priority_queue_error_exec_147.can_pop()) { typed_priority_queue_error_exec_147.pop(); }
+    return first * 1000000 + second * 10000 + third * 100 + fourth * 10 + fifth + first_priority
+        + typed_priority_queue_error_exec_147.count() * 100000000;
+}
+function priority_queue_full_error(): i32 {
+    typed_priority_queue_error_exec_147.clear();
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(3, 30); }
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(1, 10); }
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(2, 20); }
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(0, 40); }
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(-1, 50); }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(-9, 90); accepted = 1; }
+    let top: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { top = typed_priority_queue_error_exec_147.peek(); }
+    return accepted * 1000 + typed_priority_queue_error_exec_147.count() * 100
+        + top;
+}
+function priority_queue_full_drop(): i32 {
+    typed_priority_queue_drop_exec_147.clear();
+    if (typed_priority_queue_drop_exec_147.can_push()) { typed_priority_queue_drop_exec_147.push(3, 30); }
+    if (typed_priority_queue_drop_exec_147.can_push()) { typed_priority_queue_drop_exec_147.push(1, 10); }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_drop_exec_147.can_push()) { typed_priority_queue_drop_exec_147.push(-9, 90); accepted = 1; }
+    let top: i32 = 0;
+    if (typed_priority_queue_drop_exec_147.can_peek()) { top = typed_priority_queue_drop_exec_147.peek(); }
+    return accepted * 1000 + typed_priority_queue_drop_exec_147.count() * 100
+        + top;
+}
+function priority_queue_zero(): i32 {
+    typed_priority_queue_zero_exec_147.clear();
+    let pushed: i32 = 0;
+    if (typed_priority_queue_zero_exec_147.can_push()) { typed_priority_queue_zero_exec_147.push(-1, 7); pushed = 1; }
+    let popped: i32 = 0;
+    if (typed_priority_queue_zero_exec_147.can_pop()) { typed_priority_queue_zero_exec_147.pop(); popped = 1; }
+    let top: i32 = 0;
+    if (typed_priority_queue_zero_exec_147.can_peek()) { top = typed_priority_queue_zero_exec_147.peek(); }
+    return pushed * 1000 + popped * 100 + typed_priority_queue_zero_exec_147.count() * 10
+        + top
+        + typed_priority_queue_zero_exec_147.capacity();
+}
+function priority_queue_clear_reset(): i32 {
+    typed_priority_queue_error_exec_147.clear();
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(-1, 9); }
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(1, 8); }
+    typed_priority_queue_error_exec_147.clear();
+    let popped: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_pop()) { typed_priority_queue_error_exec_147.pop(); popped = 1; }
+    let top: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { top = typed_priority_queue_error_exec_147.peek(); }
+    return typed_priority_queue_error_exec_147.count() * 100
+        + top * 10 + popped;
+}
+function priority_queue_max_order(): i32 {
+    let accepted: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(1, 99); accepted = 1; }
+    return accepted;
+}
+function priority_queue_preflight_empty(): i32 {
+    typed_priority_queue_error_exec_147.clear();
+    let can_push: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { can_peek = 1; }
+    let popped: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_pop()) { typed_priority_queue_error_exec_147.pop(); popped = 1; }
+    let top: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { top = typed_priority_queue_error_exec_147.peek(); }
+    return can_push * 100 + can_pop * 10 + can_peek + popped * 1000
+        + top;
+}
+function priority_queue_preflight_full(): i32 {
+    typed_priority_queue_error_exec_147.clear();
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(3, 30); }
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(1, 10); }
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(2, 20); }
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(0, 40); }
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(-1, 50); }
+    let can_push: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { can_peek = 1; }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(-9, 90); accepted = 1; }
+    return can_push * 100 + can_pop * 10 + can_peek + accepted * 1000;
+}
+function priority_queue_preflight_zero(): i32 {
+    typed_priority_queue_zero_exec_147.clear();
+    let can_push: i32 = 0;
+    if (typed_priority_queue_zero_exec_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_zero_exec_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_zero_exec_147.can_peek()) { can_peek = 1; }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_zero_exec_147.can_push()) { typed_priority_queue_zero_exec_147.push(-9, 90); accepted = 1; }
+    return can_push * 100 + can_pop * 10 + can_peek + accepted * 1000;
+}
+function priority_queue_preflight_max_order(): i32 {
+    let can_push: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_peek()) { can_peek = 1; }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_error_exec_147.can_push()) { typed_priority_queue_error_exec_147.push(1, 99); accepted = 1; }
+    return can_push * 100 + can_pop * 10 + can_peek + accepted * 1000;
+}
+"#,
+        );
+        process.compile().expect("typed priority-queue JIT compile");
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_ordering")
+                .unwrap(),
+            20_210_769
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.next_order") as u32,
+            5
+        );
+        for field in ["priority", "order", "values"] {
+            for index in 0..5 {
+                assert_eq!(
+                    process.read_global_collection_scalar(
+                        "typed_priority_queue_error_exec_147",
+                        field,
+                        index,
+                    ),
+                    Ok(match field {
+                        "order" => JitScalarValue::U32(0),
+                        _ => JitScalarValue::I32(0),
+                    }),
+                    "drain must zero released priority-queue {field} lane"
+                );
+            }
+        }
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_full_error")
+                .unwrap(),
+            550
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.count"),
+            5
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_full_drop")
+                .unwrap(),
+            210
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_drop_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_zero")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_clear_reset")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.next_order") as u32,
+            0
+        );
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_preflight_empty")
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.next_order") as u32,
+            0
+        );
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_preflight_full")
+                .unwrap(),
+            11
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.count"),
+            5
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_preflight_zero")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_zero_exec_147.count"),
+            0
+        );
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_clear_reset")
+                .unwrap(),
+            0
+        );
+        process.write_i32_global_path("typed_priority_queue_error_exec_147.next_order", -1);
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_max_order")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.next_order") as u32,
+            u32::MAX
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("priority_queue_preflight_max_order")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_priority_queue_error_exec_147.next_order") as u32,
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn typed_queue_overflow_policies_and_zero_capacity_execute_without_traps() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&[
+            "queue_drop_run".to_string(),
+            "queue_drop_clear".to_string(),
+            "queue_overwrite_run".to_string(),
+            "queue_overwrite_pop".to_string(),
+            "queue_zero_run".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_queue_policy_execution.stasis",
+             "global typed_queue_drop_exec_147: queue<i32, 2>;\n\
+             global typed_queue_overwrite_exec_147: queue<i32, 2>;\n\
+             global typed_queue_zero_exec_147: queue<i32, 0>;\n\
+             function queue_drop_run(): i32 { typed_queue_drop_exec_147.clear(); let accepted: i32 = 0; if (typed_queue_drop_exec_147.can_push()) { typed_queue_drop_exec_147.push(1); accepted += 1; } if (typed_queue_drop_exec_147.can_push()) { typed_queue_drop_exec_147.push(2); accepted += 1; } if (typed_queue_drop_exec_147.can_push()) { typed_queue_drop_exec_147.push(3); accepted += 100; } let first: i32 = 0; if (typed_queue_drop_exec_147.can_peek(0)) { first = typed_queue_drop_exec_147.peek(0); } let second: i32 = 0; if (typed_queue_drop_exec_147.can_peek(1)) { second = typed_queue_drop_exec_147.peek(1); } return accepted * 100 + typed_queue_drop_exec_147.count() * 10 + first + second; }\n\
+             function queue_drop_clear(): i32 { typed_queue_drop_exec_147.clear(); return typed_queue_drop_exec_147.count(); }\n\
+             function queue_overwrite_run(): i32 { typed_queue_overwrite_exec_147.clear(); let accepted: i32 = 0; if (typed_queue_overwrite_exec_147.can_push()) { typed_queue_overwrite_exec_147.push(1); accepted += 1; } if (typed_queue_overwrite_exec_147.can_push()) { typed_queue_overwrite_exec_147.push(2); accepted += 1; } typed_queue_overwrite_exec_147.overwrite_oldest(3); accepted += 1; let first: i32 = 0; if (typed_queue_overwrite_exec_147.can_peek(0)) { first = typed_queue_overwrite_exec_147.peek(0); } let second: i32 = 0; if (typed_queue_overwrite_exec_147.can_peek(1)) { second = typed_queue_overwrite_exec_147.peek(1); } return accepted * 100 + typed_queue_overwrite_exec_147.count() * 10 + first + second; }\n\
+             function queue_overwrite_pop(): i32 { if (typed_queue_overwrite_exec_147.can_pop()) { typed_queue_overwrite_exec_147.pop(); return 1; } return 0; }\n\
+             function queue_zero_run(): i32 { typed_queue_zero_exec_147.clear(); let score: i32 = 0; if (typed_queue_zero_exec_147.can_push()) { typed_queue_zero_exec_147.push(7); score += 100; } if (typed_queue_zero_exec_147.can_pop()) { typed_queue_zero_exec_147.pop(); score += 10; } let peeked: i32 = 0; if (typed_queue_zero_exec_147.can_peek(0)) { peeked = typed_queue_zero_exec_147.peek(0); } let physical: i32 = -1; if (typed_queue_zero_exec_147.can_peek(0)) { physical = typed_queue_zero_exec_147.physical_index(0); } return score + typed_queue_zero_exec_147.count() * 1000 + typed_queue_zero_exec_147.capacity() * 100 + peeked * 10 + physical; }\n",
+        );
+        process.compile().expect("typed queue policy JIT compile");
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("queue_drop_run").unwrap(),
+            223
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_drop_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_drop_exec_147.head"),
+            0
+        );
+        for (index, expected) in [1, 2].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_queue_drop_exec_147",
+                        "values",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(expected)
+            );
+        }
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_drop_clear")
+                .unwrap(),
+            0
+        );
+        for index in 0..2 {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_queue_drop_exec_147", "values", index)
+                    .unwrap(),
+                JitScalarValue::I32(0)
+            );
+        }
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_overwrite_run")
+                .unwrap(),
+            325
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_overwrite_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_overwrite_exec_147.head"),
+            1
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_queue_overwrite_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(3)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_queue_overwrite_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(2)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("queue_overwrite_pop")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_overwrite_exec_147.count"),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_overwrite_exec_147.head"),
+            0
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_queue_overwrite_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("queue_zero_run").unwrap(),
+            -1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_zero_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_queue_zero_exec_147.head"),
+            0
+        );
+        assert_eq!(
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::I32,
+                hash_global_path("typed_queue_zero_exec_147"),
+                crate::backend::emit::hash_foreach_field_suffix("values"),
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn typed_ring_buffer_operations_execute_all_policies_and_zero_capacity() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&[
+            "ring_error_seed".to_string(),
+            "ring_error_observe".to_string(),
+            "ring_error_invalid_peek".to_string(),
+            "ring_error_invalid_physical".to_string(),
+            "ring_error_pop".to_string(),
+            "ring_error_push_wrap".to_string(),
+            "ring_error_push_second_wrap".to_string(),
+            "ring_error_pop_second_wrap".to_string(),
+            "ring_error_clear".to_string(),
+            "ring_drop_run".to_string(),
+            "ring_drop_clear".to_string(),
+            "ring_overwrite_run".to_string(),
+            "ring_overwrite_pop".to_string(),
+            "ring_zero_run".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_ring_buffer_execution.stasis",
+            r#"global typed_ring_error_exec_147: ring_buffer<i32, 3>;
+global typed_ring_drop_exec_147: ring_buffer<i32, 2>;
+global typed_ring_overwrite_exec_147: ring_buffer<i32, 2>;
+global typed_ring_zero_exec_147: ring_buffer<i32, 0>;
+function ring_error_seed(): i32 {
+    typed_ring_error_exec_147.clear();
+    let accepted: i32 = 0;
+    if (typed_ring_error_exec_147.can_push()) { typed_ring_error_exec_147.push(10); accepted += 1; }
+    if (typed_ring_error_exec_147.can_push()) { typed_ring_error_exec_147.push(20); accepted += 1; }
+    if (typed_ring_error_exec_147.can_push()) { typed_ring_error_exec_147.push(30); accepted += 1; }
+    if (typed_ring_error_exec_147.can_push()) { typed_ring_error_exec_147.push(40); accepted += 100; }
+    return accepted;
+}
+function ring_error_observe(): i32 {
+    let first: i32 = 0;
+    if (typed_ring_error_exec_147.can_peek(0)) { first = typed_ring_error_exec_147.peek(0); }
+    let third: i32 = 0;
+    if (typed_ring_error_exec_147.can_peek(2)) { third = typed_ring_error_exec_147.peek(2); }
+    let physical_first: i32 = -1;
+    if (typed_ring_error_exec_147.can_peek(0)) { physical_first = typed_ring_error_exec_147.physical_index(0); }
+    let physical_third: i32 = -1;
+    if (typed_ring_error_exec_147.can_peek(2)) { physical_third = typed_ring_error_exec_147.physical_index(2); }
+    return typed_ring_error_exec_147.count() * 100000
+        + typed_ring_error_exec_147.capacity() * 10000
+        + first * 1000
+        + third * 100
+        + physical_first * 10
+        + physical_third;
+}
+function ring_error_invalid_peek(): i32 {
+    let result: i32 = 0;
+    if (typed_ring_error_exec_147.can_peek(9)) { result = typed_ring_error_exec_147.peek(9); }
+    return result;
+}
+function ring_error_invalid_physical(): i32 {
+    if (typed_ring_error_exec_147.can_peek(-1)) { return typed_ring_error_exec_147.physical_index(-1); }
+    return -1;
+}
+function ring_error_pop(): i32 {
+    if (typed_ring_error_exec_147.can_pop()) { typed_ring_error_exec_147.pop(); return 1; }
+    return 0;
+}
+function ring_error_push_wrap(): i32 {
+    if (typed_ring_error_exec_147.can_push()) { typed_ring_error_exec_147.push(40); return 1; }
+    return 0;
+}
+function ring_error_push_second_wrap(): i32 {
+    if (typed_ring_error_exec_147.can_push()) { typed_ring_error_exec_147.push(50); return 1; }
+    return 0;
+}
+function ring_error_pop_second_wrap(): i32 {
+    if (typed_ring_error_exec_147.can_pop()) { typed_ring_error_exec_147.pop(); return 1; }
+    return 0;
+}
+function ring_error_clear(): i32 {
+    typed_ring_error_exec_147.clear();
+    return typed_ring_error_exec_147.count();
+}
+function ring_drop_run(): i32 {
+    typed_ring_drop_exec_147.clear();
+    let accepted: i32 = 0;
+    if (typed_ring_drop_exec_147.can_push()) { typed_ring_drop_exec_147.push(1); accepted += 1; }
+    if (typed_ring_drop_exec_147.can_push()) { typed_ring_drop_exec_147.push(2); accepted += 1; }
+    if (typed_ring_drop_exec_147.can_push()) { typed_ring_drop_exec_147.push(3); accepted += 100; }
+    let first: i32 = 0;
+    if (typed_ring_drop_exec_147.can_peek(0)) { first = typed_ring_drop_exec_147.peek(0); }
+    let second: i32 = 0;
+    if (typed_ring_drop_exec_147.can_peek(1)) { second = typed_ring_drop_exec_147.peek(1); }
+    return accepted * 100 + typed_ring_drop_exec_147.count() * 10 + first + second;
+}
+function ring_drop_clear(): i32 {
+    typed_ring_drop_exec_147.clear();
+    return typed_ring_drop_exec_147.count();
+}
+function ring_overwrite_run(): i32 {
+    typed_ring_overwrite_exec_147.clear();
+    let accepted: i32 = 0;
+    if (typed_ring_overwrite_exec_147.can_push()) { typed_ring_overwrite_exec_147.push(1); accepted += 1; }
+    if (typed_ring_overwrite_exec_147.can_push()) { typed_ring_overwrite_exec_147.push(2); accepted += 1; }
+    typed_ring_overwrite_exec_147.overwrite_oldest(3); accepted += 1;
+    let first: i32 = 0;
+    if (typed_ring_overwrite_exec_147.can_peek(0)) { first = typed_ring_overwrite_exec_147.peek(0); }
+    let second: i32 = 0;
+    if (typed_ring_overwrite_exec_147.can_peek(1)) { second = typed_ring_overwrite_exec_147.peek(1); }
+    return accepted * 100 + typed_ring_overwrite_exec_147.count() * 10 + first + second;
+}
+function ring_overwrite_pop(): i32 {
+    if (typed_ring_overwrite_exec_147.can_pop()) { typed_ring_overwrite_exec_147.pop(); return 1; }
+    return 0;
+}
+function ring_zero_run(): i32 {
+    typed_ring_zero_exec_147.clear();
+    let score: i32 = 0;
+    if (typed_ring_zero_exec_147.can_push()) { typed_ring_zero_exec_147.push(7); score += 100; }
+    if (typed_ring_zero_exec_147.can_pop()) { typed_ring_zero_exec_147.pop(); score += 10; }
+    let peeked: i32 = 0;
+    if (typed_ring_zero_exec_147.can_peek(0)) { peeked = typed_ring_zero_exec_147.peek(0); }
+    let physical: i32 = -1;
+    if (typed_ring_zero_exec_147.can_peek(0)) { physical = typed_ring_zero_exec_147.physical_index(0); }
+    return score + typed_ring_zero_exec_147.count() * 1000
+        + typed_ring_zero_exec_147.capacity() * 100
+        + peeked * 10
+        + physical;
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("typed ring-buffer operation JIT compile");
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_seed")
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.head"),
+            0
+        );
+        assert_eq!(
+            process.global_collection_capacity("typed_ring_error_exec_147"),
+            Some(3)
+        );
+        assert_eq!(
+            process.global_collection_field_type("typed_ring_error_exec_147", "values"),
+            Some("i32")
+        );
+        for (index, expected) in [10, 20, 30].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_ring_error_exec_147",
+                        "values",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(expected)
+            );
+        }
+        let memory = process
+            .state_memory_report(&BTreeMap::new(), u64::MAX)
+            .expect("typed ring-buffer memory report");
+        assert_eq!(
+            memory
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_ring_error_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(3)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_observe")
+                .unwrap(),
+            343002
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_invalid_peek")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_invalid_physical")
+                .unwrap(),
+            -1
+        );
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("ring_error_pop").unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.head"),
+            1
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_error_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_push_wrap")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_observe")
+                .unwrap(),
+            354010
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_error_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(40)
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("ring_error_pop").unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.head"),
+            2
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_error_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_push_second_wrap")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_pop_second_wrap")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.head"),
+            0
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_error_exec_147", "values", 2)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_clear")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.head"),
+            0
+        );
+        for index in 0..3 {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_ring_error_exec_147", "values", index,)
+                    .unwrap(),
+                JitScalarValue::I32(0)
+            );
+        }
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("ring_drop_run").unwrap(),
+            223
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_drop_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_drop_exec_147.head"),
+            0
+        );
+        for (index, expected) in [1, 2].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_ring_drop_exec_147",
+                        "values",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(expected)
+            );
+        }
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_drop_clear")
+                .unwrap(),
+            0
+        );
+        for index in 0..2 {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_ring_drop_exec_147", "values", index)
+                    .unwrap(),
+                JitScalarValue::I32(0)
+            );
+        }
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_overwrite_run")
+                .unwrap(),
+            325
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_overwrite_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_overwrite_exec_147.head"),
+            1
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_overwrite_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(3)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_overwrite_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(2)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_overwrite_pop")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_overwrite_exec_147.count"),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_overwrite_exec_147.head"),
+            0
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_overwrite_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("ring_zero_run").unwrap(),
+            -1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_zero_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_zero_exec_147.head"),
+            0
+        );
+        assert_eq!(
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::I32,
+                hash_global_path("typed_ring_zero_exec_147"),
+                crate::backend::emit::hash_foreach_field_suffix("values"),
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
     fn direct_foreach_rejects_backing_shorter_than_fixed_capacity() {
         let mut process = JitProcess::new();
         process.upsert_file(
@@ -5216,6 +7834,188 @@ function main(): i32 {
             11,
             "changing an inline callee must regenerate callers that embed its body"
         );
+    }
+
+    #[test]
+    fn jit_requires_helper_is_compile_time_only() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "requires.stasis",
+            "global events: queue<i32, 2>;\n@requires(events.can_push())\nfunction enqueue(value: i32): void { events.push(value); }\nfunction main(): i32 { if (events.can_push()) { enqueue(7); return 1; } return 0; }\n",
+        );
+        let report = process.compile().expect("compile required-helper fixture");
+
+        assert_eq!(report.emit.emitted_functions, 1);
+        assert_eq!(process.artifacts().len(), 1);
+        assert!(artifact_keys_named(&process, "enqueue").is_empty());
+        assert!(
+            process.clif_for_function_name("enqueue").is_none(),
+            "@requires helper must not receive a JIT artifact"
+        );
+        assert!(
+            !process.symbol_code_ptrs().contains_key("enqueue"),
+            "@requires helper must not become a host export"
+        );
+
+        let main = process.clif_for_function_name("main").expect("main CLIF");
+        assert!(
+            !main.lines().any(|line| line.contains("enqueue")),
+            "caller CLIF retained a call to the compile-time-only helper:\n{main}"
+        );
+        assert_eq!(
+            main.matches("load.i32").count(),
+            2,
+            "guarded queue push must load count/head once and reuse them:\n{main}"
+        );
+        assert_eq!(
+            main.matches("brif").count(),
+            1,
+            "the source if must be the only guarded queue-push branch:\n{main}"
+        );
+    }
+
+    #[test]
+    fn typed_collection_metadata_checks_remain_fatal_at_zero_capacity() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "metadata.stasis",
+            "global pool_values: pool<i32, 0>;\n\
+             global stable_values: stable_pool<i32, 0>;\n\
+             global queued_values: queue<i32, 0>;\n\
+             global priority_values: priority_queue<i32, 0>;\n\
+             global mapped_values: map<i32, i32, 0>;\n\
+             global set_values: set<i32, 0>;\n\
+             function pool_count(): i32 { return pool_values.count(); }\n\
+             function stable_count(): i32 { return stable_values.count(); }\n\
+             function queue_count(): i32 { return queued_values.count(); }\n\
+             function priority_count(): i32 { return priority_values.count(); }\n\
+             function map_contains(): bool { return mapped_values.contains(1); }\n\
+             function set_contains(): bool { return set_values.contains(1); }\n\
+             function main(): i32 { let total: i32 = pool_count() + stable_count() + queue_count() + priority_count(); if (map_contains()) { total += 1; } if (set_contains()) { total += 1; } return total; }\n",
+        );
+        process
+            .compile()
+            .expect("compile zero-capacity metadata checks");
+        for function in [
+            "pool_count",
+            "stable_count",
+            "queue_count",
+            "priority_count",
+            "map_contains",
+            "set_contains",
+        ] {
+            let clif = process
+                .clif_for_function_name(function)
+                .unwrap_or_else(|| panic!("{function} CLIF"));
+            assert!(
+                clif.contains("trapz"),
+                "{function} converted corrupt metadata into a recoverable result:\n{clif}"
+            );
+        }
+    }
+
+    #[test]
+    fn jit_requires_helper_fuses_nested_positive_source_guard() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "requires_nested.stasis",
+            "global events: queue<i32, 2>;\n@requires(events.can_push())\nfunction enqueue(value: i32): void { events.push(value); }\nfunction main(): i32 { if (events.can_push()) { if (true) { enqueue(7); } return 1; } return 0; }\n",
+        );
+        let report = process
+            .compile()
+            .expect("compile nested required-helper fixture");
+
+        assert_eq!(report.emit.emitted_functions, 1);
+        assert_eq!(process.artifacts().len(), 1);
+        assert!(artifact_keys_named(&process, "enqueue").is_empty());
+        let main = process.clif_for_function_name("main").expect("main CLIF");
+        assert_eq!(
+            main.matches("load.i32").count(),
+            2,
+            "nested guarded queue push must load count/head once and reuse them:\n{main}"
+        );
+        assert_eq!(
+            main.matches("brif").count(),
+            2,
+            "outer can_* guard and inner source if must be the only branches:\n{main}"
+        );
+    }
+
+    #[test]
+    fn jit_requires_helper_body_and_contract_edits_recompile_callers() {
+        fn source(body: &str, contract: &str) -> String {
+            format!(
+                "global events: queue<i32, 2>;\n@requires({contract})\nfunction enqueue(value: i32): void {{ events.push({body}); }}\nfunction main(): i32 {{ if (events.can_push()) {{ enqueue(7); }} return events.count(); }}\n"
+            )
+        }
+
+        fn emitted_names(process: &JitProcess) -> BTreeSet<String> {
+            process
+                .generation_metadata()
+                .expect("generation metadata")
+                .emitted_function_ids
+                .iter()
+                .filter_map(|id| {
+                    process
+                        .compiler
+                        .functions()
+                        .iter()
+                        .find(|function| function.id == *id)
+                })
+                .map(|function| function.name.clone())
+                .collect()
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file("requires.stasis", source("value", "events.can_push()"));
+        process
+            .compile()
+            .expect("compile initial required-helper fixture");
+        let first = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name == "main")
+            .map(|artifact| (artifact.code_ptr, artifact.clif.clone()))
+            .expect("initial main artifact");
+
+        process.upsert_file("requires.stasis", source("value + 1", "events.can_push()"));
+        let body_report = process
+            .compile()
+            .expect("compile changed required-helper body");
+        assert!(
+            emitted_names(&process).contains("main"),
+            "changing an embedded required helper must re-emit its caller"
+        );
+        assert!(body_report.emit.emitted_functions >= 1);
+        let second = process
+            .artifacts()
+            .iter()
+            .find(|artifact| artifact.function_key.name == "main")
+            .map(|artifact| (artifact.code_ptr, artifact.clif.clone()))
+            .expect("body-edit main artifact");
+        assert_ne!(
+            first, second,
+            "caller artifact did not change after helper edit"
+        );
+        assert!(artifact_keys_named(&process, "enqueue").is_empty());
+
+        process.upsert_file("requires.stasis", source("value + 1", "events.can_push( )"));
+        let contract_report = process
+            .compile()
+            .expect("compile changed required-helper contract");
+        assert!(
+            emitted_names(&process).contains("main"),
+            "changing @requires metadata must re-emit its caller"
+        );
+        assert!(contract_report.emit.emitted_functions >= 1);
+        assert!(
+            process
+                .artifacts()
+                .iter()
+                .any(|artifact| artifact.function_key.name == "main"),
+            "contract edit must retain the re-emitted caller artifact"
+        );
+        assert!(artifact_keys_named(&process, "enqueue").is_empty());
     }
 
     #[cfg(windows)]

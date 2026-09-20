@@ -1190,6 +1190,7 @@ mod tests {
                 return_type: 0,
                 inline: false,
                 effect_contract: None,
+                requires_contract: None,
                 dependencies: Vec::new(),
                 dependents: Vec::new(),
                 call_sites: Vec::new(),

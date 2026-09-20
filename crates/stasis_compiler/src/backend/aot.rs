@@ -2,14 +2,15 @@ use crate::backend::compile_analysis::{
     build_compile_analysis_cache, compile_analysis_requires_reemit, compute_files_fingerprint,
     is_i32_abi_compatible_type, resolve_preferred_extern_call_signatures, select_emit_function_ids,
     CallSignatureMap, CollectionInfoMap, ConstantValueMap, GlobalPathTypeMap,
-    NamedStructFieldTypeMap,
+    NamedStructFieldTypeMap, TypedCollectionInfoMap,
 };
 use crate::backend::emit::*;
 use crate::backend::hot_render::HotRenderImageMetadata;
 use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
 use crate::backend::reachability::matches_root;
 use crate::backend::state_layout::{
-    aot_storage_symbol, is_named_scalar_state_path, AotStorageSymbolKind, StateLayout,
+    aot_storage_symbol, collection_field_element_count, is_named_scalar_state_path,
+    AotStorageSymbolKind, StateLayout,
 };
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
@@ -248,6 +249,7 @@ impl AotProcess {
         let direct_storage = build_aot_direct_storage_bindings(
             &analysis.global_path_types,
             &analysis.collection_infos,
+            snapshot.typed_collection_descriptors(),
             &analysis_type_table,
         )
         .map_err(crate::compiler::CompileError::Backend)?;
@@ -504,7 +506,9 @@ impl AotProcess {
                 .compiler
                 .functions()
                 .iter()
-                .filter(|function| matches_root(function, name))
+                .filter(|function| {
+                    function.requires_contract.is_none() && matches_root(function, name)
+                })
                 .count();
             if count > 1 {
                 return Err(format!(
@@ -643,13 +647,24 @@ impl AotProcess {
             ));
         }
         for collection in &layout.collections {
-            let len = usize::try_from(collection.capacity).map_err(|_| {
+            let collection_len = usize::try_from(collection.capacity).map_err(|_| {
                 format!(
                     "negative standalone AOT collection capacity for '{}'",
                     collection.path
                 )
             })?;
             for field in &collection.fields {
+                let element_count = collection_field_element_count(
+                    collection,
+                    field,
+                    u64::try_from(collection_len).unwrap_or(u64::MAX),
+                );
+                let len = usize::try_from(element_count).map_err(|_| {
+                    format!(
+                        "standalone AOT field element count {} for '{}.{}' does not fit usize",
+                        element_count, collection.path, field.field
+                    )
+                })?;
                 let storage_type_name = field.storage_type_name();
                 let width = storage_width(storage_type_name)?;
                 let size = len.checked_mul(width).ok_or_else(|| {
@@ -1149,9 +1164,11 @@ fn define_standalone_storage_data(
 fn build_aot_direct_storage_bindings(
     global_path_types: &GlobalPathTypeMap,
     collection_infos: &CollectionInfoMap,
+    typed_collection_descriptors: &TypedCollectionInfoMap,
     type_table: &TypeTable,
 ) -> Result<DirectStorageBindings, String> {
     let mut bindings = DirectStorageBindings::default();
+    let mut claimed_symbols = BTreeMap::new();
     for (path, type_id) in global_path_types {
         if collection_infos.contains_key(path) {
             continue;
@@ -1164,14 +1181,15 @@ fn build_aot_direct_storage_bindings(
             continue;
         }
         if aot_scalar_lane(*type_id, type_table).is_some() {
-            bindings.scalars.insert(
-                path.clone(),
-                DirectStorageBinding::Symbol(aot_storage_symbol(
-                    AotStorageSymbolKind::Scalar,
-                    path,
-                    "",
-                )),
-            );
+            let symbol = aot_storage_symbol(AotStorageSymbolKind::Scalar, path, "");
+            claim_aot_storage_symbol(
+                &mut claimed_symbols,
+                &symbol,
+                &format!("scalar path '{path}'"),
+            )?;
+            bindings
+                .scalars
+                .insert(path.clone(), DirectStorageBinding::Symbol(symbol));
         }
     }
     for (path, info) in collection_infos {
@@ -1180,14 +1198,16 @@ fn build_aot_direct_storage_bindings(
                 aot_array_lane(path, type_id, global_path_types, type_table).ok_or_else(|| {
                     format!("unsupported AOT direct storage element type {type_id} for '{path}'")
                 })?;
+            let symbol = aot_storage_symbol(AotStorageSymbolKind::Array, path, "");
+            claim_aot_storage_symbol(
+                &mut claimed_symbols,
+                &symbol,
+                &format!("array path '{path}'"),
+            )?;
             bindings.arrays.insert(
                 (path.clone(), String::new()),
                 crate::backend::emit::DirectArrayStorageBinding {
-                    slot: DirectStorageBinding::Symbol(aot_storage_symbol(
-                        AotStorageSymbolKind::Array,
-                        path,
-                        "",
-                    )),
+                    slot: DirectStorageBinding::Symbol(symbol),
                     storage_bytes: aot_lane_bytes(lane),
                     static_len: Some(info.len as usize),
                 },
@@ -1200,21 +1220,89 @@ fn build_aot_direct_storage_bindings(
                         "unsupported AOT direct storage field type {type_id} for '{path}.{field}'"
                     )
                 })?;
+            let symbol = aot_storage_symbol(AotStorageSymbolKind::Array, path, field);
+            claim_aot_storage_symbol(
+                &mut claimed_symbols,
+                &symbol,
+                &format!("array lane '{path}.{field}'"),
+            )?;
             bindings.arrays.insert(
                 (path.clone(), field.clone()),
                 crate::backend::emit::DirectArrayStorageBinding {
-                    slot: DirectStorageBinding::Symbol(aot_storage_symbol(
-                        AotStorageSymbolKind::Array,
-                        path,
-                        field,
-                    )),
+                    slot: DirectStorageBinding::Symbol(symbol),
                     storage_bytes: aot_lane_bytes(lane),
                     static_len: Some(info.len as usize),
                 },
             );
         }
     }
+    for (path, descriptor) in typed_collection_descriptors {
+        for lane in &descriptor.lanes {
+            let lane_path = format!("{path}.{}", lane.name);
+            let semantic_lane = format!("typed collection lane '{lane_path}'");
+            if matches!(lane.name.as_str(), "count" | "head" | "next_order") {
+                let symbol = aot_storage_symbol(AotStorageSymbolKind::Scalar, &lane_path, "");
+                claim_aot_storage_symbol(&mut claimed_symbols, &symbol, &semantic_lane)?;
+                if bindings.scalars.contains_key(&lane_path) {
+                    return Err(format!(
+                        "AOT direct storage scalar binding collision for '{lane_path}'"
+                    ));
+                }
+                bindings
+                    .scalars
+                    .insert(lane_path, DirectStorageBinding::Symbol(symbol));
+            } else {
+                let lane_name = aot_array_lane(path, lane.type_id, global_path_types, type_table)
+                    .ok_or_else(|| {
+                    format!(
+                        "unsupported AOT direct storage lane type {} for '{lane_path}'",
+                        lane.type_id
+                    )
+                })?;
+                let length = usize::try_from(lane.element_count).map_err(|_| {
+                    format!(
+                        "typed collection '{path}' lane '{}' element count {} does not fit usize",
+                        lane.name, lane.element_count
+                    )
+                })?;
+                let symbol = aot_storage_symbol(AotStorageSymbolKind::Array, path, &lane.name);
+                claim_aot_storage_symbol(&mut claimed_symbols, &symbol, &semantic_lane)?;
+                let key = (path.clone(), lane.name.clone());
+                if bindings.arrays.contains_key(&key) {
+                    return Err(format!(
+                        "AOT direct storage array binding collision for '{}.{}'",
+                        key.0, key.1
+                    ));
+                }
+                bindings.arrays.insert(
+                    key,
+                    crate::backend::emit::DirectArrayStorageBinding {
+                        slot: DirectStorageBinding::Symbol(symbol),
+                        storage_bytes: aot_lane_bytes(lane_name),
+                        static_len: Some(length),
+                    },
+                );
+            }
+        }
+    }
     Ok(bindings)
+}
+
+fn claim_aot_storage_symbol(
+    claimed_symbols: &mut BTreeMap<String, String>,
+    symbol: &str,
+    semantic_lane: &str,
+) -> Result<(), String> {
+    if let Some(previous_lane) = claimed_symbols.get(symbol) {
+        if previous_lane != semantic_lane {
+            return Err(format!(
+                "AOT direct storage symbol collision for '{symbol}': semantic lanes '{previous_lane}' and '{semantic_lane}'"
+            ));
+        }
+    } else {
+        claimed_symbols.insert(symbol.to_string(), semantic_lane.to_string());
+    }
+    Ok(())
 }
 
 fn aot_lane_bytes(lane: &str) -> u8 {
@@ -1779,7 +1867,7 @@ mod tests {
         let error = process.compile().expect_err("AOT contract violation");
         assert!(format!("{error:?}").contains("tick -> helper"));
     }
-    use crate::backend::jit::JitProcess;
+    use crate::backend::jit::{JitProcess, JitScalarValue};
     use crate::backend::EngineEntrypoints;
     use object::{
         Architecture, BinaryFormat, File, Object, ObjectSection, ObjectSymbol, RelocationKind,
@@ -3115,6 +3203,1748 @@ mod tests {
             symbols.contains("ExitProcess"),
             "native Windows wrapper must terminate with the Stasis result: {symbols:?}"
         );
+    }
+
+    #[test]
+    fn typed_grid_and_bitset_aot_storage_matches_jit_lane_lengths() {
+        for (path, type_name, field, logical_capacity, expected_len) in [
+            (
+                "grid_storage_147",
+                "grid<i32, 2, 3>",
+                "values",
+                6_i32,
+                6_usize,
+            ),
+            ("bitset_storage_147", "bitset<33>", "words", 33_i32, 2_usize),
+        ] {
+            let source =
+                format!("global {path}: {type_name};\nfunction main(): i32 {{ return 0; }}\n");
+            let mut jit = JitProcess::new();
+            jit.upsert_file("typed_grid_bitset_storage.stasis", source.clone());
+            jit.compile().expect("typed grid/bitset JIT compile");
+
+            let mut aot = AotProcess::new();
+            aot.upsert_file("typed_grid_bitset_storage.stasis", source);
+            aot.compile().expect("typed grid/bitset AOT compile");
+
+            let jit_layout = jit.state_layout();
+            let jit_collection = jit_layout
+                .collections
+                .iter()
+                .find(|collection| collection.path == path)
+                .expect("JIT typed collection layout");
+            let jit_field = jit_collection
+                .fields
+                .iter()
+                .find(|field_layout| field_layout.field == field)
+                .expect("JIT typed lane layout");
+            assert_eq!(jit_collection.capacity, logical_capacity);
+            assert_eq!(jit_field.element_count, Some(expected_len as u64));
+
+            let aot_layout = aot.state_layout();
+            let aot_collection = aot_layout
+                .collections
+                .iter()
+                .find(|collection| collection.path == path)
+                .expect("AOT typed collection layout");
+            assert_eq!(
+                aot_collection, jit_collection,
+                "JIT/AOT layout parity for {path}"
+            );
+
+            let snapshot = aot.program_snapshot().expect("typed collection snapshot");
+            let bindings = build_aot_direct_storage_bindings(
+                &snapshot.analysis.global_path_types,
+                &snapshot.analysis.collection_infos,
+                snapshot.typed_collection_descriptors(),
+                snapshot.types(),
+            )
+            .expect("typed grid/bitset AOT direct storage plan");
+            let binding = bindings
+                .arrays
+                .get(&(path.to_string(), field.to_string()))
+                .expect("typed lane AOT direct storage binding");
+            assert_eq!(binding.static_len, Some(expected_len));
+            assert_eq!(binding.storage_bytes, 4);
+
+            let (bytes, _) = aot
+                .compile_standalone_storage_object("aot_fn_0")
+                .expect("standalone typed grid/bitset storage object")
+                .expect("typed grid/bitset storage required");
+            let object = File::parse(bytes.as_slice()).expect("parse typed storage object");
+            let symbol_name = aot_storage_symbol(AotStorageSymbolKind::Array, path, field);
+            let symbol = object
+                .symbols()
+                .find(|symbol| symbol.name().ok() == Some(symbol_name.as_str()))
+                .unwrap_or_else(|| panic!("missing standalone storage symbol '{symbol_name}'"));
+            let section_index = symbol
+                .section_index()
+                .expect("typed storage symbol section");
+            let section = object
+                .section_by_index(section_index)
+                .expect("typed storage symbol section data");
+            assert_eq!(
+                section.size(),
+                u64::try_from(expected_len * 4).expect("typed storage size"),
+                "standalone AOT storage section must use {path}.{field} lane length"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn linked_aot_matches_jit_for_grid_and_bitset_operations() {
+        let source = "global grid_aot_147: grid<i32, 2, 3>;\n\
+                      global bits_aot_147: bitset<33>;\n\
+                      function main(): i32 {\n\
+                          grid_aot_147.clear();\n\
+                          let result: i32 = grid_aot_147.capacity();\n\
+                          if (grid_aot_147.can_access(1, 2)) { grid_aot_147.set(1, 2, 41); }\n\
+                          if (grid_aot_147.can_access(1, 2)) { result += grid_aot_147.get(1, 2); }\n\
+                          grid_aot_147.clear();\n\
+                          if (grid_aot_147.can_access(1, 2)) { result += grid_aot_147.get(1, 2); }\n\
+                          bits_aot_147.clear();\n\
+                          result += bits_aot_147.capacity();\n\
+                          if (bits_aot_147.can_access(0)) { bits_aot_147.set(0, true); }\n\
+                          if (bits_aot_147.can_access(31)) { bits_aot_147.set(31, true); }\n\
+                          if (bits_aot_147.can_access(32)) { bits_aot_147.set(32, true); }\n\
+                          if (bits_aot_147.can_access(0)) { if (bits_aot_147.test(0)) { result += 1; } }\n\
+                          if (bits_aot_147.can_access(31)) { if (bits_aot_147.test(31)) { result += 10; } }\n\
+                          if (bits_aot_147.can_access(32)) { if (bits_aot_147.test(32)) { result += 100; } }\n\
+                          if (bits_aot_147.can_access(-1)) { result += 1000; }\n\
+                          if (bits_aot_147.can_access(33)) { result += 2000; }\n\
+                          bits_aot_147.clear();\n\
+                          if (bits_aot_147.can_access(0)) { if (bits_aot_147.test(0)) { result += 4000; } }\n\
+                          return result;\n\
+                      }\n";
+        let mut jit = JitProcess::new();
+        jit.upsert_file("typed_grid_bitset_linked.stasis", source);
+        jit.compile().expect("typed grid/bitset JIT compile");
+        let jit_result = jit
+            .execute_i32_noarg_by_name("main")
+            .expect("typed grid/bitset JIT execution");
+        assert_eq!(jit_result, 191);
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("typed_grid_bitset_linked.stasis", source);
+        aot.compile().expect("typed grid/bitset AOT compile");
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            eprintln!("skipping linked typed grid/bitset fixture: no Windows linker found");
+            return;
+        };
+        let Some(aot_result) = run_linked_i32_noarg_fixture(
+            &aot,
+            "main",
+            "typed_grid_bitset_operations",
+            &link_config,
+        ) else {
+            return;
+        };
+        assert_eq!(aot_result, jit_result, "linked AOT/JIT operation parity");
+    }
+
+    #[test]
+    fn typed_pool_aot_storage_plan_and_symbols_match_jit_lanes() {
+        for capacity in [2_u32, 0_u32] {
+            let mut process = AotProcess::new();
+            process.upsert_file(
+                "typed_pool_storage.stasis",
+                format!(
+                    "global actors: pool<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
+                ),
+            );
+            process.compile().expect("typed pool AOT compile");
+
+            let snapshot = process.program_snapshot().expect("typed pool snapshot");
+            let descriptor = snapshot
+                .typed_collection_descriptors()
+                .get("actors")
+                .expect("typed pool descriptor");
+            assert_eq!(descriptor.capacity, capacity);
+            assert_eq!(
+                descriptor.canonical_type_name(snapshot.types()),
+                format!("pool<i32, {capacity}>")
+            );
+
+            let bindings = build_aot_direct_storage_bindings(
+                &snapshot.analysis.global_path_types,
+                &snapshot.analysis.collection_infos,
+                snapshot.typed_collection_descriptors(),
+                snapshot.types(),
+            )
+            .expect("typed pool AOT direct storage plan");
+            assert!(matches!(
+                bindings.scalars.get("actors.count"),
+                Some(DirectStorageBinding::Symbol(symbol))
+                    if symbol == &aot_storage_symbol(
+                        AotStorageSymbolKind::Scalar,
+                        "actors.count",
+                        "",
+                    )
+            ));
+            assert!(!bindings.scalars.contains_key("actors"));
+            let values = bindings
+                .arrays
+                .get(&(String::from("actors"), String::from("values")))
+                .expect("typed pool values array binding");
+            match &values.slot {
+                DirectStorageBinding::Symbol(symbol) => assert_eq!(
+                    symbol,
+                    &aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values")
+                ),
+                DirectStorageBinding::Absolute(_) => {
+                    panic!("AOT typed pool values lane must use a symbol binding")
+                }
+            }
+            assert_eq!(values.static_len, Some(capacity as usize));
+            assert_eq!(values.storage_bytes, 4);
+            assert_eq!(bindings.arrays.len(), 1);
+
+            let (bytes, _) = process
+                .compile_standalone_storage_object("aot_fn_0")
+                .expect("standalone typed pool storage object")
+                .expect("typed pool storage required");
+            let object = File::parse(bytes.as_slice()).expect("parse typed pool storage object");
+            let symbols: BTreeSet<String> = object
+                .symbols()
+                .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                .collect();
+            for expected in [
+                aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.count", ""),
+                aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values"),
+                "stasis_jit_register_global_i32_ptr".to_string(),
+                "stasis_jit_register_global_i32_array".to_string(),
+            ] {
+                assert!(
+                    symbols.contains(&expected),
+                    "typed pool storage object missing '{expected}' for capacity {capacity}: {symbols:?}"
+                );
+            }
+            assert!(
+                !symbols.contains(&aot_storage_symbol(
+                    AotStorageSymbolKind::Scalar,
+                    "actors",
+                    ""
+                )),
+                "typed pool root must not be emitted as a scalar storage symbol"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_stable_pool_aot_storage_plan_and_symbols_match_jit_lanes() {
+        for _ in [()] {
+            for capacity in [2_u32, 0_u32] {
+                let mut process = AotProcess::new();
+                process.upsert_file(
+                    "typed_stable_pool_storage.stasis",
+                    format!(
+                        "global actors: stable_pool<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed stable-pool AOT compile");
+
+                let snapshot = process
+                    .program_snapshot()
+                    .expect("typed stable-pool snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed stable-pool descriptor");
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("stable_pool<i32, {capacity}>")
+                );
+                let bindings = build_aot_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                )
+                .expect("typed stable-pool AOT direct storage plan");
+                assert!(matches!(
+                    bindings.scalars.get("actors.count"),
+                    Some(DirectStorageBinding::Symbol(symbol))
+                        if symbol == &aot_storage_symbol(
+                            AotStorageSymbolKind::Scalar,
+                            "actors.count",
+                            "",
+                        )
+                ));
+                assert!(!bindings.scalars.contains_key("actors"));
+                assert_eq!(bindings.scalars.len(), 1);
+                let occupied = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("occupied")))
+                    .expect("typed stable-pool occupied array binding");
+                assert!(matches!(
+                    &occupied.slot,
+                    DirectStorageBinding::Symbol(symbol)
+                        if symbol == &aot_storage_symbol(
+                            AotStorageSymbolKind::Array,
+                            "actors",
+                            "occupied",
+                        )
+                ));
+                assert_eq!(occupied.static_len, Some(capacity as usize));
+                assert_eq!(occupied.storage_bytes, 1);
+                let values = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("values")))
+                    .expect("typed stable-pool values array binding");
+                assert!(matches!(
+                    &values.slot,
+                    DirectStorageBinding::Symbol(symbol)
+                        if symbol == &aot_storage_symbol(
+                            AotStorageSymbolKind::Array,
+                            "actors",
+                            "values",
+                        )
+                ));
+                assert_eq!(values.static_len, Some(capacity as usize));
+                assert_eq!(values.storage_bytes, 4);
+                assert_eq!(bindings.arrays.len(), 2);
+
+                let (bytes, _) = process
+                    .compile_standalone_storage_object("aot_fn_0")
+                    .expect("standalone typed stable-pool storage object")
+                    .expect("typed stable-pool storage required");
+                let object =
+                    File::parse(bytes.as_slice()).expect("parse typed stable-pool storage object");
+                let symbols: BTreeSet<String> = object
+                    .symbols()
+                    .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                    .collect();
+                for expected in [
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.count", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "occupied"),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values"),
+                ] {
+                    assert!(
+                        symbols.contains(&expected),
+                        "typed stable-pool storage object missing '{expected}' capacity {capacity}: {symbols:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_map_and_set_aot_storage_plan_and_symbols_match_jit_lanes() {
+        for kind in ["map", "set"] {
+            for _ in [()] {
+                for capacity in [3_u32, 0_u32] {
+                    let mut process = AotProcess::new();
+                    let declaration = match kind {
+                        "map" => format!("global collection: map<i32, i32, {capacity}>;"),
+                        "set" => format!("global collection: set<i32, {capacity}>;"),
+                        _ => unreachable!(),
+                    };
+                    process.upsert_file(
+                        "typed_map_set_storage.stasis",
+                        format!("{declaration}\nfunction main(): i32 {{ return 0; }}\n"),
+                    );
+                    process.compile().expect("typed map/set AOT compile");
+
+                    let snapshot = process
+                        .program_snapshot()
+                        .expect("typed map/set AOT snapshot");
+                    let descriptor = snapshot
+                        .typed_collection_descriptors()
+                        .get("collection")
+                        .expect("typed map/set descriptor");
+                    assert_eq!(
+                        descriptor.canonical_type_name(snapshot.types()),
+                        match kind {
+                            "map" => format!("map<i32, i32, {capacity}>"),
+                            "set" => format!("set<i32, {capacity}>"),
+                            _ => unreachable!(),
+                        }
+                    );
+
+                    let bindings = build_aot_direct_storage_bindings(
+                        &snapshot.analysis.global_path_types,
+                        &snapshot.analysis.collection_infos,
+                        snapshot.typed_collection_descriptors(),
+                        snapshot.types(),
+                    )
+                    .expect("typed map/set AOT direct storage plan");
+                    assert!(matches!(
+                        bindings.scalars.get("collection.count"),
+                        Some(DirectStorageBinding::Symbol(symbol))
+                            if symbol == &aot_storage_symbol(
+                                AotStorageSymbolKind::Scalar,
+                                "collection.count",
+                                "",
+                            )
+                    ));
+                    assert_eq!(bindings.scalars.len(), 1);
+
+                    let expected_arrays: &[(&str, u8)] = match kind {
+                        "map" => &[("occupied", 1), ("keys", 4), ("values", 4)],
+                        "set" => &[("occupied", 1), ("keys", 4)],
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(bindings.arrays.len(), expected_arrays.len());
+                    for (field, storage_bytes) in expected_arrays {
+                        let lane = bindings
+                            .arrays
+                            .get(&(String::from("collection"), String::from(*field)))
+                            .unwrap_or_else(|| panic!("missing {kind} {field} lane"));
+                        assert!(matches!(
+                            &lane.slot,
+                            DirectStorageBinding::Symbol(symbol)
+                                if symbol == &aot_storage_symbol(
+                                    AotStorageSymbolKind::Array,
+                                    "collection",
+                                    field,
+                                )
+                        ));
+                        assert_eq!(lane.static_len, Some(capacity as usize));
+                        assert_eq!(lane.storage_bytes, *storage_bytes);
+                    }
+
+                    let (bytes, _) = process
+                        .compile_standalone_storage_object("aot_fn_0")
+                        .expect("standalone typed map/set storage object")
+                        .expect("typed map/set storage required");
+                    let object =
+                        File::parse(bytes.as_slice()).expect("parse typed map/set storage object");
+                    let symbols: BTreeSet<String> = object
+                        .symbols()
+                        .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                        .collect();
+                    assert!(
+                        symbols.contains(&aot_storage_symbol(
+                            AotStorageSymbolKind::Scalar,
+                            "collection.count",
+                            "",
+                        )),
+                        "typed {kind} count symbol missing capacity {capacity}: {symbols:?}"
+                    );
+                    for (field, _) in expected_arrays {
+                        assert!(
+                            symbols.contains(&aot_storage_symbol(
+                                AotStorageSymbolKind::Array,
+                                "collection",
+                                field,
+                            )),
+                            "typed {kind} {field} symbol missing capacity {capacity}: {symbols:?}"
+                        );
+                    }
+                    assert!(
+                        symbols.contains("stasis_jit_register_global_u8_array"),
+                        "typed {kind} occupancy registration symbol missing: {symbols:?}"
+                    );
+                    assert!(
+                        symbols.contains("stasis_jit_register_global_i32_array"),
+                        "typed {kind} i32 array registration symbol missing: {symbols:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_queue_aot_storage_plan_and_symbols_match_jit_lanes() {
+        for _ in [()] {
+            for capacity in [2_u32, 0_u32] {
+                let mut process = AotProcess::new();
+                process.upsert_file(
+                    "typed_queue_storage.stasis",
+                    format!(
+                        "global actors: queue<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed queue AOT compile");
+
+                let snapshot = process.program_snapshot().expect("typed queue snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed queue descriptor");
+                assert_eq!(descriptor.capacity, capacity);
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("queue<i32, {capacity}>")
+                );
+                let bindings = build_aot_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                )
+                .expect("typed queue AOT direct storage plan");
+                for metadata in ["count", "head"] {
+                    let path = format!("actors.{metadata}");
+                    assert!(matches!(
+                        bindings.scalars.get(&path),
+                        Some(DirectStorageBinding::Symbol(symbol))
+                            if symbol == &aot_storage_symbol(
+                                AotStorageSymbolKind::Scalar,
+                                &path,
+                                "",
+                            )
+                    ));
+                }
+                assert!(!bindings.scalars.contains_key("actors"));
+                assert_eq!(bindings.scalars.len(), 2);
+                let values = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("values")))
+                    .expect("typed queue values array binding");
+                assert!(matches!(
+                    &values.slot,
+                    DirectStorageBinding::Symbol(symbol)
+                        if symbol == &aot_storage_symbol(
+                            AotStorageSymbolKind::Array,
+                            "actors",
+                            "values",
+                        )
+                ));
+                assert_eq!(values.static_len, Some(capacity as usize));
+                assert_eq!(values.storage_bytes, 4);
+                assert_eq!(bindings.arrays.len(), 1);
+
+                let (bytes, _) = process
+                    .compile_standalone_storage_object("aot_fn_0")
+                    .expect("standalone typed queue storage object")
+                    .expect("typed queue storage required");
+                let object =
+                    File::parse(bytes.as_slice()).expect("parse typed queue storage object");
+                let symbols: BTreeSet<String> = object
+                    .symbols()
+                    .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                    .collect();
+                for expected in [
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.count", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.head", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values"),
+                ] {
+                    assert!(
+                        symbols.contains(&expected),
+                        "typed queue storage object missing '{expected}' capacity {capacity}: {symbols:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_priority_queue_aot_storage_plan_and_symbols_match_jit_lanes() {
+        for _ in [()] {
+            for capacity in [3_u32, 0_u32] {
+                let mut process = AotProcess::new();
+                process.upsert_file(
+                    "typed_priority_queue_storage.stasis",
+                    format!(
+                        "global actors: priority_queue<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed priority-queue AOT compile");
+
+                let snapshot = process
+                    .program_snapshot()
+                    .expect("typed priority-queue AOT snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed priority-queue descriptor");
+                assert_eq!(descriptor.capacity, capacity);
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("priority_queue<i32, {capacity}>")
+                );
+                let bindings = build_aot_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                )
+                .expect("typed priority-queue AOT direct storage plan");
+                for metadata in ["count", "next_order"] {
+                    let path = format!("actors.{metadata}");
+                    assert!(matches!(
+                        bindings.scalars.get(&path),
+                        Some(DirectStorageBinding::Symbol(symbol))
+                            if symbol == &aot_storage_symbol(
+                                AotStorageSymbolKind::Scalar,
+                                &path,
+                                "",
+                            )
+                    ));
+                }
+                assert_eq!(bindings.scalars.len(), 2);
+                for field in ["priority", "order", "values"] {
+                    let lane = bindings
+                        .arrays
+                        .get(&(String::from("actors"), String::from(field)))
+                        .unwrap_or_else(|| panic!("missing priority-queue {field} lane"));
+                    assert!(matches!(
+                        &lane.slot,
+                        DirectStorageBinding::Symbol(symbol)
+                            if symbol == &aot_storage_symbol(
+                                AotStorageSymbolKind::Array,
+                                "actors",
+                                field,
+                            )
+                    ));
+                    assert_eq!(lane.static_len, Some(capacity as usize));
+                    assert_eq!(lane.storage_bytes, 4);
+                }
+                assert_eq!(bindings.arrays.len(), 3);
+
+                let (bytes, _) = process
+                    .compile_standalone_storage_object("aot_fn_0")
+                    .expect("standalone typed priority-queue storage object")
+                    .expect("typed priority-queue storage required");
+                let object = File::parse(bytes.as_slice())
+                    .expect("parse typed priority-queue storage object");
+                let symbols: BTreeSet<String> = object
+                    .symbols()
+                    .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                    .collect();
+                for expected in [
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.count", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.next_order", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "priority"),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "order"),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values"),
+                ] {
+                    assert!(
+                        symbols.contains(&expected),
+                        "typed priority-queue storage object missing '{expected}' capacity {capacity}: {symbols:?}"
+                    );
+                }
+                assert!(
+                    symbols.contains("stasis_jit_register_global_i32_array"),
+                    "typed priority-queue i32 array registration symbol missing: {symbols:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_ring_buffer_aot_storage_plan_and_symbols_match_jit_lanes() {
+        for _ in [()] {
+            for capacity in [2_u32, 0_u32] {
+                let mut process = AotProcess::new();
+                process.upsert_file(
+                    "typed_ring_buffer_storage.stasis",
+                    format!(
+                        "global actors: ring_buffer<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed ring-buffer AOT compile");
+
+                let snapshot = process
+                    .program_snapshot()
+                    .expect("typed ring-buffer snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed ring-buffer descriptor");
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("ring_buffer<i32, {capacity}>")
+                );
+                let bindings = build_aot_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                )
+                .expect("typed ring-buffer AOT direct storage plan");
+                for metadata in ["count", "head"] {
+                    let path = format!("actors.{metadata}");
+                    assert!(matches!(
+                        bindings.scalars.get(&path),
+                        Some(DirectStorageBinding::Symbol(symbol))
+                            if symbol == &aot_storage_symbol(
+                                AotStorageSymbolKind::Scalar,
+                                &path,
+                                "",
+                            )
+                    ));
+                }
+                assert!(!bindings.scalars.contains_key("actors"));
+                assert_eq!(bindings.scalars.len(), 2);
+                let values = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("values")))
+                    .expect("typed ring-buffer values array binding");
+                assert!(matches!(
+                    &values.slot,
+                    DirectStorageBinding::Symbol(symbol)
+                        if symbol == &aot_storage_symbol(
+                            AotStorageSymbolKind::Array,
+                            "actors",
+                            "values",
+                        )
+                ));
+                assert_eq!(values.static_len, Some(capacity as usize));
+                assert_eq!(values.storage_bytes, 4);
+                assert_eq!(bindings.arrays.len(), 1);
+
+                let (bytes, _) = process
+                    .compile_standalone_storage_object("aot_fn_0")
+                    .expect("standalone typed ring-buffer storage object")
+                    .expect("typed ring-buffer storage required");
+                let object =
+                    File::parse(bytes.as_slice()).expect("parse typed ring-buffer storage object");
+                let symbols: BTreeSet<String> = object
+                    .symbols()
+                    .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                    .collect();
+                for expected in [
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.count", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.head", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values"),
+                ] {
+                    assert!(
+                        symbols.contains(&expected),
+                        "typed ring-buffer storage object missing '{expected}' capacity {capacity}: {symbols:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_queue_aot_head_storage_symbol_collision_is_rejected() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "typed_queue_head_collision.stasis",
+            "global actors: queue<i32, 2>;\n\
+             global actors__head: i32;\n\
+             function main(): i32 { return 0; }\n",
+        );
+
+        let error = process
+            .compile()
+            .expect_err("queue head storage symbol collision must fail");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("AOT direct storage symbol collision"),
+                    "unexpected collision diagnostic: {message}"
+                );
+                assert!(
+                    message.contains("stasis_state_scalar__actors__head"),
+                    "collision diagnostic omitted head symbol: {message}"
+                );
+                assert!(
+                    message.contains("actors.head"),
+                    "missing queue lane: {message}"
+                );
+                assert!(
+                    message.contains("actors__head"),
+                    "missing colliding path: {message}"
+                );
+            }
+            other => panic!("expected backend collision error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_pool_aot_storage_symbol_collisions_are_rejected() {
+        for (fixture_name, extra_global, expected_symbol, expected_lanes) in [
+            (
+                "typed_pool_count_collision.stasis",
+                "global actors__count: i32;",
+                aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.count", ""),
+                ["actors.count", "actors__count"],
+            ),
+            (
+                "typed_pool_values_collision.stasis",
+                "global actors__values: i32[2];",
+                aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values"),
+                ["actors.values", "actors__values"],
+            ),
+        ] {
+            let mut process = AotProcess::new();
+            process.upsert_file(
+                fixture_name,
+                format!(
+                    "global actors: pool<i32, 2>;\n{extra_global}\nfunction main(): i32 {{ return 0; }}\n"
+                ),
+            );
+
+            let error = process
+                .compile()
+                .expect_err("storage symbol collision must fail");
+            match error {
+                crate::compiler::CompileError::Backend(message) => {
+                    assert!(
+                        message.contains("AOT direct storage symbol collision"),
+                        "unexpected collision diagnostic: {message}"
+                    );
+                    assert!(
+                        message.contains(&expected_symbol),
+                        "collision diagnostic omitted symbol {expected_symbol}: {message}"
+                    );
+                    for lane in expected_lanes {
+                        assert!(
+                            message.contains(lane),
+                            "collision diagnostic omitted semantic lane {lane}: {message}"
+                        );
+                    }
+                }
+                other => panic!("expected backend collision error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn typed_pool_linked_aot_matches_jit_operation_sequence() {
+        const SOURCE: &str = r#"global typed_pool_parity_147: pool<i32, 2>;
+global typed_pool_lanes_147: pool<i32, 2>;
+global typed_pool_zero_147: pool<i32, 0>;
+function main(): i32 {
+    let first: i32 = -1;
+    if (typed_pool_parity_147.can_push()) { typed_pool_parity_147.push(10); first = 0; }
+    let second: i32 = -1;
+    if (typed_pool_parity_147.can_push()) { typed_pool_parity_147.push(20); second = 1; }
+    let rejected: i32 = -1;
+    if (typed_pool_parity_147.can_push()) { typed_pool_parity_147.push(30); rejected = 2; }
+    let count_before: i32 = typed_pool_parity_147.count();
+    let capacity: i32 = typed_pool_parity_147.capacity();
+    let removed_code: i32 = 0;
+    if (typed_pool_parity_147.can_remove(0)) { typed_pool_parity_147.remove(0); removed_code = 1; }
+    let invalid_code: i32 = 0;
+    if (typed_pool_parity_147.can_remove(9)) { typed_pool_parity_147.remove(9); invalid_code = 1; }
+    let count_after: i32 = typed_pool_parity_147.count();
+    typed_pool_parity_147.clear();
+    let count_cleared: i32 = typed_pool_parity_147.count();
+    return first * 1000000 + second * 100000 + rejected * 10000
+        + count_before * 1000 + capacity * 100 + removed_code * 10
+        + invalid_code * 2 + count_after + count_cleared;
+}
+function fill_lanes(): i32 {
+    let first: i32 = -1;
+    if (typed_pool_lanes_147.can_push()) { typed_pool_lanes_147.push(10); first = 0; }
+    let second: i32 = -1;
+    if (typed_pool_lanes_147.can_push()) { typed_pool_lanes_147.push(20); second = 1; }
+    let rejected: i32 = -1;
+    if (typed_pool_lanes_147.can_push()) { typed_pool_lanes_147.push(30); rejected = 2; }
+    return first * 100 + second * 10 + rejected;
+}
+function remove_lanes(): i32 {
+    if (typed_pool_lanes_147.can_remove(0)) { typed_pool_lanes_147.remove(0); return 1; }
+    return 0;
+}
+function remove_invalid_lanes(): i32 {
+    if (typed_pool_lanes_147.can_remove(9)) { typed_pool_lanes_147.remove(9); return 1; }
+    return 0;
+}
+function clear_lanes(): i32 {
+    typed_pool_lanes_147.clear();
+    return typed_pool_lanes_147.count();
+}
+function zero_capacity(): i32 {
+    let pushed: i32 = -1;
+    if (typed_pool_zero_147.can_push()) { typed_pool_zero_147.push(7); pushed = 0; }
+    let rejected_code: i32 = 0;
+    if (pushed == -1) { rejected_code = 1; }
+    let removed_code: i32 = 0;
+    if (typed_pool_zero_147.can_remove(0)) { typed_pool_zero_147.remove(0); removed_code = 1; }
+    typed_pool_zero_147.clear();
+    return rejected_code * 1000 + removed_code * 100
+        + typed_pool_zero_147.count() * 10
+        + typed_pool_zero_147.capacity();
+}
+"#;
+        const EXPECTED_MAIN: i32 = 92211;
+        const EXPECTED_ZERO: i32 = 1000;
+
+        let roots = [
+            "main",
+            "fill_lanes",
+            "remove_lanes",
+            "remove_invalid_lanes",
+            "clear_lanes",
+            "zero_capacity",
+        ];
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&roots.map(str::to_string));
+        jit.upsert_file("typed_pool_parity_147.stasis", SOURCE);
+        jit.compile().expect("typed pool JIT parity compile");
+
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("main")
+                .expect("typed pool JIT main"),
+            EXPECTED_MAIN
+        );
+        assert_eq!(
+            jit.read_i32_global_path("typed_pool_parity_147.count"),
+            0,
+            "main must clear the parity pool"
+        );
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("zero_capacity")
+                .expect("typed pool JIT zero-capacity probe"),
+            EXPECTED_ZERO
+        );
+
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("fill_lanes")
+                .expect("typed pool JIT fill"),
+            9
+        );
+        assert_eq!(jit.read_i32_global_path("typed_pool_lanes_147.count"), 2);
+        assert_eq!(
+            jit.read_global_collection_scalar("typed_pool_lanes_147", "values", 0)
+                .expect("read first filled lane"),
+            JitScalarValue::I32(10)
+        );
+        assert_eq!(
+            jit.read_global_collection_scalar("typed_pool_lanes_147", "values", 1)
+                .expect("read second filled lane"),
+            JitScalarValue::I32(20)
+        );
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("remove_lanes")
+                .expect("typed pool JIT swap-remove"),
+            1
+        );
+        assert_eq!(jit.read_i32_global_path("typed_pool_lanes_147.count"), 1);
+        assert_eq!(
+            jit.read_global_collection_scalar("typed_pool_lanes_147", "values", 0)
+                .expect("read swapped lane"),
+            JitScalarValue::I32(20)
+        );
+        assert_eq!(
+            jit.read_global_collection_scalar("typed_pool_lanes_147", "values", 1)
+                .expect("read released lane"),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("remove_invalid_lanes")
+                .expect("typed pool JIT invalid remove"),
+            0
+        );
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("clear_lanes")
+                .expect("typed pool JIT clear"),
+            0
+        );
+        assert_eq!(jit.read_i32_global_path("typed_pool_lanes_147.count"), 0);
+        for index in 0..2 {
+            assert_eq!(
+                jit.read_global_collection_scalar("typed_pool_lanes_147", "values", index)
+                    .expect("read cleared lane"),
+                JitScalarValue::I32(0)
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let mut aot = AotProcess::new();
+            aot.set_required_emit_roots(&roots.map(str::to_string));
+            aot.upsert_file("typed_pool_parity_147.stasis", SOURCE);
+            aot.compile().expect("typed pool AOT parity compile");
+
+            let linked_main = run_linked_i32_noarg_fixture(
+                &aot,
+                "main",
+                "typed_pool_operation_parity",
+                &link_config,
+            )
+            .expect("linked typed pool main fixture");
+            assert_eq!(
+                linked_main, EXPECTED_MAIN,
+                "linked AOT/JIT typed pool operation parity"
+            );
+
+            let linked_zero = run_linked_i32_noarg_fixture(
+                &aot,
+                "zero_capacity",
+                "typed_pool_zero_capacity_parity",
+                &link_config,
+            )
+            .expect("linked typed pool zero-capacity fixture");
+            assert_eq!(
+                linked_zero, EXPECTED_ZERO,
+                "linked AOT/JIT zero-capacity typed pool parity"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_stable_pool_linked_aot_matches_jit_operation_sequence() {
+        const SOURCE: &str = r#"global typed_stable_error_parity_147: stable_pool<i32, 3>;
+global typed_stable_drop_parity_147: stable_pool<i32, 2>;
+global typed_stable_zero_parity_147: stable_pool<i32, 0>;
+function stable_error_sequence(): i32 {
+    typed_stable_error_parity_147.clear();
+    let first: i32 = -1;
+    if (typed_stable_error_parity_147.can_insert()) { typed_stable_error_parity_147.insert(10); first = 0; }
+    let second: i32 = -1;
+    if (typed_stable_error_parity_147.can_insert()) { typed_stable_error_parity_147.insert(20); second = 1; }
+    let third: i32 = -1;
+    if (typed_stable_error_parity_147.can_insert()) { typed_stable_error_parity_147.insert(30); third = 2; }
+    let full: i32 = -1;
+    if (typed_stable_error_parity_147.can_insert()) { typed_stable_error_parity_147.insert(40); full = 3; }
+    let removed: i32 = 0;
+    if (typed_stable_error_parity_147.can_remove(1)) { typed_stable_error_parity_147.remove(1); removed = 1; }
+    let invalid: i32 = 0;
+    if (typed_stable_error_parity_147.can_remove(1)) { typed_stable_error_parity_147.remove(1); invalid += 100; }
+    if (typed_stable_error_parity_147.can_remove(9)) { typed_stable_error_parity_147.remove(9); invalid += 10; }
+    let reused: i32 = -1;
+    if (typed_stable_error_parity_147.can_insert()) { typed_stable_error_parity_147.insert(40); reused = 1; }
+    let count_after: i32 = typed_stable_error_parity_147.count();
+    let capacity: i32 = typed_stable_error_parity_147.capacity();
+    typed_stable_error_parity_147.clear();
+    let cleared: i32 = typed_stable_error_parity_147.count();
+    return first * 1000000 + second * 100000 + third * 10000 + full * 1000
+        + removed * 100 + invalid + reused + count_after * 10 + capacity + cleared;
+}
+function stable_drop_sequence(): i32 {
+    typed_stable_drop_parity_147.clear();
+    let first: i32 = -1;
+    if (typed_stable_drop_parity_147.can_insert()) { typed_stable_drop_parity_147.insert(1); first = 0; }
+    let second: i32 = -1;
+    if (typed_stable_drop_parity_147.can_insert()) { typed_stable_drop_parity_147.insert(2); second = 1; }
+    let rejected: i32 = -1;
+    if (typed_stable_drop_parity_147.can_insert()) { typed_stable_drop_parity_147.insert(3); rejected = 2; }
+    let count: i32 = typed_stable_drop_parity_147.count();
+    let capacity: i32 = typed_stable_drop_parity_147.capacity();
+    typed_stable_drop_parity_147.clear();
+    let cleared: i32 = typed_stable_drop_parity_147.count();
+    return first * 1000000 + second * 100000 + rejected * 10000
+        + count * 100 + capacity * 10 + cleared;
+}
+function stable_zero_capacity(): i32 {
+    typed_stable_zero_parity_147.clear();
+    let inserted: i32 = -1;
+    if (typed_stable_zero_parity_147.can_insert()) { typed_stable_zero_parity_147.insert(7); inserted = 0; }
+    let removed: i32 = 0;
+    if (typed_stable_zero_parity_147.can_remove(0)) { typed_stable_zero_parity_147.remove(0); removed = 1; }
+    let count: i32 = typed_stable_zero_parity_147.count();
+    let capacity: i32 = typed_stable_zero_parity_147.capacity();
+    typed_stable_zero_parity_147.clear();
+    let cleared: i32 = typed_stable_zero_parity_147.count();
+    return inserted + removed * 10 + count * 100 + capacity * 1000 + cleared;
+}
+"#;
+        const ROOTS: [&str; 3] = [
+            "stable_error_sequence",
+            "stable_drop_sequence",
+            "stable_zero_capacity",
+        ];
+        const EXPECTED: [i32; 3] = [119_134, 90_220, -1];
+
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&ROOTS.map(str::to_string));
+        jit.upsert_file("typed_stable_pool_parity_147.stasis", SOURCE);
+        jit.compile().expect("typed stable-pool JIT parity compile");
+        for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+            assert_eq!(
+                jit.execute_i32_noarg_by_name(root)
+                    .unwrap_or_else(|_| panic!("typed stable-pool JIT root {root}")),
+                expected,
+                "typed stable-pool JIT operation oracle for {root}"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let mut aot = AotProcess::new();
+            aot.set_required_emit_roots(&ROOTS.map(str::to_string));
+            aot.upsert_file("typed_stable_pool_parity_147.stasis", SOURCE);
+            aot.compile().expect("typed stable-pool AOT parity compile");
+
+            for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+                let linked = run_linked_i32_noarg_fixture(
+                    &aot,
+                    root,
+                    &format!("typed_stable_pool_{root}_parity"),
+                    &link_config,
+                )
+                .unwrap_or_else(|| panic!("linked typed stable-pool root {root}"));
+                assert_eq!(
+                    linked, expected,
+                    "linked AOT/JIT typed stable-pool operation parity for {root}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_map_and_set_linked_aot_matches_jit_operation_sequence() {
+        const SOURCE: &str = r#"global typed_map_error_parity_147: map<i32, i32, 3>;
+global typed_map_drop_parity_147: map<i32, i32, 3>;
+global typed_map_zero_parity_147: map<i32, i32, 0>;
+global typed_set_error_parity_147: set<i32, 3>;
+global typed_set_drop_parity_147: set<i32, 3>;
+global typed_set_zero_parity_147: set<i32, 0>;
+function map_sequence(): i32 {
+    if (typed_map_error_parity_147.can_put(1)) { typed_map_error_parity_147.put(1, 10); }
+    if (typed_map_error_parity_147.can_put(2)) { typed_map_error_parity_147.put(2, 20); }
+    if (typed_map_error_parity_147.can_put(3)) { typed_map_error_parity_147.put(3, 30); }
+    let before_update: i32 = 0;
+    if (typed_map_error_parity_147.can_get(2)) { before_update = typed_map_error_parity_147.get(2); }
+    if (typed_map_error_parity_147.can_put(2)) { typed_map_error_parity_147.put(2, 25); }
+    let after_update: i32 = 0;
+    if (typed_map_error_parity_147.can_get(2)) { after_update = typed_map_error_parity_147.get(2); }
+    if (typed_map_error_parity_147.can_put(4)) { typed_map_error_parity_147.put(4, 40); }
+    let full_contains: i32 = 0;
+    if (typed_map_error_parity_147.contains(4)) { full_contains = 1; }
+    let removed: i32 = 0;
+    if (typed_map_error_parity_147.can_remove(2)) { typed_map_error_parity_147.remove(2); removed = 1; }
+    let missing_after_remove: i32 = 0;
+    if (typed_map_error_parity_147.can_get(2)) { missing_after_remove = typed_map_error_parity_147.get(2); }
+    if (typed_map_error_parity_147.can_put(4)) { typed_map_error_parity_147.put(4, 40); }
+    let reused: i32 = 0;
+    if (typed_map_error_parity_147.can_get(4)) { reused = typed_map_error_parity_147.get(4); }
+    return before_update * 1000000 + after_update * 10000
+        + full_contains * 1000 + removed * 100
+        + missing_after_remove * 10 + reused;
+}
+function map_drop_sequence(): i32 {
+    if (typed_map_drop_parity_147.can_put(1)) { typed_map_drop_parity_147.put(1, 10); }
+    if (typed_map_drop_parity_147.can_put(2)) { typed_map_drop_parity_147.put(2, 20); }
+    if (typed_map_drop_parity_147.can_put(3)) { typed_map_drop_parity_147.put(3, 30); }
+    if (typed_map_drop_parity_147.can_put(2)) { typed_map_drop_parity_147.put(2, 25); }
+    if (typed_map_drop_parity_147.can_put(4)) { typed_map_drop_parity_147.put(4, 40); }
+    let existing: i32 = 0;
+    if (typed_map_drop_parity_147.can_get(2)) { existing = typed_map_drop_parity_147.get(2); }
+    let rejected: i32 = 0;
+    if (typed_map_drop_parity_147.can_get(4)) { rejected = typed_map_drop_parity_147.get(4); }
+    return existing * 100 + rejected;
+}
+function map_zero_capacity(): i32 {
+    if (typed_map_zero_parity_147.can_put(1)) { typed_map_zero_parity_147.put(1, 7); }
+    let result: i32 = 0;
+    if (typed_map_zero_parity_147.can_get(1)) { result = typed_map_zero_parity_147.get(1); }
+    if (typed_map_zero_parity_147.contains(1)) { result += 100; }
+    if (typed_map_zero_parity_147.can_remove(1)) { typed_map_zero_parity_147.remove(1); result += 10; }
+    return result;
+}
+function set_sequence(): i32 {
+    if (typed_set_error_parity_147.can_add(1)) { typed_set_error_parity_147.add(1); }
+    if (typed_set_error_parity_147.can_add(2)) { typed_set_error_parity_147.add(2); }
+    if (typed_set_error_parity_147.can_add(3)) { typed_set_error_parity_147.add(3); }
+    if (typed_set_error_parity_147.can_add(2)) { typed_set_error_parity_147.add(2); }
+    let duplicate_present: i32 = 0;
+    if (typed_set_error_parity_147.contains(2)) { duplicate_present = 1; }
+    if (typed_set_error_parity_147.can_add(4)) { typed_set_error_parity_147.add(4); }
+    let full_present: i32 = 0;
+    if (typed_set_error_parity_147.contains(4)) { full_present = 1; }
+    if (typed_set_error_parity_147.can_remove(2)) { typed_set_error_parity_147.remove(2); }
+    let removed_present: i32 = 0;
+    if (typed_set_error_parity_147.contains(2)) { removed_present = 1; }
+    if (typed_set_error_parity_147.can_add(4)) { typed_set_error_parity_147.add(4); }
+    let reused_present: i32 = 0;
+    if (typed_set_error_parity_147.contains(4)) { reused_present = 1; }
+    return duplicate_present * 1000 + full_present * 100
+        + removed_present * 10 + reused_present;
+}
+function set_drop_sequence(): i32 {
+    if (typed_set_drop_parity_147.can_add(1)) { typed_set_drop_parity_147.add(1); }
+    if (typed_set_drop_parity_147.can_add(2)) { typed_set_drop_parity_147.add(2); }
+    if (typed_set_drop_parity_147.can_add(3)) { typed_set_drop_parity_147.add(3); }
+    if (typed_set_drop_parity_147.can_add(4)) { typed_set_drop_parity_147.add(4); }
+    if (typed_set_drop_parity_147.contains(4)) { return 1; }
+    return 0;
+}
+function set_zero_capacity(): i32 {
+    if (typed_set_zero_parity_147.can_add(1)) { typed_set_zero_parity_147.add(1); }
+    if (typed_set_zero_parity_147.can_remove(1)) { typed_set_zero_parity_147.remove(1); }
+    if (typed_set_zero_parity_147.contains(1)) { return 100; }
+    return 0;
+}
+"#;
+        const ROOTS: [&str; 6] = [
+            "map_sequence",
+            "map_drop_sequence",
+            "map_zero_capacity",
+            "set_sequence",
+            "set_drop_sequence",
+            "set_zero_capacity",
+        ];
+        const EXPECTED: [i32; 6] = [20_250_140, 2_500, 0, 1_001, 0, 0];
+
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&ROOTS.map(str::to_string));
+        jit.upsert_file("typed_map_set_parity_147.stasis", SOURCE);
+        jit.compile().expect("typed map/set JIT parity compile");
+        for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+            assert_eq!(
+                jit.execute_i32_noarg_by_name(root)
+                    .unwrap_or_else(|_| panic!("typed map/set JIT root {root}")),
+                expected,
+                "typed map/set JIT operation oracle for {root}"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let mut aot = AotProcess::new();
+            aot.set_required_emit_roots(&ROOTS.map(str::to_string));
+            aot.upsert_file("typed_map_set_parity_147.stasis", SOURCE);
+            aot.compile().expect("typed map/set AOT parity compile");
+
+            for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+                let linked = run_linked_i32_noarg_fixture(
+                    &aot,
+                    root,
+                    &format!("typed_map_set_{root}_parity"),
+                    &link_config,
+                )
+                .unwrap_or_else(|| panic!("linked typed map/set root {root}"));
+                assert_eq!(
+                    linked, expected,
+                    "linked AOT/JIT typed map/set operation parity for {root}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_queue_linked_aot_matches_jit_operation_sequence() {
+        const SOURCE: &str = r#"global typed_queue_error_parity_147: queue<i32, 3>;
+global typed_queue_drop_parity_147: queue<i32, 2>;
+global typed_queue_overwrite_parity_147: queue<i32, 2>;
+global typed_queue_zero_parity_147: queue<i32, 0>;
+function error_wraparound(): i32 {
+    typed_queue_error_parity_147.clear();
+    let accepted: i32 = 0;
+    if (typed_queue_error_parity_147.can_push()) { typed_queue_error_parity_147.push(10); accepted += 1; }
+    if (typed_queue_error_parity_147.can_push()) { typed_queue_error_parity_147.push(20); accepted += 1; }
+    if (typed_queue_error_parity_147.can_push()) { typed_queue_error_parity_147.push(30); accepted += 1; }
+    let rejected: i32 = 0;
+    if (typed_queue_error_parity_147.can_push()) { typed_queue_error_parity_147.push(40); rejected = 1; }
+    let before_peek_zero: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(0)) { before_peek_zero = typed_queue_error_parity_147.peek(0); }
+    let before_peek_two: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(2)) { before_peek_two = typed_queue_error_parity_147.peek(2); }
+    let before_physical_zero: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(0)) { before_physical_zero = typed_queue_error_parity_147.physical_index(0); }
+    let before_physical_two: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(2)) { before_physical_two = typed_queue_error_parity_147.physical_index(2); }
+    let before: i32 = typed_queue_error_parity_147.count() * 100000
+        + typed_queue_error_parity_147.capacity() * 10000
+        + before_peek_zero * 1000
+        + before_peek_two * 100
+        + before_physical_zero * 10
+        + before_physical_two;
+    let invalid_peek: i32 = 0;
+    if (typed_queue_error_parity_147.can_peek(9)) { invalid_peek = typed_queue_error_parity_147.peek(9); }
+    let invalid_physical: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(-1)) { invalid_physical = typed_queue_error_parity_147.physical_index(-1); }
+    let popped: i32 = 0;
+    if (typed_queue_error_parity_147.can_pop()) { typed_queue_error_parity_147.pop(); popped = 1; }
+    let wrapped: i32 = 0;
+    if (typed_queue_error_parity_147.can_push()) { typed_queue_error_parity_147.push(40); wrapped = 1; }
+    let after_wrap_peek_zero: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(0)) { after_wrap_peek_zero = typed_queue_error_parity_147.peek(0); }
+    let after_wrap_peek_two: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(2)) { after_wrap_peek_two = typed_queue_error_parity_147.peek(2); }
+    let after_wrap_physical_zero: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(0)) { after_wrap_physical_zero = typed_queue_error_parity_147.physical_index(0); }
+    let after_wrap_physical_two: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(2)) { after_wrap_physical_two = typed_queue_error_parity_147.physical_index(2); }
+    let after_wrap: i32 = typed_queue_error_parity_147.count() * 100000
+        + typed_queue_error_parity_147.capacity() * 10000
+        + after_wrap_peek_zero * 1000
+        + after_wrap_peek_two * 100
+        + after_wrap_physical_zero * 10
+        + after_wrap_physical_two;
+    let popped_again: i32 = 0;
+    if (typed_queue_error_parity_147.can_pop()) { typed_queue_error_parity_147.pop(); popped_again = 1; }
+    let wrapped_again: i32 = 0;
+    if (typed_queue_error_parity_147.can_push()) { typed_queue_error_parity_147.push(50); wrapped_again = 1; }
+    let after_second_wrap_peek_zero: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(0)) { after_second_wrap_peek_zero = typed_queue_error_parity_147.peek(0); }
+    let after_second_wrap_peek_two: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(2)) { after_second_wrap_peek_two = typed_queue_error_parity_147.peek(2); }
+    let after_second_wrap_physical_zero: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(0)) { after_second_wrap_physical_zero = typed_queue_error_parity_147.physical_index(0); }
+    let after_second_wrap_physical_two: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(2)) { after_second_wrap_physical_two = typed_queue_error_parity_147.physical_index(2); }
+    let after_second_wrap: i32 = typed_queue_error_parity_147.count() * 100000
+        + typed_queue_error_parity_147.capacity() * 10000
+        + after_second_wrap_peek_zero * 1000
+        + after_second_wrap_peek_two * 100
+        + after_second_wrap_physical_zero * 10
+        + after_second_wrap_physical_two;
+    typed_queue_error_parity_147.clear();
+    return accepted * 1000000 + rejected * 100000 + before
+        + invalid_peek * 10000 + invalid_physical * 1000
+        + popped * 100 + wrapped * 10 + after_wrap
+        + popped_again * 1000000 + wrapped_again * 100000
+        + after_second_wrap + typed_queue_error_parity_147.count();
+}
+function drop_rejection(): i32 {
+    typed_queue_drop_parity_147.clear();
+    let first: i32 = 0;
+    if (typed_queue_drop_parity_147.can_push()) { typed_queue_drop_parity_147.push(1); first = 1; }
+    let second: i32 = 0;
+    if (typed_queue_drop_parity_147.can_push()) { typed_queue_drop_parity_147.push(2); second = 1; }
+    let rejected: i32 = 0;
+    if (typed_queue_drop_parity_147.can_push()) { typed_queue_drop_parity_147.push(3); rejected = 1; }
+    let observed_peek_zero: i32 = -1;
+    if (typed_queue_drop_parity_147.can_peek(0)) { observed_peek_zero = typed_queue_drop_parity_147.peek(0); }
+    let observed_peek_one: i32 = -1;
+    if (typed_queue_drop_parity_147.can_peek(1)) { observed_peek_one = typed_queue_drop_parity_147.peek(1); }
+    let observed: i32 = typed_queue_drop_parity_147.count() * 100
+        + typed_queue_drop_parity_147.capacity() * 10
+        + observed_peek_zero
+        + observed_peek_one;
+    typed_queue_drop_parity_147.clear();
+    return first * 1000000 + second * 100000 + rejected * 10000
+        + observed * 100 + typed_queue_drop_parity_147.count();
+}
+function overwrite_replace(): i32 {
+    typed_queue_overwrite_parity_147.clear();
+    let accepted: i32 = 0;
+    if (typed_queue_overwrite_parity_147.can_push()) { typed_queue_overwrite_parity_147.push(1); accepted += 1; }
+    if (typed_queue_overwrite_parity_147.can_push()) { typed_queue_overwrite_parity_147.push(2); accepted += 1; }
+    typed_queue_overwrite_parity_147.overwrite_oldest(3); accepted += 1;
+    let before_pop_peek_zero: i32 = -1;
+    if (typed_queue_overwrite_parity_147.can_peek(0)) { before_pop_peek_zero = typed_queue_overwrite_parity_147.peek(0); }
+    let before_pop_peek_one: i32 = -1;
+    if (typed_queue_overwrite_parity_147.can_peek(1)) { before_pop_peek_one = typed_queue_overwrite_parity_147.peek(1); }
+    let before_pop_physical_zero: i32 = -1;
+    if (typed_queue_overwrite_parity_147.can_peek(0)) { before_pop_physical_zero = typed_queue_overwrite_parity_147.physical_index(0); }
+    let before_pop_physical_one: i32 = -1;
+    if (typed_queue_overwrite_parity_147.can_peek(1)) { before_pop_physical_one = typed_queue_overwrite_parity_147.physical_index(1); }
+    let before_pop: i32 = typed_queue_overwrite_parity_147.count() * 100000
+        + typed_queue_overwrite_parity_147.capacity() * 10000
+        + before_pop_peek_zero * 1000
+        + before_pop_peek_one * 100
+        + before_pop_physical_zero * 10
+        + before_pop_physical_one;
+    let popped: i32 = 0;
+    if (typed_queue_overwrite_parity_147.can_pop()) { typed_queue_overwrite_parity_147.pop(); popped = 1; }
+    let after_pop_peek_zero: i32 = -1;
+    if (typed_queue_overwrite_parity_147.can_peek(0)) { after_pop_peek_zero = typed_queue_overwrite_parity_147.peek(0); }
+    let after_pop_physical_zero: i32 = -1;
+    if (typed_queue_overwrite_parity_147.can_peek(0)) { after_pop_physical_zero = typed_queue_overwrite_parity_147.physical_index(0); }
+    let after_pop: i32 = typed_queue_overwrite_parity_147.count() * 100
+        + after_pop_physical_zero * 10
+        + after_pop_peek_zero;
+    typed_queue_overwrite_parity_147.clear();
+    return accepted * 1000000 + before_pop + popped * 1000 + after_pop
+        + typed_queue_overwrite_parity_147.count();
+}
+function zero_capacity(): i32 {
+    typed_queue_zero_parity_147.clear();
+    let pushed: i32 = 0;
+    if (typed_queue_zero_parity_147.can_push()) { typed_queue_zero_parity_147.push(7); pushed = 1; }
+    let popped: i32 = 0;
+    if (typed_queue_zero_parity_147.can_pop()) { typed_queue_zero_parity_147.pop(); popped = 1; }
+    let peeked: i32 = 0;
+    if (typed_queue_zero_parity_147.can_peek(0)) { peeked = typed_queue_zero_parity_147.peek(0); }
+    let physical: i32 = -1;
+    if (typed_queue_zero_parity_147.can_peek(0)) { physical = typed_queue_zero_parity_147.physical_index(0); }
+    return pushed * 100000 + popped * 10000
+        + typed_queue_zero_parity_147.count() * 1000
+        + typed_queue_zero_parity_147.capacity() * 100
+        + peeked * 10
+        + physical;
+}
+"#;
+        const ROOTS: [&str; 4] = [
+            "error_wraparound",
+            "drop_rejection",
+            "overwrite_replace",
+            "zero_capacity",
+        ];
+        const EXPECTED: [i32; 4] = [5_161_143, 1_122_300, 3_223_413, -1];
+
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&ROOTS.map(str::to_string));
+        jit.upsert_file("typed_queue_parity_147.stasis", SOURCE);
+        jit.compile().expect("typed queue JIT parity compile");
+        for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+            assert_eq!(
+                jit.execute_i32_noarg_by_name(root)
+                    .unwrap_or_else(|_| panic!("typed queue JIT root {root}")),
+                expected,
+                "typed queue JIT operation oracle for {root}"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let mut aot = AotProcess::new();
+            aot.set_required_emit_roots(&ROOTS.map(str::to_string));
+            aot.upsert_file("typed_queue_parity_147.stasis", SOURCE);
+            aot.compile().expect("typed queue AOT parity compile");
+
+            for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+                let linked = run_linked_i32_noarg_fixture(
+                    &aot,
+                    root,
+                    &format!("typed_queue_{root}_parity"),
+                    &link_config,
+                )
+                .unwrap_or_else(|| panic!("linked typed queue root {root}"));
+                assert_eq!(
+                    linked, expected,
+                    "linked AOT/JIT typed queue operation parity for {root}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_priority_queue_linked_aot_matches_jit_operation_sequence() {
+        const SOURCE: &str = r#"global typed_priority_queue_error_parity_147: priority_queue<i32, 5>;
+global typed_priority_queue_drop_parity_147: priority_queue<i32, 2>;
+global typed_priority_queue_zero_parity_147: priority_queue<i32, 0>;
+function signed_order(): i32 {
+    typed_priority_queue_error_parity_147.clear();
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(7, 70); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-2, 20); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(7, 71); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(0, 0); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-2, 21); }
+    let first: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { first = typed_priority_queue_error_parity_147.peek(); }
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); }
+    let second: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { second = typed_priority_queue_error_parity_147.peek(); }
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); }
+    let third: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { third = typed_priority_queue_error_parity_147.peek(); }
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); }
+    let fourth: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { fourth = typed_priority_queue_error_parity_147.peek(); }
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); }
+    let fifth: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { fifth = typed_priority_queue_error_parity_147.peek(); }
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); }
+    return first * 1000000 + second * 10000 + third * 100 + fourth * 10 + fifth
+        + typed_priority_queue_error_parity_147.count() * 100000000;
+}
+function full_error(): i32 {
+    typed_priority_queue_error_parity_147.clear();
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(3, 30); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(1, 10); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(2, 20); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(0, 40); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-1, 50); }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-9, 90); accepted = 1; }
+    let peeked: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { peeked = typed_priority_queue_error_parity_147.peek(); }
+    return accepted * 1000 + typed_priority_queue_error_parity_147.count() * 100
+        + peeked;
+}
+function full_drop(): i32 {
+    typed_priority_queue_drop_parity_147.clear();
+    if (typed_priority_queue_drop_parity_147.can_push()) { typed_priority_queue_drop_parity_147.push(3, 30); }
+    if (typed_priority_queue_drop_parity_147.can_push()) { typed_priority_queue_drop_parity_147.push(1, 10); }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_drop_parity_147.can_push()) { typed_priority_queue_drop_parity_147.push(-9, 90); accepted = 1; }
+    let peeked: i32 = 0;
+    if (typed_priority_queue_drop_parity_147.can_peek()) { peeked = typed_priority_queue_drop_parity_147.peek(); }
+    return accepted * 1000 + typed_priority_queue_drop_parity_147.count() * 100
+        + peeked;
+}
+function zero_capacity(): i32 {
+    typed_priority_queue_zero_parity_147.clear();
+    let pushed: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.can_push()) { typed_priority_queue_zero_parity_147.push(-1, 7); pushed = 1; }
+    let popped: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.can_pop()) { typed_priority_queue_zero_parity_147.pop(); popped = 1; }
+    let peeked: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.can_peek()) { peeked = typed_priority_queue_zero_parity_147.peek(); }
+    return pushed * 1000 + popped * 100 + typed_priority_queue_zero_parity_147.count() * 10
+        + peeked
+        + typed_priority_queue_zero_parity_147.capacity();
+}
+function clear_reset(): i32 {
+    typed_priority_queue_error_parity_147.clear();
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-1, 9); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(1, 8); }
+    typed_priority_queue_error_parity_147.clear();
+    let popped: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); popped = 1; }
+    let peeked: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { peeked = typed_priority_queue_error_parity_147.peek(); }
+    return typed_priority_queue_error_parity_147.count() * 100
+        + peeked * 10 + popped;
+}
+function preflight_empty(): i32 {
+    typed_priority_queue_error_parity_147.clear();
+    let can_push: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { can_peek = 1; }
+    let popped: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); popped = 1; }
+    let peeked: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { peeked = typed_priority_queue_error_parity_147.peek(); }
+    return can_push * 100 + can_pop * 10 + can_peek + popped * 1000
+        + peeked;
+}
+function preflight_full(): i32 {
+    typed_priority_queue_error_parity_147.clear();
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(3, 30); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(1, 10); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(2, 20); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(0, 40); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-1, 50); }
+    let can_push: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { can_peek = 1; }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-9, 90); accepted = 1; }
+    return can_push * 100 + can_pop * 10 + can_peek + accepted * 1000;
+}
+function preflight_zero(): i32 {
+    typed_priority_queue_zero_parity_147.clear();
+    let can_push: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.can_push()) { can_push = 1; }
+    let can_pop: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.can_pop()) { can_pop = 1; }
+    let can_peek: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.can_peek()) { can_peek = 1; }
+    let accepted: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.can_push()) { typed_priority_queue_zero_parity_147.push(-9, 90); accepted = 1; }
+    return can_push * 100 + can_pop * 10 + can_peek + accepted * 1000;
+}
+"#;
+        const ROOTS: [&str; 8] = [
+            "signed_order",
+            "full_error",
+            "full_drop",
+            "zero_capacity",
+            "clear_reset",
+            "preflight_empty",
+            "preflight_full",
+            "preflight_zero",
+        ];
+        const EXPECTED: [i32; 8] = [20_210_771, 550, 210, 0, 0, 100, 11, 0];
+
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&ROOTS.map(str::to_string));
+        jit.upsert_file("typed_priority_queue_parity_147.stasis", SOURCE);
+        jit.compile()
+            .expect("typed priority-queue JIT parity compile");
+        for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+            assert_eq!(
+                jit.execute_i32_noarg_by_name(root)
+                    .unwrap_or_else(|_| panic!("typed priority-queue JIT root {root}")),
+                expected,
+                "typed priority-queue JIT operation oracle for {root}"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let mut aot = AotProcess::new();
+            aot.set_required_emit_roots(&ROOTS.map(str::to_string));
+            aot.upsert_file("typed_priority_queue_parity_147.stasis", SOURCE);
+            aot.compile()
+                .expect("typed priority-queue AOT parity compile");
+
+            for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+                let linked = run_linked_i32_noarg_fixture(
+                    &aot,
+                    root,
+                    &format!("typed_priority_queue_{root}_parity"),
+                    &link_config,
+                )
+                .unwrap_or_else(|| panic!("linked typed priority-queue root {root}"));
+                assert_eq!(
+                    linked, expected,
+                    "linked AOT/JIT typed priority-queue operation parity for {root}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_ring_buffer_linked_aot_matches_jit_operation_sequence() {
+        const SOURCE: &str = r#"global typed_ring_error_parity_147: ring_buffer<i32, 3>;
+global typed_ring_drop_parity_147: ring_buffer<i32, 2>;
+global typed_ring_overwrite_parity_147: ring_buffer<i32, 2>;
+global typed_ring_zero_parity_147: ring_buffer<i32, 0>;
+function error_wraparound(): i32 {
+    typed_ring_error_parity_147.clear();
+    let accepted: i32 = 0;
+    if (typed_ring_error_parity_147.can_push()) { typed_ring_error_parity_147.push(10); accepted += 1; }
+    if (typed_ring_error_parity_147.can_push()) { typed_ring_error_parity_147.push(20); accepted += 1; }
+    if (typed_ring_error_parity_147.can_push()) { typed_ring_error_parity_147.push(30); accepted += 1; }
+    let rejected: i32 = 0;
+    if (typed_ring_error_parity_147.can_push()) { typed_ring_error_parity_147.push(40); rejected = 1; }
+    let before_peek_zero: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(0)) { before_peek_zero = typed_ring_error_parity_147.peek(0); }
+    let before_peek_two: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(2)) { before_peek_two = typed_ring_error_parity_147.peek(2); }
+    let before_physical_zero: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(0)) { before_physical_zero = typed_ring_error_parity_147.physical_index(0); }
+    let before_physical_two: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(2)) { before_physical_two = typed_ring_error_parity_147.physical_index(2); }
+    let before: i32 = typed_ring_error_parity_147.count() * 100000
+        + typed_ring_error_parity_147.capacity() * 10000
+        + before_peek_zero * 1000
+        + before_peek_two * 100
+        + before_physical_zero * 10
+        + before_physical_two;
+    let popped: i32 = 0;
+    if (typed_ring_error_parity_147.can_pop()) { typed_ring_error_parity_147.pop(); popped = 1; }
+    let wrapped: i32 = 0;
+    if (typed_ring_error_parity_147.can_push()) { typed_ring_error_parity_147.push(40); wrapped = 1; }
+    let after_wrap_peek_zero: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(0)) { after_wrap_peek_zero = typed_ring_error_parity_147.peek(0); }
+    let after_wrap_peek_two: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(2)) { after_wrap_peek_two = typed_ring_error_parity_147.peek(2); }
+    let after_wrap_physical_zero: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(0)) { after_wrap_physical_zero = typed_ring_error_parity_147.physical_index(0); }
+    let after_wrap_physical_two: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(2)) { after_wrap_physical_two = typed_ring_error_parity_147.physical_index(2); }
+    let after_wrap: i32 = typed_ring_error_parity_147.count() * 100000
+        + typed_ring_error_parity_147.capacity() * 10000
+        + after_wrap_peek_zero * 1000
+        + after_wrap_peek_two * 100
+        + after_wrap_physical_zero * 10
+        + after_wrap_physical_two;
+    typed_ring_error_parity_147.clear();
+    return accepted * 1000000 + rejected * 100000 + before
+        + popped * 100 + wrapped * 10 + after_wrap
+        + typed_ring_error_parity_147.count();
+}
+function drop_rejection(): i32 {
+    typed_ring_drop_parity_147.clear();
+    let first: i32 = 0;
+    if (typed_ring_drop_parity_147.can_push()) { typed_ring_drop_parity_147.push(1); first = 1; }
+    let second: i32 = 0;
+    if (typed_ring_drop_parity_147.can_push()) { typed_ring_drop_parity_147.push(2); second = 1; }
+    let rejected: i32 = 0;
+    if (typed_ring_drop_parity_147.can_push()) { typed_ring_drop_parity_147.push(3); rejected = 1; }
+    let observed_peek_zero: i32 = -1;
+    if (typed_ring_drop_parity_147.can_peek(0)) { observed_peek_zero = typed_ring_drop_parity_147.peek(0); }
+    let observed_peek_one: i32 = -1;
+    if (typed_ring_drop_parity_147.can_peek(1)) { observed_peek_one = typed_ring_drop_parity_147.peek(1); }
+    let observed: i32 = typed_ring_drop_parity_147.count() * 100
+        + typed_ring_drop_parity_147.capacity() * 10
+        + observed_peek_zero
+        + observed_peek_one;
+    typed_ring_drop_parity_147.clear();
+    return first * 1000000 + second * 100000 + rejected * 10000
+        + observed * 100 + typed_ring_drop_parity_147.count();
+}
+function overwrite_replace(): i32 {
+    typed_ring_overwrite_parity_147.clear();
+    let accepted: i32 = 0;
+    if (typed_ring_overwrite_parity_147.can_push()) { typed_ring_overwrite_parity_147.push(1); accepted += 1; }
+    if (typed_ring_overwrite_parity_147.can_push()) { typed_ring_overwrite_parity_147.push(2); accepted += 1; }
+    typed_ring_overwrite_parity_147.overwrite_oldest(3); accepted += 1;
+    let before_pop_peek_zero: i32 = -1;
+    if (typed_ring_overwrite_parity_147.can_peek(0)) { before_pop_peek_zero = typed_ring_overwrite_parity_147.peek(0); }
+    let before_pop_peek_one: i32 = -1;
+    if (typed_ring_overwrite_parity_147.can_peek(1)) { before_pop_peek_one = typed_ring_overwrite_parity_147.peek(1); }
+    let before_pop_physical_zero: i32 = -1;
+    if (typed_ring_overwrite_parity_147.can_peek(0)) { before_pop_physical_zero = typed_ring_overwrite_parity_147.physical_index(0); }
+    let before_pop_physical_one: i32 = -1;
+    if (typed_ring_overwrite_parity_147.can_peek(1)) { before_pop_physical_one = typed_ring_overwrite_parity_147.physical_index(1); }
+    let before_pop: i32 = typed_ring_overwrite_parity_147.count() * 100000
+        + typed_ring_overwrite_parity_147.capacity() * 10000
+        + before_pop_peek_zero * 1000
+        + before_pop_peek_one * 100
+        + before_pop_physical_zero * 10
+        + before_pop_physical_one;
+    let popped: i32 = 0;
+    if (typed_ring_overwrite_parity_147.can_pop()) { typed_ring_overwrite_parity_147.pop(); popped = 1; }
+    let after_pop_peek_zero: i32 = -1;
+    if (typed_ring_overwrite_parity_147.can_peek(0)) { after_pop_peek_zero = typed_ring_overwrite_parity_147.peek(0); }
+    let after_pop_physical_zero: i32 = -1;
+    if (typed_ring_overwrite_parity_147.can_peek(0)) { after_pop_physical_zero = typed_ring_overwrite_parity_147.physical_index(0); }
+    let after_pop: i32 = typed_ring_overwrite_parity_147.count() * 100
+        + after_pop_physical_zero * 10
+        + after_pop_peek_zero;
+    typed_ring_overwrite_parity_147.clear();
+    return accepted * 1000000 + before_pop + popped * 1000 + after_pop
+        + typed_ring_overwrite_parity_147.count();
+}
+function zero_capacity(): i32 {
+    typed_ring_zero_parity_147.clear();
+    let pushed: i32 = 0;
+    if (typed_ring_zero_parity_147.can_push()) { typed_ring_zero_parity_147.push(7); pushed = 1; }
+    let popped: i32 = 0;
+    if (typed_ring_zero_parity_147.can_pop()) { typed_ring_zero_parity_147.pop(); popped = 1; }
+    let peeked: i32 = 0;
+    if (typed_ring_zero_parity_147.can_peek(0)) { peeked = typed_ring_zero_parity_147.peek(0); }
+    let physical: i32 = -1;
+    if (typed_ring_zero_parity_147.can_peek(0)) { physical = typed_ring_zero_parity_147.physical_index(0); }
+    return pushed * 100000 + popped * 10000
+        + typed_ring_zero_parity_147.count() * 1000
+        + typed_ring_zero_parity_147.capacity() * 100
+        + peeked * 10
+        + physical;
+}
+"#;
+        const ROOTS: [&str; 4] = [
+            "error_wraparound",
+            "drop_rejection",
+            "overwrite_replace",
+            "zero_capacity",
+        ];
+        const EXPECTED: [i32; 4] = [3_697_122, 1_122_300, 3_223_413, -1];
+
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&ROOTS.map(str::to_string));
+        jit.upsert_file("typed_ring_buffer_parity_147.stasis", SOURCE);
+        jit.compile().expect("typed ring-buffer JIT parity compile");
+        for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+            assert_eq!(
+                jit.execute_i32_noarg_by_name(root)
+                    .unwrap_or_else(|_| panic!("typed ring-buffer JIT root {root}")),
+                expected,
+                "typed ring-buffer JIT operation oracle for {root}"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let mut aot = AotProcess::new();
+            aot.set_required_emit_roots(&ROOTS.map(str::to_string));
+            aot.upsert_file("typed_ring_buffer_parity_147.stasis", SOURCE);
+            aot.compile().expect("typed ring-buffer AOT parity compile");
+
+            for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+                let linked = run_linked_i32_noarg_fixture(
+                    &aot,
+                    root,
+                    &format!("typed_ring_buffer_{root}_parity"),
+                    &link_config,
+                )
+                .unwrap_or_else(|| panic!("linked typed ring-buffer root {root}"));
+                assert_eq!(
+                    linked, expected,
+                    "linked AOT/JIT typed ring-buffer operation parity for {root}"
+                );
+            }
+        }
     }
 
     #[test]

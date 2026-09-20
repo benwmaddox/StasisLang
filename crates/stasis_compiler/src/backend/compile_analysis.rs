@@ -9,8 +9,8 @@ use crate::frontend::parser::{
     ParsedField,
 };
 use crate::frontend::types::{
-    TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
-    TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
+    TypeCategory, TypeId, TypeTable, TypedCollectionDescriptor, TYPE_ID_BOOL, TYPE_ID_F32,
+    TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
 use std::collections::{BTreeMap, HashMap};
 
@@ -55,6 +55,7 @@ pub(crate) type CallSignatureMap = HashMap<String, Vec<CallSignature>>;
 pub(crate) type GlobalPathTypeMap = BTreeMap<String, TypeId>;
 pub(crate) type ConstantValueMap = BTreeMap<String, ConstantValue>;
 pub(crate) type CollectionInfoMap = BTreeMap<String, ForeachCollectionInfo>;
+pub(crate) type TypedCollectionInfoMap = BTreeMap<String, TypedCollectionDescriptor>;
 pub(crate) type NamedStructFieldTypeMap = BTreeMap<TypeId, BTreeMap<String, TypeId>>;
 pub(crate) type ExternSymbolAddressMap = BTreeMap<String, usize>;
 
@@ -67,6 +68,7 @@ pub(crate) struct CompileAnalysisCache {
     pub(crate) global_path_types: GlobalPathTypeMap,
     pub(crate) constant_values: ConstantValueMap,
     pub(crate) collection_infos: CollectionInfoMap,
+    pub(crate) typed_collection_descriptors: TypedCollectionInfoMap,
     pub(crate) named_struct_field_types: NamedStructFieldTypeMap,
     pub(crate) extern_symbol_addresses: ExternSymbolAddressMap,
 }
@@ -153,6 +155,9 @@ pub(crate) fn is_supported_call_lane_type(
     type_table: &TypeTable,
     allow_void: bool,
 ) -> bool {
+    if type_table.is_typed_collection_type(type_id) {
+        return false;
+    }
     if allow_void && type_id == TYPE_ID_VOID {
         return true;
     }
@@ -282,6 +287,10 @@ pub(crate) fn build_compile_analysis_cache_from_resolved_externs(
     let call_signatures =
         collect_supported_call_signatures(functions, &resolved_extern_signatures, type_table);
     let constant_values = collect_top_level_constant_values(files, type_table)?;
+    // Validate compiler-owned collection applications first so diagnostics
+    // retain the persistent state path and source file instead of surfacing as
+    // an unscoped type-interning error from the ordinary global inventory.
+    let typed_collection_descriptors = collect_typed_collection_descriptors(files, type_table)?;
     let global_path_types = collect_global_path_types(files, type_table, &constant_values)?;
     let collection_infos = collect_foreach_collection_infos(files, type_table, &constant_values)?;
     let named_struct_field_types =
@@ -293,6 +302,7 @@ pub(crate) fn build_compile_analysis_cache_from_resolved_externs(
         global_path_types,
         constant_values,
         collection_infos,
+        typed_collection_descriptors,
         named_struct_field_types,
         extern_symbol_addresses,
     })
@@ -371,6 +381,9 @@ pub(crate) fn build_extern_symbol_candidates(
 }
 
 pub(crate) fn is_i32_abi_compatible_type(type_id: TypeId, type_table: &TypeTable) -> bool {
+    if type_table.is_typed_collection_type(type_id) {
+        return false;
+    }
     type_table.is_i32_abi_compatible(type_id)
 }
 
@@ -394,6 +407,9 @@ pub(crate) fn is_i32_scalar_lane_type(type_id: TypeId, type_table: &TypeTable) -
 }
 
 pub(crate) fn is_i32_numeric_type(type_id: TypeId, type_table: &TypeTable) -> bool {
+    if type_table.is_typed_collection_type(type_id) {
+        return false;
+    }
     if type_table.is_sealed_sprite_ref(type_id) {
         return false;
     }
@@ -414,6 +430,7 @@ pub(crate) fn compile_analysis_requires_reemit(
         || previous.constant_values != next.constant_values
         || previous.global_path_types != next.global_path_types
         || previous.collection_infos != next.collection_infos
+        || previous.typed_collection_descriptors != next.typed_collection_descriptors
         || previous.named_struct_field_types != next.named_struct_field_types
 }
 
@@ -850,6 +867,139 @@ pub(crate) fn parse_constant_string_initializer(
             name
         )),
     }
+}
+
+/// Inventory compiler-owned typed collection declarations at persistent state
+/// paths.  This phase-0 seam intentionally does not alter the existing
+/// ordinary global-path or foreach maps; later lowering can consume the same
+/// descriptor without teaching each backend to reparse type applications.
+pub(crate) fn collect_typed_collection_descriptors(
+    files: &[SourceFile],
+    type_table: &mut TypeTable,
+) -> Result<TypedCollectionInfoMap, String> {
+    let mut struct_fields_by_name: BTreeMap<String, Vec<ParsedField>> = BTreeMap::new();
+    let mut struct_source_by_name: BTreeMap<String, String> = BTreeMap::new();
+    let mut roots: Vec<(String, String, String)> = Vec::new();
+
+    for file in files {
+        let parsed = parse_top_level_type_layout(&file.content).map_err(|error| {
+            format!(
+                "failed parsing top-level type layout in {}: {error}",
+                file.path
+            )
+        })?;
+        for parsed_struct in parsed.structs {
+            if let Some(existing) = struct_fields_by_name.get(&parsed_struct.name) {
+                if existing != &parsed_struct.fields {
+                    return Err(format!(
+                        "conflicting struct definition for '{}' (source {})",
+                        parsed_struct.name, file.path
+                    ));
+                }
+            } else {
+                struct_source_by_name.insert(parsed_struct.name.clone(), file.path.clone());
+                struct_fields_by_name.insert(parsed_struct.name, parsed_struct.fields);
+            }
+        }
+        for global in parsed.globals {
+            roots.push((global.name, global.type_name, file.path.clone()));
+        }
+        for global_block in parsed.global_blocks {
+            for field in global_block.fields {
+                roots.push((
+                    format!("{}.{}", global_block.name, field.name),
+                    field.type_name,
+                    file.path.clone(),
+                ));
+            }
+        }
+    }
+
+    let mut out = TypedCollectionInfoMap::new();
+    for (path, type_name, source_path) in roots {
+        collect_typed_collection_descriptors_from_type(
+            &path,
+            &type_name,
+            &source_path,
+            &struct_fields_by_name,
+            &struct_source_by_name,
+            type_table,
+            &mut out,
+            &mut Vec::new(),
+        )?;
+    }
+    Ok(out)
+}
+
+fn collect_typed_collection_descriptors_from_type(
+    path: &str,
+    type_name: &str,
+    source_path: &str,
+    struct_fields_by_name: &BTreeMap<String, Vec<ParsedField>>,
+    struct_source_by_name: &BTreeMap<String, String>,
+    type_table: &mut TypeTable,
+    out: &mut TypedCollectionInfoMap,
+    visiting_structs: &mut Vec<String>,
+) -> Result<(), String> {
+    let descriptor = type_table
+        .parse_typed_collection_descriptor(type_name)
+        .map_err(|error| {
+            format!("invalid typed collection state path '{path}': {error} (source {source_path})")
+        })?;
+    if let Some(descriptor) = descriptor {
+        insert_typed_collection_descriptor(out, path, descriptor)?;
+        return Ok(());
+    }
+
+    let type_name = type_name.trim();
+    let Some(fields) = struct_fields_by_name.get(type_name) else {
+        return Ok(());
+    };
+    if visiting_structs.iter().any(|name| name == type_name) {
+        return Err(format!(
+            "recursive typed collection state path '{path}' is unsupported (source {source_path})"
+        ));
+    }
+    visiting_structs.push(type_name.to_string());
+    let result = (|| {
+        for field in fields {
+            let child_path = format!("{path}.{}", field.name);
+            let child_source = struct_source_by_name
+                .get(type_name)
+                .map(String::as_str)
+                .unwrap_or(source_path);
+            collect_typed_collection_descriptors_from_type(
+                &child_path,
+                &field.type_name,
+                child_source,
+                struct_fields_by_name,
+                struct_source_by_name,
+                type_table,
+                out,
+                visiting_structs,
+            )?;
+        }
+        Ok(())
+    })();
+    visiting_structs.pop();
+    result
+}
+
+fn insert_typed_collection_descriptor(
+    out: &mut TypedCollectionInfoMap,
+    path: &str,
+    descriptor: TypedCollectionDescriptor,
+) -> Result<(), String> {
+    if let Some(existing) = out.get(path) {
+        if existing != &descriptor {
+            return Err(format!(
+                "conflicting typed collection descriptor for '{path}'"
+            ));
+        }
+    } else {
+        out.insert(path.to_string(), descriptor);
+    }
+    Ok(())
 }
 
 pub(crate) fn collect_foreach_collection_infos(
@@ -1393,5 +1543,195 @@ mod tests {
         canonical.trusted_graphics_source = true;
         validate_privileged_graphics_extern_provenance(&[canonical])
             .expect("compiler-owned graphics extern retains valid provenance");
+    }
+
+    #[test]
+    fn typed_collection_ids_are_not_numeric_or_supported_call_lanes() {
+        let mut type_table = TypeTable::new();
+        let typed = type_table
+            .resolve_or_intern("pool<i32, 2>")
+            .expect("typed pool type");
+
+        assert_eq!(
+            type_table.type_info(typed).map(|info| info.category),
+            Some(TypeCategory::Named),
+            "the public category remains source-compatible metadata"
+        );
+        assert!(!is_i32_abi_compatible_type(typed, &type_table));
+        assert!(!is_i32_scalar_lane_type(typed, &type_table));
+        assert!(!is_i32_numeric_type(typed, &type_table));
+        assert!(!is_supported_call_lane_type(typed, &type_table, false));
+        assert!(!is_supported_call_lane_type(typed, &type_table, true));
+    }
+
+    #[test]
+    fn supported_call_signatures_exclude_typed_collection_params_and_returns() {
+        let mut type_table = TypeTable::new();
+        let typed = type_table
+            .resolve_or_intern("pool<i32, 2>")
+            .expect("typed pool type");
+        let signatures = vec![
+            ResolvedExternCallSignature {
+                name: "typed_param".to_string(),
+                symbol: "typed_param".to_string(),
+                source_path: "tests/typed.stasis".to_string(),
+                trusted_graphics_source: false,
+                params: vec![typed],
+                return_type: TYPE_ID_VOID,
+            },
+            ResolvedExternCallSignature {
+                name: "typed_return".to_string(),
+                symbol: "typed_return".to_string(),
+                source_path: "tests/typed.stasis".to_string(),
+                trusted_graphics_source: false,
+                params: Vec::new(),
+                return_type: typed,
+            },
+        ];
+
+        let supported = collect_supported_call_signatures(&[], &signatures, &type_table);
+        assert!(!supported.contains_key("typed_param"));
+        assert!(!supported.contains_key("typed_return"));
+    }
+
+    #[test]
+    fn typed_collection_inventory_reads_global_and_global_block_paths() {
+        let files = vec![SourceFile {
+            path: "typed_collections.stasis".to_string(),
+            content: concat!(
+                "struct NestedState { history: ring_buffer<u8, 4>; }\n",
+                "struct AppState { pending: queue<i32, 2>; nested: NestedState; }\n",
+                "global actors: pool<i32, 2>;\n",
+                "global ordinary: Buffer<i32, 2>;\n",
+                "global app: AppState;\n",
+                "global State {\n",
+                "    events: queue<i32, 2>;\n",
+                "}\n",
+            )
+            .to_string(),
+            original_content: String::new(),
+            hash: 0,
+            functions: Vec::new(),
+        }];
+        let mut type_table = TypeTable::new();
+        let descriptors = collect_typed_collection_descriptors(&files, &mut type_table)
+            .expect("typed collection declarations should parse");
+
+        assert_eq!(descriptors.len(), 4);
+        assert_eq!(
+            descriptors["actors"].canonical_type_name(&type_table),
+            "pool<i32, 2>"
+        );
+        assert_eq!(descriptors["app.pending"].static_size_bytes, 16);
+        assert_eq!(
+            descriptors["app.nested.history"].canonical_type_name(&type_table),
+            "ring_buffer<u8, 4>"
+        );
+        assert_eq!(descriptors["State.events"].static_size_bytes, 16);
+        assert!(!descriptors.contains_key("ordinary"));
+    }
+
+    #[test]
+    fn production_cache_contains_typed_collection_descriptors() {
+        let files = vec![SourceFile {
+            path: "typed_collections.stasis".to_string(),
+            content: concat!(
+                "struct AppState { pending: queue<i32, 2>; }\n",
+                "global actors: pool<i32, 2>;\n",
+                "global app: AppState;\n",
+            )
+            .to_string(),
+            original_content: String::new(),
+            hash: 0,
+            functions: Vec::new(),
+        }];
+        let mut type_table = TypeTable::new();
+        let cache = build_compile_analysis_cache_from_resolved_externs(
+            &files,
+            &[],
+            &mut type_table,
+            1,
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .expect("production cache construction should inventory typed collections");
+
+        assert_eq!(cache.typed_collection_descriptors.len(), 2);
+        assert_eq!(
+            cache.typed_collection_descriptors["actors"].canonical_type_name(&type_table),
+            "pool<i32, 2>"
+        );
+        assert_eq!(
+            cache.typed_collection_descriptors["app.pending"].canonical_type_name(&type_table),
+            "queue<i32, 2>"
+        );
+    }
+
+    #[test]
+    fn typed_collection_inventory_rejects_conflicting_state_declarations() {
+        let files = vec![
+            SourceFile {
+                path: "first.stasis".to_string(),
+                content: "global actors: pool<i32, 2>;\n".to_string(),
+                original_content: String::new(),
+                hash: 0,
+                functions: Vec::new(),
+            },
+            SourceFile {
+                path: "second.stasis".to_string(),
+                content: "global actors: pool<i32, 3>;\n".to_string(),
+                original_content: String::new(),
+                hash: 0,
+                functions: Vec::new(),
+            },
+        ];
+        let mut type_table = TypeTable::new();
+        let error = collect_typed_collection_descriptors(&files, &mut type_table)
+            .expect_err("same state path with a different descriptor must fail");
+        assert!(
+            error.contains("conflicting typed collection descriptor for 'actors'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn typed_collection_inventory_attaches_state_path_and_source_to_type_errors() {
+        let files = vec![SourceFile {
+            path: "bad_collections.stasis".to_string(),
+            content: "global State { flags: pool<i32, -1>; }\n".to_string(),
+            original_content: String::new(),
+            hash: 0,
+            functions: Vec::new(),
+        }];
+        let mut type_table = TypeTable::new();
+        let error = collect_typed_collection_descriptors(&files, &mut type_table)
+            .expect_err("invalid capacity should be a state declaration error");
+        assert!(error.contains("State.flags"), "{error}");
+        assert!(error.contains("bad_collections.stasis"), "{error}");
+        assert!(error.contains("nonnegative decimal"), "{error}");
+    }
+
+    #[test]
+    fn production_cache_rejects_invalid_typed_collection_descriptors() {
+        let files = vec![SourceFile {
+            path: "bad_collections.stasis".to_string(),
+            content: "global State { flags: bitset<invalid>; }\n".to_string(),
+            original_content: String::new(),
+            hash: 0,
+            functions: Vec::new(),
+        }];
+        let mut type_table = TypeTable::new();
+        let error = build_compile_analysis_cache_from_resolved_externs(
+            &files,
+            &[],
+            &mut type_table,
+            1,
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .expect_err("production cache construction must reject invalid descriptors");
+
+        assert!(error.contains("State.flags"), "{error}");
+        assert!(error.contains("nonnegative decimal constant"), "{error}");
     }
 }

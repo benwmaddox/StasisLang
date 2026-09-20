@@ -48,6 +48,8 @@ pub struct FunctionMeta {
     pub inline: bool,
     /// Optional compile-time assertion over the function's reachable effects.
     pub effect_contract: Option<Vec<String>>,
+    /// Caller-owned collection preflights required by this function.
+    pub requires_contract: Option<Vec<String>>,
     pub dependencies: Vec<FunctionId>,
     pub dependents: Vec<FunctionId>,
     pub call_sites: Vec<FunctionCallSite>,
@@ -637,6 +639,7 @@ impl Compiler {
         self.parsed_statement_ids.clear();
         let mut dependencies_by_function: Vec<Vec<IndexedCallDependency>> = Vec::new();
         let mut signature_changed_ids: Vec<FunctionId> = Vec::new();
+        let mut required_template_changed_ids: Vec<FunctionId> = Vec::new();
 
         for file_id in 0..self.files.len() {
             let indexed =
@@ -698,6 +701,12 @@ impl Compiler {
                 if signature_changed {
                     signature_changed_ids.push(function_id);
                 }
+                if body_changed
+                    && (indexed_function.requires_contract.is_some()
+                        || previous.is_some_and(|old| old.requires_contract))
+                {
+                    required_template_changed_ids.push(function_id);
+                }
 
                 dependencies_by_function.push(indexed_function.dependencies);
                 self.functions.push(FunctionMeta {
@@ -720,6 +729,7 @@ impl Compiler {
                     return_type: indexed_function.return_type,
                     inline: indexed_function.inline,
                     effect_contract: indexed_function.effect_contract,
+                    requires_contract: indexed_function.requires_contract,
                     dependencies: Vec::new(),
                     dependents: Vec::new(),
                     call_sites: Vec::new(),
@@ -828,6 +838,7 @@ impl Compiler {
             .map(|function| function.id)
             .collect::<Vec<_>>();
         self.propagate_dirty_from_signature_changes(&signature_changed_ids);
+        self.propagate_dirty_from_signature_changes(&required_template_changed_ids);
         self.prepare_statement_artifacts(&all_functions)?;
         let dirty_functions = self
             .functions
@@ -1128,6 +1139,12 @@ impl Compiler {
                     CompileError::Invariant(format!("invalid function id {}", function_id))
                 })?
                 .clone();
+            if snapshot.requires_contract.is_some() {
+                // Required helpers exist only as compile-time expansion
+                // templates. Never materialize a callable artifact for them.
+                emitted_ids.push(*function_id);
+                continue;
+            }
             let hir = match self.lower_function_to_hir(&snapshot) {
                 Ok(hir) => hir,
                 Err(error) => {
@@ -1234,6 +1251,7 @@ impl Compiler {
                 PreviousFunctionHashes {
                     signature_hash: function.signature_hash,
                     body_hash: function.body_hash,
+                    requires_contract: function.requires_contract.is_some(),
                 },
             );
         }
@@ -1288,14 +1306,28 @@ impl Compiler {
         )
         .map_err(CompileError::Frontend)?;
         let mut inline_candidates = Vec::new();
-        for candidate in self.functions.iter().filter(|candidate| candidate.inline) {
+        for candidate in self
+            .functions
+            .iter()
+            .filter(|candidate| candidate.inline || candidate.requires_contract.is_some())
+        {
             let Some(candidate_statements) =
                 self.parsed_statements.get(candidate.storage_index as usize)
             else {
                 continue;
             };
-            let [SimpleStmt::Return(expression)] = candidate_statements.as_slice() else {
-                continue;
+            let expression = match candidate_statements.as_slice() {
+                [SimpleStmt::Return(expression)] => expression,
+                [SimpleStmt::Expr(expression)] if candidate.requires_contract.is_some() => {
+                    expression
+                }
+                _ if candidate.requires_contract.is_some() => {
+                    return Err(CompileError::Frontend(format!(
+                        "@requires function '{}' must contain exactly one action expression or return so it can be expanded at compile time",
+                        candidate.name
+                    )));
+                }
+                _ => continue,
             };
             let candidate_file = self.files.get(candidate.file_id as usize).ok_or_else(|| {
                 CompileError::Invariant(format!(
@@ -1330,9 +1362,15 @@ impl Compiler {
                 param_names: candidate.param_names.clone(),
                 expression,
                 has_same_arity_overload,
+                mandatory: candidate.requires_contract.is_some(),
             });
         }
         inline_expression_calls(&mut statements, &inline_candidates, function.id);
+        if let Some(target) = first_unexpanded_mandatory_call(&statements, &inline_candidates) {
+            return Err(CompileError::Frontend(format!(
+                "call to @requires function '{target}' could not be expanded at compile time"
+            )));
+        }
         Ok(FunctionHIR {
             statements,
             debug_statements: self
@@ -2321,6 +2359,7 @@ fn compile_error_message(error: &CompileError) -> &str {
 struct PreviousFunctionHashes {
     signature_hash: u64,
     body_hash: u64,
+    requires_contract: bool,
 }
 
 #[derive(Clone)]
@@ -2330,6 +2369,97 @@ struct InlineExpressionCandidate {
     param_names: Vec<String>,
     expression: SimpleExpr,
     has_same_arity_overload: bool,
+    mandatory: bool,
+}
+
+fn first_unexpanded_mandatory_call(
+    statements: &[SimpleStmt],
+    candidates: &[InlineExpressionCandidate],
+) -> Option<String> {
+    fn expression(value: &SimpleExpr, candidates: &[InlineExpressionCandidate]) -> Option<String> {
+        match value {
+            SimpleExpr::Call { target, args } => {
+                if candidates.iter().any(|candidate| {
+                    candidate.mandatory
+                        && candidate.qualified_name == *target
+                        && candidate.param_names.len() == args.len()
+                }) {
+                    return Some(target.clone());
+                }
+                args.iter()
+                    .find_map(|argument| expression(argument, candidates))
+            }
+            SimpleExpr::IndexedPath { index, .. } => expression(index, candidates),
+            SimpleExpr::Binary { lhs, rhs, .. } => {
+                expression(lhs, candidates).or_else(|| expression(rhs, candidates))
+            }
+            SimpleExpr::Condition(condition) => condition_value(condition, candidates),
+            SimpleExpr::DefaultValue(_)
+            | SimpleExpr::Int(_)
+            | SimpleExpr::Float(_)
+            | SimpleExpr::Bool(_)
+            | SimpleExpr::StringLiteral(_)
+            | SimpleExpr::Identifier(_) => None,
+        }
+    }
+
+    fn condition_value(
+        condition: &SimpleCondition,
+        candidates: &[InlineExpressionCandidate],
+    ) -> Option<String> {
+        match condition {
+            SimpleCondition::Comparison { lhs, rhs, .. } => {
+                expression(lhs, candidates).or_else(|| expression(rhs, candidates))
+            }
+            SimpleCondition::Expr(value) => expression(value, candidates),
+            SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+                condition_value(lhs, candidates).or_else(|| condition_value(rhs, candidates))
+            }
+            SimpleCondition::Not(inner) => condition_value(inner, candidates),
+        }
+    }
+
+    fn statement(value: &SimpleStmt, candidates: &[InlineExpressionCandidate]) -> Option<String> {
+        match value {
+            SimpleStmt::Let {
+                expression: value, ..
+            }
+            | SimpleStmt::Assign {
+                expression: value, ..
+            }
+            | SimpleStmt::Expr(value)
+            | SimpleStmt::Return(value) => expression(value, candidates),
+            SimpleStmt::Convert { source, .. } => expression(source, candidates),
+            SimpleStmt::If {
+                condition,
+                then_statements,
+                else_statements,
+            } => condition_value(condition, candidates)
+                .or_else(|| first_unexpanded_mandatory_call(then_statements, candidates))
+                .or_else(|| {
+                    else_statements.as_ref().and_then(|statements| {
+                        first_unexpanded_mandatory_call(statements, candidates)
+                    })
+                }),
+            SimpleStmt::For {
+                init,
+                condition,
+                step,
+                body_statements,
+            } => statement(init, candidates)
+                .or_else(|| condition_value(condition, candidates))
+                .or_else(|| statement(step, candidates))
+                .or_else(|| first_unexpanded_mandatory_call(body_statements, candidates)),
+            SimpleStmt::Foreach {
+                body_statements, ..
+            } => first_unexpanded_mandatory_call(body_statements, candidates),
+            SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => None,
+        }
+    }
+
+    statements
+        .iter()
+        .find_map(|statement_value| statement(statement_value, candidates))
 }
 
 fn inline_expression_calls(
@@ -2643,6 +2773,217 @@ mod tests {
                 && matches!(index.as_ref(), SimpleExpr::Int(0))
                 && suffix == "hp"
         ));
+    }
+
+    #[test]
+    fn requires_function_is_mandatorily_expanded_and_not_reachable() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "global events: queue<i32, 2>;\n@requires(events.can_push())\nfunction enqueue(value: i32): void { events.push(value); }\nfunction main(): i32 { if (events.can_push()) { enqueue(7); return 1; } else { return 0; } }\n",
+        );
+        compiler
+            .index_pass()
+            .expect("index required helper fixture");
+        let main = function_by_name(&compiler, "main").clone();
+        let hir = compiler
+            .lower_function_to_hir(&main)
+            .expect("lower required helper caller");
+        let SimpleStmt::If {
+            then_statements, ..
+        } = &hir.statements[0]
+        else {
+            panic!("expected guarded call");
+        };
+        assert!(matches!(
+            &then_statements[0],
+            SimpleStmt::Expr(SimpleExpr::Call { target, args })
+                if target == "push"
+                    && matches!(&args[0], SimpleExpr::Identifier(path) if path == "events")
+                    && matches!(&args[1], SimpleExpr::Int(7))
+        ));
+
+        let reachable =
+            crate::backend::reachability::compute_reachable_function_ids(compiler.functions(), &[]);
+        let enqueue = function_by_name(&compiler, "enqueue");
+        assert!(!reachable.contains(&enqueue.id));
+        assert!(reachable.contains(&main.id));
+    }
+
+    #[test]
+    fn requires_guard_substitutes_key_parameters_at_the_call_site() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "global values: map<i32, i32, 2>;\n@requires(values.can_put(key))\nfunction create(key: i32, value: i32): void { values.put(key, value); }\nfunction main(): void { let key: i32 = 7; if (values.can_put(key)) { create(key, 9); } }\n",
+        );
+        compiler
+            .check()
+            .expect("caller argument must instantiate the required key proof");
+    }
+
+    #[test]
+    fn requires_guard_rejects_unguarded_cached_compound_and_consumed_calls() {
+        let cases = [
+            (
+                "function main(): void { enqueue(1); }",
+                "requires its exact direct if",
+            ),
+            (
+                "function main(): void { let ok: bool = events.can_push(); if (ok) { enqueue(1); } }",
+                "requires its exact direct if",
+            ),
+            (
+                "function main(): void { if (events.can_push() && true) { enqueue(1); } }",
+                "requires its exact direct if",
+            ),
+            (
+                "function main(): void { if (!events.can_push()) { enqueue(1); } }",
+                "requires its exact direct if",
+            ),
+            (
+                "function main(): void { if (events.can_push()) { events.push(1); enqueue(2); } }",
+                "requires its exact direct if",
+            ),
+            (
+                "function main(): void { if (events.can_push()) { for (let i: i32 = 0; i < 1; i += 1) { enqueue(1); } } }",
+                "requires its exact direct if",
+            ),
+        ];
+        for (main, expected) in cases {
+            let mut compiler = Compiler::new();
+            compiler.upsert_file(
+                "sample.stasis",
+                format!(
+                    "global events: queue<i32, 2>;\n@requires(events.can_push())\nfunction enqueue(value: i32): void {{ events.push(value); }}\n{main}\n"
+                ),
+            );
+            let error = compiler
+                .check()
+                .expect_err("invalid caller proof must be rejected");
+            assert!(format!("{error:?}").contains(expected), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn requires_helper_rejects_nested_calls_in_action_arguments() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "global events: queue<i32, 2>;\nfunction next_value(): i32 { return 7; }\n@requires(events.can_push())\nfunction enqueue(): void { events.push(next_value()); }\nfunction main(): void { if (events.can_push()) { enqueue(); } }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("a nested call could invalidate the required preflight");
+        assert!(
+            format!("{error:?}").contains("side-effect-free action arguments"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn requires_can_add_rejects_missing_and_mismatched_caller_guards() {
+        for main in [
+            "function main(): void { add_tag(7); }",
+            "function main(): void { if (tags.can_add(6)) { add_tag(7); } }",
+        ] {
+            let mut compiler = Compiler::new();
+            compiler.upsert_file(
+                "sample.stasis",
+                format!(
+                    "global tags: set<i32, 2>;\n@requires(tags.can_add(key))\nfunction add_tag(key: i32): void {{ tags.add(key); }}\n{main}\n"
+                ),
+            );
+            let error = compiler
+                .check()
+                .expect_err("missing or wrong-key can_add guard must be rejected");
+            assert!(
+                format!("{error:?}").contains("requires its exact direct if"),
+                "{error:?}"
+            );
+        }
+
+        let mut accepted = Compiler::new();
+        accepted.upsert_file(
+            "sample.stasis",
+            "global tags: set<i32, 2>;\n@requires(tags.can_add(key))\nfunction add_tag(key: i32): void { tags.add(key); }\nfunction main(): void { if (tags.can_add(7)) { add_tag(7); } }\n",
+        );
+        accepted
+            .check()
+            .expect("the exact direct can_add guard must authorize one matching add");
+    }
+
+    #[test]
+    fn guarded_collection_actions_require_one_exact_direct_precheck() {
+        let rejected = [
+            "global tags: set<i32, 2>;\nfunction main(): void { tags.add(7); }",
+            "global values: map<i32, i32, 2>;\nfunction main(): i32 { return values.get(7); }",
+            "global events: queue<i32, 2>;\nfunction main(): i32 { if (events.can_peek(0)) { return events.physical_index(1); } return -1; }",
+            "global history: ring_buffer<i32, 2>;\nfunction main(): i32 { return history.physical_index(0); }",
+            "global events: priority_queue<i32, 2>;\nfunction main(): i32 { return events.peek_priority(); }",
+            "global events: queue<i32, 2>;\nfunction main(): void { if (events.can_push()) { events.push(1); events.push(2); } }",
+        ];
+        for source in rejected {
+            let mut compiler = Compiler::new();
+            compiler.upsert_file("rejected.stasis", source);
+            let error = compiler
+                .check()
+                .expect_err("missing, mismatched, or consumed precheck must be rejected");
+            assert!(
+                format!("{error:?}").contains("requires a matching direct if"),
+                "{source}: {error:?}"
+            );
+        }
+
+        let accepted = [
+            "global tags: set<i32, 2>;\nfunction main(): void { if (tags.can_add(7)) { tags.add(7); } }",
+            "global values: map<i32, i32, 2>;\nfunction main(): i32 { if (values.can_get(7)) { return values.get(7); } return -1; }",
+            "global events: queue<i32, 2>;\nfunction main(): i32 { if (events.can_peek(0)) { return events.physical_index(0); } return -1; }",
+            "global history: ring_buffer<i32, 2>;\nfunction main(): i32 { if (history.can_peek(0)) { return history.physical_index(0); } return -1; }",
+            "global events: priority_queue<i32, 2>;\nfunction main(): i32 { if (events.can_peek()) { return events.peek_priority(); } return -1; }",
+        ];
+        for source in accepted {
+            let mut compiler = Compiler::new();
+            compiler.upsert_file("accepted.stasis", source);
+            compiler
+                .check()
+                .expect("one exact direct precheck must authorize one matching action");
+        }
+    }
+
+    #[test]
+    fn guarded_collection_mutators_are_void_not_recoverable_results() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "global events: queue<i32, 2>;\nfunction main(): bool { if (events.can_push()) { return events.push(7); } return false; }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("a guarded command must not expose a recoverable result");
+        assert!(format!("{error:?}").contains("void"), "{error:?}");
+    }
+
+    #[test]
+    fn overwrite_oldest_is_unguarded_but_zero_capacity_is_rejected() {
+        let mut accepted = Compiler::new();
+        accepted.upsert_file(
+            "accepted.stasis",
+            "global events: queue<i32, 2>;\nfunction main(): void { events.overwrite_oldest(1); }\n",
+        );
+        accepted
+            .check()
+            .expect("overwrite_oldest must not require a guard");
+
+        let mut rejected = Compiler::new();
+        rejected.upsert_file(
+            "rejected.stasis",
+            "global events: queue<i32, 0>;\nfunction main(): void { events.overwrite_oldest(1); }\n",
+        );
+        let error = rejected
+            .check()
+            .expect_err("zero-capacity overwrite must fail at compile time");
+        assert!(format!("{error:?}").contains("zero-capacity"), "{error:?}");
     }
 
     #[test]
@@ -4028,7 +4369,7 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
             .expect("tick");
         assert_eq!(
             &source[tick.signature_range.start as usize..tick.signature_range.end as usize],
-            "function tick(): i32 "
+            "@tick_budget_us(100) function tick(): i32 "
         );
         let structs = source_struct_items(source, "sample.stasis").expect("source structs");
         assert_eq!(structs.len(), 1);

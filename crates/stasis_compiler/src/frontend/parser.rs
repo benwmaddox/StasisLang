@@ -837,14 +837,54 @@ fn parse_top_level_functions_impl(
     let mut out = Vec::new();
     let mut cursor = 0usize;
     while cursor < tokens.len() {
+        let mut leading_annotations = Vec::new();
+        let mut leading_signature_start = None;
+        if tokens
+            .get(cursor)
+            .copied()
+            .is_some_and(|token| token_is_other_char(source, token, b'@'))
+        {
+            let annotation_start = tokens[cursor].start;
+            let (after_annotations, _, parsed) =
+                parse_function_annotations(source, &tokens, cursor).map_err(|message| {
+                    contextual_parser_error(source, &tokens, cursor, cursor, None, message)
+                })?;
+            if parsed
+                .iter()
+                .any(|annotation| annotation.name == "requires")
+                && tokens.get(after_annotations).is_some_and(|token| {
+                    token.kind == TokenKind::Identifier && token_text(source, *token) == "extern"
+                })
+                && tokens
+                    .get(after_annotations + 1)
+                    .is_some_and(|token| token.kind == TokenKind::FunctionKw)
+            {
+                return Err(contextual_parser_error(
+                    source,
+                    &tokens,
+                    cursor,
+                    after_annotations,
+                    None,
+                    "@requires functions must be internal and cannot be extern".to_string(),
+                ));
+            }
+            if tokens
+                .get(after_annotations)
+                .is_some_and(|token| token.kind == TokenKind::FunctionKw)
+            {
+                leading_signature_start = Some(annotation_start);
+                leading_annotations = parsed;
+                cursor = after_annotations;
+            }
+        }
         if tokens[cursor].kind != TokenKind::FunctionKw {
             cursor += 1;
             continue;
         }
         let function_token_index = cursor;
-        let signature_start = tokens[cursor].start;
+        let signature_start = leading_signature_start.unwrap_or(tokens[cursor].start);
         cursor += 1;
-        let (next_cursor, _, annotations) = parse_function_annotations(source, &tokens, cursor)
+        let (next_cursor, _, mut annotations) = parse_function_annotations(source, &tokens, cursor)
             .map_err(|message| {
                 contextual_parser_error(
                     source,
@@ -855,6 +895,8 @@ fn parse_top_level_functions_impl(
                     message,
                 )
             })?;
+        leading_annotations.append(&mut annotations);
+        let annotations = leading_annotations;
         cursor = next_cursor;
         let name = token_text(
             source,
@@ -1751,11 +1793,13 @@ fn parse_function_annotations(
                 }
             }
             let next_cursor = skip_parenthesized_tokens(tokens, cursor)?;
-            if annotation_name == "effects" {
-                arguments = parse_effect_annotation_arguments(
-                    source,
-                    &tokens[cursor + 1..next_cursor - 1],
-                )?;
+            if matches!(annotation_name, "effects" | "requires") {
+                let annotation_tokens = &tokens[cursor + 1..next_cursor - 1];
+                arguments = if annotation_name == "requires" {
+                    parse_requires_annotation_argument(source, annotation_tokens)?
+                } else {
+                    parse_effect_annotation_arguments(source, annotation_tokens)?
+                };
                 cursor = next_cursor;
                 annotations.push(ParsedFunctionAnnotation {
                     name: annotation_name.to_string(),
@@ -1805,6 +1849,54 @@ fn parse_function_annotations(
         });
     }
     Ok((cursor, extern_symbol, annotations))
+}
+
+fn parse_requires_annotation_argument(
+    source: &str,
+    tokens: &[Token],
+) -> Result<Vec<ParsedFunctionAnnotationArgument>, String> {
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut arguments = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    for end in 0..=tokens.len() {
+        let split = if end == tokens.len() {
+            true
+        } else {
+            match tokens[end].kind {
+                TokenKind::LParen => {
+                    depth += 1;
+                    false
+                }
+                TokenKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                    false
+                }
+                TokenKind::Comma => depth == 0,
+                _ => false,
+            }
+        };
+        if !split {
+            continue;
+        }
+        if start == end {
+            return Err("annotation '@requires' has an empty argument".to_string());
+        }
+        let first = tokens[start];
+        let last = tokens[end - 1];
+        arguments.push(ParsedFunctionAnnotationArgument {
+            kind: if start + 1 == end && first.kind == TokenKind::Identifier {
+                ParsedFunctionAnnotationArgumentKind::Identifier
+            } else {
+                ParsedFunctionAnnotationArgumentKind::Other
+            },
+            text: source[first.start..last.end].to_string(),
+        });
+        start = end + 1;
+    }
+    Ok(arguments)
 }
 
 fn parse_effect_annotation_arguments(
@@ -2415,6 +2507,37 @@ function tick(): i32 {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].name, "fast_path");
         assert_eq!(parsed[0].return_type_name, "i32");
+    }
+
+    #[test]
+    fn retains_requires_preflight_as_one_compile_time_annotation_expression() {
+        let source = "@requires(cells.can_access(x, y))\nfunction set_cell(x: i32, y: i32): void { return; }\n";
+        let parsed = parse_top_level_functions(source).expect("parse requires annotation");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].annotations.len(), 1);
+        let annotation = &parsed[0].annotations[0];
+        assert_eq!(annotation.name, "requires");
+        assert!(annotation.has_parentheses);
+        assert_eq!(annotation.arguments.len(), 1);
+        assert_eq!(annotation.arguments[0].text, "cells.can_access(x, y)");
+    }
+
+    #[test]
+    fn retains_leading_inline_and_requires_annotations_together() {
+        let source = "@inline @requires(events.can_push())\nfunction enqueue(value: i32): void { return; }\n";
+        let parsed = parse_top_level_functions(source).expect("parse leading annotations");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].annotations.len(), 2);
+        assert_eq!(parsed[0].annotations[0].name, "inline");
+        assert_eq!(parsed[0].annotations[1].name, "requires");
+    }
+
+    #[test]
+    fn rejects_requires_on_leading_extern_function() {
+        let source = "@requires(events.can_push())\nextern function enqueue(value: i32): void;\n";
+        let error = parse_top_level_functions(source)
+            .expect_err("required functions must not silently become extern declarations");
+        assert!(error.contains("cannot be extern"), "{error}");
     }
 
     #[test]

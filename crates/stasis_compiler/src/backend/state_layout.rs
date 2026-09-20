@@ -1,7 +1,7 @@
-use super::compile_analysis::{CollectionInfoMap, GlobalPathTypeMap};
+use super::compile_analysis::{CollectionInfoMap, GlobalPathTypeMap, TypedCollectionInfoMap};
 use crate::frontend::types::{
-    TypeCategory, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16,
-    TYPE_ID_U32, TYPE_ID_U8,
+    TypeCategory, TypeTable, TypedCollectionDescriptor, TypedCollectionKind, TYPE_ID_BOOL,
+    TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -81,6 +81,12 @@ pub struct StateCollectionFieldLayout {
     pub type_name: String,
     #[serde(default)]
     pub storage_type_name: String,
+    /// Physical element count for this lane when it differs from the
+    /// collection's logical capacity.  Older serialized layouts omit this
+    /// additive field; those layouts continue to use the collection capacity
+    /// as the compatibility fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_count: Option<u64>,
 }
 
 impl StateCollectionFieldLayout {
@@ -91,6 +97,36 @@ impl StateCollectionFieldLayout {
             &self.storage_type_name
         }
     }
+}
+
+/// Return the physical element count for one collection lane at a logical
+/// collection capacity.  Legacy ordinary collection fields have no
+/// `element_count`, so they retain the collection-capacity fallback.  Typed
+/// payload lanes that track the logical capacity continue to scale with a
+/// capacity projection; a bitset's `words` lane instead scales by its packed
+/// 32-bit word count.
+pub(crate) fn collection_field_element_count(
+    collection: &StateCollectionLayout,
+    field: &StateCollectionFieldLayout,
+    logical_capacity: u64,
+) -> u64 {
+    let current_capacity = u64::try_from(collection.capacity).unwrap_or(0);
+    match field.element_count {
+        None => logical_capacity,
+        Some(count) if logical_capacity == current_capacity => count,
+        Some(_) if is_bitset_collection(collection) && field.field == "words" => {
+            logical_capacity.div_ceil(32)
+        }
+        Some(count) if count == current_capacity => logical_capacity,
+        Some(count) => count,
+    }
+}
+
+fn is_bitset_collection(collection: &StateCollectionLayout) -> bool {
+    collection
+        .element_shape
+        .split(';')
+        .any(|part| part == "kind=bitset")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -260,6 +296,9 @@ pub fn build_state_memory_report(
             .copied()
             .map(|count| count.min(old_capacity));
         let mut bytes_per_element = 0u64;
+        let mut capacity_bytes = 0u64;
+        let mut projected_bytes = 0u64;
+        let mut active_bytes = active_count.map(|_| 0u64);
         for field in &collection.fields {
             let storage_type_name = field.storage_type_name();
             let element_bytes = storage_type_bytes(storage_type_name).unwrap_or(0);
@@ -272,6 +311,25 @@ pub fn build_state_memory_report(
             bytes_per_element = bytes_per_element
                 .checked_add(element_bytes)
                 .ok_or_else(|| "state memory report byte count overflow".to_string())?;
+            let field_capacity = collection_field_element_count(collection, field, old_capacity);
+            let projected_field_capacity =
+                collection_field_element_count(collection, field, new_capacity);
+            let field_active_count = active_count
+                .map(|count| collection_field_active_count(collection, field, count, old_capacity));
+            let field_capacity_bytes = checked_memory_bytes(field_capacity, element_bytes)?;
+            let field_projected_bytes =
+                checked_memory_bytes(projected_field_capacity, element_bytes)?;
+            capacity_bytes = capacity_bytes
+                .checked_add(field_capacity_bytes)
+                .ok_or_else(|| "state memory report byte count overflow".to_string())?;
+            projected_bytes = projected_bytes
+                .checked_add(field_projected_bytes)
+                .ok_or_else(|| "state memory report byte count overflow".to_string())?;
+            if let (Some(total), Some(count)) = (&mut active_bytes, field_active_count) {
+                *total = total
+                    .checked_add(checked_memory_bytes(count, element_bytes)?)
+                    .ok_or_else(|| "state memory report byte count overflow".to_string())?;
+            }
             entries.push(StateMemoryEntry {
                 path: collection.path.clone(),
                 field: field.field.clone(),
@@ -280,16 +338,14 @@ pub fn build_state_memory_report(
                 alignment_bytes: storage_type_alignment(storage_type_name).unwrap_or(1),
                 element_bytes,
                 padding_bytes: 0,
-                capacity: old_capacity,
-                active_count,
-                capacity_bytes: checked_memory_bytes(old_capacity, element_bytes)?,
-                active_bytes: active_count
+                capacity: field_capacity,
+                active_count: field_active_count,
+                capacity_bytes: field_capacity_bytes,
+                active_bytes: field_active_count
                     .map(|count| checked_memory_bytes(count, element_bytes))
                     .transpose()?,
             });
         }
-        let capacity_bytes = checked_memory_bytes(old_capacity, bytes_per_element)?;
-        let projected_bytes = checked_memory_bytes(new_capacity, bytes_per_element)?;
         pools.push(StateMemoryPoolReport {
             path: collection.path.clone(),
             element_shape: collection.element_shape.clone(),
@@ -297,9 +353,7 @@ pub fn build_state_memory_report(
             active_count,
             bytes_per_element,
             capacity_bytes,
-            active_bytes: active_count
-                .map(|count| checked_memory_bytes(count, bytes_per_element))
-                .transpose()?,
+            active_bytes,
         });
         if new_capacity != old_capacity {
             let delta = i128::from(projected_bytes) - i128::from(capacity_bytes);
@@ -439,6 +493,21 @@ fn checked_memory_bytes(count: u64, element_bytes: u64) -> Result<u64, String> {
         .ok_or_else(|| "state memory report byte count overflow".to_string())
 }
 
+fn collection_field_active_count(
+    collection: &StateCollectionLayout,
+    field: &StateCollectionFieldLayout,
+    active_count: u64,
+    logical_capacity: u64,
+) -> u64 {
+    let active_count = active_count.min(logical_capacity);
+    let field_capacity = collection_field_element_count(collection, field, logical_capacity);
+    if is_bitset_collection(collection) && field.field == "words" {
+        active_count.div_ceil(32).min(field_capacity)
+    } else {
+        active_count.min(field_capacity)
+    }
+}
+
 pub fn is_command_buffer_path(path: &str) -> bool {
     path.starts_with("gfx_cmd_")
         || path.starts_with("render_cmd_")
@@ -453,11 +522,22 @@ pub fn is_command_buffer_path(path: &str) -> bool {
 pub(crate) fn build_state_layout(
     global_path_types: &GlobalPathTypeMap,
     collection_infos: &CollectionInfoMap,
+    typed_collection_descriptors: &TypedCollectionInfoMap,
     type_table: &TypeTable,
-) -> StateLayout {
-    let scalars = global_path_types
+) -> Result<StateLayout, String> {
+    let typed_paths = typed_collection_descriptors
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for (path, descriptor) in typed_collection_descriptors {
+        validate_typed_collection_placement(path, descriptor, global_path_types, type_table)?;
+    }
+    let mut scalars: Vec<StateScalarLayout> = global_path_types
         .iter()
         .filter_map(|(path, type_id)| {
+            if typed_paths.contains(path) {
+                return None;
+            }
             let info = type_table.type_info(*type_id)?;
             let storage_type_name = scalar_storage_type_name(type_table, *type_id)?;
             if info.category == TypeCategory::Named
@@ -484,6 +564,7 @@ pub(crate) fn build_state_layout(
                     field: String::new(),
                     type_name,
                     storage_type_name,
+                    element_count: None,
                 });
             }
             fields.extend(info.field_types.iter().filter_map(|(field, type_id)| {
@@ -492,6 +573,7 @@ pub(crate) fn build_state_layout(
                         field: field.clone(),
                         type_name,
                         storage_type_name,
+                        element_count: None,
                     },
                 )
             }));
@@ -504,7 +586,49 @@ pub(crate) fn build_state_layout(
             }
         })
         .collect();
+    for (path, descriptor) in typed_collection_descriptors {
+        let mut fields = Vec::new();
+        for lane in &descriptor.lanes {
+            let type_name = type_table
+                .type_info(lane.type_id)
+                .map(|info| info.name.clone())
+                .unwrap_or_else(|| format!("type{}", lane.type_id));
+            let storage_type_name = typed_lane_storage_type_name(lane.type_id)
+                .unwrap_or_default()
+                .to_string();
+            if typed_metadata_lane(lane.name.as_str()) {
+                scalars.push(StateScalarLayout {
+                    path: format!("{path}.{}", lane.name),
+                    type_name,
+                    storage_type_name,
+                });
+            } else {
+                fields.push(StateCollectionFieldLayout {
+                    field: lane.name.clone(),
+                    type_name,
+                    storage_type_name,
+                    element_count: Some(lane.element_count),
+                });
+            }
+        }
+        collections.push(StateCollectionLayout {
+            path: path.clone(),
+            capacity: i32::try_from(descriptor.capacity).map_err(|_| {
+                format!(
+                    "typed collection state path '{}' capacity {} exceeds i32 layout capacity",
+                    path, descriptor.capacity
+                )
+            })?,
+            element_shape: typed_collection_layout_metadata(descriptor, type_table),
+            fully_migratable: false,
+            fields,
+        });
+    }
+    scalars.sort_by(|left, right| left.path.cmp(&right.path));
     for (path, type_id) in global_path_types {
+        if typed_paths.contains(path) {
+            continue;
+        }
         let Some(info) = type_table.type_info(*type_id) else {
             continue;
         };
@@ -533,6 +657,7 @@ pub(crate) fn build_state_layout(
                     field: String::new(),
                     type_name: "u8".to_string(),
                     storage_type_name: "u8".to_string(),
+                    element_count: None,
                 });
             }
             collection.fully_migratable = true;
@@ -547,6 +672,7 @@ pub(crate) fn build_state_layout(
                 field: String::new(),
                 type_name: "u8".to_string(),
                 storage_type_name: "u8".to_string(),
+                element_count: None,
             }],
         });
     }
@@ -558,6 +684,9 @@ pub(crate) fn build_state_layout(
     let opaque = global_path_types
         .iter()
         .filter_map(|(path, type_id)| {
+            if typed_paths.contains(path) {
+                return None;
+            }
             if scalar_storage_type_name(type_table, *type_id).is_some()
                 || collection_paths.contains(path.as_str())
             {
@@ -581,6 +710,9 @@ pub(crate) fn build_state_layout(
     let structs = global_path_types
         .iter()
         .filter_map(|(path, type_id)| {
+            if typed_paths.contains(path) {
+                return None;
+            }
             let info = type_table.type_info(*type_id)?;
             if info.category != TypeCategory::Named {
                 return None;
@@ -612,12 +744,470 @@ pub(crate) fn build_state_layout(
             })
         })
         .collect();
-    StateLayout {
+    Ok(StateLayout {
         scalars,
         collections,
         structs,
         opaque,
+    })
+}
+
+/// Stable metadata spelling for compiler-owned collection state.  The
+/// existing `element_shape` slot is used deliberately: widening the public
+/// layout records would break app-side fixtures that construct those records
+/// directly.  This spelling includes every descriptor fact that can affect
+/// migration identity, including lane order and byte ranges.
+pub(crate) fn typed_collection_layout_metadata(
+    descriptor: &TypedCollectionDescriptor,
+    type_table: &TypeTable,
+) -> String {
+    let lanes = descriptor
+        .lanes
+        .iter()
+        .map(|lane| {
+            let type_name = type_table
+                .type_info(lane.type_id)
+                .map(|info| info.name.as_str())
+                .unwrap_or("?");
+            format!(
+                "{}:{}:{}:{}:{}:{}",
+                lane.name,
+                type_name,
+                lane.element_count,
+                lane.offset_bytes,
+                lane.byte_size,
+                lane.alignment_bytes
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "typed_collection{{type={};kind={};capacity={};width={};height={};static_size={};lanes=[{}]}}",
+        descriptor.canonical_type_name(type_table),
+        descriptor.kind_name(),
+        descriptor.capacity,
+        descriptor.width.map_or_else(|| "-".to_string(), |value| value.to_string()),
+        descriptor.height.map_or_else(|| "-".to_string(), |value| value.to_string()),
+        descriptor.static_size_bytes,
+        lanes,
+    )
+}
+
+fn validate_typed_collection_placement(
+    path: &str,
+    descriptor: &TypedCollectionDescriptor,
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+) -> Result<(), String> {
+    let type_id = global_path_types.get(path).copied().ok_or_else(|| {
+        format!(
+            "typed collection descriptor '{path}' has unsupported placement; only persistent global paths are supported"
+        )
+    })?;
+    if !type_table.is_typed_collection_type(type_id) {
+        return Err(format!(
+            "typed collection descriptor '{path}' is not backed by its compiler-owned type identity"
+        ));
     }
+    let info = type_table.type_info(type_id).ok_or_else(|| {
+        format!("typed collection descriptor '{path}' has no type metadata for type id {type_id}")
+    })?;
+    let canonical = descriptor.canonical_type_name(type_table);
+    if info.name != canonical {
+        return Err(format!(
+            "typed collection descriptor '{path}' identity mismatch: type table has '{}', descriptor has '{canonical}'",
+            info.name
+        ));
+    }
+    if descriptor.capacity > i32::MAX as u32 {
+        return Err(format!(
+            "typed collection state path '{path}' capacity {} exceeds i32 layout capacity",
+            descriptor.capacity
+        ));
+    }
+    let supported_kind = matches!(
+        descriptor.kind,
+        TypedCollectionKind::Pool
+            | TypedCollectionKind::StablePool
+            | TypedCollectionKind::Queue
+            | TypedCollectionKind::RingBuffer
+            | TypedCollectionKind::PriorityQueue
+            | TypedCollectionKind::Map
+            | TypedCollectionKind::Set
+            | TypedCollectionKind::Grid
+            | TypedCollectionKind::Bitset
+    );
+    let supported_payload = match descriptor.kind {
+        TypedCollectionKind::Pool
+        | TypedCollectionKind::StablePool
+        | TypedCollectionKind::Queue
+        | TypedCollectionKind::RingBuffer => descriptor.element_type == Some(TYPE_ID_I32),
+        TypedCollectionKind::PriorityQueue => descriptor.element_type == Some(TYPE_ID_I32),
+        TypedCollectionKind::Map => {
+            descriptor.key_type == Some(TYPE_ID_I32) && descriptor.value_type == Some(TYPE_ID_I32)
+        }
+        TypedCollectionKind::Set => descriptor.key_type == Some(TYPE_ID_I32),
+        TypedCollectionKind::Grid => descriptor.element_type == Some(TYPE_ID_I32),
+        TypedCollectionKind::Bitset => true,
+    };
+    if !supported_kind || !supported_payload {
+        return Err(format!(
+            "typed collection state path '{path}' is not yet supported for production layout: only pool<i32,N>, stable_pool<i32,N>, queue<i32,N>, ring_buffer<i32,N>, priority_queue<i32,N>, map<i32,i32,N>, set<i32,N>, grid<i32,W,H>, and bitset<N> have a descriptor-defined state contract; got {}",
+            descriptor.canonical_type_name(type_table)
+        ));
+    }
+
+    if descriptor.kind == TypedCollectionKind::StablePool
+        && !stable_pool_lane_schema_matches(descriptor)
+    {
+        return Err(format!(
+            "typed collection state path '{path}' stable_pool descriptor must use exact count:i32@0, occupied:u8[N], and aligned values:i32[N] lanes"
+        ));
+    }
+    if descriptor.kind == TypedCollectionKind::Map && !map_lane_schema_matches(descriptor) {
+        return Err(format!(
+            "typed collection state path '{path}' map descriptor must use exact count:i32@0, occupied:u8[N], aligned keys:i32[N], and aligned values:i32[N] lanes"
+        ));
+    }
+    if descriptor.kind == TypedCollectionKind::Set && !set_lane_schema_matches(descriptor) {
+        return Err(format!(
+            "typed collection state path '{path}' set descriptor must use exact count:i32@0, occupied:u8[N], and aligned keys:i32[N] lanes"
+        ));
+    }
+    if descriptor.kind == TypedCollectionKind::PriorityQueue
+        && !priority_queue_lane_schema_matches(descriptor)
+    {
+        return Err(format!(
+            "typed collection state path '{path}' priority_queue descriptor must use exact count:i32@0, next_order:u32@4, priority:i32[N]@8, order:u32[N], and values:i32[N] lanes"
+        ));
+    }
+    if descriptor.kind == TypedCollectionKind::Grid && !grid_lane_schema_matches(descriptor) {
+        return Err(format!(
+            "typed collection state path '{path}' grid descriptor must use exact values:i32[W*H]@0 lane"
+        ));
+    }
+    if descriptor.kind == TypedCollectionKind::Bitset && !bitset_lane_schema_matches(descriptor) {
+        return Err(format!(
+            "typed collection state path '{path}' bitset descriptor must use exact words:u32[ceil(N/32)]@0 lane"
+        ));
+    }
+
+    let mut names = BTreeSet::new();
+    let mut previous_end = 0u64;
+    let mut max_alignment = 1u64;
+    for lane in &descriptor.lanes {
+        if !names.insert(lane.name.as_str()) {
+            return Err(format!(
+                "typed collection state path '{path}' contains duplicate lane '{}'",
+                lane.name
+            ));
+        }
+        let storage_type = typed_lane_storage_type_name(lane.type_id).ok_or_else(|| {
+            format!(
+                "typed collection state path '{path}' lane '{}' has unsupported payload type id {}",
+                lane.name, lane.type_id
+            )
+        })?;
+        let element_bytes = storage_type_bytes(storage_type).ok_or_else(|| {
+            format!(
+                "typed collection state path '{path}' lane '{}' has unsupported storage type '{storage_type}'",
+                lane.name
+            )
+        })?;
+        let alignment = storage_type_alignment(storage_type).ok_or_else(|| {
+            format!(
+                "typed collection state path '{path}' lane '{}' has unsupported alignment",
+                lane.name
+            )
+        })?;
+        if lane.alignment_bytes != alignment {
+            return Err(format!(
+                "typed collection state path '{path}' lane '{}' alignment {} does not match scalar alignment {alignment}",
+                lane.name, lane.alignment_bytes
+            ));
+        }
+        if lane.offset_bytes % alignment != 0 {
+            return Err(format!(
+                "typed collection state path '{path}' lane '{}' offset {} is not aligned to {alignment}",
+                lane.name, lane.offset_bytes
+            ));
+        }
+        let expected_size = element_bytes
+            .checked_mul(lane.element_count)
+            .ok_or_else(|| {
+                format!(
+                    "typed collection state path '{path}' lane '{}' byte size overflow",
+                    lane.name
+                )
+            })?;
+        if lane.byte_size != expected_size {
+            return Err(format!(
+                "typed collection state path '{path}' lane '{}' byte size {} does not match {}",
+                lane.name, lane.byte_size, expected_size
+            ));
+        }
+        if lane.byte_size == 0 {
+            if lane.offset_bytes < previous_end {
+                return Err(format!(
+                    "typed collection state path '{path}' lane '{}' overlaps a previous lane",
+                    lane.name
+                ));
+            }
+            continue;
+        }
+        if lane.offset_bytes < previous_end {
+            return Err(format!(
+                "typed collection state path '{path}' lane '{}' overlaps a previous lane",
+                lane.name
+            ));
+        }
+        previous_end = lane
+            .offset_bytes
+            .checked_add(lane.byte_size)
+            .ok_or_else(|| {
+                format!(
+                    "typed collection state path '{path}' lane '{}' offset overflow",
+                    lane.name
+                )
+            })?;
+        max_alignment = max_alignment.max(alignment);
+    }
+    let expected_total = align_state_layout_offset(previous_end, max_alignment)?;
+    if descriptor.static_size_bytes != expected_total {
+        return Err(format!(
+            "typed collection state path '{path}' total size {} does not match lane total {expected_total}",
+            descriptor.static_size_bytes
+        ));
+    }
+    Ok(())
+}
+
+fn stable_pool_lane_schema_matches(descriptor: &TypedCollectionDescriptor) -> bool {
+    if descriptor.lanes.len() != 3 {
+        return false;
+    }
+
+    let [count, occupied, values] = descriptor.lanes.as_slice() else {
+        return false;
+    };
+    let capacity = u64::from(descriptor.capacity);
+    let values_offset = if capacity == 0 {
+        count.offset_bytes.checked_add(4).unwrap_or(u64::MAX)
+    } else {
+        count
+            .offset_bytes
+            .checked_add(4)
+            .and_then(|offset| align_state_layout_offset(offset + capacity, 4).ok())
+            .unwrap_or(u64::MAX)
+    };
+
+    count.name == "count"
+        && count.type_id == TYPE_ID_I32
+        && count.element_count == 1
+        && count.offset_bytes == 0
+        && count.byte_size == 4
+        && count.alignment_bytes == 4
+        && occupied.name == "occupied"
+        && occupied.type_id == TYPE_ID_U8
+        && occupied.element_count == capacity
+        && occupied.offset_bytes == 4
+        && occupied.byte_size == capacity
+        && occupied.alignment_bytes == 1
+        && values.name == "values"
+        && values.type_id == TYPE_ID_I32
+        && values.element_count == capacity
+        && values.offset_bytes == values_offset
+        && values.byte_size == capacity.saturating_mul(4)
+        && values.alignment_bytes == 4
+}
+
+fn map_lane_schema_matches(descriptor: &TypedCollectionDescriptor) -> bool {
+    if descriptor.lanes.len() != 4 {
+        return false;
+    }
+
+    let [count, occupied, keys, values] = descriptor.lanes.as_slice() else {
+        return false;
+    };
+    let capacity = u64::from(descriptor.capacity);
+    let Some(keys_offset) = map_set_array_offset(capacity) else {
+        return false;
+    };
+    let Some(values_offset) = keys_offset.checked_add(capacity.checked_mul(4).unwrap_or(u64::MAX))
+    else {
+        return false;
+    };
+
+    count_lane_schema_matches(count)
+        && occupied_lane_schema_matches(occupied, capacity)
+        && i32_array_lane_schema_matches(keys, "keys", capacity, keys_offset)
+        && i32_array_lane_schema_matches(values, "values", capacity, values_offset)
+}
+
+fn set_lane_schema_matches(descriptor: &TypedCollectionDescriptor) -> bool {
+    if descriptor.lanes.len() != 3 {
+        return false;
+    }
+
+    let [count, occupied, keys] = descriptor.lanes.as_slice() else {
+        return false;
+    };
+    let capacity = u64::from(descriptor.capacity);
+    let Some(keys_offset) = map_set_array_offset(capacity) else {
+        return false;
+    };
+
+    count_lane_schema_matches(count)
+        && occupied_lane_schema_matches(occupied, capacity)
+        && i32_array_lane_schema_matches(keys, "keys", capacity, keys_offset)
+}
+
+fn priority_queue_lane_schema_matches(descriptor: &TypedCollectionDescriptor) -> bool {
+    if descriptor.lanes.len() != 5 {
+        return false;
+    }
+
+    let [count, next_order, priority, order, values] = descriptor.lanes.as_slice() else {
+        return false;
+    };
+    let capacity = u64::from(descriptor.capacity);
+    let Some(order_offset) = 8u64.checked_add(capacity.checked_mul(4).unwrap_or(u64::MAX)) else {
+        return false;
+    };
+    let Some(values_offset) = 8u64.checked_add(capacity.checked_mul(8).unwrap_or(u64::MAX)) else {
+        return false;
+    };
+
+    count_lane_schema_matches(count)
+        && next_order_lane_schema_matches(next_order)
+        && i32_array_lane_schema_matches(priority, "priority", capacity, 8)
+        && u32_array_lane_schema_matches(order, "order", capacity, order_offset)
+        && i32_array_lane_schema_matches(values, "values", capacity, values_offset)
+}
+
+fn grid_lane_schema_matches(descriptor: &TypedCollectionDescriptor) -> bool {
+    if descriptor.lanes.len() != 1 {
+        return false;
+    }
+
+    let [values] = descriptor.lanes.as_slice() else {
+        return false;
+    };
+    let capacity = u64::from(descriptor.capacity);
+    values.name == "values"
+        && values.type_id == TYPE_ID_I32
+        && values.element_count == capacity
+        && values.offset_bytes == 0
+        && values.byte_size == capacity.saturating_mul(4)
+        && values.alignment_bytes == 4
+}
+
+fn bitset_lane_schema_matches(descriptor: &TypedCollectionDescriptor) -> bool {
+    if descriptor.lanes.len() != 1 {
+        return false;
+    }
+
+    let [words] = descriptor.lanes.as_slice() else {
+        return false;
+    };
+    let capacity = u64::from(descriptor.capacity);
+    let word_count = capacity.div_ceil(32);
+    words.name == "words"
+        && words.type_id == TYPE_ID_U32
+        && words.element_count == word_count
+        && words.offset_bytes == 0
+        && words.byte_size == word_count.saturating_mul(4)
+        && words.alignment_bytes == 4
+}
+
+fn map_set_array_offset(capacity: u64) -> Option<u64> {
+    let end_of_occupied = 4u64.checked_add(capacity)?;
+    align_state_layout_offset(end_of_occupied, 4).ok()
+}
+
+fn count_lane_schema_matches(lane: &crate::frontend::types::TypedCollectionLane) -> bool {
+    lane.name == "count"
+        && lane.type_id == TYPE_ID_I32
+        && lane.element_count == 1
+        && lane.offset_bytes == 0
+        && lane.byte_size == 4
+        && lane.alignment_bytes == 4
+}
+
+fn occupied_lane_schema_matches(
+    lane: &crate::frontend::types::TypedCollectionLane,
+    capacity: u64,
+) -> bool {
+    lane.name == "occupied"
+        && lane.type_id == TYPE_ID_U8
+        && lane.element_count == capacity
+        && lane.offset_bytes == 4
+        && lane.byte_size == capacity
+        && lane.alignment_bytes == 1
+}
+
+fn i32_array_lane_schema_matches(
+    lane: &crate::frontend::types::TypedCollectionLane,
+    name: &str,
+    capacity: u64,
+    offset: u64,
+) -> bool {
+    lane.name == name
+        && lane.type_id == TYPE_ID_I32
+        && lane.element_count == capacity
+        && lane.offset_bytes == offset
+        && lane.byte_size == capacity.saturating_mul(4)
+        && lane.alignment_bytes == 4
+}
+
+fn next_order_lane_schema_matches(lane: &crate::frontend::types::TypedCollectionLane) -> bool {
+    lane.name == "next_order"
+        && lane.type_id == TYPE_ID_U32
+        && lane.element_count == 1
+        && lane.offset_bytes == 4
+        && lane.byte_size == 4
+        && lane.alignment_bytes == 4
+}
+
+fn u32_array_lane_schema_matches(
+    lane: &crate::frontend::types::TypedCollectionLane,
+    name: &str,
+    capacity: u64,
+    offset: u64,
+) -> bool {
+    lane.name == name
+        && lane.type_id == TYPE_ID_U32
+        && lane.element_count == capacity
+        && lane.offset_bytes == offset
+        && lane.byte_size == capacity.saturating_mul(4)
+        && lane.alignment_bytes == 4
+}
+
+fn typed_lane_storage_type_name(type_id: u16) -> Option<&'static str> {
+    match type_id {
+        TYPE_ID_I32 => Some("i32"),
+        TYPE_ID_F32 => Some("f32"),
+        TYPE_ID_F64 => Some("f64"),
+        TYPE_ID_BOOL => Some("bool"),
+        TYPE_ID_U8 => Some("u8"),
+        TYPE_ID_U16 => Some("u16"),
+        TYPE_ID_U32 => Some("u32"),
+        _ => None,
+    }
+}
+
+fn typed_metadata_lane(name: &str) -> bool {
+    matches!(name, "count" | "head" | "next_order")
+}
+
+fn align_state_layout_offset(offset: u64, alignment: u64) -> Result<u64, String> {
+    let adjustment = alignment
+        .checked_sub(1)
+        .ok_or_else(|| "typed collection alignment cannot be zero".to_string())?;
+    offset
+        .checked_add(adjustment)
+        .map(|value| value / alignment * alignment)
+        .ok_or_else(|| "typed collection alignment arithmetic overflow".to_string())
 }
 
 pub(crate) fn is_named_scalar_state_path(
@@ -626,12 +1216,11 @@ pub(crate) fn is_named_scalar_state_path(
     global_path_types: &GlobalPathTypeMap,
     type_table: &TypeTable,
 ) -> bool {
-    type_table
-        .type_info(type_id)
-        .is_some_and(|info| info.category == TypeCategory::Named)
-        && !global_path_types
-            .keys()
-            .any(|candidate| candidate.starts_with(&format!("{path}.")))
+    type_table.type_info(type_id).is_some_and(|info| {
+        info.category == TypeCategory::Named && !type_table.is_typed_collection_type(type_id)
+    }) && !global_path_types
+        .keys()
+        .any(|candidate| candidate.starts_with(&format!("{path}.")))
 }
 
 fn scalar_storage_type_name(type_table: &TypeTable, type_id: u16) -> Option<&'static str> {
@@ -661,10 +1250,46 @@ fn state_value_type_names(type_table: &TypeTable, type_id: u16) -> Option<(Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{aot_storage_symbol, build_state_memory_report, AotStorageSymbolKind};
+    use super::{
+        aot_storage_symbol, build_state_layout, build_state_memory_report,
+        is_named_scalar_state_path, state_layout_digest, AotStorageSymbolKind,
+    };
     use crate::backend::aot::AotProcess;
+    use crate::backend::compile_analysis::{
+        collect_foreach_collection_infos, collect_global_path_types,
+        collect_top_level_constant_values, collect_typed_collection_descriptors,
+    };
     use crate::backend::jit::JitProcess;
+    use crate::compiler::SourceFile;
+    use crate::frontend::types::TypeTable;
     use std::collections::BTreeMap;
+
+    fn typed_layout_result(type_name: &str) -> Result<super::StateLayout, String> {
+        let content =
+            format!("global actors: {type_name};\nfunction main(): i32 {{ return 0; }}\n");
+        let files = vec![SourceFile {
+            path: "typed_pool.stasis".to_string(),
+            hash: 0,
+            original_content: content.clone(),
+            content,
+            functions: Vec::new(),
+        }];
+        let mut types = TypeTable::new();
+        types.ensure_utf8_view_id().expect("utf8 view");
+        types.ensure_ascii_view_id().expect("ascii view");
+        let constants = collect_top_level_constant_values(&files, &mut types).expect("constants");
+        let globals =
+            collect_global_path_types(&files, &mut types, &constants).expect("global paths");
+        let collections =
+            collect_foreach_collection_infos(&files, &mut types, &constants).expect("arrays");
+        let typed =
+            collect_typed_collection_descriptors(&files, &mut types).expect("typed descriptors");
+        build_state_layout(&globals, &collections, &typed, &types)
+    }
+
+    fn typed_layout(type_name: &str) -> super::StateLayout {
+        typed_layout_result(type_name).expect("state layout")
+    }
 
     #[test]
     fn aot_storage_symbol_namespaces_scalar_metadata_and_array_fields() {
@@ -699,6 +1324,771 @@ mod tests {
             array,
             "a scalar user path cannot recreate an array namespace symbol"
         );
+    }
+
+    #[test]
+    fn typed_pool_layout_is_descriptor_owned_and_has_count_then_values_lanes() {
+        let layout = typed_layout("pool<i32, 2>");
+        assert!(layout.scalars.iter().all(|scalar| scalar.path != "actors"));
+        let count = layout
+            .scalars
+            .iter()
+            .find(|scalar| scalar.path == "actors.count")
+            .expect("typed pool count scalar");
+        assert_eq!(count.type_name, "i32");
+        assert_eq!(count.storage_type_name(), "i32");
+        let pool = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("typed pool collection layout");
+        assert_eq!(pool.capacity, 2);
+        assert!(!pool.fully_migratable);
+        assert_eq!(
+            pool.fields
+                .iter()
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["values"]
+        );
+        assert_eq!(pool.fields[0].storage_type_name(), "i32");
+        assert!(pool
+            .element_shape
+            .contains("typed_collection{type=pool<i32, 2>;kind=pool;capacity=2"));
+        assert!(pool
+            .element_shape
+            .contains("lanes=[count:i32:1:0:4:4,values:i32:2:4:8:4]"));
+    }
+
+    #[test]
+    fn typed_collection_root_is_not_a_named_scalar_state_path() {
+        let mut types = TypeTable::new();
+        let typed = types
+            .resolve_or_intern("pool<i32, 2>")
+            .expect("typed pool type");
+        let nominal = types
+            .resolve_or_intern("Entity")
+            .expect("nominal scalar type");
+        let global_path_types = BTreeMap::from([
+            ("actors".to_string(), typed),
+            ("entity".to_string(), nominal),
+        ]);
+
+        assert_eq!(
+            types.type_info(typed).map(|info| info.category),
+            Some(crate::frontend::types::TypeCategory::Named)
+        );
+        assert!(!is_named_scalar_state_path(
+            "actors",
+            typed,
+            &global_path_types,
+            &types
+        ));
+        assert!(is_named_scalar_state_path(
+            "entity",
+            nominal,
+            &global_path_types,
+            &types
+        ));
+    }
+
+    #[test]
+    fn typed_pool_zero_capacity_keeps_metadata_lane_without_payload_bytes() {
+        let layout = typed_layout("pool<i32, 0>");
+        assert!(layout.scalars.iter().all(|scalar| scalar.path != "actors"));
+        assert!(layout
+            .scalars
+            .iter()
+            .any(|scalar| scalar.path == "actors.count"));
+        let pool = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("zero-capacity typed pool layout");
+        assert_eq!(pool.capacity, 0);
+        assert_eq!(
+            pool.fields
+                .iter()
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["values"]
+        );
+        assert!(pool
+            .element_shape
+            .contains("type=pool<i32, 0>;kind=pool;capacity=0"));
+        assert!(pool
+            .element_shape
+            .contains("lanes=[count:i32:1:0:4:4,values:i32:0:4:0:4]"));
+    }
+
+    #[test]
+    fn typed_stable_pool_layout_has_exact_lanes() {
+        let layout = typed_layout("stable_pool<i32, 2>");
+        assert!(layout.scalars.iter().all(|scalar| scalar.path != "actors"));
+        let count = layout
+            .scalars
+            .iter()
+            .find(|scalar| scalar.path == "actors.count")
+            .expect("typed stable pool count scalar");
+        assert_eq!(count.type_name, "i32");
+        assert_eq!(count.storage_type_name(), "i32");
+
+        let pool = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("typed stable pool collection layout");
+        assert_eq!(pool.capacity, 2);
+        assert!(!pool.fully_migratable);
+        assert_eq!(
+            pool.fields
+                .iter()
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["occupied", "values"]
+        );
+        assert_eq!(pool.fields[0].type_name, "u8");
+        assert_eq!(pool.fields[0].storage_type_name(), "u8");
+        assert_eq!(pool.fields[1].type_name, "i32");
+        assert_eq!(pool.fields[1].storage_type_name(), "i32");
+        assert_eq!(
+            pool.element_shape,
+            "typed_collection{type=stable_pool<i32, 2>;kind=stable_pool;capacity=2;width=-;height=-;static_size=16;lanes=[count:i32:1:0:4:4,occupied:u8:2:4:2:1,values:i32:2:8:8:4]}"
+        );
+    }
+
+    #[test]
+    fn typed_stable_pool_zero_capacity_keeps_occupied_and_values_lanes_empty() {
+        let layout = typed_layout("stable_pool<i32, 0>");
+        let count = layout
+            .scalars
+            .iter()
+            .find(|scalar| scalar.path == "actors.count")
+            .expect("zero-capacity typed stable pool count scalar");
+        assert_eq!(count.storage_type_name(), "i32");
+        let pool = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("zero-capacity typed stable pool collection layout");
+        assert_eq!(pool.capacity, 0);
+        assert_eq!(
+            pool.fields
+                .iter()
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["occupied", "values"]
+        );
+        assert_eq!(
+            pool.element_shape,
+            "typed_collection{type=stable_pool<i32, 0>;kind=stable_pool;capacity=0;width=-;height=-;static_size=4;lanes=[count:i32:1:0:4:4,occupied:u8:0:4:0:1,values:i32:0:4:0:4]}"
+        );
+    }
+
+    #[test]
+    fn typed_map_and_set_layouts_have_exact_i32_lanes_for_every_capacity() {
+        for capacity in [0, 1, 3] {
+            let map = typed_layout(&format!("map<i32, i32, {capacity}>"));
+            assert_eq!(
+                map.scalars
+                    .iter()
+                    .map(|scalar| scalar.path.as_str())
+                    .collect::<Vec<_>>(),
+                ["actors.count"]
+            );
+            let map_layout = map
+                .collections
+                .iter()
+                .find(|collection| collection.path == "actors")
+                .expect("typed map collection layout");
+            assert_eq!(map_layout.capacity, capacity);
+            assert!(!map_layout.fully_migratable);
+            assert_eq!(
+                map_layout
+                    .fields
+                    .iter()
+                    .map(|field| field.field.as_str())
+                    .collect::<Vec<_>>(),
+                ["occupied", "keys", "values"]
+            );
+            assert_eq!(
+                    map_layout.element_shape,
+                    format!(
+                        "typed_collection{{type=map<i32, i32, {capacity}>;kind=map;capacity={capacity};width=-;height=-;static_size={};lanes=[{}]}}",
+                        match capacity {
+                            0 => 4,
+                            1 => 16,
+                            3 => 32,
+                            _ => unreachable!(),
+                        },
+                        match capacity {
+                            0 => "count:i32:1:0:4:4,occupied:u8:0:4:0:1,keys:i32:0:4:0:4,values:i32:0:4:0:4",
+                            1 => "count:i32:1:0:4:4,occupied:u8:1:4:1:1,keys:i32:1:8:4:4,values:i32:1:12:4:4",
+                            3 => "count:i32:1:0:4:4,occupied:u8:3:4:3:1,keys:i32:3:8:12:4,values:i32:3:20:12:4",
+                            _ => unreachable!(),
+                        }
+                    )
+                );
+
+            let set = typed_layout(&format!("set<i32, {capacity}>"));
+            assert_eq!(
+                set.scalars
+                    .iter()
+                    .map(|scalar| scalar.path.as_str())
+                    .collect::<Vec<_>>(),
+                ["actors.count"]
+            );
+            let set_layout = set
+                .collections
+                .iter()
+                .find(|collection| collection.path == "actors")
+                .expect("typed set collection layout");
+            assert_eq!(set_layout.capacity, capacity);
+            assert!(!set_layout.fully_migratable);
+            assert_eq!(
+                set_layout
+                    .fields
+                    .iter()
+                    .map(|field| field.field.as_str())
+                    .collect::<Vec<_>>(),
+                ["occupied", "keys"]
+            );
+            assert_eq!(
+                    set_layout.element_shape,
+                    format!(
+                        "typed_collection{{type=set<i32, {capacity}>;kind=set;capacity={capacity};width=-;height=-;static_size={};lanes=[{}]}}",
+                        match capacity {
+                            0 => 4,
+                            1 => 12,
+                            3 => 20,
+                            _ => unreachable!(),
+                        },
+                        match capacity {
+                            0 => "count:i32:1:0:4:4,occupied:u8:0:4:0:1,keys:i32:0:4:0:4",
+                            1 => "count:i32:1:0:4:4,occupied:u8:1:4:1:1,keys:i32:1:8:4:4",
+                            3 => "count:i32:1:0:4:4,occupied:u8:3:4:3:1,keys:i32:3:8:12:4",
+                            _ => unreachable!(),
+                        }
+                    )
+                );
+        }
+    }
+
+    #[test]
+    fn typed_priority_queue_layout_has_exact_metadata_and_soa_lanes() {
+        for capacity in [0, 1, 3] {
+            let layout = typed_layout(&format!("priority_queue<i32, {capacity}>"));
+            assert_eq!(
+                layout
+                    .scalars
+                    .iter()
+                    .map(|scalar| scalar.path.as_str())
+                    .collect::<Vec<_>>(),
+                ["actors.count", "actors.next_order"]
+            );
+            let count = layout
+                .scalars
+                .iter()
+                .find(|scalar| scalar.path == "actors.count")
+                .expect("priority queue count scalar");
+            assert_eq!(count.storage_type_name(), "i32");
+            let next_order = layout
+                .scalars
+                .iter()
+                .find(|scalar| scalar.path == "actors.next_order")
+                .expect("priority queue next_order scalar");
+            assert_eq!(next_order.storage_type_name(), "u32");
+
+            let queue = layout
+                .collections
+                .iter()
+                .find(|collection| collection.path == "actors")
+                .expect("priority queue collection layout");
+            assert_eq!(queue.capacity, capacity);
+            assert!(!queue.fully_migratable);
+            assert_eq!(
+                queue
+                    .fields
+                    .iter()
+                    .map(|field| field.field.as_str())
+                    .collect::<Vec<_>>(),
+                ["priority", "order", "values"]
+            );
+            let (static_size, lanes) = match capacity {
+                    0 => (
+                        8,
+                        "count:i32:1:0:4:4,next_order:u32:1:4:4:4,priority:i32:0:8:0:4,order:u32:0:8:0:4,values:i32:0:8:0:4",
+                    ),
+                    1 => (
+                        20,
+                        "count:i32:1:0:4:4,next_order:u32:1:4:4:4,priority:i32:1:8:4:4,order:u32:1:12:4:4,values:i32:1:16:4:4",
+                    ),
+                    3 => (
+                        44,
+                        "count:i32:1:0:4:4,next_order:u32:1:4:4:4,priority:i32:3:8:12:4,order:u32:3:20:12:4,values:i32:3:32:12:4",
+                    ),
+                    _ => unreachable!(),
+                };
+            assert_eq!(
+                    queue.element_shape,
+                    format!(
+                        "typed_collection{{type=priority_queue<i32, {capacity}>;kind=priority_queue;capacity={capacity};width=-;height=-;static_size={static_size};lanes=[{lanes}]}}"
+                    )
+                );
+        }
+    }
+
+    #[test]
+    fn typed_queue_layout_keeps_count_and_head_metadata() {
+        let layout = typed_layout("queue<i32, 2>");
+        let queue = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("typed queue collection layout");
+        assert_eq!(queue.capacity, 2);
+        assert_eq!(
+            queue
+                .fields
+                .iter()
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["values"]
+        );
+        assert!(queue
+            .element_shape
+            .contains("typed_collection{type=queue<i32, 2>;kind=queue;capacity=2"));
+        assert!(queue
+            .element_shape
+            .contains("lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:2:8:8:4]"));
+        for lane in ["count", "head"] {
+            let scalar = layout
+                .scalars
+                .iter()
+                .find(|scalar| scalar.path == format!("actors.{lane}"))
+                .unwrap_or_else(|| panic!("typed queue {lane} scalar"));
+            assert_eq!(scalar.storage_type_name(), "i32");
+        }
+    }
+
+    #[test]
+    fn typed_queue_zero_capacity_retains_count_head_and_empty_values_lane() {
+        let layout = typed_layout("queue<i32, 0>");
+        for lane in ["count", "head"] {
+            assert!(layout
+                .scalars
+                .iter()
+                .any(|scalar| scalar.path == format!("actors.{lane}")));
+        }
+        let queue = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("zero-capacity typed queue layout");
+        assert_eq!(queue.capacity, 0);
+        assert_eq!(
+            queue
+                .fields
+                .iter()
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["values"]
+        );
+        assert!(queue
+            .element_shape
+            .contains("type=queue<i32, 0>;kind=queue;capacity=0"));
+        assert!(queue
+            .element_shape
+            .contains("lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:0:8:0:4]"));
+    }
+
+    #[test]
+    fn typed_ring_buffer_layout_has_exact_count_head_and_values_lanes() {
+        let layout = typed_layout("ring_buffer<i32, 2>");
+        assert!(layout.scalars.iter().all(|scalar| scalar.path != "actors"));
+        let count = layout
+            .scalars
+            .iter()
+            .find(|scalar| scalar.path == "actors.count")
+            .expect("typed ring buffer count scalar");
+        assert_eq!(count.type_name, "i32");
+        assert_eq!(count.storage_type_name(), "i32");
+        let head = layout
+            .scalars
+            .iter()
+            .find(|scalar| scalar.path == "actors.head")
+            .expect("typed ring buffer head scalar");
+        assert_eq!(head.type_name, "i32");
+        assert_eq!(head.storage_type_name(), "i32");
+
+        let ring = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("typed ring buffer collection layout");
+        assert_eq!(ring.capacity, 2);
+        assert!(!ring.fully_migratable);
+        assert_eq!(
+            ring.fields
+                .iter()
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["values"]
+        );
+        assert_eq!(ring.fields[0].type_name, "i32");
+        assert_eq!(ring.fields[0].storage_type_name(), "i32");
+        assert_eq!(
+                ring.element_shape,
+                "typed_collection{type=ring_buffer<i32, 2>;kind=ring_buffer;capacity=2;width=-;height=-;static_size=16;lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:2:8:8:4]}"
+            );
+    }
+
+    #[test]
+    fn typed_ring_buffer_zero_capacity_has_exact_metadata_and_empty_values_lane() {
+        let layout = typed_layout("ring_buffer<i32, 0>");
+        for lane in ["count", "head"] {
+            let scalar = layout
+                .scalars
+                .iter()
+                .find(|scalar| scalar.path == format!("actors.{lane}"))
+                .unwrap_or_else(|| panic!("typed ring buffer {lane} scalar"));
+            assert_eq!(scalar.type_name, "i32");
+            assert_eq!(scalar.storage_type_name(), "i32");
+        }
+        let ring = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("zero-capacity typed ring buffer layout");
+        assert_eq!(ring.capacity, 0);
+        assert!(!ring.fully_migratable);
+        assert_eq!(
+            ring.fields
+                .iter()
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["values"]
+        );
+        assert_eq!(ring.fields[0].type_name, "i32");
+        assert_eq!(ring.fields[0].storage_type_name(), "i32");
+        assert_eq!(
+            ring.element_shape,
+            "typed_collection{type=ring_buffer<i32, 0>;kind=ring_buffer;capacity=0;width=-;height=-;static_size=8;lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:0:8:0:4]}"
+        );
+    }
+
+    #[test]
+    fn typed_pool_capacity_is_state_layout_identity() {
+        let smaller = state_layout_digest(&typed_layout("pool<i32, 2>")).expect("digest");
+        let larger = state_layout_digest(&typed_layout("pool<i32, 3>")).expect("digest");
+        assert_ne!(smaller, larger, "capacity is part of layout identity");
+    }
+
+    #[test]
+    fn typed_stable_pool_memory_report_counts_each_soa_lane_exactly() {
+        let layout = typed_layout("stable_pool<i32, 2>");
+        let active_counts = BTreeMap::from([("actors".to_string(), 1)]);
+        let capacity_overrides = BTreeMap::from([("actors".to_string(), 4)]);
+        let report =
+            build_state_memory_report(&layout, &active_counts, &capacity_overrides, u64::MAX)
+                .expect("stable pool memory report");
+
+        let count = report
+            .entries
+            .iter()
+            .find(|entry| entry.path == "actors.count")
+            .expect("stable pool count report entry");
+        assert_eq!(count.element_bytes, 4);
+        assert_eq!(count.capacity, 1);
+        assert_eq!(count.capacity_bytes, 4);
+
+        let occupied = report
+            .entries
+            .iter()
+            .find(|entry| entry.path == "actors" && entry.field == "occupied")
+            .expect("stable pool occupied report entry");
+        assert_eq!(occupied.element_bytes, 1);
+        assert_eq!(occupied.capacity, 2);
+        assert_eq!(occupied.active_count, Some(1));
+        assert_eq!(occupied.capacity_bytes, 2);
+        assert_eq!(occupied.active_bytes, Some(1));
+
+        let values = report
+            .entries
+            .iter()
+            .find(|entry| entry.path == "actors" && entry.field == "values")
+            .expect("stable pool values report entry");
+        assert_eq!(values.element_bytes, 4);
+        assert_eq!(values.capacity, 2);
+        assert_eq!(values.capacity_bytes, 8);
+        assert_eq!(values.active_bytes, Some(4));
+
+        let pool = report
+            .largest_pools
+            .iter()
+            .find(|pool| pool.path == "actors")
+            .expect("stable pool report");
+        assert_eq!(pool.bytes_per_element, 5);
+        assert_eq!(pool.capacity_bytes, 10);
+        assert_eq!(pool.active_count, Some(1));
+        assert_eq!(pool.active_bytes, Some(5));
+        assert_eq!(report.total_capacity_bytes, 14);
+        assert_eq!(report.projected_capacity_bytes, 24);
+        assert_eq!(report.capacity_changes[0].delta_bytes, 10);
+    }
+
+    #[test]
+    fn typed_map_and_set_memory_reports_count_each_soa_lane_exactly() {
+        for kind in ["map", "set"] {
+            for capacity in [0_u64, 1, 3] {
+                let type_name = if kind == "map" {
+                    format!("map<i32, i32, {capacity}>")
+                } else {
+                    format!("set<i32, {capacity}>")
+                };
+                let layout = typed_layout(&type_name);
+                let active_counts = BTreeMap::from([("actors".to_string(), 1)]);
+                let capacity_overrides = BTreeMap::from([("actors".to_string(), capacity + 1)]);
+                let report = build_state_memory_report(
+                    &layout,
+                    &active_counts,
+                    &capacity_overrides,
+                    u64::MAX,
+                )
+                .expect("typed map/set memory report");
+
+                let fields = if kind == "map" {
+                    vec![("occupied", 1_u64), ("keys", 4), ("values", 4)]
+                } else {
+                    vec![("occupied", 1_u64), ("keys", 4)]
+                };
+                assert_eq!(report.entries.len(), fields.len() + 1);
+                let count = report
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == "actors.count")
+                    .expect("typed map/set count report entry");
+                assert_eq!(count.element_bytes, 4);
+                assert_eq!(count.capacity, 1);
+                assert_eq!(count.capacity_bytes, 4);
+
+                let active_capacity = capacity.min(1);
+                for (field, element_bytes) in &fields {
+                    let entry = report
+                        .entries
+                        .iter()
+                        .find(|entry| entry.path == "actors" && entry.field == *field)
+                        .unwrap_or_else(|| panic!("typed {kind} {field} report entry"));
+                    assert_eq!(entry.element_bytes, *element_bytes);
+                    assert_eq!(entry.capacity, capacity);
+                    assert_eq!(entry.active_count, Some(active_capacity));
+                    assert_eq!(entry.capacity_bytes, capacity * element_bytes);
+                    assert_eq!(entry.active_bytes, Some(active_capacity * element_bytes));
+                }
+
+                let bytes_per_element = fields
+                    .iter()
+                    .map(|(_, element_bytes)| element_bytes)
+                    .sum::<u64>();
+                let pool = report
+                    .largest_pools
+                    .iter()
+                    .find(|pool| pool.path == "actors")
+                    .expect("typed map/set pool report");
+                assert_eq!(pool.capacity, capacity);
+                assert_eq!(pool.active_count, Some(active_capacity));
+                assert_eq!(pool.bytes_per_element, bytes_per_element);
+                assert_eq!(pool.capacity_bytes, capacity * bytes_per_element);
+                assert_eq!(pool.active_bytes, Some(active_capacity * bytes_per_element));
+                assert_eq!(
+                    report.total_capacity_bytes,
+                    4 + capacity * bytes_per_element
+                );
+                assert_eq!(
+                    report.projected_capacity_bytes,
+                    4 + (capacity + 1) * bytes_per_element
+                );
+                assert_eq!(report.capacity_changes.len(), 1);
+                assert_eq!(report.capacity_changes[0].old_capacity, capacity);
+                assert_eq!(report.capacity_changes[0].new_capacity, capacity + 1);
+                assert_eq!(
+                    report.capacity_changes[0].bytes_per_element,
+                    bytes_per_element
+                );
+                assert_eq!(
+                    report.capacity_changes[0].delta_bytes,
+                    i64::try_from(bytes_per_element).expect("report delta")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_priority_queue_memory_reports_each_lane_and_metadata_exactly() {
+        for capacity in [0_u64, 1, 3] {
+            let layout = typed_layout(&format!("priority_queue<i32, {capacity}>"));
+            let active_counts = BTreeMap::from([("actors".to_string(), 1)]);
+            let capacity_overrides = BTreeMap::from([("actors".to_string(), capacity + 1)]);
+            let report =
+                build_state_memory_report(&layout, &active_counts, &capacity_overrides, u64::MAX)
+                    .expect("priority queue memory report");
+
+            assert_eq!(report.entries.len(), 5);
+            for path in ["actors.count", "actors.next_order"] {
+                let scalar = report
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == path)
+                    .unwrap_or_else(|| panic!("priority queue scalar report entry {path}"));
+                assert_eq!(scalar.element_bytes, 4);
+                assert_eq!(scalar.capacity, 1);
+                assert_eq!(scalar.capacity_bytes, 4);
+            }
+
+            let active_capacity = capacity.min(1);
+            for field in ["priority", "order", "values"] {
+                let entry = report
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == "actors" && entry.field == field)
+                    .unwrap_or_else(|| panic!("priority queue {field} report entry"));
+                assert_eq!(entry.element_bytes, 4);
+                assert_eq!(entry.capacity, capacity);
+                assert_eq!(entry.active_count, Some(active_capacity));
+                assert_eq!(entry.capacity_bytes, capacity * 4);
+                assert_eq!(entry.active_bytes, Some(active_capacity * 4));
+            }
+
+            let pool = report
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "actors")
+                .expect("priority queue pool report");
+            assert_eq!(pool.capacity, capacity);
+            assert_eq!(pool.active_count, Some(active_capacity));
+            assert_eq!(pool.bytes_per_element, 12);
+            assert_eq!(pool.capacity_bytes, capacity * 12);
+            assert_eq!(pool.active_bytes, Some(active_capacity * 12));
+            assert_eq!(report.total_capacity_bytes, 8 + capacity * 12);
+            assert_eq!(report.projected_capacity_bytes, 8 + (capacity + 1) * 12);
+            assert_eq!(report.capacity_changes.len(), 1);
+            assert_eq!(report.capacity_changes[0].old_capacity, capacity);
+            assert_eq!(report.capacity_changes[0].new_capacity, capacity + 1);
+            assert_eq!(report.capacity_changes[0].bytes_per_element, 12);
+            assert_eq!(report.capacity_changes[0].delta_bytes, 12);
+        }
+    }
+
+    #[test]
+    fn typed_grid_and_bitset_layouts_report_logical_and_lane_counts() {
+        let grid = typed_layout("grid<i32, 2, 3>");
+        let grid_collection = grid
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("grid collection layout");
+        assert_eq!(grid_collection.capacity, 6);
+        assert_eq!(grid_collection.fields[0].field, "values");
+        assert_eq!(grid_collection.fields[0].element_count, Some(6));
+        let grid_memory =
+            build_state_memory_report(&grid, &BTreeMap::new(), &BTreeMap::new(), u64::MAX)
+                .expect("grid memory report");
+        let grid_values = grid_memory
+            .entries
+            .iter()
+            .find(|entry| entry.path == "actors" && entry.field == "values")
+            .expect("grid values entry");
+        assert_eq!(grid_values.capacity, 6);
+        assert_eq!(grid_values.capacity_bytes, 24);
+        assert_eq!(grid_memory.total_capacity_bytes, 24);
+
+        let bitset = typed_layout("bitset<33>");
+        let bitset_collection = bitset
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("bitset collection layout");
+        assert_eq!(bitset_collection.capacity, 33);
+        assert_eq!(bitset_collection.fields[0].field, "words");
+        assert_eq!(bitset_collection.fields[0].element_count, Some(2));
+        let bitset_memory = build_state_memory_report(
+            &bitset,
+            &BTreeMap::from([("actors".to_string(), 33)]),
+            &BTreeMap::new(),
+            u64::MAX,
+        )
+        .expect("bitset memory report");
+        let words = bitset_memory
+            .entries
+            .iter()
+            .find(|entry| entry.path == "actors" && entry.field == "words")
+            .expect("bitset words entry");
+        assert_eq!(words.capacity, 2);
+        assert_eq!(words.active_count, Some(2));
+        assert_eq!(words.capacity_bytes, 8);
+        assert_eq!(words.active_bytes, Some(8));
+        assert_eq!(bitset_memory.total_capacity_bytes, 8);
+
+        let zero = typed_layout("bitset<0>");
+        let zero_collection = zero
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("zero-capacity bitset layout");
+        assert_eq!(zero_collection.capacity, 0);
+        assert_eq!(zero_collection.fields[0].element_count, Some(0));
+        let zero_memory =
+            build_state_memory_report(&zero, &BTreeMap::new(), &BTreeMap::new(), u64::MAX)
+                .expect("zero-capacity bitset memory report");
+        assert_eq!(zero_memory.entries[0].capacity, 0);
+        assert_eq!(zero_memory.entries[0].capacity_bytes, 0);
+        assert_eq!(zero_memory.total_capacity_bytes, 0);
+    }
+
+    #[test]
+    fn collection_field_element_count_is_serde_compatible_when_absent() {
+        let serialized = r#"{
+            "scalars": [],
+            "collections": [{
+                "path": "values",
+                "capacity": 2,
+                "element_shape": "i32",
+                "fully_migratable": true,
+                "fields": [{
+                    "field": "",
+                    "type_name": "i32",
+                    "storage_type_name": "i32"
+                }]
+            }],
+            "structs": [],
+            "opaque": []
+        }"#;
+        let layout: super::StateLayout =
+            serde_json::from_str(serialized).expect("deserialize legacy state layout");
+        assert_eq!(layout.collections[0].fields[0].element_count, None);
+        let round_trip = serde_json::to_string(&layout).expect("serialize state layout");
+        assert!(!round_trip.contains("element_count"));
+        let field = &layout.collections[0].fields[0];
+        assert_eq!(
+            super::collection_field_element_count(&layout.collections[0], field, 2),
+            2
+        );
+    }
+
+    #[test]
+    fn unsupported_typed_collection_kinds_are_rejected_at_state_layout_boundary() {
+        let wide_pool = typed_layout_result("pool<f64, 2>")
+            .expect_err("non-i32 pool payload layout must be rejected");
+        assert!(
+            wide_pool.contains(
+                "only pool<i32,N>, stable_pool<i32,N>, queue<i32,N>, ring_buffer<i32,N>, priority_queue<i32,N>, map<i32,i32,N>, set<i32,N>, grid<i32,W,H>, and bitset<N>"
+            ),
+            "{wide_pool}"
+        );
+
+        let wide_grid = typed_layout_result("grid<f64, 2, 3>")
+            .expect_err("non-i32 grid payload layout must be rejected");
+        assert!(wide_grid.contains("grid<i32,W,H>"), "{wide_grid}");
     }
 
     #[test]

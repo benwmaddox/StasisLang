@@ -23,7 +23,9 @@ pub(crate) fn compute_reachable_function_ids(
         roots.extend(
             functions
                 .iter()
-                .filter(|function| matches_root(function, root_name))
+                .filter(|function| {
+                    function.requires_contract.is_none() && matches_root(function, root_name)
+                })
                 .map(|function| function.id),
         );
     }
@@ -31,12 +33,18 @@ pub(crate) fn compute_reachable_function_ids(
         roots.extend(
             functions
                 .iter()
-                .filter(|function| matches_root(function, root_name))
+                .filter(|function| {
+                    function.requires_contract.is_none() && matches_root(function, root_name)
+                })
                 .map(|function| function.id),
         );
     }
     if roots.is_empty() {
-        return functions.iter().map(|function| function.id).collect();
+        return functions
+            .iter()
+            .filter(|function| function.requires_contract.is_none())
+            .map(|function| function.id)
+            .collect();
     }
 
     let mut reachable: BTreeSet<FunctionId> = BTreeSet::new();
@@ -49,7 +57,13 @@ pub(crate) fn compute_reachable_function_ids(
             continue;
         };
         for dependency in &function.dependencies {
-            stack.push(*dependency);
+            if functions
+                .iter()
+                .find(|candidate| candidate.id == *dependency)
+                .is_none_or(|candidate| candidate.requires_contract.is_none())
+            {
+                stack.push(*dependency);
+            }
         }
     }
 
