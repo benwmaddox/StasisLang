@@ -8,8 +8,8 @@ use crate::backend::compile_analysis::{
 use crate::compiler::{FunctionMeta, SourceFile};
 use crate::frontend::parser::{parse_top_level_extern_functions, parse_top_level_type_layout};
 use crate::frontend::types::{
-    TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
-    TYPE_ID_VOID,
+    TypeCategory, TypeId, TypeTable, TypedCollectionDescriptor, TypedCollectionKind, TYPE_ID_BOOL,
+    TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_VOID,
 };
 use crate::ir::hir::{
     eval_const_i64, AssignOp, AssignTarget, ComparisonOp, SimpleCondition, SimpleExpr, SimpleStmt,
@@ -286,6 +286,7 @@ struct AnalysisContext<'a> {
     collection_capacities: BTreeMap<String, u64>,
     path_types: BTreeMap<String, TypeId>,
     field_types: BTreeMap<TypeId, BTreeMap<String, TypeId>>,
+    typed_collection_descriptors: BTreeMap<String, TypedCollectionDescriptor>,
     call_signatures: CallSignatureMap,
     fingerprint: u64,
     types: &'a TypeTable,
@@ -324,6 +325,29 @@ pub(crate) fn validate_program_semantics(
         context.field_types.entry(owner).or_default().extend(fields);
     }
     for function in functions {
+        if semantic_types.is_typed_collection_type(function.return_type) {
+            return Err((
+                function.storage_index,
+                format!(
+                    "function '{}' cannot return a typed collection value",
+                    function.name
+                ),
+            ));
+        }
+        if let Some((index, _)) = function
+            .params
+            .iter()
+            .enumerate()
+            .find(|(_, type_id)| semantic_types.is_typed_collection_type(**type_id))
+        {
+            return Err((
+                function.storage_index,
+                format!(
+                    "function '{}' cannot accept typed collection parameter {}",
+                    function.name, index
+                ),
+            ));
+        }
         let statements = statements_by_id
             .get(function.storage_index as usize)
             .ok_or_else(|| {
@@ -369,12 +393,24 @@ fn validate_statements(
                     return Err(format!("let binding '{name}' shadows existing variable"));
                 }
                 validate_expression_access(expression, context, local_types)?;
+                if type_id.is_some_and(|type_id| context.types.is_typed_collection_type(type_id)) {
+                    return Err(format!(
+                        "let binding '{name}' cannot store a typed collection value"
+                    ));
+                }
                 let expression_type = semantic_expression_type_with_expected(
                     expression,
                     *type_id,
                     context,
                     local_types,
                 );
+                if expression_type
+                    .is_some_and(|type_id| context.types.is_typed_collection_type(type_id))
+                {
+                    return Err(format!(
+                        "let binding '{name}' cannot store a typed collection value"
+                    ));
+                }
                 if let (Some(expected), Some(found)) = (type_id, expression_type) {
                     if !assignment_types_compatible(*expected, found, context.types) {
                         return Err(type_mismatch(
@@ -397,12 +433,22 @@ fn validate_statements(
                 if let Some(target_type) =
                     semantic_assignment_target_type(target, context, local_types)
                 {
+                    if context.types.is_typed_collection_type(target_type) {
+                        return Err(
+                            "typed collection values cannot be assignment targets".to_string()
+                        );
+                    }
                     if let Some(expression_type) = semantic_expression_type_with_expected(
                         expression,
                         Some(target_type),
                         context,
                         local_types,
                     ) {
+                        if context.types.is_typed_collection_type(expression_type) {
+                            return Err(
+                                "typed collection values cannot be used in assignments".to_string()
+                            );
+                        }
                         if !assignment_types_compatible(target_type, expression_type, context.types)
                         {
                             return Err(type_mismatch(
@@ -521,6 +567,12 @@ fn validate_statements(
                 collection_path,
                 body_statements,
             } => {
+                if is_typed_collection_path_or_descendant(collection_path, context, local_types) {
+                    return Err(
+                        "typed collection paths may only be used as the first argument of a pool operation"
+                            .to_string(),
+                    );
+                }
                 let mut loop_locals = local_types.clone();
                 if loop_locals.contains_key(item_name) {
                     return Err(format!(
@@ -564,6 +616,12 @@ fn validate_statements(
                     context,
                     local_types,
                 ) {
+                    if context.types.is_typed_collection_type(expression_type) {
+                        return Err(
+                            "typed collection values cannot be returned from expressions"
+                                .to_string(),
+                        );
+                    }
                     if !assignment_types_compatible(return_type, expression_type, context.types) {
                         return Err(type_mismatch(
                             "return expression",
@@ -637,6 +695,137 @@ fn semantic_expression_type_with_expected(
         return Some(TYPE_ID_F64);
     }
     inferred
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypedPoolOperation {
+    Push,
+    Remove,
+    Count,
+    Capacity,
+    Clear,
+}
+
+impl TypedPoolOperation {
+    fn from_target(target: &str) -> Option<Self> {
+        match target {
+            "pool_push" => Some(Self::Push),
+            "pool_remove" => Some(Self::Remove),
+            "pool_count" => Some(Self::Count),
+            "pool_capacity" => Some(Self::Capacity),
+            "pool_clear" => Some(Self::Clear),
+            _ => None,
+        }
+    }
+
+    fn return_type(self) -> TypeId {
+        match self {
+            Self::Push | Self::Count | Self::Capacity => TYPE_ID_I32,
+            Self::Remove => TYPE_ID_BOOL,
+            Self::Clear => TYPE_ID_VOID,
+        }
+    }
+
+    fn requires_value(self) -> bool {
+        matches!(self, Self::Push | Self::Remove)
+    }
+
+    fn value_argument_name(self) -> &'static str {
+        match self {
+            Self::Push => "value",
+            Self::Remove => "index",
+            Self::Count | Self::Capacity | Self::Clear => "argument",
+        }
+    }
+}
+
+fn is_typed_collection_path_or_descendant(
+    path: &str,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> bool {
+    if let Some(local_type) = local_types.get(root_name(path)) {
+        return context.types.is_typed_collection_type(*local_type);
+    }
+    context.typed_collection_descriptors.keys().any(|root| {
+        path == root
+            || path
+                .strip_prefix(root)
+                .is_some_and(|suffix| suffix.starts_with('.') || suffix.starts_with('['))
+    })
+}
+
+fn exact_typed_collection_path<'a>(
+    expression: &SimpleExpr,
+    context: &'a AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Option<(&'a str, &'a TypedCollectionDescriptor)> {
+    let SimpleExpr::Identifier(path) = expression else {
+        return None;
+    };
+    if local_types.contains_key(root_name(path)) {
+        return None;
+    }
+    context
+        .typed_collection_descriptors
+        .get_key_value(path)
+        .map(|(path, descriptor)| (path.as_str(), descriptor))
+}
+
+fn typed_pool_operation(
+    target: &str,
+    args: &[SimpleExpr],
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Result<Option<TypedPoolOperation>, String> {
+    let Some(operation) = TypedPoolOperation::from_target(target) else {
+        return Ok(None);
+    };
+
+    let expected_arity = if operation.requires_value() { 2 } else { 1 };
+    if args.len() != expected_arity {
+        return Err(format!(
+            "{target} expects {expected_arity} arguments, got {}",
+            args.len()
+        ));
+    }
+
+    let Some((path, descriptor)) = exact_typed_collection_path(&args[0], context, local_types)
+    else {
+        return Err(format!(
+            "{target} first argument must be an exact persistent typed collection path"
+        ));
+    };
+    if descriptor.kind != TypedCollectionKind::Pool {
+        return Err(format!(
+            "{target} requires persistent pool path '{path}', found {}",
+            descriptor.kind_name()
+        ));
+    }
+    if descriptor.element_type != Some(TYPE_ID_I32) {
+        return Err(format!(
+            "{target} requires pool path '{path}' with i32 payload"
+        ));
+    }
+
+    if operation.requires_value() {
+        let value_type =
+            semantic_expression_type(&args[1], context, local_types).ok_or_else(|| {
+                format!(
+                    "{target} {} argument must have type i32; its type could not be inferred",
+                    operation.value_argument_name()
+                )
+            })?;
+        if value_type != TYPE_ID_I32 {
+            return Err(type_mismatch(
+                &format!("{target} {} argument", operation.value_argument_name()),
+                TYPE_ID_I32,
+                value_type,
+                context.types,
+            ));
+        }
+    }
+    Ok(Some(operation))
 }
 
 fn semantic_assignment_target_type(
@@ -717,6 +906,26 @@ fn validate_assignment_target_access(
     context: &AnalysisContext<'_>,
     local_types: &BTreeMap<String, TypeId>,
 ) -> Result<(), String> {
+    let typed_collection_target = match target {
+        AssignTarget::Local(path) | AssignTarget::GlobalPath(path) => {
+            is_typed_collection_path_or_descendant(path, context, local_types)
+        }
+        AssignTarget::IndexedPath {
+            collection_path,
+            suffix,
+            ..
+        } => {
+            let indexed_path = indexed_state_path(collection_path, suffix);
+            is_typed_collection_path_or_descendant(collection_path, context, local_types)
+                || is_typed_collection_path_or_descendant(&indexed_path, context, local_types)
+        }
+    };
+    if typed_collection_target {
+        return Err(
+            "typed collection paths may only be used as the first argument of a pool operation"
+                .to_string(),
+        );
+    }
     match target {
         AssignTarget::Local(path) | AssignTarget::GlobalPath(path) => {
             validate_property_access(path, context, local_types)
@@ -768,10 +977,43 @@ fn validate_expression_access(
             suffix,
         } => {
             validate_expression_access(index, context, local_types)?;
+            if is_typed_collection_path_or_descendant(collection_path, context, local_types)
+                || is_typed_collection_path_or_descendant(
+                    &indexed_state_path(collection_path, suffix),
+                    context,
+                    local_types,
+                )
+            {
+                return Err(
+                    "typed collection paths may only be used as the first argument of a pool operation"
+                        .to_string(),
+                );
+            }
             validate_indexed_property_access(collection_path, suffix, context, local_types)
         }
-        SimpleExpr::Identifier(path) => validate_property_access(path, context, local_types),
+        SimpleExpr::Identifier(path) => {
+            if is_typed_collection_path_or_descendant(path, context, local_types)
+                || semantic_expression_type(expression, context, local_types)
+                    .is_some_and(|type_id| context.types.is_typed_collection_type(type_id))
+            {
+                return Err(
+                    "typed collection paths may only be used as the first argument of a pool operation"
+                        .to_string(),
+                );
+            }
+            validate_property_access(path, context, local_types)
+        }
         SimpleExpr::Call { target, args } => {
+            if TypedPoolOperation::from_target(target).is_some() {
+                for (index, argument) in args.iter().enumerate() {
+                    if index == 0 && matches!(argument, SimpleExpr::Identifier(_)) {
+                        continue;
+                    }
+                    validate_expression_access(argument, context, local_types)?;
+                }
+                typed_pool_operation(target, args, context, local_types)?;
+                return Ok(());
+            }
             for argument in args {
                 validate_expression_access(argument, context, local_types)?;
             }
@@ -1416,6 +1658,19 @@ fn build_context<'a>(
     functions: &'a [FunctionMeta],
     types: &'a TypeTable,
 ) -> Result<AnalysisContext<'a>, String> {
+    if let Some(name) = functions.iter().find_map(|function| {
+        TypedPoolOperation::from_target(&function.name).map(|_| &function.name)
+    }) {
+        return Err(format!(
+            "compiler-owned typed pool operation name '{name}' cannot be declared as a user function"
+        ));
+    }
+    let mut descriptor_types = types.clone();
+    let typed_collection_descriptors =
+        crate::backend::compile_analysis::collect_typed_collection_descriptors(
+            files,
+            &mut descriptor_types,
+        )?;
     let mut globals = BTreeSet::new();
     let mut constants = BTreeMap::new();
     let mut extern_functions = BTreeSet::new();
@@ -1449,6 +1704,12 @@ fn build_context<'a>(
         }
         if file.content.contains("extern") {
             for external in parse_top_level_extern_functions(&file.content)? {
+                if TypedPoolOperation::from_target(&external.name).is_some() {
+                    return Err(format!(
+                        "compiler-owned typed pool operation name '{}' cannot be declared as an extern function",
+                        external.name
+                    ));
+                }
                 extern_functions.insert(external.name.clone());
                 let mut effect_annotations = external
                     .annotations
@@ -1599,7 +1860,7 @@ fn build_context<'a>(
         }
     }
     let mut fingerprint_hasher = DefaultHasher::new();
-    format!("{structs:?}|{global_types:?}|{constants:?}|{resolved_externs:?}|{extern_effects:?}|{internal_function_targets:?}")
+    format!("{structs:?}|{global_types:?}|{constants:?}|{resolved_externs:?}|{extern_effects:?}|{internal_function_targets:?}|{typed_collection_descriptors:?}")
         .hash(&mut fingerprint_hasher);
     let fingerprint = fingerprint_hasher.finish();
     Ok(AnalysisContext {
@@ -1613,6 +1874,7 @@ fn build_context<'a>(
         collection_capacities,
         path_types,
         field_types,
+        typed_collection_descriptors,
         call_signatures,
         fingerprint,
         types,
@@ -2047,6 +2309,61 @@ fn analyze_assignment_target(
     }
 }
 
+fn analyze_typed_pool_operation(
+    target: &str,
+    args: &[SimpleExpr],
+    context: &AnalysisContext<'_>,
+    locals: &BTreeSet<String>,
+    local_types: &BTreeMap<String, TypeId>,
+    aliases: &BTreeMap<String, String>,
+    effects: &mut EffectSets,
+) -> bool {
+    let Some(operation) = TypedPoolOperation::from_target(target) else {
+        return false;
+    };
+    let expected_arity = if operation.requires_value() { 2 } else { 1 };
+    let valid_descriptor = if args.len() == expected_arity {
+        args.first()
+            .and_then(|first| exact_typed_collection_path(first, context, local_types))
+            .filter(|(path, descriptor)| {
+                !locals.contains(root_name(path))
+                    && descriptor.kind == TypedCollectionKind::Pool
+                    && descriptor.element_type == Some(TYPE_ID_I32)
+            })
+    } else {
+        None
+    };
+    if let Some((path, _)) = valid_descriptor {
+        match operation {
+            TypedPoolOperation::Push => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedPoolOperation::Remove => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.values[*]"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedPoolOperation::Clear => {
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedPoolOperation::Count => effects.insert_read(format!("{path}.count")),
+            TypedPoolOperation::Capacity => {}
+        }
+        for argument in args.iter().skip(1) {
+            analyze_expression(argument, context, locals, local_types, aliases, effects);
+        }
+    } else {
+        for argument in args {
+            analyze_expression(argument, context, locals, local_types, aliases, effects);
+        }
+    }
+    true
+}
+
 fn analyze_expression(
     expression: &SimpleExpr,
     context: &AnalysisContext<'_>,
@@ -2080,6 +2397,17 @@ fn analyze_expression(
             }
         }
         SimpleExpr::Call { target, args } => {
+            if analyze_typed_pool_operation(
+                target,
+                args,
+                context,
+                locals,
+                local_types,
+                aliases,
+                effects,
+            ) {
+                return;
+            }
             let mut target_id = resolve_internal_call(target, args, context, local_types, aliases);
             if let Some(target_id) = target_id {
                 effects.calls.insert(
@@ -2308,26 +2636,31 @@ fn expression_type(
             let element = context.types.indexed_element_type_id(collection)?;
             field_suffix_type(element, suffix, &context.field_types)
         }
-        SimpleExpr::Call { target, args } => match target.as_str() {
-            "i32_to_f32" | "sin_fast" | "cos_fast" => Some(TYPE_ID_F32),
-            "f32_to_i32" | "fixed32_from_i32" | "fixed32_to_i32" | "fixed32_mul"
-            | "fixed32_div" | "fixed32_from_ratio" => Some(TYPE_ID_I32),
-            _ => {
-                let argument_types: Vec<TypeId> = args
-                    .iter()
-                    .map(|argument| expression_type(argument, context, local_types, aliases))
-                    .collect::<Option<_>>()?;
-                resolve_call_signature(
-                    target,
-                    &argument_types,
-                    &context.call_signatures,
-                    context.types,
-                    &context.field_types,
-                )
-                .ok()
-                .map(|signature| signature.return_type)
+        SimpleExpr::Call { target, args } => {
+            if let Some(operation) = TypedPoolOperation::from_target(target) {
+                return Some(operation.return_type());
             }
-        },
+            match target.as_str() {
+                "i32_to_f32" | "sin_fast" | "cos_fast" => Some(TYPE_ID_F32),
+                "f32_to_i32" | "fixed32_from_i32" | "fixed32_to_i32" | "fixed32_mul"
+                | "fixed32_div" | "fixed32_from_ratio" => Some(TYPE_ID_I32),
+                _ => {
+                    let argument_types: Vec<TypeId> = args
+                        .iter()
+                        .map(|argument| expression_type(argument, context, local_types, aliases))
+                        .collect::<Option<_>>()?;
+                    resolve_call_signature(
+                        target,
+                        &argument_types,
+                        &context.call_signatures,
+                        context.types,
+                        &context.field_types,
+                    )
+                    .ok()
+                    .map(|signature| signature.return_type)
+                }
+            }
+        }
         SimpleExpr::Binary { lhs, rhs, .. } => {
             let lhs = expression_type(lhs, context, local_types, aliases)?;
             let rhs = expression_type(rhs, context, local_types, aliases)?;
@@ -2908,8 +3241,421 @@ fn display_expression(expression: &SimpleExpr) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::backend::jit::JitProcess;
+    use crate::compiler::{Compiler, FunctionMeta, SourceFile};
+    use crate::frontend::types::TypeTable;
+    use crate::identity::{CanonicalSourcePath, SymbolId};
+    use crate::ir::hir::{AssignTarget, SimpleStmt};
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
+
+    fn typed_pool_fixture(extra: &str) -> (TypeTable, Vec<SourceFile>) {
+        let source = format!(
+            "global actors: pool<i32, 2, error>;\nglobal queue: queue<i32, 2, overwrite_oldest>;\nglobal floats: pool<f32, 2, error>;\n{extra}"
+        );
+        let mut types = TypeTable::new();
+        for type_name in [
+            "pool<i32, 2, error>",
+            "queue<i32, 2, overwrite_oldest>",
+            "pool<f32, 2, error>",
+        ] {
+            types
+                .resolve_or_intern(type_name)
+                .expect("typed collection fixture type");
+        }
+        let file = SourceFile {
+            path: "pool_semantics.stasis".to_string(),
+            content: source.clone(),
+            original_content: source,
+            hash: 0,
+            functions: Vec::new(),
+        };
+        (types, vec![file])
+    }
+
+    fn pool_context<'a>(types: &'a TypeTable, files: &[SourceFile]) -> AnalysisContext<'a> {
+        build_context(files, &[], types).expect("typed collection analysis context")
+    }
+
+    fn pool_call(target: &str, args: Vec<SimpleExpr>) -> SimpleExpr {
+        SimpleExpr::Call {
+            target: target.to_string(),
+            args,
+        }
+    }
+
+    fn test_function(
+        name: &str,
+        param_names: Vec<String>,
+        params: Vec<TypeId>,
+        return_type: TypeId,
+    ) -> FunctionMeta {
+        let path = CanonicalSourcePath::project_relative("pool_semantics.stasis")
+            .expect("canonical fixture path");
+        FunctionMeta {
+            id: 0,
+            symbol_id: SymbolId::function(&path, name, "test"),
+            storage_index: 0,
+            name: name.to_string(),
+            module_alias: String::new(),
+            name_hash: 0,
+            file_id: 0,
+            source_range: 0..0,
+            signature_range: 0..0,
+            signature_hash: 0,
+            body_hash: 0,
+            param_names,
+            params,
+            return_type,
+            inline: false,
+            effect_contract: None,
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            call_sites: Vec::new(),
+            dirty: false,
+        }
+    }
+
+    fn compiler_rejects(source: &str, expected: &str) {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("pool_semantics.stasis", source);
+        let error = compiler
+            .check()
+            .expect_err("pool semantic fixture must be rejected");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains(expected),
+            "expected diagnostic containing {expected:?}, got {message}"
+        );
+    }
+
+    #[test]
+    fn typed_pool_operations_have_fixed_return_types_and_explicit_effects() {
+        let (types, files) = typed_pool_fixture("");
+        let context = pool_context(&types, &files);
+        let local_types = BTreeMap::new();
+        let locals = BTreeSet::new();
+        let aliases = BTreeMap::new();
+        let operations = [
+            (
+                "pool_push",
+                vec![
+                    SimpleExpr::Identifier("actors".to_string()),
+                    SimpleExpr::Int(7),
+                ],
+                TYPE_ID_I32,
+                vec!["actors.count"],
+                vec!["actors.count", "actors.values[*]"],
+            ),
+            (
+                "pool_remove",
+                vec![
+                    SimpleExpr::Identifier("actors".to_string()),
+                    SimpleExpr::Int(1),
+                ],
+                TYPE_ID_BOOL,
+                vec!["actors.count", "actors.values[*]"],
+                vec!["actors.count", "actors.values[*]"],
+            ),
+            (
+                "pool_count",
+                vec![SimpleExpr::Identifier("actors".to_string())],
+                TYPE_ID_I32,
+                vec!["actors.count"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "pool_capacity",
+                vec![SimpleExpr::Identifier("actors".to_string())],
+                TYPE_ID_I32,
+                Vec::<&str>::new(),
+                Vec::<&str>::new(),
+            ),
+            (
+                "pool_clear",
+                vec![SimpleExpr::Identifier("actors".to_string())],
+                TYPE_ID_VOID,
+                Vec::<&str>::new(),
+                vec!["actors.count", "actors.values[*]"],
+            ),
+        ];
+
+        for (target, args, expected_type, expected_reads, expected_writes) in operations {
+            let expression = pool_call(target, args);
+            assert_eq!(
+                expression_type(&expression, &context, &local_types, &aliases),
+                Some(expected_type),
+                "{target} return type"
+            );
+            validate_expression_access(&expression, &context, &local_types)
+                .expect("valid typed pool operation");
+            let mut effects = EffectSets::default();
+            analyze_expression(
+                &expression,
+                &context,
+                &locals,
+                &local_types,
+                &aliases,
+                &mut effects,
+            );
+            let reads: Vec<_> = effects.reads.iter().map(String::as_str).collect();
+            let writes: Vec<_> = effects.writes.iter().map(String::as_str).collect();
+            assert_eq!(reads, expected_reads, "{target} reads");
+            assert_eq!(writes, expected_writes, "{target} writes");
+            assert!(effects.calls.is_empty(), "{target} became an internal call");
+            assert!(effects.host_calls.is_empty(), "{target} leaked a host call");
+            assert!(
+                effects.host_effects.is_empty(),
+                "{target} leaked a host capability"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_pool_operations_require_exact_persistent_pool_paths() {
+        let (types, files) = typed_pool_fixture("");
+        let context = pool_context(&types, &files);
+        let mut local_types = BTreeMap::new();
+        local_types.insert(
+            "actors".to_string(),
+            types.resolve("pool<i32, 2, error>").expect("pool type id"),
+        );
+
+        let local_error = typed_pool_operation(
+            "pool_count",
+            &[SimpleExpr::Identifier("actors".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("local pool value must not be a persistent path");
+        assert!(local_error.contains("exact persistent typed collection path"));
+
+        local_types.clear();
+        let field_error = typed_pool_operation(
+            "pool_count",
+            &[SimpleExpr::Identifier("actors.values".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("pool field must not be accepted as the descriptor path");
+        assert!(field_error.contains("exact persistent typed collection path"));
+
+        let non_pool_error = typed_pool_operation(
+            "pool_count",
+            &[SimpleExpr::Identifier("queue".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("non-pool descriptor must be rejected");
+        assert!(non_pool_error.contains("requires persistent pool path"));
+
+        let payload_error = typed_pool_operation(
+            "pool_count",
+            &[SimpleExpr::Identifier("floats".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("non-i32 payload pool must be rejected");
+        assert!(payload_error.contains("with i32 payload"));
+    }
+
+    #[test]
+    fn typed_pool_operations_reject_arity_and_strict_index_or_value_types() {
+        let (types, files) = typed_pool_fixture("");
+        let context = pool_context(&types, &files);
+        let local_types = BTreeMap::new();
+        let actor = || SimpleExpr::Identifier("actors".to_string());
+
+        let push_arity = typed_pool_operation("pool_push", &[actor()], &context, &local_types)
+            .expect_err("pool_push arity must be checked");
+        assert!(push_arity.contains("expects 2 arguments"));
+
+        let remove_arity = typed_pool_operation(
+            "pool_remove",
+            &[actor(), SimpleExpr::Int(0), SimpleExpr::Int(1)],
+            &context,
+            &local_types,
+        )
+        .expect_err("pool_remove arity must be checked");
+        assert!(remove_arity.contains("expects 2 arguments"));
+
+        let remove_index = typed_pool_operation(
+            "pool_remove",
+            &[actor(), SimpleExpr::Float(0.0)],
+            &context,
+            &local_types,
+        )
+        .expect_err("pool_remove index type must be checked");
+        assert!(remove_index.contains("pool_remove index argument"));
+        assert!(!remove_index.contains("pool_remove value argument"));
+
+        let push_value = typed_pool_operation(
+            "pool_push",
+            &[actor(), SimpleExpr::Bool(true)],
+            &context,
+            &local_types,
+        )
+        .expect_err("pool_push value type must be checked");
+        assert!(push_value.contains("pool_push value argument"));
+    }
+
+    #[test]
+    fn typed_collection_values_are_not_ordinary_expression_values() {
+        let (types, files) = typed_pool_fixture("");
+        let context = pool_context(&types, &files);
+        let local_types = BTreeMap::new();
+        let direct = validate_expression_access(
+            &SimpleExpr::Identifier("actors".to_string()),
+            &context,
+            &local_types,
+        )
+        .expect_err("direct typed collection value use must be rejected");
+        assert!(direct.contains("only be used as the first argument"));
+
+        let arithmetic = validate_expression_access(
+            &SimpleExpr::Binary {
+                lhs: Box::new(SimpleExpr::Identifier("actors".to_string())),
+                op: '+',
+                rhs: Box::new(SimpleExpr::Int(1)),
+            },
+            &context,
+            &local_types,
+        )
+        .expect_err("typed collection arithmetic must be rejected");
+        assert!(arithmetic.contains("only be used as the first argument"));
+
+        let ordinary_call = validate_expression_access(
+            &pool_call(
+                "unrelated",
+                vec![SimpleExpr::Identifier("actors".to_string())],
+            ),
+            &context,
+            &local_types,
+        )
+        .expect_err("ordinary calls must not consume typed collections");
+        assert!(ordinary_call.contains("only be used as the first argument"));
+    }
+
+    #[test]
+    fn typed_collection_roots_and_descendant_lanes_cannot_be_read_or_written() {
+        let (types, files) = typed_pool_fixture("");
+        let context = pool_context(&types, &files);
+        let local_types = BTreeMap::new();
+
+        for expression in [
+            SimpleExpr::Identifier("actors.count".to_string()),
+            SimpleExpr::Identifier("actors.values".to_string()),
+            SimpleExpr::IndexedPath {
+                collection_path: "actors".to_string(),
+                index: Box::new(SimpleExpr::Int(0)),
+                suffix: "values".to_string(),
+            },
+        ] {
+            let error = validate_expression_access(&expression, &context, &local_types)
+                .expect_err("typed collection lane read must be rejected");
+            assert!(error.contains("typed collection paths"), "{error}");
+        }
+
+        for target in [
+            AssignTarget::GlobalPath("actors.count".to_string()),
+            AssignTarget::GlobalPath("actors.values".to_string()),
+            AssignTarget::IndexedPath {
+                collection_path: "actors".to_string(),
+                index: SimpleExpr::Int(0),
+                suffix: "values".to_string(),
+            },
+        ] {
+            let error = validate_assignment_target_access(&target, &context, &local_types)
+                .expect_err("typed collection lane write must be rejected");
+            assert!(error.contains("typed collection paths"), "{error}");
+        }
+
+        let mut locals = BTreeMap::new();
+        let error = validate_statements(
+            &[SimpleStmt::Foreach {
+                item_name: "item".to_string(),
+                index_name: None,
+                collection_path: "actors".to_string(),
+                body_statements: Vec::new(),
+            }],
+            TYPE_ID_VOID,
+            &context,
+            &mut locals,
+            0,
+        )
+        .expect_err("typed collection foreach source must be rejected");
+        assert!(error.contains("typed collection paths"), "{error}");
+    }
+
+    #[test]
+    fn typed_collection_function_params_and_returns_are_rejected() {
+        let (types, files) = typed_pool_fixture("");
+        let pool_type = types.resolve("pool<i32, 2, error>").expect("pool type id");
+        let statements = vec![vec![SimpleStmt::Return(SimpleExpr::Int(0))]];
+
+        let parameter_error = validate_program_semantics(
+            &files,
+            &[test_function(
+                "takes_pool",
+                vec!["items".to_string()],
+                vec![pool_type],
+                TYPE_ID_I32,
+            )],
+            &statements,
+            &types,
+        )
+        .expect_err("typed collection parameter must be rejected")
+        .1;
+        assert!(parameter_error.contains("cannot accept typed collection parameter"));
+
+        let return_error = validate_program_semantics(
+            &files,
+            &[test_function(
+                "returns_pool",
+                Vec::new(),
+                Vec::new(),
+                pool_type,
+            )],
+            &statements,
+            &types,
+        )
+        .expect_err("typed collection return must be rejected")
+        .1;
+        assert!(return_error.contains("cannot return a typed collection value"));
+    }
+
+    #[test]
+    fn compiler_rejects_pool_semantic_errors_before_emission() {
+        for (source, expected) in [
+            (
+                "global actors: pool<i32, 2, error>;\nfunction main(): i32 { return pool_count(actors, 1); }",
+                "pool_count expects 1 arguments",
+            ),
+            (
+                "global actors: pool<i32, 2, error>;\nfunction main(): i32 { return pool_remove(actors, 1.0); }",
+                "pool_remove index argument",
+            ),
+            (
+                "global actors: pool<i32, 2, error>;\nfunction main(): i32 { let p: i32 = 0; return pool_count(p); }",
+                "exact persistent typed collection path",
+            ),
+            (
+                "global actors: pool<i32, 2, error>;\nfunction main(): i32 { return actors; }",
+                "only be used as the first argument",
+            ),
+            (
+                "global actors: pool<i32, 2, overwrite_oldest>;\nfunction main(): i32 { return 0; }",
+                "does not support overflow policy",
+            ),
+            (
+                "function pool_count(value: i32): i32 { return value; }\nfunction main(): i32 { return pool_count(1); }",
+                "compiler-owned typed pool operation name",
+            ),
+        ] {
+            compiler_rejects(source, expected);
+        }
+    }
 
     #[test]
     fn representative_sample_compiles_to_cranelift_and_reports_runtime_state() {

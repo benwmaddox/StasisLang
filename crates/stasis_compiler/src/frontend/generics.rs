@@ -18,6 +18,7 @@ use crate::frontend::parser::{
     ParsedExternFunctionDeclaration, ParsedFunctionSignature, ParsedGenericParameter,
     ParsedGenericParameterKind, ParsedStructDefinitionRange,
 };
+use crate::frontend::types::TypedCollectionKind;
 
 const MAX_SPECIALIZATIONS: usize = 4096;
 const MAX_INSTANTIATION_DEPTH: usize = 128;
@@ -740,6 +741,7 @@ impl Expansion {
                 if structure.generic_parameters.is_empty() {
                     continue;
                 }
+                reject_reserved_generic_collection_name(&file.path, &structure.name)?;
                 let definition_range = find_struct_definition_range(
                     &struct_ranges,
                     &structure.name,
@@ -2383,6 +2385,9 @@ impl Expansion {
             return Ok(format!("{element}[{value}]"));
         }
         if let Some((base, arguments)) = parse_type_application(trimmed)? {
+            if is_compiler_owned_typed_collection_base(base) {
+                return Ok(trimmed.to_string());
+            }
             let definition = self
                 .lookup_generic_struct_for_environment(base, environment)?
                 .ok_or_else(|| format!("unknown generic type '{base}'"))?
@@ -2430,6 +2435,9 @@ impl Expansion {
             return Ok(format!("{element}[{value}]"));
         }
         if let Some((base, arguments)) = parse_type_application(trimmed)? {
+            if is_compiler_owned_typed_collection_base(base) {
+                return Ok(trimmed.to_string());
+            }
             let definition = self
                 .lookup_generic_struct_for_environment(base, environment)?
                 .ok_or_else(|| format!("unknown generic type '{base}'"))?;
@@ -3944,6 +3952,32 @@ fn reject_reserved_declaration_name(
         ));
     }
     Ok(())
+}
+
+fn reject_reserved_generic_collection_name(path: &str, name: &str) -> Result<(), ExpansionError> {
+    if is_compiler_owned_typed_collection_base(name) {
+        return Err(ExpansionError::for_file(
+            path.to_string(),
+            format!("generic struct '{name}' uses reserved compiler-owned typed collection name"),
+        ));
+    }
+    Ok(())
+}
+
+fn is_compiler_owned_typed_collection_base(name: &str) -> bool {
+    [
+        TypedCollectionKind::Pool,
+        TypedCollectionKind::StablePool,
+        TypedCollectionKind::Queue,
+        TypedCollectionKind::RingBuffer,
+        TypedCollectionKind::Map,
+        TypedCollectionKind::Set,
+        TypedCollectionKind::PriorityQueue,
+        TypedCollectionKind::Grid,
+        TypedCollectionKind::Bitset,
+    ]
+    .into_iter()
+    .any(|kind| kind.as_str() == name.trim())
 }
 
 fn ensure_specialization_count(count: usize) -> Result<(), String> {
@@ -6113,6 +6147,58 @@ mod tests {
         compiler
             .check()
             .expect("the test harness namespace must not be reserved by generic expansion");
+    }
+
+    #[test]
+    fn unrelated_generic_population_preserves_typed_collection_global_for_type_table() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "typed_collection_global.stasis",
+            "struct Buffer<N: i32> { value: i32; }\n\
+             global actors: pool<i32, 4, error>;\n\
+             global buffer: Buffer<4>;\n\
+             function main(): i32 { return 0; }\n",
+        );
+
+        compiler
+            .check()
+            .expect("an unrelated generic must not hide compiler-owned typed collections");
+        assert!(compiler.files()[0]
+            .content
+            .contains("global actors: pool<i32, 4, error>;"));
+    }
+
+    #[test]
+    fn generic_structs_cannot_hijack_compiler_owned_typed_collection_names() {
+        for name in [
+            "pool",
+            "stable_pool",
+            "queue",
+            "ring_buffer",
+            "map",
+            "set",
+            "priority_queue",
+            "grid",
+            "bitset",
+        ] {
+            let mut compiler = Compiler::new();
+            compiler.upsert_file(
+                "reserved_collection_generic.stasis",
+                format!(
+                    "struct {name}<T: type> {{ value: T; }}\n\
+                     function main(): i32 {{ return 0; }}\n"
+                ),
+            );
+            let error = compiler
+                .check()
+                .expect_err("compiler-owned typed collection names are not source generics");
+            let diagnostic = format!("{error:?}");
+            assert!(
+                diagnostic.contains("reserved compiler-owned typed collection name"),
+                "{name}: {diagnostic}"
+            );
+            assert!(diagnostic.contains(name), "{name}: {diagnostic}");
+        }
     }
 
     fn repeated_constant_terms(term_count: usize) -> String {

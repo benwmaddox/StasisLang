@@ -7,8 +7,8 @@ use crate::backend::compile_analysis::{
 use crate::compiler::{FunctionId, FunctionMeta};
 use crate::data_flow::{FunctionDataFlowSummary, ParameterStorageKind};
 use crate::frontend::types::{
-    TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
-    TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
+    TypeCategory, TypeId, TypeTable, TypedCollectionKind, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64,
+    TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
 use crate::ir::hir::{
     eval_const_i64, AssignOp, AssignTarget, ComparisonOp, ConversionKind, DebugStatement,
@@ -3060,6 +3060,25 @@ pub(crate) fn emit_simple_statements(
                     if handled {
                         continue;
                     }
+                    if try_emit_typed_pool_call(
+                        builder,
+                        target,
+                        args,
+                        values_by_name,
+                        runtime_call_refs,
+                        internal_calls,
+                        call_signatures,
+                        type_table,
+                        global_path_types,
+                        constant_values,
+                        collection_infos,
+                        named_struct_field_types,
+                        foreach_bindings,
+                    )?
+                    .is_some()
+                    {
+                        continue;
+                    }
                     let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
                     let mut arg_types: Vec<TypeId> = Vec::with_capacity(args.len());
                     let expected_params =
@@ -4206,6 +4225,495 @@ pub(crate) fn try_emit_struct_view_value(
     }
 }
 
+#[derive(Clone, Copy)]
+enum TypedPoolCallResult {
+    Value(ValueBinding),
+    Void,
+}
+
+#[derive(Clone, Copy)]
+enum TypedPoolCallKind {
+    Push,
+    Remove,
+    Count,
+    Capacity,
+    Clear,
+}
+
+impl TypedPoolCallKind {
+    fn from_target(target: &str) -> Option<Self> {
+        match target {
+            "pool_push" => Some(Self::Push),
+            "pool_remove" => Some(Self::Remove),
+            "pool_count" => Some(Self::Count),
+            "pool_capacity" => Some(Self::Capacity),
+            "pool_clear" => Some(Self::Clear),
+            _ => None,
+        }
+    }
+
+    fn expects_value(self) -> bool {
+        matches!(self, Self::Push | Self::Remove)
+    }
+}
+
+fn typed_pool_storage_bindings(
+    target: &str,
+    args: &[SimpleExpr],
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+) -> Result<(String, usize, DirectStorageRef, DirectArrayStorageRef), String> {
+    let Some(SimpleExpr::Identifier(path)) = args.first() else {
+        return Err(format!(
+            "{target} first argument must be an exact persistent typed collection path"
+        ));
+    };
+    let root = path.split('.').next().unwrap_or(path);
+    if values_by_name.contains_key(root) {
+        return Err(format!(
+            "{target} first argument must be an exact persistent typed collection path"
+        ));
+    }
+    let type_id = global_path_types.get(path).copied().ok_or_else(|| {
+        format!(
+            "{target} first argument '{}' is not a persistent typed collection path",
+            path
+        )
+    })?;
+    if !type_table.is_typed_collection_type(type_id) {
+        return Err(format!(
+            "{target} requires persistent pool path '{}', found non-typed state type {}",
+            path, type_id
+        ));
+    }
+    let type_name = type_table
+        .type_info(type_id)
+        .map(|info| info.name.as_str())
+        .ok_or_else(|| format!("{target} path '{}' has unknown type {}", path, type_id))?;
+    let descriptor = type_table
+        .parse_typed_collection_descriptor(type_name)?
+        .ok_or_else(|| {
+            format!(
+                "{target} path '{}' has no compiler-owned typed collection descriptor",
+                path
+            )
+        })?;
+    if descriptor.kind != TypedCollectionKind::Pool {
+        return Err(format!(
+            "{target} requires persistent pool path '{}', found {}",
+            path,
+            descriptor.kind_name()
+        ));
+    }
+    if descriptor.element_type != Some(TYPE_ID_I32) {
+        return Err(format!(
+            "{target} requires pool path '{}' with i32 payload",
+            path
+        ));
+    }
+    let capacity = usize::try_from(descriptor.capacity).map_err(|_| {
+        format!(
+            "{target} pool path '{}' capacity {} does not fit the target index type",
+            path, descriptor.capacity
+        )
+    })?;
+    let direct_storage = runtime_call_refs.direct_storage.as_ref().ok_or_else(|| {
+        format!(
+            "{target} for typed pool '{}' requires direct storage bindings",
+            path
+        )
+    })?;
+    let count_path = format!("{path}.count");
+    let count = direct_storage
+        .scalars
+        .get(&count_path)
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "{target} for typed pool '{}' is missing direct scalar binding '{}.count'",
+                path, path
+            )
+        })?;
+    let values = direct_storage
+        .arrays
+        .get(&(path.to_string(), String::from("values")))
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "{target} for typed pool '{}' is missing direct array binding '{}.values'",
+                path, path
+            )
+        })?;
+    if values.storage_bytes != 4 || values.static_len != Some(capacity) {
+        return Err(format!(
+            "{target} for typed pool '{}' requires an i32 values binding with static length {}, found {} bytes and length {:?}",
+            path, capacity, values.storage_bytes, values.static_len
+        ));
+    }
+    Ok((path.clone(), capacity, count, values))
+}
+
+fn emit_direct_i32_store(
+    builder: &mut FunctionBuilder<'_>,
+    slot_ref: DirectStorageRef,
+    value: Value,
+) {
+    let data = emit_direct_slot_data_ptr(builder, slot_ref);
+    builder.ins().store(MemFlags::new(), value, data, 0);
+}
+
+fn emit_typed_pool_push(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+    value: Value,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let capacity_i32 = i32::try_from(capacity)
+        .map_err(|_| format!("typed pool capacity {capacity} exceeds i32 operation range"))?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, -1),
+            type_id: TYPE_ID_I32,
+        });
+    }
+
+    let non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, count, 0);
+    let below_capacity =
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedLessThan, count, i64::from(capacity_i32));
+    let can_insert = builder.ins().band(non_negative, below_capacity);
+    let insert_block = builder.create_block();
+    let reject_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(can_insert, insert_block, &[], reject_block, &[]);
+
+    builder.seal_block(insert_block);
+    builder.switch_to_block(insert_block);
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        count,
+        value,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let next_count = builder.ins().iadd_imm(count, 1);
+    emit_direct_i32_store(builder, count_ref, next_count);
+    builder.ins().jump(merge_block, &[count]);
+
+    builder.seal_block(reject_block);
+    builder.switch_to_block(reject_block);
+    let rejected = builder.ins().iconst(types::I32, -1);
+    builder.ins().jump(merge_block, &[rejected]);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "typed pool push merge block missing result".to_string())?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_I32,
+    })
+}
+
+fn emit_typed_pool_remove(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+    index: Value,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let capacity_i32 = i32::try_from(capacity)
+        .map_err(|_| format!("typed pool capacity {capacity} exceeds i32 operation range"))?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_BOOL,
+        });
+    }
+
+    let non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
+    let below_count = builder.ins().icmp(IntCC::SignedLessThan, index, count);
+    let count_non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, count, 0);
+    let count_within_capacity =
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedLessThanOrEqual, count, i64::from(capacity_i32));
+    let count_well_formed = builder
+        .ins()
+        .band(count_non_negative, count_within_capacity);
+    let below_capacity =
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedLessThan, index, i64::from(capacity_i32));
+    let below_count_and_capacity = builder.ins().band(below_count, below_capacity);
+    let valid_index = builder.ins().band(non_negative, below_count_and_capacity);
+    let valid = builder.ins().band(count_well_formed, valid_index);
+    let valid_block = builder.create_block();
+    let invalid_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(valid, valid_block, &[], invalid_block, &[]);
+
+    builder.seal_block(valid_block);
+    builder.switch_to_block(valid_block);
+    let last_index = builder.ins().iadd_imm(count, -1);
+    let removing_last = builder.ins().icmp(IntCC::Equal, index, last_index);
+    let zero_last_block = builder.create_block();
+    let move_last_block = builder.create_block();
+    builder
+        .ins()
+        .brif(removing_last, zero_last_block, &[], move_last_block, &[]);
+
+    builder.seal_block(move_last_block);
+    builder.switch_to_block(move_last_block);
+    let moved_value = emit_direct_array_load(
+        builder,
+        values_ref.slot,
+        last_index,
+        TYPE_ID_I32,
+        type_table,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        index,
+        moved_value,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    builder.ins().jump(zero_last_block, &[]);
+
+    builder.seal_block(zero_last_block);
+    builder.switch_to_block(zero_last_block);
+    let zero = builder.ins().iconst(types::I32, 0);
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        last_index,
+        zero,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    emit_direct_i32_store(builder, count_ref, last_index);
+    let removed = builder.ins().iconst(types::I32, 1);
+    builder.ins().jump(merge_block, &[removed]);
+
+    builder.seal_block(invalid_block);
+    builder.switch_to_block(invalid_block);
+    let not_removed = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(merge_block, &[not_removed]);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "typed pool remove merge block missing result".to_string())?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_BOOL,
+    })
+}
+
+fn emit_typed_pool_clear(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+) -> Result<(), String> {
+    let zero = builder.ins().iconst(types::I32, 0);
+    emit_direct_i32_store(builder, count_ref, zero);
+    if capacity == 0 {
+        return Ok(());
+    }
+    let capacity_i32 = i32::try_from(capacity)
+        .map_err(|_| format!("typed pool capacity {capacity} exceeds i32 operation range"))?;
+    let condition_block = builder.create_block();
+    let body_block = builder.create_block();
+    let exit_block = builder.create_block();
+    builder.append_block_param(condition_block, types::I32);
+    builder.ins().jump(condition_block, &[zero]);
+
+    builder.switch_to_block(condition_block);
+    let index = builder.block_params(condition_block)[0];
+    let more = builder
+        .ins()
+        .icmp_imm(IntCC::SignedLessThan, index, i64::from(capacity_i32));
+    builder.ins().brif(more, body_block, &[], exit_block, &[]);
+
+    builder.seal_block(body_block);
+    builder.switch_to_block(body_block);
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        index,
+        zero,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let next = builder.ins().iadd_imm(index, 1);
+    builder.ins().jump(condition_block, &[next]);
+    builder.seal_block(condition_block);
+
+    builder.seal_block(exit_block);
+    builder.switch_to_block(exit_block);
+    Ok(())
+}
+
+fn try_emit_typed_pool_call(
+    builder: &mut FunctionBuilder<'_>,
+    target: &str,
+    args: &[SimpleExpr],
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<Option<TypedPoolCallResult>, String> {
+    let Some(kind) = TypedPoolCallKind::from_target(target) else {
+        return Ok(None);
+    };
+    let expected_arity = if kind.expects_value() { 2 } else { 1 };
+    if args.len() != expected_arity {
+        return Err(format!(
+            "{target} expects {expected_arity} argument(s), found {}",
+            args.len()
+        ));
+    }
+    let (path, capacity, count_ref, values_ref) = typed_pool_storage_bindings(
+        target,
+        args,
+        values_by_name,
+        runtime_call_refs,
+        global_path_types,
+        type_table,
+    )?;
+    match kind {
+        TypedPoolCallKind::Push => {
+            let value = emit_simple_expression(
+                builder,
+                &args[1],
+                Some(TYPE_ID_I32),
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )?;
+            if value.type_id != TYPE_ID_I32 {
+                return Err(format!(
+                    "{target} value argument must have exact i32 type, found {}",
+                    value.type_id
+                ));
+            }
+            Ok(Some(TypedPoolCallResult::Value(emit_typed_pool_push(
+                builder,
+                count_ref,
+                values_ref,
+                capacity,
+                value.value,
+                type_table,
+            )?)))
+        }
+        TypedPoolCallKind::Remove => {
+            let index = emit_simple_expression(
+                builder,
+                &args[1],
+                Some(TYPE_ID_I32),
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )?;
+            if index.type_id != TYPE_ID_I32 {
+                return Err(format!(
+                    "{target} index argument must have exact i32 type, found {}",
+                    index.type_id
+                ));
+            }
+            Ok(Some(TypedPoolCallResult::Value(emit_typed_pool_remove(
+                builder,
+                count_ref,
+                values_ref,
+                capacity,
+                index.value,
+                type_table,
+            )?)))
+        }
+        TypedPoolCallKind::Count => {
+            let value = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+            Ok(Some(TypedPoolCallResult::Value(ValueBinding {
+                value,
+                type_id: TYPE_ID_I32,
+            })))
+        }
+        TypedPoolCallKind::Capacity => {
+            let capacity = i32::try_from(capacity).map_err(|_| {
+                format!("{target} pool path '{path}' capacity exceeds i32 operation range")
+            })?;
+            Ok(Some(TypedPoolCallResult::Value(ValueBinding {
+                value: builder.ins().iconst(types::I32, i64::from(capacity)),
+                type_id: TYPE_ID_I32,
+            })))
+        }
+        TypedPoolCallKind::Clear => {
+            emit_typed_pool_clear(builder, count_ref, values_ref, capacity)?;
+            Ok(Some(TypedPoolCallResult::Void))
+        }
+    }
+}
+
 pub(crate) fn emit_simple_expression(
     builder: &mut FunctionBuilder<'_>,
     expression: &SimpleExpr,
@@ -4551,6 +5059,29 @@ pub(crate) fn emit_simple_expression(
             )
         }
         SimpleExpr::Call { target, args } => {
+            if let Some(result) = try_emit_typed_pool_call(
+                builder,
+                target,
+                args,
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )? {
+                return match result {
+                    TypedPoolCallResult::Value(value) => Ok(value),
+                    TypedPoolCallResult::Void => Err(format!(
+                        "void call target '{}' cannot be used in value expression",
+                        target
+                    )),
+                };
+            }
             let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
             let mut arg_types: Vec<TypeId> = Vec::with_capacity(args.len());
             let expected_params = unambiguous_call_params(target, args.len(), call_signatures);

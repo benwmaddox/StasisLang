@@ -36,6 +36,22 @@ enum TypeKey {
         definition: String,
         arguments: Vec<GenericArgument>,
     },
+    /// A compiler-owned collection application. This is intentionally a
+    /// distinct key from both `Named` and `InstantiatedNominal`: collection
+    /// identity includes the descriptor's policy, dimensions, and lane
+    /// schema, even while the legacy public category remains source-ABI
+    /// compatible for this metadata-only slice.
+    TypedCollection {
+        kind: TypedCollectionKind,
+        policy: TypedCollectionOverflowPolicy,
+        element_type: Option<TypeId>,
+        key_type: Option<TypeId>,
+        value_type: Option<TypeId>,
+        capacity: u32,
+        width: Option<u32>,
+        height: Option<u32>,
+        lanes: Vec<TypedCollectionLane>,
+    },
     ArrayFixed {
         element: TypeId,
         max_len: u32,
@@ -79,6 +95,148 @@ pub struct TypeInfo {
     pub layout: TypeLayout,
 }
 
+/// Compiler-owned fixed-capacity collection applications.
+///
+/// These names are deliberately distinct from ordinary source-defined generic
+/// structs.  A collection descriptor owns the storage policy and lane order;
+/// it is not a second spelling for an array/count struct in the stdlib.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TypedCollectionKind {
+    Pool,
+    StablePool,
+    Queue,
+    RingBuffer,
+    Map,
+    Set,
+    PriorityQueue,
+    Grid,
+    Bitset,
+}
+
+impl TypedCollectionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pool => "pool",
+            Self::StablePool => "stable_pool",
+            Self::Queue => "queue",
+            Self::RingBuffer => "ring_buffer",
+            Self::Map => "map",
+            Self::Set => "set",
+            Self::PriorityQueue => "priority_queue",
+            Self::Grid => "grid",
+            Self::Bitset => "bitset",
+        }
+    }
+}
+
+/// Overflow behavior is part of a typed collection's identity and layout
+/// contract.  It is parsed only for compiler-recognized collection kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TypedCollectionOverflowPolicy {
+    Error,
+    DropNewest,
+    OverwriteOldest,
+}
+
+impl TypedCollectionOverflowPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::DropNewest => "drop_newest",
+            Self::OverwriteOldest => "overwrite_oldest",
+        }
+    }
+}
+
+/// One statically laid out structure-of-arrays lane in a typed collection.
+///
+/// `element_count` is one for metadata lanes and the fixed lane capacity for
+/// payload lanes.  `offset_bytes` and `byte_size` are measured in the shared
+/// native state representation, after per-lane alignment has been applied.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedCollectionLane {
+    pub name: String,
+    pub type_id: TypeId,
+    pub element_count: u64,
+    pub offset_bytes: u64,
+    pub byte_size: u64,
+    pub alignment_bytes: u64,
+}
+
+/// Frontend descriptor for one compiler-owned typed collection application.
+///
+/// This first implementation slice accepts scalar lanes.  Flat scalar-field
+/// structs can be added later by reusing the existing explicit field-wise copy
+/// contract; this descriptor never implies an aggregate copy or return ABI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedCollectionDescriptor {
+    pub kind: TypedCollectionKind,
+    pub policy: TypedCollectionOverflowPolicy,
+    pub element_type: Option<TypeId>,
+    pub key_type: Option<TypeId>,
+    pub value_type: Option<TypeId>,
+    pub capacity: u32,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub lanes: Vec<TypedCollectionLane>,
+    pub static_size_bytes: u64,
+}
+
+impl TypedCollectionDescriptor {
+    pub fn kind_name(&self) -> &'static str {
+        self.kind.as_str()
+    }
+
+    pub fn policy_name(&self) -> &'static str {
+        self.policy.as_str()
+    }
+
+    /// Return a canonical type spelling for identity and layout diagnostics.
+    pub fn canonical_type_name(&self, type_table: &TypeTable) -> String {
+        let type_name = |type_id: Option<TypeId>| {
+            type_id
+                .and_then(|id| type_table.type_info(id))
+                .map_or_else(|| "?".to_string(), |info| info.name.clone())
+        };
+        match self.kind {
+            TypedCollectionKind::Pool
+            | TypedCollectionKind::StablePool
+            | TypedCollectionKind::Queue
+            | TypedCollectionKind::RingBuffer
+            | TypedCollectionKind::PriorityQueue => format!(
+                "{}<{}, {}, {}>",
+                self.kind_name(),
+                type_name(self.element_type),
+                self.capacity,
+                self.policy_name()
+            ),
+            TypedCollectionKind::Map => format!(
+                "map<{}, {}, {}, {}>",
+                type_name(self.key_type),
+                type_name(self.value_type),
+                self.capacity,
+                self.policy_name()
+            ),
+            TypedCollectionKind::Set => format!(
+                "set<{}, {}, {}>",
+                type_name(self.key_type),
+                self.capacity,
+                self.policy_name()
+            ),
+            TypedCollectionKind::Grid => format!(
+                "grid<{}, {}, {}, {}>",
+                type_name(self.element_type),
+                self.width.unwrap_or_default(),
+                self.height.unwrap_or_default(),
+                self.policy_name()
+            ),
+            TypedCollectionKind::Bitset => {
+                format!("bitset<{}, {}>", self.capacity, self.policy_name())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TypeTable {
     types: Vec<TypeInfo>,
@@ -111,6 +269,167 @@ impl TypeTable {
 
     pub fn resolve_or_intern(&mut self, type_name: &str) -> Result<TypeId, String> {
         self.resolve_or_intern_inner(type_name.trim())
+    }
+
+    /// Parse and validate a compiler-owned typed collection application.
+    ///
+    /// `Ok(None)` is returned for ordinary source-defined types, including
+    /// ordinary generic applications.  This keeps existing generic behavior
+    /// unchanged until the shared compiler lowering consumes the descriptor.
+    /// Recognized collection names are validated eagerly, so malformed policy,
+    /// capacity, key, and payload arguments cannot silently become nominal
+    /// user types.
+    pub fn parse_typed_collection_descriptor(
+        &self,
+        type_name: &str,
+    ) -> Result<Option<TypedCollectionDescriptor>, String> {
+        let trimmed = type_name.trim();
+        let Some(open) = trimmed.find('<') else {
+            return Ok(None);
+        };
+        let kind_name = trimmed[..open].trim();
+        // Do not validate arbitrary source-defined generic syntax here.  The
+        // ordinary generic elaborator owns that grammar, and applications such
+        // as `Buffer<i32, 4>[2]` must remain outside this built-in recognizer.
+        if parse_typed_collection_kind(kind_name).is_none() {
+            return Ok(None);
+        }
+        let Some((kind_name, arguments)) = split_type_application(trimmed)? else {
+            return Ok(None);
+        };
+        let Some(kind) = parse_typed_collection_kind(kind_name) else {
+            return Ok(None);
+        };
+
+        let expected_arity = match kind {
+            TypedCollectionKind::Map => 4,
+            TypedCollectionKind::Grid => 4,
+            TypedCollectionKind::Bitset => 2,
+            _ => 3,
+        };
+        if arguments.len() != expected_arity {
+            return Err(format!(
+                "typed collection '{}' expects {} arguments, got {}",
+                kind.as_str(),
+                expected_arity,
+                arguments.len()
+            ));
+        }
+
+        let policy_text = arguments[arguments.len() - 1];
+        let policy = parse_typed_collection_policy(kind, policy_text)?;
+        let mut descriptor = TypedCollectionDescriptor {
+            kind,
+            policy,
+            element_type: None,
+            key_type: None,
+            value_type: None,
+            capacity: 0,
+            width: None,
+            height: None,
+            lanes: Vec::new(),
+            static_size_bytes: 0,
+        };
+
+        match kind {
+            TypedCollectionKind::Pool
+            | TypedCollectionKind::StablePool
+            | TypedCollectionKind::Queue
+            | TypedCollectionKind::RingBuffer
+            | TypedCollectionKind::PriorityQueue => {
+                descriptor.element_type =
+                    Some(self.resolve_typed_scalar_argument(kind, "element", arguments[0])?);
+                descriptor.capacity = parse_typed_capacity(kind, arguments[1], "capacity")?;
+            }
+            TypedCollectionKind::Map => {
+                descriptor.key_type = Some(self.resolve_typed_key_argument(kind, arguments[0])?);
+                descriptor.value_type =
+                    Some(self.resolve_typed_scalar_argument(kind, "value", arguments[1])?);
+                descriptor.capacity = parse_typed_capacity(kind, arguments[2], "capacity")?;
+            }
+            TypedCollectionKind::Set => {
+                descriptor.key_type = Some(self.resolve_typed_key_argument(kind, arguments[0])?);
+                descriptor.capacity = parse_typed_capacity(kind, arguments[1], "capacity")?;
+            }
+            TypedCollectionKind::Grid => {
+                descriptor.element_type =
+                    Some(self.resolve_typed_scalar_argument(kind, "element", arguments[0])?);
+                let width = parse_typed_capacity(kind, arguments[1], "width")?;
+                let height = parse_typed_capacity(kind, arguments[2], "height")?;
+                let cells = u64::from(width)
+                    .checked_mul(u64::from(height))
+                    .ok_or_else(|| {
+                        format!(
+                            "typed collection '{}' width*height overflows checked layout arithmetic",
+                            kind.as_str()
+                        )
+                    })?;
+                if cells > u64::from(i32::MAX as u32) {
+                    return Err(format!(
+                        "typed collection '{}' width*height exceeds i32 runtime index capacity",
+                        kind.as_str()
+                    ));
+                }
+                descriptor.capacity = cells as u32;
+                descriptor.width = Some(width);
+                descriptor.height = Some(height);
+            }
+            TypedCollectionKind::Bitset => {
+                descriptor.capacity = parse_typed_capacity(kind, arguments[0], "capacity")?;
+            }
+        }
+
+        descriptor.lanes = build_typed_collection_lanes(self, &descriptor)?;
+        descriptor.static_size_bytes = typed_collection_total_size(&descriptor.lanes)?;
+        if descriptor.static_size_bytes > u64::from(u32::MAX) {
+            return Err(format!(
+                "typed collection '{}' static size {} exceeds u32 layout representation",
+                kind.as_str(),
+                descriptor.static_size_bytes
+            ));
+        }
+        Ok(Some(descriptor))
+    }
+
+    fn resolve_typed_scalar_argument(
+        &self,
+        kind: TypedCollectionKind,
+        role: &str,
+        type_name: &str,
+    ) -> Result<TypeId, String> {
+        let type_id = self.resolve(type_name).ok_or_else(|| {
+            format!(
+                "typed collection '{}' {} type '{}' is not a supported scalar",
+                kind.as_str(),
+                role,
+                type_name.trim()
+            )
+        })?;
+        if !is_typed_scalar_type(type_id) {
+            return Err(format!(
+                "typed collection '{}' {} type '{}' must be a scalar lane",
+                kind.as_str(),
+                role,
+                type_name.trim()
+            ));
+        }
+        Ok(type_id)
+    }
+
+    fn resolve_typed_key_argument(
+        &self,
+        kind: TypedCollectionKind,
+        type_name: &str,
+    ) -> Result<TypeId, String> {
+        let type_id = self.resolve_typed_scalar_argument(kind, "key", type_name)?;
+        if !self.is_integer(type_id) {
+            return Err(format!(
+                "typed collection '{}' key type '{}' must be an integer scalar",
+                kind.as_str(),
+                type_name.trim()
+            ));
+        }
+        Ok(type_id)
     }
 
     pub fn intern_instantiated_nominal(
@@ -266,7 +585,54 @@ impl TypeTable {
             return self.resolve_or_intern_array(base, extent);
         }
 
+        if let Some(descriptor) = self.parse_typed_collection_descriptor(type_name)? {
+            return self.intern_typed_collection(descriptor);
+        }
+
         self.intern_named(type_name)
+    }
+
+    fn intern_typed_collection(
+        &mut self,
+        descriptor: TypedCollectionDescriptor,
+    ) -> Result<TypeId, String> {
+        let key = TypeKey::TypedCollection {
+            kind: descriptor.kind,
+            policy: descriptor.policy,
+            element_type: descriptor.element_type,
+            key_type: descriptor.key_type,
+            value_type: descriptor.value_type,
+            capacity: descriptor.capacity,
+            width: descriptor.width,
+            height: descriptor.height,
+            lanes: descriptor.lanes.clone(),
+        };
+        if let Some(existing) = self.by_key.get(&key) {
+            return Ok(*existing);
+        }
+        let static_size_bytes = u32::try_from(descriptor.static_size_bytes).map_err(|_| {
+            format!(
+                "typed collection '{}' static size {} exceeds u32 layout representation",
+                descriptor.kind_name(),
+                descriptor.static_size_bytes
+            )
+        })?;
+        self.intern_with_info(
+            key,
+            TypeInfo {
+                name: descriptor.canonical_type_name(self),
+                // Keep the existing source ABI category until collection
+                // operations have a dedicated lowering contract. The
+                // internal TypeKey above is what prevents nominal identity
+                // and scalar state fallback at the compiler-owned boundary.
+                category: TypeCategory::Named,
+                layout: TypeLayout {
+                    header_i32_words: 0,
+                    payload_size_bytes: Some(static_size_bytes),
+                    static_size_bytes: Some(static_size_bytes),
+                },
+            },
+        )
     }
 
     fn resolve_or_intern_array(
@@ -431,6 +797,24 @@ impl TypeTable {
             return TypeId::try_from(index).ok();
         }
 
+        // Normalize whitespace and retain compiler-owned identity for callers
+        // that use `resolve` after an application was interned through a
+        // differently spaced source spelling.
+        if let Ok(Some(descriptor)) = self.parse_typed_collection_descriptor(type_name) {
+            let key = TypeKey::TypedCollection {
+                kind: descriptor.kind,
+                policy: descriptor.policy,
+                element_type: descriptor.element_type,
+                key_type: descriptor.key_type,
+                value_type: descriptor.value_type,
+                capacity: descriptor.capacity,
+                width: descriptor.width,
+                height: descriptor.height,
+                lanes: descriptor.lanes,
+            };
+            return self.by_key.get(&key).copied();
+        }
+
         let split = split_array_suffix(type_name).ok()?;
         if let Some((base, extent_text)) = split {
             let extent = parse_array_extent(extent_text).ok()?;
@@ -511,6 +895,15 @@ impl TypeTable {
         self.type_keys.get(id as usize)
     }
 
+    /// Whether a type id was interned from a compiler-owned typed collection
+    /// application rather than from an ordinary nominal declaration.
+    pub fn is_typed_collection_type(&self, type_id: TypeId) -> bool {
+        matches!(
+            self.type_key(type_id),
+            Some(TypeKey::TypedCollection { .. })
+        )
+    }
+
     fn find_first_type_id_by_category(&self, category: TypeCategory) -> Option<TypeId> {
         self.types
             .iter()
@@ -537,6 +930,9 @@ impl TypeTable {
     }
 
     pub(crate) fn is_i32_abi_compatible(&self, type_id: TypeId) -> bool {
+        if self.is_typed_collection_type(type_id) {
+            return false;
+        }
         if type_id == TYPE_ID_I32
             || type_id == TYPE_ID_BOOL
             || self.unsigned_integer_bits(type_id).is_some()
@@ -638,6 +1034,439 @@ fn is_byte_array_key(key: &TypeKey, table: &TypeTable) -> bool {
         table.type_key(element),
         Some(TypeKey::Builtin(BuiltinType::U8))
     )
+}
+
+fn parse_typed_collection_kind(name: &str) -> Option<TypedCollectionKind> {
+    match name.trim() {
+        "pool" => Some(TypedCollectionKind::Pool),
+        "stable_pool" => Some(TypedCollectionKind::StablePool),
+        "queue" => Some(TypedCollectionKind::Queue),
+        "ring_buffer" => Some(TypedCollectionKind::RingBuffer),
+        "map" => Some(TypedCollectionKind::Map),
+        "set" => Some(TypedCollectionKind::Set),
+        "priority_queue" => Some(TypedCollectionKind::PriorityQueue),
+        "grid" => Some(TypedCollectionKind::Grid),
+        "bitset" => Some(TypedCollectionKind::Bitset),
+        _ => None,
+    }
+}
+
+fn parse_typed_collection_policy(
+    kind: TypedCollectionKind,
+    text: &str,
+) -> Result<TypedCollectionOverflowPolicy, String> {
+    let policy = match text.trim() {
+        "error" => TypedCollectionOverflowPolicy::Error,
+        "drop_newest" => TypedCollectionOverflowPolicy::DropNewest,
+        "overwrite_oldest" => TypedCollectionOverflowPolicy::OverwriteOldest,
+        other => {
+            return Err(format!(
+                "typed collection '{}' has unknown overflow policy '{}'; expected error, drop_newest, or overwrite_oldest",
+                kind.as_str(),
+                other
+            ));
+        }
+    };
+    let allowed = match kind {
+        TypedCollectionKind::Pool
+        | TypedCollectionKind::StablePool
+        | TypedCollectionKind::Map
+        | TypedCollectionKind::Set
+        | TypedCollectionKind::PriorityQueue => {
+            matches!(
+                policy,
+                TypedCollectionOverflowPolicy::Error | TypedCollectionOverflowPolicy::DropNewest
+            )
+        }
+        TypedCollectionKind::Queue | TypedCollectionKind::RingBuffer => true,
+        TypedCollectionKind::Grid | TypedCollectionKind::Bitset => {
+            policy == TypedCollectionOverflowPolicy::Error
+        }
+    };
+    if !allowed {
+        return Err(format!(
+            "typed collection '{}' does not support overflow policy '{}'",
+            kind.as_str(),
+            policy.as_str()
+        ));
+    }
+    Ok(policy)
+}
+
+fn parse_typed_capacity(kind: TypedCollectionKind, text: &str, role: &str) -> Result<u32, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || !trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "typed collection '{}' {} must be a nonnegative decimal constant, got '{}'",
+            kind.as_str(),
+            role,
+            trimmed
+        ));
+    }
+    let value = trimmed.parse::<u64>().map_err(|_| {
+        format!(
+            "typed collection '{}' {} '{}' is outside the supported integer range",
+            kind.as_str(),
+            role,
+            trimmed
+        )
+    })?;
+    if value > i32::MAX as u64 {
+        return Err(format!(
+            "typed collection '{}' {} {} exceeds i32::MAX",
+            kind.as_str(),
+            role,
+            value
+        ));
+    }
+    Ok(value as u32)
+}
+
+fn split_type_application(type_name: &str) -> Result<Option<(&str, Vec<&str>)>, String> {
+    let trimmed = type_name.trim();
+    let Some(open) = trimmed.find('<') else {
+        return Ok(None);
+    };
+    if !trimmed.ends_with('>') {
+        return Err(format!(
+            "invalid typed collection application '{}': missing '>'",
+            trimmed
+        ));
+    }
+    let base = trimmed[..open].trim();
+    if base.is_empty() {
+        return Err(format!(
+            "invalid typed collection application '{}': missing collection name",
+            trimmed
+        ));
+    }
+
+    let bytes = trimmed.as_bytes();
+    let mut angle_depth = 0i32;
+    let mut square_depth = 0i32;
+    let mut argument_start = open + 1;
+    let mut arguments = Vec::new();
+    for index in open..bytes.len() {
+        match bytes[index] {
+            b'<' => angle_depth += 1,
+            b'>' => {
+                angle_depth -= 1;
+                if angle_depth < 0 {
+                    return Err(format!(
+                        "invalid typed collection application '{}': unmatched '>'",
+                        trimmed
+                    ));
+                }
+                if angle_depth == 0 {
+                    if square_depth != 0 {
+                        return Err(format!(
+                            "invalid typed collection application '{}': unmatched '['",
+                            trimmed
+                        ));
+                    }
+                    let argument = trimmed[argument_start..index].trim();
+                    if argument.is_empty() {
+                        return Err(format!(
+                            "invalid typed collection application '{}': empty argument",
+                            trimmed
+                        ));
+                    }
+                    arguments.push(argument);
+                    if index + 1 != bytes.len() {
+                        return Err(format!(
+                            "invalid typed collection application '{}': trailing text",
+                            trimmed
+                        ));
+                    }
+                }
+            }
+            b'[' => square_depth += 1,
+            b']' => {
+                square_depth -= 1;
+                if square_depth < 0 {
+                    return Err(format!(
+                        "invalid typed collection application '{}': unmatched ']'",
+                        trimmed
+                    ));
+                }
+            }
+            b',' if angle_depth == 1 && square_depth == 0 => {
+                let argument = trimmed[argument_start..index].trim();
+                if argument.is_empty() {
+                    return Err(format!(
+                        "invalid typed collection application '{}': empty argument",
+                        trimmed
+                    ));
+                }
+                arguments.push(argument);
+                argument_start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    if angle_depth != 0 || square_depth != 0 || arguments.is_empty() {
+        return Err(format!(
+            "invalid typed collection application '{}': unbalanced or empty arguments",
+            trimmed
+        ));
+    }
+    Ok(Some((base, arguments)))
+}
+
+fn is_typed_scalar_type(type_id: TypeId) -> bool {
+    matches!(
+        type_id,
+        TYPE_ID_I32
+            | TYPE_ID_F32
+            | TYPE_ID_F64
+            | TYPE_ID_BOOL
+            | TYPE_ID_U8
+            | TYPE_ID_U16
+            | TYPE_ID_U32
+    )
+}
+
+fn typed_scalar_lane_layout(type_id: TypeId) -> Option<(u64, u64)> {
+    match type_id {
+        TYPE_ID_I32 | TYPE_ID_F32 | TYPE_ID_U32 | TYPE_ID_BOOL => Some((4, 4)),
+        TYPE_ID_F64 => Some((8, 8)),
+        TYPE_ID_U8 => Some((1, 1)),
+        TYPE_ID_U16 => Some((2, 2)),
+        _ => None,
+    }
+}
+
+fn build_typed_collection_lanes(
+    type_table: &TypeTable,
+    descriptor: &TypedCollectionDescriptor,
+) -> Result<Vec<TypedCollectionLane>, String> {
+    let mut lanes = Vec::new();
+    let mut offset = 0u64;
+    match descriptor.kind {
+        TypedCollectionKind::Pool => {
+            append_typed_lane(type_table, &mut lanes, &mut offset, "count", TYPE_ID_I32, 1)?;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "values",
+                descriptor.element_type.expect("pool element validated"),
+                u64::from(descriptor.capacity),
+            )?;
+        }
+        TypedCollectionKind::StablePool => {
+            append_typed_lane(type_table, &mut lanes, &mut offset, "count", TYPE_ID_I32, 1)?;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "occupied",
+                TYPE_ID_U8,
+                u64::from(descriptor.capacity),
+            )?;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "values",
+                descriptor
+                    .element_type
+                    .expect("stable pool element validated"),
+                u64::from(descriptor.capacity),
+            )?;
+        }
+        TypedCollectionKind::Queue | TypedCollectionKind::RingBuffer => {
+            append_typed_lane(type_table, &mut lanes, &mut offset, "count", TYPE_ID_I32, 1)?;
+            append_typed_lane(type_table, &mut lanes, &mut offset, "head", TYPE_ID_I32, 1)?;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "values",
+                descriptor.element_type.expect("queue element validated"),
+                u64::from(descriptor.capacity),
+            )?;
+        }
+        TypedCollectionKind::Map => {
+            append_typed_lane(type_table, &mut lanes, &mut offset, "count", TYPE_ID_I32, 1)?;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "occupied",
+                TYPE_ID_U8,
+                u64::from(descriptor.capacity),
+            )?;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "keys",
+                descriptor.key_type.expect("map key validated"),
+                u64::from(descriptor.capacity),
+            )?;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "values",
+                descriptor.value_type.expect("map value validated"),
+                u64::from(descriptor.capacity),
+            )?;
+        }
+        TypedCollectionKind::Set => {
+            append_typed_lane(type_table, &mut lanes, &mut offset, "count", TYPE_ID_I32, 1)?;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "occupied",
+                TYPE_ID_U8,
+                u64::from(descriptor.capacity),
+            )?;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "keys",
+                descriptor.key_type.expect("set key validated"),
+                u64::from(descriptor.capacity),
+            )?;
+        }
+        TypedCollectionKind::PriorityQueue => {
+            append_typed_lane(type_table, &mut lanes, &mut offset, "count", TYPE_ID_I32, 1)?;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "next_order",
+                TYPE_ID_U32,
+                1,
+            )?;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "priority",
+                TYPE_ID_I32,
+                u64::from(descriptor.capacity),
+            )?;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "order",
+                TYPE_ID_U32,
+                u64::from(descriptor.capacity),
+            )?;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "values",
+                descriptor
+                    .element_type
+                    .expect("priority queue element validated"),
+                u64::from(descriptor.capacity),
+            )?;
+        }
+        TypedCollectionKind::Grid => {
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "values",
+                descriptor.element_type.expect("grid element validated"),
+                u64::from(descriptor.capacity),
+            )?;
+        }
+        TypedCollectionKind::Bitset => {
+            let words = u64::from(descriptor.capacity)
+                .checked_add(31)
+                .ok_or_else(|| "typed bitset word-count arithmetic overflow".to_string())?
+                / 32;
+            append_typed_lane(
+                type_table,
+                &mut lanes,
+                &mut offset,
+                "words",
+                TYPE_ID_U32,
+                words,
+            )?;
+        }
+    }
+    Ok(lanes)
+}
+
+fn append_typed_lane(
+    _type_table: &TypeTable,
+    lanes: &mut Vec<TypedCollectionLane>,
+    offset: &mut u64,
+    name: &str,
+    type_id: TypeId,
+    element_count: u64,
+) -> Result<(), String> {
+    let (element_size, alignment) = typed_scalar_lane_layout(type_id).ok_or_else(|| {
+        format!(
+            "typed collection lane '{}' has unsupported scalar type id {}",
+            name, type_id
+        )
+    })?;
+    if element_count == 0 {
+        lanes.push(TypedCollectionLane {
+            name: name.to_string(),
+            type_id,
+            element_count,
+            offset_bytes: *offset,
+            byte_size: 0,
+            alignment_bytes: alignment,
+        });
+        return Ok(());
+    }
+    let aligned_offset = align_typed_offset(*offset, alignment)?;
+    let byte_size = element_size
+        .checked_mul(element_count)
+        .ok_or_else(|| format!("typed collection lane '{}' byte size overflow", name))?;
+    let end = aligned_offset
+        .checked_add(byte_size)
+        .ok_or_else(|| format!("typed collection lane '{}' offset overflow", name))?;
+    lanes.push(TypedCollectionLane {
+        name: name.to_string(),
+        type_id,
+        element_count,
+        offset_bytes: aligned_offset,
+        byte_size,
+        alignment_bytes: alignment,
+    });
+    *offset = end;
+    Ok(())
+}
+
+fn typed_collection_total_size(lanes: &[TypedCollectionLane]) -> Result<u64, String> {
+    let mut end = 0u64;
+    let mut alignment = 1u64;
+    for lane in lanes {
+        end = end.max(
+            lane.offset_bytes
+                .checked_add(lane.byte_size)
+                .ok_or_else(|| "typed collection total byte size overflow".to_string())?,
+        );
+        if lane.byte_size > 0 {
+            alignment = alignment.max(lane.alignment_bytes);
+        }
+    }
+    align_typed_offset(end, alignment)
+}
+
+fn align_typed_offset(offset: u64, alignment: u64) -> Result<u64, String> {
+    debug_assert!(alignment.is_power_of_two());
+    let adjustment = alignment
+        .checked_sub(1)
+        .ok_or_else(|| "typed collection alignment cannot be zero".to_string())?;
+    offset
+        .checked_add(adjustment)
+        .map(|value| value / alignment * alignment)
+        .ok_or_else(|| "typed collection alignment arithmetic overflow".to_string())
 }
 
 fn split_array_suffix(type_name: &str) -> Result<Option<(&str, &str)>, String> {
@@ -981,5 +1810,196 @@ mod tests {
         assert!(!table.is_argument_compatible_with_param(sprite_ref, TYPE_ID_I32));
         assert!(!table.assignment_types_are_compatible(sprite_ref, TYPE_ID_I32));
         assert!(table.assignment_types_are_compatible(TYPE_ID_I32, sprite_ref));
+    }
+
+    #[test]
+    fn typed_collection_descriptors_cover_all_kinds_with_exact_lane_costs() {
+        let table = TypeTable::new();
+        let cases = [
+            ("pool<i32, 2, error>", TypedCollectionKind::Pool, 12, 2),
+            (
+                "stable_pool<u16, 3, error>",
+                TypedCollectionKind::StablePool,
+                16,
+                3,
+            ),
+            (
+                "queue<f64, 2, overwrite_oldest>",
+                TypedCollectionKind::Queue,
+                24,
+                2,
+            ),
+            (
+                "ring_buffer<u8, 4, drop_newest>",
+                TypedCollectionKind::RingBuffer,
+                12,
+                4,
+            ),
+            ("map<u8, f64, 3, error>", TypedCollectionKind::Map, 40, 3),
+            ("set<u32, 3, drop_newest>", TypedCollectionKind::Set, 20, 3),
+            (
+                "priority_queue<i32, 2, error>",
+                TypedCollectionKind::PriorityQueue,
+                32,
+                2,
+            ),
+            ("grid<u16, 2, 3, error>", TypedCollectionKind::Grid, 12, 6),
+            ("bitset<33, error>", TypedCollectionKind::Bitset, 8, 33),
+        ];
+
+        for (source, expected_kind, expected_bytes, expected_capacity) in cases {
+            let descriptor = table
+                .parse_typed_collection_descriptor(source)
+                .expect("valid typed collection source")
+                .expect("recognized typed collection");
+            assert_eq!(descriptor.kind, expected_kind, "{source}");
+            assert_eq!(descriptor.static_size_bytes, expected_bytes, "{source}");
+            assert_eq!(descriptor.capacity, expected_capacity, "{source}");
+            assert_eq!(descriptor.canonical_type_name(&table), source, "{source}");
+            if expected_kind == TypedCollectionKind::StablePool {
+                assert_eq!(descriptor.lanes[1].offset_bytes, 4, "{source}");
+                assert_eq!(descriptor.lanes[2].offset_bytes, 8, "{source}");
+            }
+            assert!(
+                descriptor.lanes.windows(2).all(
+                    |lanes| lanes[0].offset_bytes + lanes[0].byte_size <= lanes[1].offset_bytes
+                ),
+                "lanes overlap for {source}: {:?}",
+                descriptor.lanes
+            );
+        }
+    }
+
+    #[test]
+    fn typed_collection_descriptor_accepts_zero_and_rejects_invalid_contracts() {
+        let table = TypeTable::new();
+        let pool_zero = table
+            .parse_typed_collection_descriptor("pool<i32, 0, drop_newest>")
+            .expect("zero-capacity pool")
+            .expect("recognized zero-capacity pool");
+        assert_eq!(pool_zero.static_size_bytes, 4);
+        assert_eq!(pool_zero.lanes[1].byte_size, 0);
+
+        let wide_pool_zero = table
+            .parse_typed_collection_descriptor("pool<f64, 0, error>")
+            .expect("zero-capacity wide pool")
+            .expect("recognized zero-capacity wide pool");
+        assert_eq!(
+            wide_pool_zero.static_size_bytes, 4,
+            "an absent payload lane must not add alignment padding"
+        );
+
+        let queue_zero = table
+            .parse_typed_collection_descriptor("queue<i32, 0, overwrite_oldest>")
+            .expect("zero-capacity queue")
+            .expect("recognized zero-capacity queue");
+        assert_eq!(queue_zero.static_size_bytes, 8);
+        assert_eq!(queue_zero.lanes[2].byte_size, 0);
+
+        let bitset_zero = table
+            .parse_typed_collection_descriptor("bitset<0, error>")
+            .expect("zero-capacity bitset")
+            .expect("recognized zero-capacity bitset");
+        assert_eq!(bitset_zero.static_size_bytes, 0);
+        assert_eq!(bitset_zero.lanes[0].element_count, 0);
+
+        assert!(table
+            .parse_typed_collection_descriptor("Buffer<i32, 2>")
+            .expect("ordinary generic applications remain outside this descriptor")
+            .is_none());
+        assert!(table
+            .parse_typed_collection_descriptor("Buffer<i32, 4>[2]")
+            .expect("ordinary generic array applications remain outside this descriptor")
+            .is_none());
+        for (source, expected) in [
+            (
+                "pool<i32, 2, overwrite_oldest>",
+                "does not support overflow policy",
+            ),
+            ("bitset<8, drop_newest>", "does not support overflow policy"),
+            ("map<f32, i32, 2, error>", "key type"),
+            ("pool<i32, -1, error>", "nonnegative decimal"),
+            ("queue<i32, N, error>", "nonnegative decimal"),
+            ("pool<Entity, 2, error>", "supported scalar"),
+            ("pool<i32, 2, unknown>", "unknown overflow policy"),
+        ] {
+            let error = table
+                .parse_typed_collection_descriptor(source)
+                .expect_err("invalid typed collection must be rejected");
+            assert!(error.contains(expected), "{source}: {error}");
+        }
+    }
+
+    #[test]
+    fn typed_collection_application_has_compiler_owned_identity() {
+        let mut table = TypeTable::new();
+        let typed = table
+            .resolve_or_intern("pool<i32,2,error>")
+            .expect("typed pool type");
+        let same = table
+            .resolve_or_intern("pool<i32, 2, error>")
+            .expect("canonical typed pool type");
+        let spaced_kind = table
+            .resolve_or_intern("pool <i32, 2, error>")
+            .expect("typed pool type with whitespace before '<'");
+        let nominal = table
+            .resolve_or_intern("PoolLike<i32, 2, error>")
+            .expect("ordinary nominal type");
+
+        assert_eq!(typed, same, "source whitespace must not change identity");
+        assert_eq!(
+            typed, spaced_kind,
+            "whitespace before '<' must not change identity"
+        );
+        assert_eq!(table.resolve("pool <i32, 2, error>"), Some(typed));
+        assert_ne!(typed, nominal, "typed pools must not be nominal aliases");
+        assert!(table.is_typed_collection_type(typed));
+        assert!(!table.is_typed_collection_type(nominal));
+        assert!(
+            !table.is_i32_abi_compatible(typed),
+            "typed collection applications must not use scalar i32 ABI fallback"
+        );
+        assert_eq!(
+            table
+                .type_info(typed)
+                .expect("typed type info")
+                .layout
+                .static_size_bytes,
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn typed_collection_descriptor_enforces_runtime_dimension_and_layout_limits() {
+        let table = TypeTable::new();
+        let exact_dimension_limit = table
+            .parse_typed_collection_descriptor("grid<u8, 2147483647, 1, error>")
+            .expect("exact i32 dimension product should be representable")
+            .expect("recognized grid descriptor");
+        assert_eq!(exact_dimension_limit.capacity, 2_147_483_647);
+        let error = table
+            .parse_typed_collection_descriptor("grid<i32, 2147483647, 2, error>")
+            .expect_err("grid product must be checked");
+        assert!(error.contains("i32 runtime index capacity"), "{error}");
+
+        let error = table
+            .parse_typed_collection_descriptor("grid<u8, 2147483647, 2, error>")
+            .expect_err("dimension product above runtime index width must be rejected");
+        assert!(error.contains("i32 runtime index capacity"), "{error}");
+
+        let fitting = table
+            .parse_typed_collection_descriptor("pool<i32, 1073741822, error>")
+            .expect("last fitting u32 static layout")
+            .expect("recognized pool descriptor");
+        assert_eq!(fitting.static_size_bytes, 4_294_967_292);
+        let error = table
+            .parse_typed_collection_descriptor("pool<i32, 1073741823, error>")
+            .expect_err("static layout above u32 representation must be rejected");
+        assert!(error.contains("u32 layout representation"), "{error}");
+
+        let error = table
+            .parse_typed_collection_descriptor("pool<i32, 2, error")
+            .expect_err("unbalanced application must be rejected");
+        assert!(error.contains("missing '>'"), "{error}");
     }
 }

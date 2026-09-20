@@ -3,7 +3,7 @@ use crate::backend::compile_analysis::{
     compute_files_fingerprint, resolve_extern_call_signatures_with_index, CallSignatureMap,
     CollectionInfoMap, CompileAnalysisCache, ConstantValueMap, ExternCallSignature,
     ExternSymbolAddressMap, GlobalPathTypeMap, NamedStructFieldTypeMap,
-    ResolvedExternCallSignature,
+    ResolvedExternCallSignature, TypedCollectionInfoMap,
 };
 use crate::backend::emit::{
     debug_variable_slot, DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage,
@@ -986,6 +986,7 @@ impl JitProcess {
         let direct_storage = build_direct_storage_bindings(
             &analysis.global_path_types,
             &analysis.collection_infos,
+            snapshot.typed_collection_descriptors(),
             self.compiler.types(),
             false,
         )
@@ -1395,6 +1396,7 @@ impl JitProcess {
         build_direct_storage_bindings(
             &analysis.global_path_types,
             &analysis.collection_infos,
+            &analysis.typed_collection_descriptors,
             self.compiler.types(),
             true,
         )?;
@@ -1536,20 +1538,20 @@ impl JitProcess {
     pub fn global_collection_capacity(&self, path: &str) -> Option<i32> {
         self.program_snapshot
             .as_ref()?
-            .analysis
-            .collection_infos
-            .get(path)
-            .map(|info| info.len)
+            .collections()
+            .iter()
+            .find(|collection| collection.path == path)
+            .map(|collection| collection.capacity)
     }
 
     pub fn global_collection_field_type(&self, path: &str, field: &str) -> Option<&'static str> {
         let type_id = self
             .program_snapshot
             .as_ref()?
-            .analysis
-            .collection_infos
-            .get(path)?
-            .field_types
+            .collections()
+            .iter()
+            .find(|collection| collection.path == path)?
+            .field_type_ids
             .get(field)?;
         scalar_type_name(*type_id)
     }
@@ -1593,6 +1595,20 @@ impl JitProcess {
                         .and_then(jit_value_as_nonnegative_u64)
                         .unwrap_or(0)
                         .min(capacity)
+                } else if self.program_snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot
+                        .typed_collection_descriptors()
+                        .get(&collection.path)
+                        .is_some_and(|descriptor| {
+                            descriptor.lanes.iter().any(|lane| lane.name == "count")
+                        })
+                }) {
+                    u64::try_from(
+                        self.read_i32_global_path(&format!("{}.count", collection.path))
+                            .max(0),
+                    )
+                    .unwrap_or(0)
+                    .min(capacity)
                 } else {
                     capacity
                 };
@@ -2035,11 +2051,11 @@ impl JitProcess {
     }
 
     fn global_collection_value_type(&self, path: &str, field: &str) -> Result<(u16, i32), String> {
-        let analysis = &self
+        let snapshot = self
             .program_snapshot
             .as_ref()
-            .ok_or_else(|| "JIT collection metadata is unavailable".to_string())?
-            .analysis;
+            .ok_or_else(|| "JIT collection metadata is unavailable".to_string())?;
+        let analysis = &snapshot.analysis;
         if let Some(info) = analysis.collection_infos.get(path) {
             let type_id = if field.is_empty() {
                 info.element_type
@@ -2050,6 +2066,21 @@ impl JitProcess {
                 format!("global collection path '{path}' field '{field}' was not found")
             })?;
             return Ok((type_id, info.len));
+        }
+        if let Some(collection) = snapshot
+            .collections()
+            .iter()
+            .find(|collection| collection.path == path)
+        {
+            let type_id = if field.is_empty() {
+                collection.element_type_id
+            } else {
+                collection.field_type_ids.get(field).copied()
+            }
+            .ok_or_else(|| {
+                format!("global collection path '{path}' field '{field}' was not found")
+            })?;
+            return Ok((type_id, collection.capacity));
         }
         if field.is_empty() {
             if let Some(capacity) = self.global_fixed_text_capacity(path) {
@@ -2915,6 +2946,7 @@ fn array_storage_kind(
 fn build_direct_storage_bindings(
     global_path_types: &crate::backend::compile_analysis::GlobalPathTypeMap,
     collection_infos: &crate::backend::compile_analysis::CollectionInfoMap,
+    typed_collection_descriptors: &TypedCollectionInfoMap,
     type_table: &TypeTable,
     provision: bool,
 ) -> Result<DirectStorageBindings, String> {
@@ -3000,6 +3032,54 @@ fn build_direct_storage_bindings(
                 },
             );
         }
+    }
+    for (path, descriptor) in typed_collection_descriptors {
+        if descriptor.kind != crate::frontend::types::TypedCollectionKind::Pool {
+            continue;
+        }
+        let count_path = format!("{path}.count");
+        let count_hash = crate::backend::emit::hash_global_path(&count_path);
+        let count_kind = scalar_storage_kind(type_table, crate::frontend::types::TYPE_ID_I32)
+            .expect("i32 has direct scalar storage");
+        let count_address =
+            stasis_dynload::direct_scalar_storage_slot_address(count_kind, count_hash)?;
+        if provision {
+            stasis_dynload::provision_direct_scalar_storage(count_kind, count_hash)?;
+        }
+        bindings
+            .scalars
+            .insert(count_path, DirectStorageBinding::Absolute(count_address));
+
+        let element_type = descriptor.element_type.ok_or_else(|| {
+            format!("typed pool '{path}' is missing its element type in storage metadata")
+        })?;
+        let kind = array_storage_kind(type_table, element_type).ok_or_else(|| {
+            format!(
+                "unsupported direct storage element type {element_type} for typed pool '{path}'"
+            )
+        })?;
+        let path_hash = crate::backend::emit::hash_global_path(path);
+        let field = "values";
+        let field_hash = crate::backend::emit::hash_foreach_field_suffix(field);
+        let length = usize::try_from(descriptor.capacity).map_err(|_| {
+            format!(
+                "typed pool '{path}' capacity {} does not fit usize",
+                descriptor.capacity
+            )
+        })?;
+        let address =
+            stasis_dynload::direct_array_storage_slot_address(kind, path_hash, field_hash)?;
+        if provision {
+            stasis_dynload::provision_direct_array_storage(kind, path_hash, field_hash, length)?;
+        }
+        bindings.arrays.insert(
+            (path.clone(), field.to_string()),
+            crate::backend::emit::DirectArrayStorageBinding {
+                slot: DirectStorageBinding::Absolute(address),
+                storage_bytes: storage_kind_bytes(kind),
+                static_len: Some(length),
+            },
+        );
     }
     Ok(bindings)
 }
@@ -4842,6 +4922,203 @@ function main(): i32 {
         assert_eq!(
             crate::backend::emit::runtime_helper_trampoline_count_for_test(),
             0
+        );
+    }
+
+    #[test]
+    fn typed_pool_jit_storage_plan_keeps_count_scalar_separate_from_values_array() {
+        for capacity in [2_u32, 0_u32] {
+            let mut process = JitProcess::new();
+            process.upsert_file(
+                "typed_pool_storage.stasis",
+                format!(
+                    "global actors: pool<i32, {capacity}, error>;\nfunction main(): i32 {{ return 0; }}\n"
+                ),
+            );
+            process.compile().expect("typed pool JIT compile");
+
+            let snapshot = process.program_snapshot().expect("typed pool snapshot");
+            let descriptors = snapshot.typed_collection_descriptors();
+            let descriptor = descriptors.get("actors").expect("typed pool descriptor");
+            assert_eq!(descriptor.capacity, capacity);
+            assert_eq!(
+                descriptor.canonical_type_name(snapshot.types()),
+                format!("pool<i32, {capacity}, error>")
+            );
+
+            let bindings = build_direct_storage_bindings(
+                &snapshot.analysis.global_path_types,
+                &snapshot.analysis.collection_infos,
+                descriptors,
+                snapshot.types(),
+                false,
+            )
+            .expect("typed pool JIT direct storage plan");
+            assert!(bindings.scalars.contains_key("actors.count"));
+            assert!(!bindings.scalars.contains_key("actors"));
+            assert_eq!(bindings.scalars.len(), 1);
+            let values = bindings
+                .arrays
+                .get(&(String::from("actors"), String::from("values")))
+                .expect("typed pool values array binding");
+            assert_eq!(values.static_len, Some(capacity as usize));
+            assert_eq!(values.storage_bytes, 4);
+            assert_eq!(bindings.arrays.len(), 1);
+
+            assert_eq!(
+                stasis_dynload::direct_array_storage_slot_len_for_test(
+                    stasis_dynload::JitStorageKind::I32,
+                    hash_global_path("actors"),
+                    crate::backend::emit::hash_foreach_field_suffix("values"),
+                ),
+                Some(capacity as usize),
+                "JIT provisioned typed pool values lane must retain descriptor capacity"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_pool_operations_execute_with_bounded_swap_remove_and_clear_semantics() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&[
+            "fill".to_string(),
+            "remove_first".to_string(),
+            "remove_invalid".to_string(),
+            "clear_all".to_string(),
+            "capacity".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_pool_execution.stasis",
+            "global typed_pool_exec_147: pool<i32, 2, error>;\n\
+             function fill(): i32 { let first: i32 = pool_push(typed_pool_exec_147, 10); let second: i32 = pool_push(typed_pool_exec_147, 20); let rejected: i32 = pool_push(typed_pool_exec_147, 30); return first * 100 + second * 10 + rejected; }\n\
+             function remove_first(): i32 { if (pool_remove(typed_pool_exec_147, 0)) { return 1; } return 0; }\n\
+             function remove_invalid(): i32 { if (pool_remove(typed_pool_exec_147, 9)) { return 1; } return 0; }\n\
+             function clear_all(): i32 { pool_clear(typed_pool_exec_147); return pool_count(typed_pool_exec_147); }\n\
+             function capacity(): i32 { return pool_capacity(typed_pool_exec_147); }\n",
+        );
+        process.compile().expect("typed pool operation JIT compile");
+
+        assert_eq!(process.read_i32_global_path("typed_pool_exec_147.count"), 0);
+        let initial_memory = process
+            .state_memory_report(&BTreeMap::new(), u64::MAX)
+            .expect("typed pool memory report");
+        assert_eq!(
+            initial_memory
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_pool_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(0)
+        );
+        assert_eq!(
+            process.global_collection_capacity("typed_pool_exec_147"),
+            Some(2)
+        );
+        assert_eq!(
+            process.global_collection_field_type("typed_pool_exec_147", "values"),
+            Some("i32")
+        );
+        assert_eq!(process.execute_i32_noarg_by_name("capacity").unwrap(), 2);
+        assert_eq!(process.execute_i32_noarg_by_name("fill").unwrap(), 9);
+        assert_eq!(process.read_i32_global_path("typed_pool_exec_147.count"), 2);
+        let full_memory = process
+            .state_memory_report(&BTreeMap::new(), u64::MAX)
+            .expect("full typed pool memory report");
+        assert_eq!(
+            full_memory
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_pool_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(2)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_pool_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(10)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_pool_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(20)
+        );
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("remove_first").unwrap(),
+            1
+        );
+        assert_eq!(process.read_i32_global_path("typed_pool_exec_147.count"), 1);
+        let reduced_memory = process
+            .state_memory_report(&BTreeMap::new(), u64::MAX)
+            .expect("reduced typed pool memory report");
+        assert_eq!(
+            reduced_memory
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_pool_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(1)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_pool_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(20)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_pool_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("remove_invalid").unwrap(),
+            0
+        );
+        assert_eq!(process.read_i32_global_path("typed_pool_exec_147.count"), 1);
+
+        assert_eq!(process.execute_i32_noarg_by_name("clear_all").unwrap(), 0);
+        assert_eq!(process.read_i32_global_path("typed_pool_exec_147.count"), 0);
+        for index in 0..2 {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_pool_exec_147", "values", index)
+                    .unwrap(),
+                JitScalarValue::I32(0)
+            );
+        }
+    }
+
+    #[test]
+    fn zero_capacity_typed_pool_operations_are_write_free() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&["exercise_zero".to_string()]);
+        process.upsert_file(
+            "typed_pool_zero_execution.stasis",
+            "global typed_pool_zero_exec_147: pool<i32, 0, drop_newest>;\n\
+             function exercise_zero(): i32 { let pushed: i32 = pool_push(typed_pool_zero_exec_147, 7); let removed: bool = pool_remove(typed_pool_zero_exec_147, 0); pool_clear(typed_pool_zero_exec_147); if (removed) { return 99; } return pushed + pool_count(typed_pool_zero_exec_147) + pool_capacity(typed_pool_zero_exec_147); }\n",
+        );
+        process
+            .compile()
+            .expect("zero-capacity typed pool JIT compile");
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("exercise_zero").unwrap(),
+            -1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_pool_zero_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::I32,
+                hash_global_path("typed_pool_zero_exec_147"),
+                crate::backend::emit::hash_foreach_field_suffix("values"),
+            ),
+            Some(0)
         );
     }
 

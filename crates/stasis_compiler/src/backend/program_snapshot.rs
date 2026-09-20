@@ -13,11 +13,13 @@ use crate::backend::compile_analysis::{
 };
 use crate::backend::hot_render::{analyze_hot_render_images, HotRenderImageMetadata};
 use crate::backend::reachability::compute_reachable_function_ids;
-use crate::backend::state_layout::{build_state_layout, state_layout_digest, StateLayout};
+use crate::backend::state_layout::{
+    build_state_layout, state_layout_digest, typed_collection_layout_metadata, StateLayout,
+};
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::data_flow::FunctionDataFlowSummary;
 use crate::frontend::module_graph::ModuleGraph;
-use crate::frontend::types::{TypeId, TypeInfo, TypeTable};
+use crate::frontend::types::{TypeId, TypeInfo, TypeTable, TypedCollectionDescriptor};
 use crate::frontend::{
     lexer::{lex, TokenKind},
     parser::parse_string_literal_text,
@@ -87,6 +89,8 @@ pub struct ProgramCollectionMetadata {
     pub capacity: i32,
     pub element_type_id: Option<u16>,
     pub field_type_ids: BTreeMap<String, u16>,
+    pub element_shape: String,
+    pub fully_migratable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +108,7 @@ pub struct ProgramSnapshot {
     data_flow_summaries: Arc<[FunctionDataFlowSummary]>,
     global_type_ids: BTreeMap<String, u16>,
     collections: Vec<ProgramCollectionMetadata>,
+    typed_collection_descriptors: BTreeMap<String, TypedCollectionDescriptor>,
     literal_table: BTreeMap<i32, String>,
     struct_field_type_ids: BTreeMap<u16, BTreeMap<String, u16>>,
     types: TypeTable,
@@ -133,6 +138,16 @@ fn compiler_layout_digest(
         facts.push(format!("collection:{path}:{info:?}"));
         pending_type_ids.extend(info.element_type);
         pending_type_ids.extend(info.field_types.values().copied());
+    }
+    for (path, descriptor) in &analysis.typed_collection_descriptors {
+        facts.push(format!(
+            "typed_collection:{path}:{}",
+            typed_collection_layout_metadata(descriptor, types)
+        ));
+        pending_type_ids.extend(descriptor.element_type);
+        pending_type_ids.extend(descriptor.key_type);
+        pending_type_ids.extend(descriptor.value_type);
+        pending_type_ids.extend(descriptor.lanes.iter().map(|lane| lane.type_id));
     }
     for function in functions {
         pending_type_ids.extend(function.params.iter().copied());
@@ -176,20 +191,60 @@ impl ProgramSnapshot {
         let state_layout = build_state_layout(
             &analysis.global_path_types,
             &analysis.collection_infos,
+            &analysis.typed_collection_descriptors,
             types,
-        );
+        )?;
         let layout_digest = state_layout_digest(&state_layout)?;
         let compiler_layout_digest = compiler_layout_digest(&analysis, functions, types);
-        let collections: Vec<ProgramCollectionMetadata> = analysis
+        let mut collections: Vec<ProgramCollectionMetadata> = analysis
             .collection_infos
             .iter()
-            .map(|(path, info)| ProgramCollectionMetadata {
-                path: path.clone(),
-                capacity: info.len,
-                element_type_id: info.element_type,
-                field_type_ids: info.field_types.clone(),
+            .map(|(path, info)| {
+                let layout = state_layout
+                    .collections
+                    .iter()
+                    .find(|collection| collection.path == *path);
+                ProgramCollectionMetadata {
+                    path: path.clone(),
+                    capacity: info.len,
+                    element_type_id: info.element_type,
+                    field_type_ids: info.field_types.clone(),
+                    element_shape: layout
+                        .map(|collection| collection.element_shape.clone())
+                        .unwrap_or_else(|| info.element_shape.clone()),
+                    fully_migratable: layout.is_some_and(|collection| collection.fully_migratable),
+                }
             })
             .collect();
+        for (path, descriptor) in &analysis.typed_collection_descriptors {
+            let layout = state_layout
+                .collections
+                .iter()
+                .find(|collection| collection.path == *path)
+                .ok_or_else(|| {
+                    format!("typed collection '{path}' is missing from snapshot state layout")
+                })?;
+            let field_type_ids = layout
+                .fields
+                .iter()
+                .filter_map(|field| {
+                    descriptor
+                        .lanes
+                        .iter()
+                        .find(|lane| lane.name == field.field)
+                        .map(|lane| (field.field.clone(), lane.type_id))
+                })
+                .collect();
+            collections.push(ProgramCollectionMetadata {
+                path: path.clone(),
+                capacity: layout.capacity,
+                element_type_id: descriptor.element_type,
+                field_type_ids,
+                element_shape: layout.element_shape.clone(),
+                fully_migratable: layout.fully_migratable,
+            });
+        }
+        collections.sort_by(|left, right| left.path.cmp(&right.path));
         let literal_table = collect_program_literals(files)?;
         let reachable_function_ids = compute_reachable_function_ids(functions, required_emit_roots);
         let asset_references = discover_asset_references(
@@ -223,6 +278,7 @@ impl ProgramSnapshot {
             data_flow_summaries,
             global_type_ids: analysis.global_path_types.clone(),
             collections,
+            typed_collection_descriptors: analysis.typed_collection_descriptors.clone(),
             literal_table,
             struct_field_type_ids: analysis.named_struct_field_types.clone(),
             types: types.clone(),
@@ -284,6 +340,11 @@ impl ProgramSnapshot {
     }
     pub fn collections(&self) -> &[ProgramCollectionMetadata] {
         &self.collections
+    }
+    /// Compiler-owned collection descriptors are retained as immutable snapshot metadata so
+    /// storage planning does not need to rediscover typed collection identity from source text.
+    pub fn typed_collection_descriptors(&self) -> &BTreeMap<String, TypedCollectionDescriptor> {
+        &self.typed_collection_descriptors
     }
     pub fn literal_table(&self) -> &BTreeMap<i32, String> {
         &self.literal_table
@@ -437,13 +498,15 @@ pub fn canonical_state_layout_digest_for_files(
     types.ensure_ascii_view_id()?;
     let constants =
         crate::backend::compile_analysis::collect_top_level_constant_values(&files, &mut types)?;
+    let typed_collections =
+        crate::backend::compile_analysis::collect_typed_collection_descriptors(&files, &mut types)?;
     let globals = crate::backend::compile_analysis::collect_global_path_types(
         &files, &mut types, &constants,
     )?;
     let collections = crate::backend::compile_analysis::collect_foreach_collection_infos(
         &files, &mut types, &constants,
     )?;
-    let layout = build_state_layout(&globals, &collections, &types);
+    let layout = build_state_layout(&globals, &collections, &typed_collections, &types)?;
     state_layout_digest(&layout)
 }
 
@@ -959,6 +1022,84 @@ function render(): void {
         let main_id = jit_snapshot.functions()[0].id;
         assert!(jit_snapshot.artifact_mappings().contains_key(&main_id));
         assert!(aot_snapshot.artifact_mappings().contains_key(&main_id));
+    }
+
+    #[test]
+    fn typed_pool_snapshot_uses_shared_descriptor_layout_identity() {
+        let source = "global actors: pool<i32, 2, error>;\nfunction main(): i32 { return 0; }\n";
+        let snapshot_digest = canonical_layout_digest_for_files(vec![(
+            "main.stasis".to_string(),
+            source.to_string(),
+        )])
+        .expect("typed pool program snapshot digest");
+        let state_digest = canonical_state_layout_digest_for_files(vec![(
+            "main.stasis".to_string(),
+            source.to_string(),
+        )])
+        .expect("typed pool state digest");
+        assert_eq!(
+            snapshot_digest, state_digest,
+            "ProgramSnapshot and the canonical state helper must consume the same descriptor layout"
+        );
+
+        let no_payload_digest = canonical_state_layout_digest_for_files(vec![(
+            "main.stasis".to_string(),
+            "global actors: pool<i32, 0, error>;\nfunction main(): i32 { return 0; }\n".to_string(),
+        )])
+        .expect("zero-capacity typed pool state digest");
+        let changed_policy_digest = canonical_state_layout_digest_for_files(vec![(
+            "main.stasis".to_string(),
+            "global actors: pool<i32, 2, drop_newest>;\nfunction main(): i32 { return 0; }\n"
+                .to_string(),
+        )])
+        .expect("changed-policy typed pool state digest");
+        assert_ne!(state_digest, no_payload_digest);
+        assert_ne!(state_digest, changed_policy_digest);
+    }
+
+    #[test]
+    fn typed_pool_snapshot_publishes_collection_inventory() {
+        for capacity in [2_u32, 0_u32] {
+            let mut aot = AotProcess::new();
+            aot.upsert_file(
+                "typed_pool_inventory.stasis",
+                format!(
+                    "global actors: pool<i32, {capacity}, error>;\nfunction main(): i32 {{ return 0; }}\n"
+                ),
+            );
+            aot.compile().expect("compile typed pool inventory fixture");
+
+            let snapshot = aot.program_snapshot().expect("typed pool snapshot");
+            let descriptor = snapshot
+                .typed_collection_descriptors()
+                .get("actors")
+                .expect("typed pool descriptor");
+            let collection = snapshot
+                .collections()
+                .iter()
+                .find(|collection| collection.path == "actors")
+                .expect("typed pool collection inventory entry");
+            let state_collection = snapshot
+                .state_layout()
+                .collections
+                .iter()
+                .find(|collection| collection.path == "actors")
+                .expect("typed pool state collection layout");
+
+            assert_eq!(collection.capacity, capacity as i32);
+            assert_eq!(collection.element_type_id, descriptor.element_type);
+            assert_eq!(
+                collection.field_type_ids.get("values").copied(),
+                descriptor.element_type
+            );
+            assert!(!collection.field_type_ids.contains_key("count"));
+            assert_eq!(collection.element_shape, state_collection.element_shape);
+            assert_eq!(
+                collection.fully_migratable,
+                state_collection.fully_migratable
+            );
+            assert!(!collection.fully_migratable);
+        }
     }
 
     #[test]

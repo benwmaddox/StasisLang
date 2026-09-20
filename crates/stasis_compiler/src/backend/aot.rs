@@ -2,7 +2,7 @@ use crate::backend::compile_analysis::{
     build_compile_analysis_cache, compile_analysis_requires_reemit, compute_files_fingerprint,
     is_i32_abi_compatible_type, resolve_preferred_extern_call_signatures, select_emit_function_ids,
     CallSignatureMap, CollectionInfoMap, ConstantValueMap, GlobalPathTypeMap,
-    NamedStructFieldTypeMap,
+    NamedStructFieldTypeMap, TypedCollectionInfoMap,
 };
 use crate::backend::emit::*;
 use crate::backend::hot_render::HotRenderImageMetadata;
@@ -248,6 +248,7 @@ impl AotProcess {
         let direct_storage = build_aot_direct_storage_bindings(
             &analysis.global_path_types,
             &analysis.collection_infos,
+            snapshot.typed_collection_descriptors(),
             &analysis_type_table,
         )
         .map_err(crate::compiler::CompileError::Backend)?;
@@ -1149,9 +1150,11 @@ fn define_standalone_storage_data(
 fn build_aot_direct_storage_bindings(
     global_path_types: &GlobalPathTypeMap,
     collection_infos: &CollectionInfoMap,
+    typed_collection_descriptors: &TypedCollectionInfoMap,
     type_table: &TypeTable,
 ) -> Result<DirectStorageBindings, String> {
     let mut bindings = DirectStorageBindings::default();
+    let mut claimed_symbols = BTreeMap::new();
     for (path, type_id) in global_path_types {
         if collection_infos.contains_key(path) {
             continue;
@@ -1164,14 +1167,15 @@ fn build_aot_direct_storage_bindings(
             continue;
         }
         if aot_scalar_lane(*type_id, type_table).is_some() {
-            bindings.scalars.insert(
-                path.clone(),
-                DirectStorageBinding::Symbol(aot_storage_symbol(
-                    AotStorageSymbolKind::Scalar,
-                    path,
-                    "",
-                )),
-            );
+            let symbol = aot_storage_symbol(AotStorageSymbolKind::Scalar, path, "");
+            claim_aot_storage_symbol(
+                &mut claimed_symbols,
+                &symbol,
+                &format!("scalar path '{path}'"),
+            )?;
+            bindings
+                .scalars
+                .insert(path.clone(), DirectStorageBinding::Symbol(symbol));
         }
     }
     for (path, info) in collection_infos {
@@ -1180,14 +1184,16 @@ fn build_aot_direct_storage_bindings(
                 aot_array_lane(path, type_id, global_path_types, type_table).ok_or_else(|| {
                     format!("unsupported AOT direct storage element type {type_id} for '{path}'")
                 })?;
+            let symbol = aot_storage_symbol(AotStorageSymbolKind::Array, path, "");
+            claim_aot_storage_symbol(
+                &mut claimed_symbols,
+                &symbol,
+                &format!("array path '{path}'"),
+            )?;
             bindings.arrays.insert(
                 (path.clone(), String::new()),
                 crate::backend::emit::DirectArrayStorageBinding {
-                    slot: DirectStorageBinding::Symbol(aot_storage_symbol(
-                        AotStorageSymbolKind::Array,
-                        path,
-                        "",
-                    )),
+                    slot: DirectStorageBinding::Symbol(symbol),
                     storage_bytes: aot_lane_bytes(lane),
                     static_len: Some(info.len as usize),
                 },
@@ -1200,21 +1206,86 @@ fn build_aot_direct_storage_bindings(
                         "unsupported AOT direct storage field type {type_id} for '{path}.{field}'"
                     )
                 })?;
+            let symbol = aot_storage_symbol(AotStorageSymbolKind::Array, path, field);
+            claim_aot_storage_symbol(
+                &mut claimed_symbols,
+                &symbol,
+                &format!("array lane '{path}.{field}'"),
+            )?;
             bindings.arrays.insert(
                 (path.clone(), field.clone()),
                 crate::backend::emit::DirectArrayStorageBinding {
-                    slot: DirectStorageBinding::Symbol(aot_storage_symbol(
-                        AotStorageSymbolKind::Array,
-                        path,
-                        field,
-                    )),
+                    slot: DirectStorageBinding::Symbol(symbol),
                     storage_bytes: aot_lane_bytes(lane),
                     static_len: Some(info.len as usize),
                 },
             );
         }
     }
+    for (path, descriptor) in typed_collection_descriptors {
+        if descriptor.kind != crate::frontend::types::TypedCollectionKind::Pool {
+            continue;
+        }
+        let count_path = format!("{path}.count");
+        let count_symbol = aot_storage_symbol(AotStorageSymbolKind::Scalar, &count_path, "");
+        claim_aot_storage_symbol(
+            &mut claimed_symbols,
+            &count_symbol,
+            &format!("scalar path '{count_path}'"),
+        )?;
+        bindings.scalars.insert(
+            count_path.clone(),
+            DirectStorageBinding::Symbol(count_symbol),
+        );
+
+        let element_type = descriptor.element_type.ok_or_else(|| {
+            format!("typed pool '{path}' is missing its element type in storage metadata")
+        })?;
+        let lane =
+            aot_array_lane(path, element_type, global_path_types, type_table).ok_or_else(|| {
+                format!(
+                "unsupported AOT direct storage element type {element_type} for typed pool '{path}'"
+            )
+            })?;
+        let length = usize::try_from(descriptor.capacity).map_err(|_| {
+            format!(
+                "typed pool '{path}' capacity {} does not fit usize",
+                descriptor.capacity
+            )
+        })?;
+        let values_symbol = aot_storage_symbol(AotStorageSymbolKind::Array, path, "values");
+        claim_aot_storage_symbol(
+            &mut claimed_symbols,
+            &values_symbol,
+            &format!("array lane '{path}.values'"),
+        )?;
+        bindings.arrays.insert(
+            (path.clone(), "values".to_string()),
+            crate::backend::emit::DirectArrayStorageBinding {
+                slot: DirectStorageBinding::Symbol(values_symbol),
+                storage_bytes: aot_lane_bytes(lane),
+                static_len: Some(length),
+            },
+        );
+    }
     Ok(bindings)
+}
+
+fn claim_aot_storage_symbol(
+    claimed_symbols: &mut BTreeMap<String, String>,
+    symbol: &str,
+    semantic_lane: &str,
+) -> Result<(), String> {
+    if let Some(previous_lane) = claimed_symbols.get(symbol) {
+        if previous_lane != semantic_lane {
+            return Err(format!(
+                "AOT direct storage symbol collision for '{symbol}': semantic lanes '{previous_lane}' and '{semantic_lane}'"
+            ));
+        }
+    } else {
+        claimed_symbols.insert(symbol.to_string(), semantic_lane.to_string());
+    }
+    Ok(())
 }
 
 fn aot_lane_bytes(lane: &str) -> u8 {
@@ -1779,7 +1850,7 @@ mod tests {
         let error = process.compile().expect_err("AOT contract violation");
         assert!(format!("{error:?}").contains("tick -> helper"));
     }
-    use crate::backend::jit::JitProcess;
+    use crate::backend::jit::{JitProcess, JitScalarValue};
     use crate::backend::EngineEntrypoints;
     use object::{
         Architecture, BinaryFormat, File, Object, ObjectSection, ObjectSymbol, RelocationKind,
@@ -3115,6 +3186,314 @@ mod tests {
             symbols.contains("ExitProcess"),
             "native Windows wrapper must terminate with the Stasis result: {symbols:?}"
         );
+    }
+
+    #[test]
+    fn typed_pool_aot_storage_plan_and_symbols_match_jit_lanes() {
+        for capacity in [2_u32, 0_u32] {
+            let mut process = AotProcess::new();
+            process.upsert_file(
+                "typed_pool_storage.stasis",
+                format!(
+                    "global actors: pool<i32, {capacity}, error>;\nfunction main(): i32 {{ return 0; }}\n"
+                ),
+            );
+            process.compile().expect("typed pool AOT compile");
+
+            let snapshot = process.program_snapshot().expect("typed pool snapshot");
+            let descriptor = snapshot
+                .typed_collection_descriptors()
+                .get("actors")
+                .expect("typed pool descriptor");
+            assert_eq!(descriptor.capacity, capacity);
+            assert_eq!(
+                descriptor.canonical_type_name(snapshot.types()),
+                format!("pool<i32, {capacity}, error>")
+            );
+
+            let bindings = build_aot_direct_storage_bindings(
+                &snapshot.analysis.global_path_types,
+                &snapshot.analysis.collection_infos,
+                snapshot.typed_collection_descriptors(),
+                snapshot.types(),
+            )
+            .expect("typed pool AOT direct storage plan");
+            assert!(matches!(
+                bindings.scalars.get("actors.count"),
+                Some(DirectStorageBinding::Symbol(symbol))
+                    if symbol == &aot_storage_symbol(
+                        AotStorageSymbolKind::Scalar,
+                        "actors.count",
+                        "",
+                    )
+            ));
+            assert!(!bindings.scalars.contains_key("actors"));
+            let values = bindings
+                .arrays
+                .get(&(String::from("actors"), String::from("values")))
+                .expect("typed pool values array binding");
+            match &values.slot {
+                DirectStorageBinding::Symbol(symbol) => assert_eq!(
+                    symbol,
+                    &aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values")
+                ),
+                DirectStorageBinding::Absolute(_) => {
+                    panic!("AOT typed pool values lane must use a symbol binding")
+                }
+            }
+            assert_eq!(values.static_len, Some(capacity as usize));
+            assert_eq!(values.storage_bytes, 4);
+            assert_eq!(bindings.arrays.len(), 1);
+
+            let (bytes, _) = process
+                .compile_standalone_storage_object("aot_fn_0")
+                .expect("standalone typed pool storage object")
+                .expect("typed pool storage required");
+            let object = File::parse(bytes.as_slice()).expect("parse typed pool storage object");
+            let symbols: BTreeSet<String> = object
+                .symbols()
+                .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                .collect();
+            for expected in [
+                aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.count", ""),
+                aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values"),
+                "stasis_jit_register_global_i32_ptr".to_string(),
+                "stasis_jit_register_global_i32_array".to_string(),
+            ] {
+                assert!(
+                    symbols.contains(&expected),
+                    "typed pool storage object missing '{expected}' for capacity {capacity}: {symbols:?}"
+                );
+            }
+            assert!(
+                !symbols.contains(&aot_storage_symbol(
+                    AotStorageSymbolKind::Scalar,
+                    "actors",
+                    ""
+                )),
+                "typed pool root must not be emitted as a scalar storage symbol"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_pool_aot_storage_symbol_collisions_are_rejected() {
+        for (fixture_name, extra_global, expected_symbol, expected_lanes) in [
+            (
+                "typed_pool_count_collision.stasis",
+                "global actors__count: i32;",
+                aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.count", ""),
+                ["actors.count", "actors__count"],
+            ),
+            (
+                "typed_pool_values_collision.stasis",
+                "global actors__values: i32[2];",
+                aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values"),
+                ["actors.values", "actors__values"],
+            ),
+        ] {
+            let mut process = AotProcess::new();
+            process.upsert_file(
+                fixture_name,
+                format!(
+                    "global actors: pool<i32, 2, error>;\n{extra_global}\nfunction main(): i32 {{ return 0; }}\n"
+                ),
+            );
+
+            let error = process
+                .compile()
+                .expect_err("storage symbol collision must fail");
+            match error {
+                crate::compiler::CompileError::Backend(message) => {
+                    assert!(
+                        message.contains("AOT direct storage symbol collision"),
+                        "unexpected collision diagnostic: {message}"
+                    );
+                    assert!(
+                        message.contains(&expected_symbol),
+                        "collision diagnostic omitted symbol {expected_symbol}: {message}"
+                    );
+                    for lane in expected_lanes {
+                        assert!(
+                            message.contains(lane),
+                            "collision diagnostic omitted semantic lane {lane}: {message}"
+                        );
+                    }
+                }
+                other => panic!("expected backend collision error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn typed_pool_linked_aot_matches_jit_operation_sequence() {
+        const SOURCE: &str = r#"global typed_pool_parity_147: pool<i32, 2, error>;
+global typed_pool_lanes_147: pool<i32, 2, error>;
+global typed_pool_zero_147: pool<i32, 0, drop_newest>;
+function main(): i32 {
+    let first: i32 = pool_push(typed_pool_parity_147, 10);
+    let second: i32 = pool_push(typed_pool_parity_147, 20);
+    let rejected: i32 = pool_push(typed_pool_parity_147, 30);
+    let count_before: i32 = pool_count(typed_pool_parity_147);
+    let capacity: i32 = pool_capacity(typed_pool_parity_147);
+    let removed_code: i32 = 0;
+    if (pool_remove(typed_pool_parity_147, 0)) { removed_code = 1; }
+    let invalid_code: i32 = 0;
+    if (pool_remove(typed_pool_parity_147, 9)) { invalid_code = 1; }
+    let count_after: i32 = pool_count(typed_pool_parity_147);
+    pool_clear(typed_pool_parity_147);
+    let count_cleared: i32 = pool_count(typed_pool_parity_147);
+    return first * 1000000 + second * 100000 + rejected * 10000
+        + count_before * 1000 + capacity * 100 + removed_code * 10
+        + invalid_code * 2 + count_after + count_cleared;
+}
+function fill_lanes(): i32 {
+    let first: i32 = pool_push(typed_pool_lanes_147, 10);
+    let second: i32 = pool_push(typed_pool_lanes_147, 20);
+    let rejected: i32 = pool_push(typed_pool_lanes_147, 30);
+    return first * 100 + second * 10 + rejected;
+}
+function remove_lanes(): i32 {
+    if (pool_remove(typed_pool_lanes_147, 0)) { return 1; }
+    return 0;
+}
+function remove_invalid_lanes(): i32 {
+    if (pool_remove(typed_pool_lanes_147, 9)) { return 1; }
+    return 0;
+}
+function clear_lanes(): i32 {
+    pool_clear(typed_pool_lanes_147);
+    return pool_count(typed_pool_lanes_147);
+}
+function zero_capacity(): i32 {
+    let pushed: i32 = pool_push(typed_pool_zero_147, 7);
+    let rejected_code: i32 = 0;
+    if (pushed == -1) { rejected_code = 1; }
+    let removed_code: i32 = 0;
+    if (pool_remove(typed_pool_zero_147, 0)) { removed_code = 1; }
+    pool_clear(typed_pool_zero_147);
+    return rejected_code * 1000 + removed_code * 100
+        + pool_count(typed_pool_zero_147) * 10
+        + pool_capacity(typed_pool_zero_147);
+}
+"#;
+        const EXPECTED_MAIN: i32 = 92211;
+        const EXPECTED_ZERO: i32 = 1000;
+
+        let roots = [
+            "main",
+            "fill_lanes",
+            "remove_lanes",
+            "remove_invalid_lanes",
+            "clear_lanes",
+            "zero_capacity",
+        ];
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&roots.map(str::to_string));
+        jit.upsert_file("typed_pool_parity_147.stasis", SOURCE);
+        jit.compile().expect("typed pool JIT parity compile");
+
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("main")
+                .expect("typed pool JIT main"),
+            EXPECTED_MAIN
+        );
+        assert_eq!(
+            jit.read_i32_global_path("typed_pool_parity_147.count"),
+            0,
+            "main must clear the parity pool"
+        );
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("zero_capacity")
+                .expect("typed pool JIT zero-capacity probe"),
+            EXPECTED_ZERO
+        );
+
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("fill_lanes")
+                .expect("typed pool JIT fill"),
+            9
+        );
+        assert_eq!(jit.read_i32_global_path("typed_pool_lanes_147.count"), 2);
+        assert_eq!(
+            jit.read_global_collection_scalar("typed_pool_lanes_147", "values", 0)
+                .expect("read first filled lane"),
+            JitScalarValue::I32(10)
+        );
+        assert_eq!(
+            jit.read_global_collection_scalar("typed_pool_lanes_147", "values", 1)
+                .expect("read second filled lane"),
+            JitScalarValue::I32(20)
+        );
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("remove_lanes")
+                .expect("typed pool JIT swap-remove"),
+            1
+        );
+        assert_eq!(jit.read_i32_global_path("typed_pool_lanes_147.count"), 1);
+        assert_eq!(
+            jit.read_global_collection_scalar("typed_pool_lanes_147", "values", 0)
+                .expect("read swapped lane"),
+            JitScalarValue::I32(20)
+        );
+        assert_eq!(
+            jit.read_global_collection_scalar("typed_pool_lanes_147", "values", 1)
+                .expect("read released lane"),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("remove_invalid_lanes")
+                .expect("typed pool JIT invalid remove"),
+            0
+        );
+        assert_eq!(
+            jit.execute_i32_noarg_by_name("clear_lanes")
+                .expect("typed pool JIT clear"),
+            0
+        );
+        assert_eq!(jit.read_i32_global_path("typed_pool_lanes_147.count"), 0);
+        for index in 0..2 {
+            assert_eq!(
+                jit.read_global_collection_scalar("typed_pool_lanes_147", "values", index)
+                    .expect("read cleared lane"),
+                JitScalarValue::I32(0)
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let mut aot = AotProcess::new();
+            aot.set_required_emit_roots(&roots.map(str::to_string));
+            aot.upsert_file("typed_pool_parity_147.stasis", SOURCE);
+            aot.compile().expect("typed pool AOT parity compile");
+
+            let linked_main = run_linked_i32_noarg_fixture(
+                &aot,
+                "main",
+                "typed_pool_operation_parity",
+                &link_config,
+            )
+            .expect("linked typed pool main fixture");
+            assert_eq!(
+                linked_main, EXPECTED_MAIN,
+                "linked AOT/JIT typed pool operation parity"
+            );
+
+            let linked_zero = run_linked_i32_noarg_fixture(
+                &aot,
+                "zero_capacity",
+                "typed_pool_zero_capacity_parity",
+                &link_config,
+            )
+            .expect("linked typed pool zero-capacity fixture");
+            assert_eq!(
+                linked_zero, EXPECTED_ZERO,
+                "linked AOT/JIT zero-capacity typed pool parity"
+            );
+        }
     }
 
     #[test]
