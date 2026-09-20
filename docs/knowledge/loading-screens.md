@@ -18,12 +18,14 @@ content or prove that a frame was displayed.
 
 ## Presentation boundary
 
-The host resets the graphics builder when it enters `render`; `end_frame` marks
-the completed construction for publication rather than synchronously swapping the display. The example records
-submission in `render`, returns to the host, and allows IO only on a subsequent
-`tick`. Its first-frame-presented gate relies on a host that consumes and presents
-that render before the next simulation tick. Repeated ticks without a render do
-not open the gate; another call in the same tick does not open it either.
+The host resets graphics construction when it enters `render`, then validates,
+finishes, and publishes the emitted commands after `render` returns successfully.
+Authored code does not bracket that work: the removed public `begin_frame` and
+`end_frame` calls are compiler-rejected. The example records submission in
+`render`, returns to the host, and allows IO only on a subsequent `tick`. Its
+first-frame-presented gate relies on a host that consumes and presents that render
+before the next simulation tick. Repeated ticks without a render do not open the
+gate; another call in the same tick does not open it either.
 
 The current public `HostFrame` API has no physical-presentation acknowledgement.
 Do not describe this flag as a GPU acknowledgement. A custom host that skips

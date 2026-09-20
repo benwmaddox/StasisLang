@@ -311,12 +311,14 @@ function render(): i32 {
         draw_hud();
     }
 
-    end_frame();
     return 0;
 }
 ```
 
-Rendering may calculate local positions and emit commands. It should not:
+Rendering may calculate local positions and emit commands, then return. The
+packaged host owns reset, validation, completion, and publication around the
+`render()` call; authored code must not call the removed, compiler-rejected
+`begin_frame` or `end_frame` wrappers. Rendering should not:
 
 - advance time or animation counters;
 - accept actions or spend resources;
