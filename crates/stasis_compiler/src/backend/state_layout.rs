@@ -81,6 +81,12 @@ pub struct StateCollectionFieldLayout {
     pub type_name: String,
     #[serde(default)]
     pub storage_type_name: String,
+    /// Physical element count for this lane when it differs from the
+    /// collection's logical capacity.  Older serialized layouts omit this
+    /// additive field; those layouts continue to use the collection capacity
+    /// as the compatibility fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element_count: Option<u64>,
 }
 
 impl StateCollectionFieldLayout {
@@ -91,6 +97,36 @@ impl StateCollectionFieldLayout {
             &self.storage_type_name
         }
     }
+}
+
+/// Return the physical element count for one collection lane at a logical
+/// collection capacity.  Legacy ordinary collection fields have no
+/// `element_count`, so they retain the collection-capacity fallback.  Typed
+/// payload lanes that track the logical capacity continue to scale with a
+/// capacity projection; a bitset's `words` lane instead scales by its packed
+/// 32-bit word count.
+pub(crate) fn collection_field_element_count(
+    collection: &StateCollectionLayout,
+    field: &StateCollectionFieldLayout,
+    logical_capacity: u64,
+) -> u64 {
+    let current_capacity = u64::try_from(collection.capacity).unwrap_or(0);
+    match field.element_count {
+        None => logical_capacity,
+        Some(count) if logical_capacity == current_capacity => count,
+        Some(_) if is_bitset_collection(collection) && field.field == "words" => {
+            logical_capacity.div_ceil(32)
+        }
+        Some(count) if count == current_capacity => logical_capacity,
+        Some(count) => count,
+    }
+}
+
+fn is_bitset_collection(collection: &StateCollectionLayout) -> bool {
+    collection
+        .element_shape
+        .split(';')
+        .any(|part| part == "kind=bitset")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -260,6 +296,9 @@ pub fn build_state_memory_report(
             .copied()
             .map(|count| count.min(old_capacity));
         let mut bytes_per_element = 0u64;
+        let mut capacity_bytes = 0u64;
+        let mut projected_bytes = 0u64;
+        let mut active_bytes = active_count.map(|_| 0u64);
         for field in &collection.fields {
             let storage_type_name = field.storage_type_name();
             let element_bytes = storage_type_bytes(storage_type_name).unwrap_or(0);
@@ -272,6 +311,25 @@ pub fn build_state_memory_report(
             bytes_per_element = bytes_per_element
                 .checked_add(element_bytes)
                 .ok_or_else(|| "state memory report byte count overflow".to_string())?;
+            let field_capacity = collection_field_element_count(collection, field, old_capacity);
+            let projected_field_capacity =
+                collection_field_element_count(collection, field, new_capacity);
+            let field_active_count = active_count
+                .map(|count| collection_field_active_count(collection, field, count, old_capacity));
+            let field_capacity_bytes = checked_memory_bytes(field_capacity, element_bytes)?;
+            let field_projected_bytes =
+                checked_memory_bytes(projected_field_capacity, element_bytes)?;
+            capacity_bytes = capacity_bytes
+                .checked_add(field_capacity_bytes)
+                .ok_or_else(|| "state memory report byte count overflow".to_string())?;
+            projected_bytes = projected_bytes
+                .checked_add(field_projected_bytes)
+                .ok_or_else(|| "state memory report byte count overflow".to_string())?;
+            if let (Some(total), Some(count)) = (&mut active_bytes, field_active_count) {
+                *total = total
+                    .checked_add(checked_memory_bytes(count, element_bytes)?)
+                    .ok_or_else(|| "state memory report byte count overflow".to_string())?;
+            }
             entries.push(StateMemoryEntry {
                 path: collection.path.clone(),
                 field: field.field.clone(),
@@ -280,16 +338,14 @@ pub fn build_state_memory_report(
                 alignment_bytes: storage_type_alignment(storage_type_name).unwrap_or(1),
                 element_bytes,
                 padding_bytes: 0,
-                capacity: old_capacity,
-                active_count,
-                capacity_bytes: checked_memory_bytes(old_capacity, element_bytes)?,
-                active_bytes: active_count
+                capacity: field_capacity,
+                active_count: field_active_count,
+                capacity_bytes: field_capacity_bytes,
+                active_bytes: field_active_count
                     .map(|count| checked_memory_bytes(count, element_bytes))
                     .transpose()?,
             });
         }
-        let capacity_bytes = checked_memory_bytes(old_capacity, bytes_per_element)?;
-        let projected_bytes = checked_memory_bytes(new_capacity, bytes_per_element)?;
         pools.push(StateMemoryPoolReport {
             path: collection.path.clone(),
             element_shape: collection.element_shape.clone(),
@@ -297,9 +353,7 @@ pub fn build_state_memory_report(
             active_count,
             bytes_per_element,
             capacity_bytes,
-            active_bytes: active_count
-                .map(|count| checked_memory_bytes(count, bytes_per_element))
-                .transpose()?,
+            active_bytes,
         });
         if new_capacity != old_capacity {
             let delta = i128::from(projected_bytes) - i128::from(capacity_bytes);
@@ -439,6 +493,21 @@ fn checked_memory_bytes(count: u64, element_bytes: u64) -> Result<u64, String> {
         .ok_or_else(|| "state memory report byte count overflow".to_string())
 }
 
+fn collection_field_active_count(
+    collection: &StateCollectionLayout,
+    field: &StateCollectionFieldLayout,
+    active_count: u64,
+    logical_capacity: u64,
+) -> u64 {
+    let active_count = active_count.min(logical_capacity);
+    let field_capacity = collection_field_element_count(collection, field, logical_capacity);
+    if is_bitset_collection(collection) && field.field == "words" {
+        active_count.div_ceil(32).min(field_capacity)
+    } else {
+        active_count.min(field_capacity)
+    }
+}
+
 pub fn is_command_buffer_path(path: &str) -> bool {
     path.starts_with("gfx_cmd_")
         || path.starts_with("render_cmd_")
@@ -495,6 +564,7 @@ pub(crate) fn build_state_layout(
                     field: String::new(),
                     type_name,
                     storage_type_name,
+                    element_count: None,
                 });
             }
             fields.extend(info.field_types.iter().filter_map(|(field, type_id)| {
@@ -503,6 +573,7 @@ pub(crate) fn build_state_layout(
                         field: field.clone(),
                         type_name,
                         storage_type_name,
+                        element_count: None,
                     },
                 )
             }));
@@ -536,6 +607,7 @@ pub(crate) fn build_state_layout(
                     field: lane.name.clone(),
                     type_name,
                     storage_type_name,
+                    element_count: Some(lane.element_count),
                 });
             }
         }
@@ -585,6 +657,7 @@ pub(crate) fn build_state_layout(
                     field: String::new(),
                     type_name: "u8".to_string(),
                     storage_type_name: "u8".to_string(),
+                    element_count: None,
                 });
             }
             collection.fully_migratable = true;
@@ -599,6 +672,7 @@ pub(crate) fn build_state_layout(
                 field: String::new(),
                 type_name: "u8".to_string(),
                 storage_type_name: "u8".to_string(),
+                element_count: None,
             }],
         });
     }
@@ -760,6 +834,8 @@ fn validate_typed_collection_placement(
             | TypedCollectionKind::PriorityQueue
             | TypedCollectionKind::Map
             | TypedCollectionKind::Set
+            | TypedCollectionKind::Grid
+            | TypedCollectionKind::Bitset
     );
     let supported_payload = match descriptor.kind {
         TypedCollectionKind::Pool
@@ -771,11 +847,12 @@ fn validate_typed_collection_placement(
             descriptor.key_type == Some(TYPE_ID_I32) && descriptor.value_type == Some(TYPE_ID_I32)
         }
         TypedCollectionKind::Set => descriptor.key_type == Some(TYPE_ID_I32),
-        _ => false,
+        TypedCollectionKind::Grid => descriptor.element_type == Some(TYPE_ID_I32),
+        TypedCollectionKind::Bitset => true,
     };
     if !supported_kind || !supported_payload {
         return Err(format!(
-            "typed collection state path '{path}' is not yet supported for production layout: only pool<i32,N>, stable_pool<i32,N>, queue<i32,N>, ring_buffer<i32,N>, priority_queue<i32,N>, map<i32,i32,N>, and set<i32,N> have a descriptor-defined state contract; got {}",
+            "typed collection state path '{path}' is not yet supported for production layout: only pool<i32,N>, stable_pool<i32,N>, queue<i32,N>, ring_buffer<i32,N>, priority_queue<i32,N>, map<i32,i32,N>, set<i32,N>, grid<i32,W,H>, and bitset<N> have a descriptor-defined state contract; got {}",
             descriptor.canonical_type_name(type_table)
         ));
     }
@@ -802,6 +879,16 @@ fn validate_typed_collection_placement(
     {
         return Err(format!(
             "typed collection state path '{path}' priority_queue descriptor must use exact count:i32@0, next_order:u32@4, priority:i32[N]@8, order:u32[N], and values:i32[N] lanes"
+        ));
+    }
+    if descriptor.kind == TypedCollectionKind::Grid && !grid_lane_schema_matches(descriptor) {
+        return Err(format!(
+            "typed collection state path '{path}' grid descriptor must use exact values:i32[W*H]@0 lane"
+        ));
+    }
+    if descriptor.kind == TypedCollectionKind::Bitset && !bitset_lane_schema_matches(descriptor) {
+        return Err(format!(
+            "typed collection state path '{path}' bitset descriptor must use exact words:u32[ceil(N/32)]@0 lane"
         ));
     }
 
@@ -996,6 +1083,41 @@ fn priority_queue_lane_schema_matches(descriptor: &TypedCollectionDescriptor) ->
         && i32_array_lane_schema_matches(priority, "priority", capacity, 8)
         && u32_array_lane_schema_matches(order, "order", capacity, order_offset)
         && i32_array_lane_schema_matches(values, "values", capacity, values_offset)
+}
+
+fn grid_lane_schema_matches(descriptor: &TypedCollectionDescriptor) -> bool {
+    if descriptor.lanes.len() != 1 {
+        return false;
+    }
+
+    let [values] = descriptor.lanes.as_slice() else {
+        return false;
+    };
+    let capacity = u64::from(descriptor.capacity);
+    values.name == "values"
+        && values.type_id == TYPE_ID_I32
+        && values.element_count == capacity
+        && values.offset_bytes == 0
+        && values.byte_size == capacity.saturating_mul(4)
+        && values.alignment_bytes == 4
+}
+
+fn bitset_lane_schema_matches(descriptor: &TypedCollectionDescriptor) -> bool {
+    if descriptor.lanes.len() != 1 {
+        return false;
+    }
+
+    let [words] = descriptor.lanes.as_slice() else {
+        return false;
+    };
+    let capacity = u64::from(descriptor.capacity);
+    let word_count = capacity.div_ceil(32);
+    words.name == "words"
+        && words.type_id == TYPE_ID_U32
+        && words.element_count == word_count
+        && words.offset_bytes == 0
+        && words.byte_size == word_count.saturating_mul(4)
+        && words.alignment_bytes == 4
 }
 
 fn map_set_array_offset(capacity: u64) -> Option<u64> {
@@ -1858,24 +1980,115 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_typed_collection_kinds_are_rejected_at_state_layout_boundary() {
-        let bitset = typed_layout_result("bitset<8>")
-            .expect_err("bitset layout must not claim pool-shaped storage");
-        assert!(
-            bitset.contains(
-                "only pool<i32,N>, stable_pool<i32,N>, queue<i32,N>, ring_buffer<i32,N>, priority_queue<i32,N>, map<i32,i32,N>, and set<i32,N>"
-            ),
-            "{bitset}"
-        );
+    fn typed_grid_and_bitset_layouts_report_logical_and_lane_counts() {
+        let grid = typed_layout("grid<i32, 2, 3>");
+        let grid_collection = grid
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("grid collection layout");
+        assert_eq!(grid_collection.capacity, 6);
+        assert_eq!(grid_collection.fields[0].field, "values");
+        assert_eq!(grid_collection.fields[0].element_count, Some(6));
+        let grid_memory =
+            build_state_memory_report(&grid, &BTreeMap::new(), &BTreeMap::new(), u64::MAX)
+                .expect("grid memory report");
+        let grid_values = grid_memory
+            .entries
+            .iter()
+            .find(|entry| entry.path == "actors" && entry.field == "values")
+            .expect("grid values entry");
+        assert_eq!(grid_values.capacity, 6);
+        assert_eq!(grid_values.capacity_bytes, 24);
+        assert_eq!(grid_memory.total_capacity_bytes, 24);
 
+        let bitset = typed_layout("bitset<33>");
+        let bitset_collection = bitset
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("bitset collection layout");
+        assert_eq!(bitset_collection.capacity, 33);
+        assert_eq!(bitset_collection.fields[0].field, "words");
+        assert_eq!(bitset_collection.fields[0].element_count, Some(2));
+        let bitset_memory = build_state_memory_report(
+            &bitset,
+            &BTreeMap::from([("actors".to_string(), 33)]),
+            &BTreeMap::new(),
+            u64::MAX,
+        )
+        .expect("bitset memory report");
+        let words = bitset_memory
+            .entries
+            .iter()
+            .find(|entry| entry.path == "actors" && entry.field == "words")
+            .expect("bitset words entry");
+        assert_eq!(words.capacity, 2);
+        assert_eq!(words.active_count, Some(2));
+        assert_eq!(words.capacity_bytes, 8);
+        assert_eq!(words.active_bytes, Some(8));
+        assert_eq!(bitset_memory.total_capacity_bytes, 8);
+
+        let zero = typed_layout("bitset<0>");
+        let zero_collection = zero
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("zero-capacity bitset layout");
+        assert_eq!(zero_collection.capacity, 0);
+        assert_eq!(zero_collection.fields[0].element_count, Some(0));
+        let zero_memory =
+            build_state_memory_report(&zero, &BTreeMap::new(), &BTreeMap::new(), u64::MAX)
+                .expect("zero-capacity bitset memory report");
+        assert_eq!(zero_memory.entries[0].capacity, 0);
+        assert_eq!(zero_memory.entries[0].capacity_bytes, 0);
+        assert_eq!(zero_memory.total_capacity_bytes, 0);
+    }
+
+    #[test]
+    fn collection_field_element_count_is_serde_compatible_when_absent() {
+        let serialized = r#"{
+            "scalars": [],
+            "collections": [{
+                "path": "values",
+                "capacity": 2,
+                "element_shape": "i32",
+                "fully_migratable": true,
+                "fields": [{
+                    "field": "",
+                    "type_name": "i32",
+                    "storage_type_name": "i32"
+                }]
+            }],
+            "structs": [],
+            "opaque": []
+        }"#;
+        let layout: super::StateLayout =
+            serde_json::from_str(serialized).expect("deserialize legacy state layout");
+        assert_eq!(layout.collections[0].fields[0].element_count, None);
+        let round_trip = serde_json::to_string(&layout).expect("serialize state layout");
+        assert!(!round_trip.contains("element_count"));
+        let field = &layout.collections[0].fields[0];
+        assert_eq!(
+            super::collection_field_element_count(&layout.collections[0], field, 2),
+            2
+        );
+    }
+
+    #[test]
+    fn unsupported_typed_collection_kinds_are_rejected_at_state_layout_boundary() {
         let wide_pool = typed_layout_result("pool<f64, 2>")
             .expect_err("non-i32 pool payload layout must be rejected");
         assert!(
             wide_pool.contains(
-                "only pool<i32,N>, stable_pool<i32,N>, queue<i32,N>, ring_buffer<i32,N>, priority_queue<i32,N>, map<i32,i32,N>, and set<i32,N>"
+                "only pool<i32,N>, stable_pool<i32,N>, queue<i32,N>, ring_buffer<i32,N>, priority_queue<i32,N>, map<i32,i32,N>, set<i32,N>, grid<i32,W,H>, and bitset<N>"
             ),
             "{wide_pool}"
         );
+
+        let wide_grid = typed_layout_result("grid<f64, 2, 3>")
+            .expect_err("non-i32 grid payload layout must be rejected");
+        assert!(wide_grid.contains("grid<i32,W,H>"), "{wide_grid}");
     }
 
     #[test]

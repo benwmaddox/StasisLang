@@ -9,7 +9,8 @@ use crate::backend::hot_render::HotRenderImageMetadata;
 use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
 use crate::backend::reachability::matches_root;
 use crate::backend::state_layout::{
-    aot_storage_symbol, is_named_scalar_state_path, AotStorageSymbolKind, StateLayout,
+    aot_storage_symbol, collection_field_element_count, is_named_scalar_state_path,
+    AotStorageSymbolKind, StateLayout,
 };
 use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
@@ -646,13 +647,24 @@ impl AotProcess {
             ));
         }
         for collection in &layout.collections {
-            let len = usize::try_from(collection.capacity).map_err(|_| {
+            let collection_len = usize::try_from(collection.capacity).map_err(|_| {
                 format!(
                     "negative standalone AOT collection capacity for '{}'",
                     collection.path
                 )
             })?;
             for field in &collection.fields {
+                let element_count = collection_field_element_count(
+                    collection,
+                    field,
+                    u64::try_from(collection_len).unwrap_or(u64::MAX),
+                );
+                let len = usize::try_from(element_count).map_err(|_| {
+                    format!(
+                        "standalone AOT field element count {} for '{}.{}' does not fit usize",
+                        element_count, collection.path, field.field
+                    )
+                })?;
                 let storage_type_name = field.storage_type_name();
                 let width = storage_width(storage_type_name)?;
                 let size = len.checked_mul(width).ok_or_else(|| {
@@ -3191,6 +3203,144 @@ mod tests {
             symbols.contains("ExitProcess"),
             "native Windows wrapper must terminate with the Stasis result: {symbols:?}"
         );
+    }
+
+    #[test]
+    fn typed_grid_and_bitset_aot_storage_matches_jit_lane_lengths() {
+        for (path, type_name, field, logical_capacity, expected_len) in [
+            (
+                "grid_storage_147",
+                "grid<i32, 2, 3>",
+                "values",
+                6_i32,
+                6_usize,
+            ),
+            ("bitset_storage_147", "bitset<33>", "words", 33_i32, 2_usize),
+        ] {
+            let source =
+                format!("global {path}: {type_name};\nfunction main(): i32 {{ return 0; }}\n");
+            let mut jit = JitProcess::new();
+            jit.upsert_file("typed_grid_bitset_storage.stasis", source.clone());
+            jit.compile().expect("typed grid/bitset JIT compile");
+
+            let mut aot = AotProcess::new();
+            aot.upsert_file("typed_grid_bitset_storage.stasis", source);
+            aot.compile().expect("typed grid/bitset AOT compile");
+
+            let jit_layout = jit.state_layout();
+            let jit_collection = jit_layout
+                .collections
+                .iter()
+                .find(|collection| collection.path == path)
+                .expect("JIT typed collection layout");
+            let jit_field = jit_collection
+                .fields
+                .iter()
+                .find(|field_layout| field_layout.field == field)
+                .expect("JIT typed lane layout");
+            assert_eq!(jit_collection.capacity, logical_capacity);
+            assert_eq!(jit_field.element_count, Some(expected_len as u64));
+
+            let aot_layout = aot.state_layout();
+            let aot_collection = aot_layout
+                .collections
+                .iter()
+                .find(|collection| collection.path == path)
+                .expect("AOT typed collection layout");
+            assert_eq!(
+                aot_collection, jit_collection,
+                "JIT/AOT layout parity for {path}"
+            );
+
+            let snapshot = aot.program_snapshot().expect("typed collection snapshot");
+            let bindings = build_aot_direct_storage_bindings(
+                &snapshot.analysis.global_path_types,
+                &snapshot.analysis.collection_infos,
+                snapshot.typed_collection_descriptors(),
+                snapshot.types(),
+            )
+            .expect("typed grid/bitset AOT direct storage plan");
+            let binding = bindings
+                .arrays
+                .get(&(path.to_string(), field.to_string()))
+                .expect("typed lane AOT direct storage binding");
+            assert_eq!(binding.static_len, Some(expected_len));
+            assert_eq!(binding.storage_bytes, 4);
+
+            let (bytes, _) = aot
+                .compile_standalone_storage_object("aot_fn_0")
+                .expect("standalone typed grid/bitset storage object")
+                .expect("typed grid/bitset storage required");
+            let object = File::parse(bytes.as_slice()).expect("parse typed storage object");
+            let symbol_name = aot_storage_symbol(AotStorageSymbolKind::Array, path, field);
+            let symbol = object
+                .symbols()
+                .find(|symbol| symbol.name().ok() == Some(symbol_name.as_str()))
+                .unwrap_or_else(|| panic!("missing standalone storage symbol '{symbol_name}'"));
+            let section_index = symbol
+                .section_index()
+                .expect("typed storage symbol section");
+            let section = object
+                .section_by_index(section_index)
+                .expect("typed storage symbol section data");
+            assert_eq!(
+                section.size(),
+                u64::try_from(expected_len * 4).expect("typed storage size"),
+                "standalone AOT storage section must use {path}.{field} lane length"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn linked_aot_matches_jit_for_grid_and_bitset_operations() {
+        let source = "global grid_aot_147: grid<i32, 2, 3>;\n\
+                      global bits_aot_147: bitset<33>;\n\
+                      function main(): i32 {\n\
+                          grid_aot_147.clear();\n\
+                          let result: i32 = grid_aot_147.capacity();\n\
+                          if (grid_aot_147.can_access(1, 2)) { grid_aot_147.set(1, 2, 41); }\n\
+                          if (grid_aot_147.can_access(1, 2)) { result += grid_aot_147.get(1, 2); }\n\
+                          grid_aot_147.clear();\n\
+                          if (grid_aot_147.can_access(1, 2)) { result += grid_aot_147.get(1, 2); }\n\
+                          bits_aot_147.clear();\n\
+                          result += bits_aot_147.capacity();\n\
+                          if (bits_aot_147.can_access(0)) { bits_aot_147.set(0, true); }\n\
+                          if (bits_aot_147.can_access(31)) { bits_aot_147.set(31, true); }\n\
+                          if (bits_aot_147.can_access(32)) { bits_aot_147.set(32, true); }\n\
+                          if (bits_aot_147.can_access(0)) { if (bits_aot_147.test(0)) { result += 1; } }\n\
+                          if (bits_aot_147.can_access(31)) { if (bits_aot_147.test(31)) { result += 10; } }\n\
+                          if (bits_aot_147.can_access(32)) { if (bits_aot_147.test(32)) { result += 100; } }\n\
+                          if (bits_aot_147.can_access(-1)) { result += 1000; }\n\
+                          if (bits_aot_147.can_access(33)) { result += 2000; }\n\
+                          bits_aot_147.clear();\n\
+                          if (bits_aot_147.can_access(0)) { if (bits_aot_147.test(0)) { result += 4000; } }\n\
+                          return result;\n\
+                      }\n";
+        let mut jit = JitProcess::new();
+        jit.upsert_file("typed_grid_bitset_linked.stasis", source);
+        jit.compile().expect("typed grid/bitset JIT compile");
+        let jit_result = jit
+            .execute_i32_noarg_by_name("main")
+            .expect("typed grid/bitset JIT execution");
+        assert_eq!(jit_result, 191);
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file("typed_grid_bitset_linked.stasis", source);
+        aot.compile().expect("typed grid/bitset AOT compile");
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            eprintln!("skipping linked typed grid/bitset fixture: no Windows linker found");
+            return;
+        };
+        let Some(aot_result) = run_linked_i32_noarg_fixture(
+            &aot,
+            "main",
+            "typed_grid_bitset_operations",
+            &link_config,
+        ) else {
+            return;
+        };
+        assert_eq!(aot_result, jit_result, "linked AOT/JIT operation parity");
     }
 
     #[test]

@@ -5,15 +5,13 @@ collection kinds in issue #147. A typed collection is a compiler-recognized type
 application with a fixed storage descriptor. It is not a source-defined generic
 struct with an array and a count, and it never allocates or resizes at runtime.
 
-Implementation status: descriptor parsing, validation, interning, fingerprinting,
-and layout reporting cover the nine collection kinds. The executable direct-storage
-slice currently covers selected persistent `i32` pool, stable-pool, queue,
-ring-buffer, map, set, and priority-queue paths. The policy-free grammar,
-receiver guard fusion, explicit `overwrite_oldest` operation, grid and bitset
-operations, structured overflow telemetry, and descriptor migration are still
-incomplete. Unsupported kinds and payload types fail at the production layout
-boundary instead of falling back to nominal scalar storage. This section is a
-status report, not a claim that every operation described below is executable.
+Descriptor parsing, validation, interning, fingerprinting, and layout reporting
+cover all nine collection kinds. Executable direct storage covers persistent
+`i32` pool, stable-pool, queue, ring-buffer, map, set, priority-queue, and grid
+paths plus bitsets. The grammar is policy-free, rejecting actions use fused
+caller-owned guards, and queue/ring overwrite is an explicit operation.
+Unsupported payload types fail at the production layout boundary instead of
+falling back to nominal scalar storage.
 
 The target receiver surface is illustrated here:
 
@@ -143,8 +141,8 @@ their other operations.
 FIFO logical index `j` maps to `(head + j) mod N`; `head` is normalized to zero
 when empty. A physical or logical index is valid only for the current count.
 The physical index helper returns `-1` when empty or out of range. An empty
-scalar peek returns the scalar zero value and records a bounded empty-read
-diagnostic; it does not read payload storage.
+scalar peek is not executable because `can_peek(logical_index)` is false and the
+required positive arm is not entered.
 
 Priority-queue operations are `push(priority, value) -> bool`, `pop() -> bool`,
 `peek() -> i32`, `peek_priority() -> i32`, `count()`, `capacity()`, and
@@ -164,11 +162,14 @@ path. Both scan keys linearly, reject corrupt count/occupancy or duplicate-key
 metadata without writing, iterate occupied slots in ascending physical order,
 and reuse the lowest free slot. Removal zeros the released key and map value.
 
-Grid access is `grid_get(x, y)`, `grid_set(x, y, value)`, or `grid_at(x, y)` in
-row-major `y*W+x` order. Out-of-range grid access is write-free. Bit index zero
-is the least-significant bit of word zero; unused tail bits are always masked to
-zero. Grid and bitset lowering remain part of the incomplete implementation
-slice.
+Grid receiver operations are `can_access(x, y)`, `get(x, y)`,
+`set(x, y, value)`, `capacity()`, and `clear()`. Grid coordinates use row-major
+`y*W+x` order. `get` and `set` require the exact positive `can_access(x, y)`
+proof, so an out-of-range access stays in the source-visible false arm and does
+not touch storage. Bitset receiver operations are `can_access(index)`,
+`test(index)`, `set(index, value)`, `capacity()`, and `clear()`. `test` and
+`set` require the exact positive proof. Bit index zero is the least-significant
+bit of word zero; unused tail bits are always masked to zero.
 
 ## Caller-owned proofs and fused lowering
 
@@ -227,9 +228,9 @@ pools expose `can_insert()` and `can_remove(index)`; queues and ring buffers
 expose `can_push()`, `can_pop()`, and `can_peek(logical_index)`; maps expose
 `can_put(key)` and `can_remove(key)`; sets expose `can_add(key)` and
 `can_remove(key)`; priority queues expose `can_push()`, `can_pop()`, and
-`can_peek()`. A preflight reads state but writes no lane and emits no telemetry;
-when paired with its guarded action, it is fused rather than emitted as a
-separate runtime call.
+`can_peek()`; grids and bitsets expose `can_access(...)`. A preflight reads only
+the state needed to decide the action and writes no lane. When paired with its
+guarded action, it is fused rather than emitted as a separate runtime call.
 
 Every `clear` is in place at the current simulation tick. It preserves the
 collection path, descriptor identity, and capacity while zeroing metadata,
@@ -250,28 +251,17 @@ payload lanes contribute zero bytes but do not permit modulo-by-zero arithmetic.
 The canonical identity includes state path, kind, element/key/value types,
 dimensions, lane schema, and capacity. It has no overflow-policy component.
 Typed collection symbols use a compiler-owned namespace distinct from ordinary
-scalar and fixed-array symbols. Changing any identity component is incompatible
-for state migration. Growing a descriptor copies active lanes and
-zero-initializes the tail. Shrinking with live elements, or changing kind,
-dimensions, key type, or value type, rejects before writing the active state.
+scalar and fixed-array symbols. Changing any identity component is currently a
+reset-required, non-migratable layout change. Snapshot, inspection, and memory
+reporting preserve each lane's physical element count, including packed bitset
+word counts, without confusing it with the collection's logical capacity.
 
 ## Diagnostics and execution parity
 
-Each lowered operation carries a compiler-generated site record containing its
-operation id, state path, function and symbol identity, source file, range, and
-debug source offset. Source text cannot provide a caller label. Overflow and
-empty-read records use the additive `stasis.collection.overflow.v1` envelope
-with state path, collection kind, operation, capacity, simulation tick, caller
-identity, peak usage, requested capacity, current memory bytes, suggested memory
-bytes, and suggested increase. The suggestion is the smallest representable
-capacity above the observed peak, or the first valid grid dimension increase; no
-suggestion is reported when the type's checked limit is exhausted.
-
-Telemetry is fixed-size compiler-owned data outside simulation state. It may be
-shown by inspection, but it does not affect replay hashes or snapshots. The
-simulation execution boundary supplies an explicit `u64` tick to both JIT and
-linked native AOT and clears it after the tick. Wall time, network time, and
-host labels are not used.
+Guard failures are ordinary source control flow, not collection errors or hidden
+telemetry events. The compiler instead diagnoses missing, mismatched, reused, or
+non-structural proofs before code generation. Runtime collection code contains
+only the source-visible condition and the fused operation in its positive arm.
 
 JIT and linked AOT consume the same descriptor, lane order, bounds, comparator,
 operation result, snapshot order, and diagnostic site table. A green acceptance

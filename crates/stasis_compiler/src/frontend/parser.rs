@@ -1794,10 +1794,12 @@ fn parse_function_annotations(
             }
             let next_cursor = skip_parenthesized_tokens(tokens, cursor)?;
             if matches!(annotation_name, "effects" | "requires") {
-                arguments = parse_effect_annotation_arguments(
-                    source,
-                    &tokens[cursor + 1..next_cursor - 1],
-                )?;
+                let annotation_tokens = &tokens[cursor + 1..next_cursor - 1];
+                arguments = if annotation_name == "requires" {
+                    parse_requires_annotation_argument(source, annotation_tokens)?
+                } else {
+                    parse_effect_annotation_arguments(source, annotation_tokens)?
+                };
                 cursor = next_cursor;
                 annotations.push(ParsedFunctionAnnotation {
                     name: annotation_name.to_string(),
@@ -1847,6 +1849,54 @@ fn parse_function_annotations(
         });
     }
     Ok((cursor, extern_symbol, annotations))
+}
+
+fn parse_requires_annotation_argument(
+    source: &str,
+    tokens: &[Token],
+) -> Result<Vec<ParsedFunctionAnnotationArgument>, String> {
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut arguments = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    for end in 0..=tokens.len() {
+        let split = if end == tokens.len() {
+            true
+        } else {
+            match tokens[end].kind {
+                TokenKind::LParen => {
+                    depth += 1;
+                    false
+                }
+                TokenKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                    false
+                }
+                TokenKind::Comma => depth == 0,
+                _ => false,
+            }
+        };
+        if !split {
+            continue;
+        }
+        if start == end {
+            return Err("annotation '@requires' has an empty argument".to_string());
+        }
+        let first = tokens[start];
+        let last = tokens[end - 1];
+        arguments.push(ParsedFunctionAnnotationArgument {
+            kind: if start + 1 == end && first.kind == TokenKind::Identifier {
+                ParsedFunctionAnnotationArgumentKind::Identifier
+            } else {
+                ParsedFunctionAnnotationArgumentKind::Other
+            },
+            text: source[first.start..last.end].to_string(),
+        });
+        start = end + 1;
+    }
+    Ok(arguments)
 }
 
 fn parse_effect_annotation_arguments(
@@ -2461,8 +2511,7 @@ function tick(): i32 {
 
     #[test]
     fn retains_requires_preflight_as_one_compile_time_annotation_expression() {
-        let source =
-            "@requires(events.can_push())\nfunction enqueue(value: i32): void { return; }\n";
+        let source = "@requires(cells.can_access(x, y))\nfunction set_cell(x: i32, y: i32): void { return; }\n";
         let parsed = parse_top_level_functions(source).expect("parse requires annotation");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].annotations.len(), 1);
@@ -2470,7 +2519,7 @@ function tick(): i32 {
         assert_eq!(annotation.name, "requires");
         assert!(annotation.has_parentheses);
         assert_eq!(annotation.arguments.len(), 1);
-        assert_eq!(annotation.arguments[0].text, "events.can_push()");
+        assert_eq!(annotation.arguments[0].text, "cells.can_access(x, y)");
     }
 
     #[test]

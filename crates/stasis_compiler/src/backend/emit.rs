@@ -7,8 +7,8 @@ use crate::backend::compile_analysis::{
 use crate::compiler::{FunctionId, FunctionMeta};
 use crate::data_flow::{FunctionDataFlowSummary, ParameterStorageKind};
 use crate::frontend::types::{
-    TypeCategory, TypeId, TypeTable, TypedCollectionKind, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64,
-    TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
+    TypeCategory, TypeId, TypeTable, TypedCollectionDescriptor, TypedCollectionKind, TYPE_ID_BOOL,
+    TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
 use crate::ir::hir::{
     eval_const_i64, AssignOp, AssignTarget, ComparisonOp, ConversionKind, DebugStatement,
@@ -292,6 +292,8 @@ enum TypedCollectionGuardAction {
     PriorityQueuePush,
     PriorityQueuePop,
     PriorityQueuePeek,
+    GridAccess,
+    BitsetAccess,
 }
 
 #[derive(Clone, Copy)]
@@ -317,6 +319,9 @@ enum TypedCollectionGuardState {
     PriorityQueue {
         count: Value,
         next_order: Option<Value>,
+    },
+    Indexed {
+        index: Value,
     },
 }
 
@@ -385,7 +390,9 @@ impl InternalCallMode<'_> {
             | TypedCollectionGuardAction::SetAdd
             | TypedCollectionGuardAction::SetRemove
             | TypedCollectionGuardAction::QueuePeek
-            | TypedCollectionGuardAction::RingBufferPeek => &[1],
+            | TypedCollectionGuardAction::RingBufferPeek
+            | TypedCollectionGuardAction::BitsetAccess => &[1],
+            TypedCollectionGuardAction::GridAccess => &[1, 2],
             TypedCollectionGuardAction::PoolPush
             | TypedCollectionGuardAction::StablePoolInsert
             | TypedCollectionGuardAction::QueuePush
@@ -3348,6 +3355,44 @@ pub(crate) fn emit_simple_statements(
                         continue;
                     }
                     if try_emit_typed_set_call(
+                        builder,
+                        target,
+                        args,
+                        values_by_name,
+                        runtime_call_refs,
+                        internal_calls,
+                        call_signatures,
+                        type_table,
+                        global_path_types,
+                        constant_values,
+                        collection_infos,
+                        named_struct_field_types,
+                        foreach_bindings,
+                    )?
+                    .is_some()
+                    {
+                        continue;
+                    }
+                    if try_emit_typed_grid_call(
+                        builder,
+                        target,
+                        args,
+                        values_by_name,
+                        runtime_call_refs,
+                        internal_calls,
+                        call_signatures,
+                        type_table,
+                        global_path_types,
+                        constant_values,
+                        collection_infos,
+                        named_struct_field_types,
+                        foreach_bindings,
+                    )?
+                    .is_some()
+                    {
+                        continue;
+                    }
+                    if try_emit_typed_bitset_call(
                         builder,
                         target,
                         args,
@@ -11294,6 +11339,585 @@ fn try_emit_typed_set_call(
     }
 }
 
+#[derive(Clone, Copy)]
+enum TypedLinearCallResult {
+    Value(ValueBinding),
+    Void,
+}
+
+fn typed_linear_storage_binding(
+    target: &str,
+    args: &[SimpleExpr],
+    expected_kind: TypedCollectionKind,
+    expected_lane: &str,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+) -> Result<
+    (
+        String,
+        usize,
+        TypedCollectionDescriptor,
+        DirectArrayStorageRef,
+    ),
+    String,
+> {
+    let Some(SimpleExpr::Identifier(path)) = args.first() else {
+        return Err(format!(
+            "{target} first argument must be an exact persistent typed collection path"
+        ));
+    };
+    let root = path.split('.').next().unwrap_or(path);
+    if values_by_name.contains_key(root) {
+        return Err(format!(
+            "{target} first argument must be an exact persistent typed collection path"
+        ));
+    }
+    let type_id = global_path_types.get(path).copied().ok_or_else(|| {
+        format!(
+            "{target} first argument '{}' is not a persistent typed collection path",
+            path
+        )
+    })?;
+    let type_name = type_table
+        .type_info(type_id)
+        .map(|info| info.name.as_str())
+        .ok_or_else(|| format!("{target} path '{}' has unknown type {}", path, type_id))?;
+    let descriptor = type_table
+        .parse_typed_collection_descriptor(type_name)?
+        .ok_or_else(|| {
+            format!(
+                "{target} path '{}' has no compiler-owned typed collection descriptor",
+                path
+            )
+        })?;
+    if descriptor.kind != expected_kind {
+        return Err(format!(
+            "{target} requires persistent {} path '{}', found {}",
+            expected_kind.as_str(),
+            path,
+            descriptor.kind_name()
+        ));
+    }
+    let capacity = usize::try_from(descriptor.capacity).map_err(|_| {
+        format!(
+            "{target} {} path '{}' capacity {} does not fit the target index type",
+            expected_kind.as_str(),
+            path,
+            descriptor.capacity
+        )
+    })?;
+    let direct_storage = runtime_call_refs.direct_storage.as_ref().ok_or_else(|| {
+        format!(
+            "{target} for typed {} '{}' requires direct storage bindings",
+            expected_kind.as_str(),
+            path
+        )
+    })?;
+    let lane = descriptor
+        .lanes
+        .iter()
+        .find(|lane| lane.name == expected_lane)
+        .ok_or_else(|| {
+            format!(
+                "{target} for typed {} '{}' is missing descriptor lane '{}'",
+                expected_kind.as_str(),
+                path,
+                expected_lane
+            )
+        })?;
+    let expected_len = usize::try_from(lane.element_count).map_err(|_| {
+        format!(
+            "{target} for typed {} '{}' lane '{}' length does not fit the target index type",
+            expected_kind.as_str(),
+            path,
+            expected_lane
+        )
+    })?;
+    let storage = direct_storage
+        .arrays
+        .get(&(path.to_string(), expected_lane.to_string()))
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "{target} for typed {} '{}' is missing direct array binding '{}.{}'",
+                expected_kind.as_str(),
+                path,
+                path,
+                expected_lane
+            )
+        })?;
+    if storage.static_len != Some(expected_len) {
+        return Err(format!(
+            "{target} for typed {} '{}' lane '{}' requires static length {}, found {:?}",
+            expected_kind.as_str(),
+            path,
+            expected_lane,
+            expected_len,
+            storage.static_len
+        ));
+    }
+    Ok((path.clone(), capacity, descriptor, storage))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_typed_i32_argument(
+    builder: &mut FunctionBuilder<'_>,
+    target: &str,
+    role: &str,
+    expression: &SimpleExpr,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<ValueBinding, String> {
+    let value = emit_simple_expression(
+        builder,
+        expression,
+        Some(TYPE_ID_I32),
+        values_by_name,
+        runtime_call_refs,
+        internal_calls,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        foreach_bindings,
+    )?;
+    if value.type_id != TYPE_ID_I32 {
+        return Err(format!(
+            "{target} {role} argument must have exact i32 type, found {}",
+            value.type_id
+        ));
+    }
+    Ok(value)
+}
+
+fn emit_typed_linear_clear(
+    builder: &mut FunctionBuilder<'_>,
+    storage: DirectArrayStorageRef,
+    len: usize,
+    type_id: TypeId,
+) -> Result<(), String> {
+    if len == 0 {
+        return Ok(());
+    }
+    let len_i32 = i32::try_from(len)
+        .map_err(|_| format!("typed collection lane length {len} exceeds i32 range"))?;
+    let zero = builder.ins().iconst(types::I32, 0);
+    let condition_block = builder.create_block();
+    let body_block = builder.create_block();
+    let exit_block = builder.create_block();
+    builder.append_block_param(condition_block, types::I32);
+    builder.ins().jump(condition_block, &[zero]);
+    builder.switch_to_block(condition_block);
+    let index = builder.block_params(condition_block)[0];
+    let more = builder
+        .ins()
+        .icmp_imm(IntCC::SignedLessThan, index, i64::from(len_i32));
+    builder.ins().brif(more, body_block, &[], exit_block, &[]);
+    builder.seal_block(body_block);
+    builder.switch_to_block(body_block);
+    emit_direct_array_store(
+        builder,
+        storage.slot,
+        index,
+        zero,
+        type_id,
+        storage.storage_bytes,
+        storage.static_len,
+        true,
+    )?;
+    let next = builder.ins().iadd_imm(index, 1);
+    builder.ins().jump(condition_block, &[next]);
+    builder.seal_block(condition_block);
+    builder.seal_block(exit_block);
+    builder.switch_to_block(exit_block);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_emit_typed_grid_call(
+    builder: &mut FunctionBuilder<'_>,
+    target: &str,
+    args: &[SimpleExpr],
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<Option<TypedLinearCallResult>, String> {
+    let expected_arity = match target {
+        "can_access" | "get" => 3,
+        "set" => 4,
+        "capacity" | "clear" => 1,
+        _ => return Ok(None),
+    };
+    if !is_typed_collection_receiver(
+        args,
+        values_by_name,
+        global_path_types,
+        type_table,
+        TypedCollectionKind::Grid,
+    )? {
+        return Ok(None);
+    }
+    if args.len() != expected_arity {
+        return Err(format!(
+            "{target} expects {expected_arity} argument(s), found {}",
+            args.len()
+        ));
+    }
+    let (path, capacity, descriptor, values_ref) = typed_linear_storage_binding(
+        target,
+        args,
+        TypedCollectionKind::Grid,
+        "values",
+        values_by_name,
+        runtime_call_refs,
+        global_path_types,
+        type_table,
+    )?;
+    if descriptor.element_type != Some(TYPE_ID_I32) || values_ref.storage_bytes != 4 {
+        return Err(format!(
+            "{target} requires grid path '{}' with i32 values",
+            path
+        ));
+    }
+    if target == "capacity" {
+        let capacity = i32::try_from(capacity)
+            .map_err(|_| format!("{target} grid path '{path}' capacity exceeds i32 range"))?;
+        return Ok(Some(TypedLinearCallResult::Value(ValueBinding {
+            value: builder.ins().iconst(types::I32, i64::from(capacity)),
+            type_id: TYPE_ID_I32,
+        })));
+    }
+    if target == "clear" {
+        emit_typed_linear_clear(builder, values_ref, capacity, TYPE_ID_I32)?;
+        return Ok(Some(TypedLinearCallResult::Void));
+    }
+    let x = emit_typed_i32_argument(
+        builder,
+        target,
+        "x",
+        &args[1],
+        values_by_name,
+        runtime_call_refs,
+        internal_calls,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        foreach_bindings,
+    )?;
+    let y = emit_typed_i32_argument(
+        builder,
+        target,
+        "y",
+        &args[2],
+        values_by_name,
+        runtime_call_refs,
+        internal_calls,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        foreach_bindings,
+    )?;
+    let width = descriptor.width.unwrap_or_default();
+    let height = descriptor.height.unwrap_or_default();
+    if target == "can_access" {
+        let x_non_negative = builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, x.value, 0);
+        let x_below = builder
+            .ins()
+            .icmp_imm(IntCC::SignedLessThan, x.value, i64::from(width));
+        let y_non_negative = builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, y.value, 0);
+        let y_below = builder
+            .ins()
+            .icmp_imm(IntCC::SignedLessThan, y.value, i64::from(height));
+        let valid_x = builder.ins().band(x_non_negative, x_below);
+        let valid_y = builder.ins().band(y_non_negative, y_below);
+        let valid = builder.ins().band(valid_x, valid_y);
+        let row = builder.ins().imul_imm(y.value, i64::from(width));
+        let index = builder.ins().iadd(row, x.value);
+        internal_calls.capture_typed_collection_guard_proof(
+            target,
+            TypedCollectionGuardAction::GridAccess,
+            args,
+            TypedCollectionGuardState::Indexed { index },
+        );
+        return Ok(Some(TypedLinearCallResult::Value(ValueBinding {
+            value: valid,
+            type_id: TYPE_ID_BOOL,
+        })));
+    }
+    let Some(TypedCollectionGuardState::Indexed { index }) = internal_calls
+        .take_typed_collection_guard_state(TypedCollectionGuardAction::GridAccess, args)
+    else {
+        return Err(format!(
+            "{target} for grid path '{path}' requires its exact direct can_access guard"
+        ));
+    };
+    if target == "get" {
+        let value = emit_direct_array_load(
+            builder,
+            values_ref.slot,
+            index,
+            TYPE_ID_I32,
+            type_table,
+            values_ref.storage_bytes,
+            values_ref.static_len,
+            true,
+        )?;
+        return Ok(Some(TypedLinearCallResult::Value(ValueBinding {
+            value,
+            type_id: TYPE_ID_I32,
+        })));
+    }
+    let value = emit_simple_expression(
+        builder,
+        &args[3],
+        Some(TYPE_ID_I32),
+        values_by_name,
+        runtime_call_refs,
+        internal_calls,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        foreach_bindings,
+    )?;
+    if value.type_id != TYPE_ID_I32 {
+        return Err(format!(
+            "{target} value argument must have exact i32 type, found {}",
+            value.type_id
+        ));
+    }
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        index,
+        value.value,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    Ok(Some(TypedLinearCallResult::Void))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_emit_typed_bitset_call(
+    builder: &mut FunctionBuilder<'_>,
+    target: &str,
+    args: &[SimpleExpr],
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<Option<TypedLinearCallResult>, String> {
+    let expected_arity = match target {
+        "can_access" | "test" => 2,
+        "set" => 3,
+        "capacity" | "clear" => 1,
+        _ => return Ok(None),
+    };
+    if !is_typed_collection_receiver(
+        args,
+        values_by_name,
+        global_path_types,
+        type_table,
+        TypedCollectionKind::Bitset,
+    )? {
+        return Ok(None);
+    }
+    if args.len() != expected_arity {
+        return Err(format!(
+            "{target} expects {expected_arity} argument(s), found {}",
+            args.len()
+        ));
+    }
+    let (path, capacity, descriptor, words_ref) = typed_linear_storage_binding(
+        target,
+        args,
+        TypedCollectionKind::Bitset,
+        "words",
+        values_by_name,
+        runtime_call_refs,
+        global_path_types,
+        type_table,
+    )?;
+    if words_ref.storage_bytes != 4 {
+        return Err(format!(
+            "{target} for bitset path '{path}' requires u32 word storage"
+        ));
+    }
+    if target == "capacity" {
+        let capacity = i32::try_from(capacity)
+            .map_err(|_| format!("{target} bitset path '{path}' capacity exceeds i32 range"))?;
+        return Ok(Some(TypedLinearCallResult::Value(ValueBinding {
+            value: builder.ins().iconst(types::I32, i64::from(capacity)),
+            type_id: TYPE_ID_I32,
+        })));
+    }
+    if target == "clear" {
+        let word_count = descriptor
+            .lanes
+            .iter()
+            .find(|lane| lane.name == "words")
+            .and_then(|lane| usize::try_from(lane.element_count).ok())
+            .ok_or_else(|| format!("{target} bitset path '{path}' has invalid word count"))?;
+        emit_typed_linear_clear(builder, words_ref, word_count, TYPE_ID_U32)?;
+        return Ok(Some(TypedLinearCallResult::Void));
+    }
+    let index = emit_typed_i32_argument(
+        builder,
+        target,
+        "index",
+        &args[1],
+        values_by_name,
+        runtime_call_refs,
+        internal_calls,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        foreach_bindings,
+    )?;
+    if target == "can_access" {
+        let non_negative = builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, index.value, 0);
+        let below = builder
+            .ins()
+            .icmp_imm(IntCC::SignedLessThan, index.value, capacity as i64);
+        let valid = builder.ins().band(non_negative, below);
+        internal_calls.capture_typed_collection_guard_proof(
+            target,
+            TypedCollectionGuardAction::BitsetAccess,
+            args,
+            TypedCollectionGuardState::Indexed { index: index.value },
+        );
+        return Ok(Some(TypedLinearCallResult::Value(ValueBinding {
+            value: valid,
+            type_id: TYPE_ID_BOOL,
+        })));
+    }
+    let Some(TypedCollectionGuardState::Indexed { index }) = internal_calls
+        .take_typed_collection_guard_state(TypedCollectionGuardAction::BitsetAccess, args)
+    else {
+        return Err(format!(
+            "{target} for bitset path '{path}' requires its exact direct can_access guard"
+        ));
+    };
+    let word_index = builder.ins().ushr_imm(index, 5);
+    let bit_index = builder.ins().band_imm(index, 31);
+    let one = builder.ins().iconst(types::I32, 1);
+    let mask = builder.ins().ishl(one, bit_index);
+    let word = emit_direct_array_load(
+        builder,
+        words_ref.slot,
+        word_index,
+        TYPE_ID_U32,
+        type_table,
+        words_ref.storage_bytes,
+        words_ref.static_len,
+        true,
+    )?;
+    if target == "test" {
+        let selected = builder.ins().band(word, mask);
+        let value = builder.ins().icmp_imm(IntCC::NotEqual, selected, 0);
+        return Ok(Some(TypedLinearCallResult::Value(ValueBinding {
+            value,
+            type_id: TYPE_ID_BOOL,
+        })));
+    }
+    let value = emit_simple_expression(
+        builder,
+        &args[2],
+        Some(TYPE_ID_BOOL),
+        values_by_name,
+        runtime_call_refs,
+        internal_calls,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        foreach_bindings,
+    )?;
+    if value.type_id != TYPE_ID_BOOL {
+        return Err(format!(
+            "{target} value argument must have exact bool type, found {}",
+            value.type_id
+        ));
+    }
+    let value_is_true = builder.ins().icmp_imm(IntCC::NotEqual, value.value, 0);
+    let cleared = builder.ins().band_not(word, mask);
+    let zero = builder.ins().iconst(types::I32, 0);
+    let selected = builder.ins().select(value_is_true, mask, zero);
+    let updated = builder.ins().bor(cleared, selected);
+    let tail_bits = capacity % 32;
+    let updated = if tail_bits == 0 {
+        updated
+    } else {
+        let tail_mask = (1_i64 << tail_bits) - 1;
+        let masked = builder.ins().band_imm(updated, tail_mask);
+        let last_word = words_ref
+            .static_len
+            .and_then(|len| len.checked_sub(1))
+            .ok_or_else(|| format!("set bitset path '{path}' has no physical word storage"))?;
+        let is_last_word = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, word_index, last_word as i64);
+        builder.ins().select(is_last_word, masked, updated)
+    };
+    emit_direct_array_store(
+        builder,
+        words_ref.slot,
+        word_index,
+        updated,
+        TYPE_ID_U32,
+        words_ref.storage_bytes,
+        words_ref.static_len,
+        true,
+    )?;
+    Ok(Some(TypedLinearCallResult::Void))
+}
+
 fn try_emit_typed_pool_call(
     builder: &mut FunctionBuilder<'_>,
     target: &str,
@@ -12043,6 +12667,52 @@ pub(crate) fn emit_simple_expression(
             )? {
                 return match result {
                     TypedKeyedCallResult::Value(value) => Ok(value),
+                };
+            }
+            if let Some(result) = try_emit_typed_grid_call(
+                builder,
+                target,
+                args,
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )? {
+                return match result {
+                    TypedLinearCallResult::Value(value) => Ok(value),
+                    TypedLinearCallResult::Void => Err(format!(
+                        "void call target '{}' cannot be used in value expression",
+                        target
+                    )),
+                };
+            }
+            if let Some(result) = try_emit_typed_bitset_call(
+                builder,
+                target,
+                args,
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )? {
+                return match result {
+                    TypedLinearCallResult::Value(value) => Ok(value),
+                    TypedLinearCallResult::Void => Err(format!(
+                        "void call target '{}' cannot be used in value expression",
+                        target
+                    )),
                 };
             }
             let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());

@@ -667,13 +667,21 @@ struct RequiredFunctionContract {
 
 impl CollectionGuardState {
     fn add(&mut self, proof: CollectionGuardProof) {
-        if !self.proofs.iter().any(|existing| existing == &proof) {
+        if !self
+            .proofs
+            .iter()
+            .any(|existing| collection_guard_proofs_match(existing, &proof))
+        {
             self.proofs.push(proof);
         }
     }
 
     fn consume(&mut self, proof: &CollectionGuardProof) -> bool {
-        let Some(index) = self.proofs.iter().position(|existing| existing == proof) else {
+        let Some(index) = self
+            .proofs
+            .iter()
+            .position(|existing| collection_guard_proofs_match(existing, proof))
+        else {
             return false;
         };
         self.proofs.remove(index);
@@ -683,6 +691,31 @@ impl CollectionGuardState {
     fn invalidate(&mut self) {
         self.proofs.clear();
     }
+}
+
+fn collection_guard_proofs_match(
+    available: &CollectionGuardProof,
+    required: &CollectionGuardProof,
+) -> bool {
+    available.receiver == required.receiver
+        && available.key_args == required.key_args
+        && (available.action == required.action
+            || matches!(
+                (available.action, required.action),
+                (
+                    TypedCollectionOperation::GridGet,
+                    TypedCollectionOperation::GridSet
+                ) | (
+                    TypedCollectionOperation::GridSet,
+                    TypedCollectionOperation::GridGet
+                ) | (
+                    TypedCollectionOperation::BitsetTest,
+                    TypedCollectionOperation::BitsetSet
+                ) | (
+                    TypedCollectionOperation::BitsetSet,
+                    TypedCollectionOperation::BitsetTest
+                )
+            ))
 }
 
 fn validate_requires_contracts(
@@ -705,10 +738,6 @@ fn validate_requires_contracts(
                 param_names: function.param_names.clone(),
             },
         );
-    }
-
-    if required_proofs.is_empty() {
-        return Ok(());
     }
 
     let (callers, call_edges) = collect_internal_call_graph(functions, statements_by_id, context);
@@ -802,7 +831,7 @@ fn parse_requires_proof(
         })?;
     if !is_can_operation(operation) {
         return Err(format!(
-            "function '{}' @requires must name can_push, can_insert, can_put, can_remove, can_pop, can_peek, or can_add; '{}' is not a preflight",
+            "function '{}' @requires must name can_push, can_insert, can_put, can_remove, can_pop, can_peek, can_add, or can_access; '{}' is not a preflight",
             function.name, target
         ));
     }
@@ -909,7 +938,7 @@ fn validate_required_function_shape(
             function.name, target
         ));
     };
-    if action_proof != *required_proof {
+    if !collection_guard_proofs_match(&action_proof, required_proof) {
         return Err(format!(
             "function '{}' @requires preflight does not exactly match its action receiver and key/index arguments",
             function.name
@@ -1364,6 +1393,8 @@ fn is_can_operation(operation: TypedCollectionOperation) -> bool {
             | TypedCollectionOperation::PriorityQueueCanPush
             | TypedCollectionOperation::PriorityQueueCanPop
             | TypedCollectionOperation::PriorityQueueCanPeek
+            | TypedCollectionOperation::GridCanAccess
+            | TypedCollectionOperation::BitsetCanAccess
     )
 }
 
@@ -1400,6 +1431,12 @@ fn can_operation_for_action(
         TypedCollectionOperation::PriorityQueuePeek => {
             TypedCollectionOperation::PriorityQueueCanPeek
         }
+        TypedCollectionOperation::GridGet | TypedCollectionOperation::GridSet => {
+            TypedCollectionOperation::GridCanAccess
+        }
+        TypedCollectionOperation::BitsetTest | TypedCollectionOperation::BitsetSet => {
+            TypedCollectionOperation::BitsetCanAccess
+        }
         _ => return None,
     })
 }
@@ -1413,7 +1450,9 @@ fn guard_key_argument_indices(operation: TypedCollectionOperation) -> &'static [
         | TypedCollectionOperation::SetAdd
         | TypedCollectionOperation::SetRemove
         | TypedCollectionOperation::QueuePeek
-        | TypedCollectionOperation::RingBufferPeek => &[1],
+        | TypedCollectionOperation::RingBufferPeek
+        | TypedCollectionOperation::BitsetTest
+        | TypedCollectionOperation::BitsetSet => &[1],
         TypedCollectionOperation::PoolPush
         | TypedCollectionOperation::StablePoolInsert
         | TypedCollectionOperation::QueuePush
@@ -1423,6 +1462,7 @@ fn guard_key_argument_indices(operation: TypedCollectionOperation) -> &'static [
         | TypedCollectionOperation::PriorityQueuePush
         | TypedCollectionOperation::PriorityQueuePop
         | TypedCollectionOperation::PriorityQueuePeek => &[],
+        TypedCollectionOperation::GridGet | TypedCollectionOperation::GridSet => &[1, 2],
         _ => &[],
     }
 }
@@ -1456,6 +1496,8 @@ fn guard_proof_for_can(
         TypedCollectionOperation::PriorityQueueCanPeek => {
             TypedCollectionOperation::PriorityQueuePeek
         }
+        TypedCollectionOperation::GridCanAccess => TypedCollectionOperation::GridGet,
+        TypedCollectionOperation::BitsetCanAccess => TypedCollectionOperation::BitsetTest,
         _ => return None,
     };
     let key_args = args.iter().skip(1).cloned().collect();
@@ -2060,6 +2102,16 @@ enum TypedCollectionOperation {
     PriorityQueueCanPush,
     PriorityQueueCanPop,
     PriorityQueueCanPeek,
+    GridGet,
+    GridSet,
+    GridCanAccess,
+    GridCapacity,
+    GridClear,
+    BitsetTest,
+    BitsetSet,
+    BitsetCanAccess,
+    BitsetCapacity,
+    BitsetClear,
 }
 
 impl TypedCollectionOperation {
@@ -2133,6 +2185,18 @@ impl TypedCollectionOperation {
             ("can_push", PriorityQueue) => Self::PriorityQueueCanPush,
             ("can_pop", PriorityQueue) => Self::PriorityQueueCanPop,
             ("can_peek", PriorityQueue) => Self::PriorityQueueCanPeek,
+
+            ("get", Grid) => Self::GridGet,
+            ("set", Grid) => Self::GridSet,
+            ("can_access", Grid) => Self::GridCanAccess,
+            ("capacity", Grid) => Self::GridCapacity,
+            ("clear", Grid) => Self::GridClear,
+
+            ("test", Bitset) => Self::BitsetTest,
+            ("set", Bitset) => Self::BitsetSet,
+            ("can_access", Bitset) => Self::BitsetCanAccess,
+            ("capacity", Bitset) => Self::BitsetCapacity,
+            ("clear", Bitset) => Self::BitsetClear,
             _ => return None,
         })
     }
@@ -2157,7 +2221,7 @@ impl TypedCollectionOperation {
             | Self::PriorityQueuePeekPriority
             | Self::PriorityQueueCount
             | Self::PriorityQueueCapacity => TYPE_ID_I32,
-            Self::MapGet => TYPE_ID_I32,
+            Self::MapGet | Self::GridGet | Self::GridCapacity | Self::BitsetCapacity => TYPE_ID_I32,
             Self::PoolCanPush
             | Self::PoolCanRemove
             | Self::StablePoolCanInsert
@@ -2188,14 +2252,21 @@ impl TypedCollectionOperation {
             | Self::PriorityQueuePop
             | Self::PriorityQueueCanPush
             | Self::PriorityQueueCanPop
-            | Self::PriorityQueueCanPeek => TYPE_ID_BOOL,
+            | Self::PriorityQueueCanPeek
+            | Self::GridCanAccess
+            | Self::BitsetTest
+            | Self::BitsetCanAccess => TYPE_ID_BOOL,
             Self::PoolClear
             | Self::StablePoolClear
             | Self::QueueClear
             | Self::RingBufferClear
             | Self::PriorityQueueClear
             | Self::QueueOverwriteOldest
-            | Self::RingBufferOverwriteOldest => TYPE_ID_VOID,
+            | Self::RingBufferOverwriteOldest
+            | Self::GridSet
+            | Self::GridClear
+            | Self::BitsetSet
+            | Self::BitsetClear => TYPE_ID_VOID,
         }
     }
 
@@ -2258,6 +2329,16 @@ impl TypedCollectionOperation {
             | Self::PriorityQueueCanPush
             | Self::PriorityQueueCanPop
             | Self::PriorityQueueCanPeek => TypedCollectionKind::PriorityQueue,
+            Self::GridGet
+            | Self::GridSet
+            | Self::GridCanAccess
+            | Self::GridCapacity
+            | Self::GridClear => TypedCollectionKind::Grid,
+            Self::BitsetTest
+            | Self::BitsetSet
+            | Self::BitsetCanAccess
+            | Self::BitsetCapacity
+            | Self::BitsetClear => TypedCollectionKind::Bitset,
         }
     }
 
@@ -2310,13 +2391,21 @@ impl TypedCollectionOperation {
             | Self::PriorityQueueClear
             | Self::PriorityQueueCanPush
             | Self::PriorityQueueCanPop
-            | Self::PriorityQueueCanPeek => 1,
+            | Self::PriorityQueueCanPeek
+            | Self::GridCapacity
+            | Self::GridClear
+            | Self::BitsetCapacity
+            | Self::BitsetClear => 1,
             Self::PoolCanPush
             | Self::StablePoolCanInsert
             | Self::QueueCanPush
             | Self::QueueCanPop
             | Self::RingBufferCanPush
             | Self::RingBufferCanPop => 1,
+            Self::GridGet | Self::GridCanAccess => 3,
+            Self::GridSet => 4,
+            Self::BitsetTest | Self::BitsetCanAccess => 2,
+            Self::BitsetSet => 3,
             Self::PriorityQueuePeek | Self::PriorityQueuePeekPriority => 1,
         }
     }
@@ -2378,7 +2467,17 @@ impl TypedCollectionOperation {
             | Self::PriorityQueueClear
             | Self::PriorityQueueCanPush
             | Self::PriorityQueueCanPop
-            | Self::PriorityQueueCanPeek => None,
+            | Self::PriorityQueueCanPeek
+            | Self::GridGet
+            | Self::GridSet
+            | Self::GridCanAccess
+            | Self::GridCapacity
+            | Self::GridClear
+            | Self::BitsetTest
+            | Self::BitsetSet
+            | Self::BitsetCanAccess
+            | Self::BitsetCapacity
+            | Self::BitsetClear => None,
         }
     }
 
@@ -2396,8 +2495,26 @@ impl TypedCollectionOperation {
             | Self::SetRemove
             | Self::SetCanAdd
             | Self::SetCanRemove => vec![(1, "key")],
+            Self::GridGet | Self::GridCanAccess => vec![(1, "x"), (2, "y")],
+            Self::GridSet => vec![(1, "x"), (2, "y"), (3, "value")],
+            Self::BitsetTest | Self::BitsetCanAccess => vec![(1, "index")],
+            Self::BitsetSet => vec![(1, "index"), (2, "value")],
             _ => self.payload_argument().into_iter().collect(),
         }
+    }
+
+    fn argument_type_specs(self) -> Vec<(usize, &'static str, TypeId)> {
+        self.argument_specs()
+            .into_iter()
+            .map(|(index, name)| {
+                let type_id = if self == Self::BitsetSet && name == "value" {
+                    TYPE_ID_BOOL
+                } else {
+                    TYPE_ID_I32
+                };
+                (index, name, type_id)
+            })
+            .collect()
     }
 }
 
@@ -2447,6 +2564,12 @@ fn typed_collection_descriptor_supports_operation(
         }
         TypedCollectionKind::Set => descriptor.key_type == Some(TYPE_ID_I32),
         TypedCollectionKind::PriorityQueue => descriptor.element_type == Some(TYPE_ID_I32),
+        TypedCollectionKind::Grid => {
+            descriptor.element_type == Some(TYPE_ID_I32)
+                && descriptor.width.is_some()
+                && descriptor.height.is_some()
+        }
+        TypedCollectionKind::Bitset => true,
         _ => descriptor.element_type == Some(TYPE_ID_I32),
     }
 }
@@ -2534,6 +2657,14 @@ fn typed_collection_operation(
                     "{target} requires priority_queue path '{path}' with i32 payload"
                 ));
             }
+            TypedCollectionKind::Grid => {
+                return Err(format!(
+                    "{target} requires grid path '{path}' with i32 payload"
+                ));
+            }
+            TypedCollectionKind::Bitset => {
+                return Err(format!("{target} requires bitset path '{path}'"));
+            }
             _ => {
                 return Err(format!(
                     "{target} requires {} path '{path}' with i32 payload",
@@ -2543,17 +2674,18 @@ fn typed_collection_operation(
         }
     }
 
-    for (argument_index, argument_name) in operation.argument_specs() {
+    for (argument_index, argument_name, expected_type) in operation.argument_type_specs() {
         let value_type = semantic_expression_type(&args[argument_index], context, local_types)
             .ok_or_else(|| {
                 format!(
-                    "{target} {argument_name} argument must have type i32; its type could not be inferred"
+                    "{target} {argument_name} argument must have type {}; its type could not be inferred",
+                    type_name(expected_type, context.types)
                 )
             })?;
-        if value_type != TYPE_ID_I32 {
+        if value_type != expected_type {
             return Err(type_mismatch(
                 &format!("{target} {argument_name} argument"),
-                TYPE_ID_I32,
+                expected_type,
                 value_type,
                 context.types,
             ));
@@ -4321,6 +4453,28 @@ fn analyze_typed_collection_operation(
             | TypedCollectionOperation::PriorityQueueCanPeek => {
                 effects.insert_read(format!("{path}.count"));
             }
+            TypedCollectionOperation::GridGet => {
+                effects.insert_read(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::GridSet => {
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::GridCanAccess | TypedCollectionOperation::GridCapacity => {}
+            TypedCollectionOperation::GridClear => {
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::BitsetTest => {
+                effects.insert_read(format!("{path}.words[*]"));
+            }
+            TypedCollectionOperation::BitsetSet => {
+                effects.insert_read(format!("{path}.words[*]"));
+                effects.insert_write(format!("{path}.words[*]"));
+            }
+            TypedCollectionOperation::BitsetCanAccess
+            | TypedCollectionOperation::BitsetCapacity => {}
+            TypedCollectionOperation::BitsetClear => {
+                effects.insert_write(format!("{path}.words[*]"));
+            }
         }
         for argument in args.iter().skip(1) {
             analyze_expression(argument, context, locals, local_types, aliases, effects);
@@ -5392,6 +5546,35 @@ mod tests {
         build_context(files, &[], types).expect("typed map/set analysis context")
     }
 
+    fn typed_grid_bitset_fixture(extra: &str) -> (TypeTable, Vec<SourceFile>) {
+        let source = format!(
+            "global cells: grid<i32, 2, 3>;\nglobal float_cells: grid<f32, 2, 3>;\nglobal bits: bitset<33>;\nglobal queue: queue<i32, 2>;\n{extra}"
+        );
+        let mut types = TypeTable::new();
+        for type_name in [
+            "grid<i32, 2, 3>",
+            "grid<f32, 2, 3>",
+            "bitset<33>",
+            "queue<i32, 2>",
+        ] {
+            types
+                .resolve_or_intern(type_name)
+                .expect("typed grid/bitset fixture type");
+        }
+        let file = SourceFile {
+            path: "grid_bitset_semantics.stasis".to_string(),
+            content: source.clone(),
+            original_content: source,
+            hash: 0,
+            functions: Vec::new(),
+        };
+        (types, vec![file])
+    }
+
+    fn grid_bitset_context<'a>(types: &'a TypeTable, files: &[SourceFile]) -> AnalysisContext<'a> {
+        build_context(files, &[], types).expect("typed grid/bitset analysis context")
+    }
+
     fn pool_call(target: &str, args: Vec<SimpleExpr>) -> SimpleExpr {
         SimpleExpr::Call {
             target: target.to_string(),
@@ -5800,6 +5983,190 @@ mod tests {
         )
         .expect("qualified name should be treated as an ordinary target")
         .is_none());
+    }
+
+    #[test]
+    fn typed_grid_and_bitset_operations_have_exact_types_and_effects() {
+        let (types, files) = typed_grid_bitset_fixture("");
+        let context = grid_bitset_context(&types, &files);
+        let local_types = BTreeMap::new();
+        let locals = BTreeSet::new();
+        let aliases = BTreeMap::new();
+        let cases = [
+            (
+                "get",
+                vec![
+                    SimpleExpr::Identifier("cells".to_string()),
+                    SimpleExpr::Int(1),
+                    SimpleExpr::Int(2),
+                ],
+                TYPE_ID_I32,
+                vec!["cells.values[*]"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "set",
+                vec![
+                    SimpleExpr::Identifier("cells".to_string()),
+                    SimpleExpr::Int(1),
+                    SimpleExpr::Int(2),
+                    SimpleExpr::Int(7),
+                ],
+                TYPE_ID_VOID,
+                Vec::<&str>::new(),
+                vec!["cells.values[*]"],
+            ),
+            (
+                "can_access",
+                vec![
+                    SimpleExpr::Identifier("cells".to_string()),
+                    SimpleExpr::Int(1),
+                    SimpleExpr::Int(2),
+                ],
+                TYPE_ID_BOOL,
+                Vec::<&str>::new(),
+                Vec::<&str>::new(),
+            ),
+            (
+                "test",
+                vec![
+                    SimpleExpr::Identifier("bits".to_string()),
+                    SimpleExpr::Int(32),
+                ],
+                TYPE_ID_BOOL,
+                vec!["bits.words[*]"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "set",
+                vec![
+                    SimpleExpr::Identifier("bits".to_string()),
+                    SimpleExpr::Int(32),
+                    SimpleExpr::Bool(true),
+                ],
+                TYPE_ID_VOID,
+                vec!["bits.words[*]"],
+                vec!["bits.words[*]"],
+            ),
+            (
+                "clear",
+                vec![SimpleExpr::Identifier("bits".to_string())],
+                TYPE_ID_VOID,
+                Vec::<&str>::new(),
+                vec!["bits.words[*]"],
+            ),
+        ];
+        for (target, args, expected_type, expected_reads, expected_writes) in cases {
+            let expression = pool_call(target, args);
+            assert_eq!(
+                expression_type(&expression, &context, &local_types, &aliases),
+                Some(expected_type),
+                "{target} return type"
+            );
+            validate_expression_access(&expression, &context, &local_types)
+                .expect("valid typed grid/bitset operation");
+            let mut effects = EffectSets::default();
+            analyze_expression(
+                &expression,
+                &context,
+                &locals,
+                &local_types,
+                &aliases,
+                &mut effects,
+            );
+            assert_eq!(
+                effects.reads.iter().map(String::as_str).collect::<Vec<_>>(),
+                expected_reads,
+                "{target} reads"
+            );
+            assert_eq!(
+                effects
+                    .writes
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                expected_writes,
+                "{target} writes"
+            );
+        }
+
+        for (target, args, expected) in [
+            (
+                "get",
+                vec![
+                    SimpleExpr::Identifier("cells".to_string()),
+                    SimpleExpr::Bool(true),
+                    SimpleExpr::Int(0),
+                ],
+                "get x argument",
+            ),
+            (
+                "set",
+                vec![
+                    SimpleExpr::Identifier("cells".to_string()),
+                    SimpleExpr::Int(0),
+                    SimpleExpr::Int(0),
+                    SimpleExpr::Bool(true),
+                ],
+                "set value argument",
+            ),
+            (
+                "test",
+                vec![
+                    SimpleExpr::Identifier("bits".to_string()),
+                    SimpleExpr::Bool(true),
+                ],
+                "test index argument",
+            ),
+            (
+                "set",
+                vec![
+                    SimpleExpr::Identifier("bits".to_string()),
+                    SimpleExpr::Int(0),
+                    SimpleExpr::Int(1),
+                ],
+                "set value argument",
+            ),
+        ] {
+            let error = typed_collection_operation(target, &args, &context, &local_types)
+                .expect_err("wrong grid/bitset argument type must fail");
+            assert!(error.contains(expected), "{target}: {error}");
+        }
+    }
+
+    #[test]
+    fn compiler_requires_one_exact_can_access_for_one_grid_or_bitset_action() {
+        let accepted = [
+            "global cells: grid<i32, 2, 3>;\n@requires(cells.can_access(x, y))\nfunction write_cell(x: i32, y: i32, value: i32): void { cells.set(x, y, value); }\nfunction main(): void { if (cells.can_access(1, 2)) { write_cell(1, 2, 7); } }",
+            "global bits: bitset<33>;\n@requires(bits.can_access(index))\nfunction read_bit(index: i32): bool { return bits.test(index); }\nfunction main(): bool { if (bits.can_access(32)) { return read_bit(32); } else { return false; } }",
+        ];
+        for source in accepted {
+            let mut compiler = Compiler::new();
+            compiler.upsert_file("grid_bitset_guard.stasis", source);
+            compiler
+                .check()
+                .expect("exact can_access proof must authorize one matching action");
+        }
+
+        for source in [
+            "global cells: grid<i32, 2, 3>;\nfunction main(): void { cells.set(1, 2, 7); }",
+            "global cells: grid<i32, 2, 3>;\nfunction main(): void { if (cells.can_access(1, 1)) { cells.set(1, 2, 7); } }",
+            "global bits: bitset<33>;\nfunction main(): bool { if (bits.can_access(31)) { return bits.test(32); } else { return false; } }",
+            "global bits: bitset<33>;\nfunction main(): void { if (bits.can_access(1)) { bits.set(1, true); bits.set(1, false); } }",
+        ] {
+            let mut compiler = Compiler::new();
+            compiler.upsert_file("grid_bitset_guard.stasis", source);
+            let error = match compiler.check() {
+                Ok(result) => panic!(
+                    "missing, mismatched, or reused can_access proof must fail: {source}; got {result:?}"
+                ),
+                Err(error) => error,
+            };
+            assert!(
+                format!("{error:?}").contains("requires a matching direct if"),
+                "{error:?}"
+            );
+        }
     }
 
     #[test]

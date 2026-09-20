@@ -2068,6 +2068,17 @@ impl JitProcess {
             })?;
             return Ok((type_id, info.len));
         }
+        if let Some(descriptor) = snapshot.typed_collection_descriptors().get(path) {
+            if let Some(lane) = descriptor.lanes.iter().find(|lane| lane.name == field) {
+                let length = i32::try_from(lane.element_count).map_err(|_| {
+                    format!(
+                        "typed collection '{path}' lane '{field}' element count {} exceeds i32 bounds",
+                        lane.element_count
+                    )
+                })?;
+                return Ok((lane.type_id, length));
+            }
+        }
         if let Some(collection) = snapshot
             .collections()
             .iter()
@@ -5406,6 +5417,174 @@ function main(): i32 {
                 );
             }
         }
+    }
+
+    #[test]
+    fn typed_grid_and_bitset_jit_storage_and_inspection_use_lane_lengths() {
+        for (path, type_name, field, logical_capacity, expected_len, expected_type) in [
+            ("grid_storage_147", "grid<i32, 2, 3>", "values", 6, 6, "i32"),
+            ("bitset_storage_147", "bitset<33>", "words", 33, 2, "u32"),
+        ] {
+            let mut process = JitProcess::new();
+            process.upsert_file(
+                "typed_grid_bitset_storage.stasis",
+                format!("global {path}: {type_name};\nfunction main(): i32 {{ return 0; }}\n"),
+            );
+            process.compile().expect("typed grid/bitset JIT compile");
+
+            assert_eq!(
+                process.global_collection_capacity(path),
+                Some(logical_capacity),
+                "logical capacity must remain independent of lane length for {path}"
+            );
+            assert_eq!(
+                process.global_collection_field_type(path, field),
+                Some(expected_type),
+                "typed lane binding type for {path}.{field}"
+            );
+            let (_, value_length) = process
+                .global_collection_value_type(path, field)
+                .expect("typed lane inspection metadata");
+            assert_eq!(
+                value_length, expected_len,
+                "inspection bound for {path}.{field}"
+            );
+
+            let snapshot = process
+                .program_snapshot()
+                .expect("typed collection snapshot");
+            let bindings = build_direct_storage_bindings(
+                &snapshot.analysis.global_path_types,
+                &snapshot.analysis.collection_infos,
+                snapshot.typed_collection_descriptors(),
+                snapshot.types(),
+                false,
+            )
+            .expect("typed grid/bitset JIT direct storage plan");
+            let binding = bindings
+                .arrays
+                .get(&(path.to_string(), field.to_string()))
+                .expect("typed lane direct storage binding");
+            assert_eq!(binding.static_len, Some(expected_len as usize));
+            assert_eq!(binding.storage_bytes, 4);
+            assert_eq!(
+                stasis_dynload::direct_array_storage_slot_len_for_test(
+                    stasis_dynload::JitStorageKind::I32,
+                    hash_global_path(path),
+                    crate::backend::emit::hash_foreach_field_suffix(field),
+                ),
+                Some(expected_len as usize),
+                "provisioned storage length must match {path}.{field} descriptor lane"
+            );
+
+            assert!(process
+                .read_global_collection_scalar(path, field, expected_len - 1)
+                .is_ok());
+            let error = process
+                .read_global_collection_scalar(path, field, expected_len)
+                .expect_err("lane index at element_count must be rejected");
+            assert!(
+                error.contains(&format!("outside capacity {expected_len}")),
+                "unexpected exact-lane-bound diagnostic: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_grid_and_bitset_operations_execute_with_exact_guards() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "typed_grid_bitset_operations.stasis",
+            "global grid_ops_147: grid<i32, 2, 3>;\n\
+             global bits_ops_147: bitset<33>;\n\
+             @requires(grid_ops_147.can_access(x, y))\n\
+             function write_grid(x: i32, y: i32, value: i32): void { grid_ops_147.set(x, y, value); }\n\
+             @requires(grid_ops_147.can_access(x, y))\n\
+             function read_grid(x: i32, y: i32): i32 { return grid_ops_147.get(x, y); }\n\
+             @requires(bits_ops_147.can_access(index))\n\
+             function write_bit(index: i32, value: bool): void { bits_ops_147.set(index, value); }\n\
+             @requires(bits_ops_147.can_access(index))\n\
+             function read_bit(index: i32): bool { return bits_ops_147.test(index); }\n\
+             function grid_result(): i32 {\n\
+                 grid_ops_147.clear();\n\
+                 let result: i32 = grid_ops_147.capacity();\n\
+                 if (grid_ops_147.can_access(1, 2)) { write_grid(1, 2, 41); }\n\
+                 if (grid_ops_147.can_access(1, 2)) { result += read_grid(1, 2); }\n\
+                 if (grid_ops_147.can_access(-1, 0)) { result += 1000; }\n\
+                 if (grid_ops_147.can_access(2, 3)) { result += 2000; }\n\
+                 grid_ops_147.clear();\n\
+                 if (grid_ops_147.can_access(1, 2)) { result += grid_ops_147.get(1, 2); }\n\
+                 return result;\n\
+             }\n\
+             function bitset_result(): i32 {\n\
+                 bits_ops_147.clear();\n\
+                 let result: i32 = bits_ops_147.capacity();\n\
+                 if (bits_ops_147.can_access(0)) { write_bit(0, true); }\n\
+                 if (bits_ops_147.can_access(31)) { bits_ops_147.set(31, true); }\n\
+                 if (bits_ops_147.can_access(32)) { bits_ops_147.set(32, true); }\n\
+                 if (bits_ops_147.can_access(0)) { if (read_bit(0)) { result += 1; } }\n\
+                 if (bits_ops_147.can_access(31)) { if (bits_ops_147.test(31)) { result += 10; } }\n\
+                 if (bits_ops_147.can_access(32)) { if (bits_ops_147.test(32)) { result += 100; } }\n\
+                 if (bits_ops_147.can_access(-1)) { result += 1000; }\n\
+                 if (bits_ops_147.can_access(33)) { result += 2000; }\n\
+                 bits_ops_147.clear();\n\
+                 if (bits_ops_147.can_access(0)) { if (bits_ops_147.test(0)) { result += 4000; } }\n\
+                 if (bits_ops_147.can_access(31)) { if (bits_ops_147.test(31)) { result += 8000; } }\n\
+                 if (bits_ops_147.can_access(32)) { if (bits_ops_147.test(32)) { result += 16000; } }\n\
+                 return result;\n\
+             }\n\
+             function main(): i32 { return grid_result() + bitset_result(); }\n",
+        );
+        process
+            .compile()
+            .expect("typed grid/bitset operation JIT compile");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("grid_result")
+                .expect("grid operations"),
+            47,
+            "grid set/get, capacity, clear, and rejected bounds"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("bitset_result")
+                .expect("bitset operations"),
+            144,
+            "bitset bits 0/31/32, capacity, clear, and rejected bounds"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("combined typed grid/bitset operations"),
+            191
+        );
+    }
+
+    #[test]
+    fn zero_capacity_grid_and_bitset_clear_and_reject_access() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "zero_grid_bitset_operations.stasis",
+            "global empty_grid: grid<i32, 0, 3>;\n\
+             global empty_bits: bitset<0>;\n\
+             function main(): i32 {\n\
+                 empty_grid.clear();\n\
+                 empty_bits.clear();\n\
+                 let result: i32 = empty_grid.capacity() + empty_bits.capacity();\n\
+                 if (empty_grid.can_access(0, 0)) { result += 1; }\n\
+                 if (empty_bits.can_access(0)) { result += 2; }\n\
+                 return result;\n\
+             }\n",
+        );
+        process
+            .compile()
+            .expect("zero-capacity grid/bitset JIT compile");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("zero-capacity grid/bitset execution"),
+            0
+        );
     }
 
     #[test]
