@@ -2780,7 +2780,7 @@ mod tests {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
             "sample.stasis",
-            "global events: queue<i32, 2>;\n@requires(events.can_push())\nfunction enqueue(value: i32): bool { return events.push(value); }\nfunction main(): bool { if (events.can_push()) { return enqueue(7); } else { return false; } }\n",
+            "global events: queue<i32, 2>;\n@requires(events.can_push())\nfunction enqueue(value: i32): void { events.push(value); }\nfunction main(): i32 { if (events.can_push()) { enqueue(7); return 1; } else { return 0; } }\n",
         );
         compiler
             .index_pass()
@@ -2797,7 +2797,7 @@ mod tests {
         };
         assert!(matches!(
             &then_statements[0],
-            SimpleStmt::Return(SimpleExpr::Call { target, args })
+            SimpleStmt::Expr(SimpleExpr::Call { target, args })
                 if target == "push"
                     && matches!(&args[0], SimpleExpr::Identifier(path) if path == "events")
                     && matches!(&args[1], SimpleExpr::Int(7))
@@ -2815,7 +2815,7 @@ mod tests {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
             "sample.stasis",
-            "global values: map<i32, i32, 2>;\n@requires(values.can_put(key))\nfunction create(key: i32, value: i32): bool { return values.put(key, value); }\nfunction main(): bool { let key: i32 = 7; if (values.can_put(key)) { return create(key, 9); } else { return false; } }\n",
+            "global values: map<i32, i32, 2>;\n@requires(values.can_put(key))\nfunction create(key: i32, value: i32): void { values.put(key, value); }\nfunction main(): void { let key: i32 = 7; if (values.can_put(key)) { create(key, 9); } }\n",
         );
         compiler
             .check()
@@ -2826,27 +2826,27 @@ mod tests {
     fn requires_guard_rejects_unguarded_cached_compound_and_consumed_calls() {
         let cases = [
             (
-                "function main(): bool { return enqueue(1); }",
+                "function main(): void { enqueue(1); }",
                 "requires its exact direct if",
             ),
             (
-                "function main(): bool { let ok: bool = events.can_push(); if (ok) { return enqueue(1); } else { return false; } }",
+                "function main(): void { let ok: bool = events.can_push(); if (ok) { enqueue(1); } }",
                 "requires its exact direct if",
             ),
             (
-                "function main(): bool { if (events.can_push() && true) { return enqueue(1); } else { return false; } }",
+                "function main(): void { if (events.can_push() && true) { enqueue(1); } }",
                 "requires its exact direct if",
             ),
             (
-                "function main(): bool { if (!events.can_push()) { return enqueue(1); } else { return false; } }",
+                "function main(): void { if (!events.can_push()) { enqueue(1); } }",
                 "requires its exact direct if",
             ),
             (
-                "function main(): bool { if (events.can_push()) { events.push(1); return enqueue(2); } else { return false; } }",
+                "function main(): void { if (events.can_push()) { events.push(1); enqueue(2); } }",
                 "requires its exact direct if",
             ),
             (
-                "function main(): bool { if (events.can_push()) { for (let i: i32 = 0; i < 1; i += 1) { return enqueue(1); } } return false; }",
+                "function main(): void { if (events.can_push()) { for (let i: i32 = 0; i < 1; i += 1) { enqueue(1); } } }",
                 "requires its exact direct if",
             ),
         ];
@@ -2855,7 +2855,7 @@ mod tests {
             compiler.upsert_file(
                 "sample.stasis",
                 format!(
-                    "global events: queue<i32, 2>;\n@requires(events.can_push())\nfunction enqueue(value: i32): bool {{ return events.push(value); }}\n{main}\n"
+                    "global events: queue<i32, 2>;\n@requires(events.can_push())\nfunction enqueue(value: i32): void {{ events.push(value); }}\n{main}\n"
                 ),
             );
             let error = compiler
@@ -2870,7 +2870,7 @@ mod tests {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
             "sample.stasis",
-            "global events: queue<i32, 2>;\nfunction next_value(): i32 { return 7; }\n@requires(events.can_push())\nfunction enqueue(): bool { return events.push(next_value()); }\nfunction main(): bool { if (events.can_push()) { return enqueue(); } else { return false; } }\n",
+            "global events: queue<i32, 2>;\nfunction next_value(): i32 { return 7; }\n@requires(events.can_push())\nfunction enqueue(): void { events.push(next_value()); }\nfunction main(): void { if (events.can_push()) { enqueue(); } }\n",
         );
         let error = compiler
             .check()
@@ -2884,14 +2884,14 @@ mod tests {
     #[test]
     fn requires_can_add_rejects_missing_and_mismatched_caller_guards() {
         for main in [
-            "function main(): bool { return add_tag(7); }",
-            "function main(): bool { if (tags.can_add(6)) { return add_tag(7); } else { return false; } }",
+            "function main(): void { add_tag(7); }",
+            "function main(): void { if (tags.can_add(6)) { add_tag(7); } }",
         ] {
             let mut compiler = Compiler::new();
             compiler.upsert_file(
                 "sample.stasis",
                 format!(
-                    "global tags: set<i32, 2>;\n@requires(tags.can_add(key))\nfunction add_tag(key: i32): bool {{ return tags.add(key); }}\n{main}\n"
+                    "global tags: set<i32, 2>;\n@requires(tags.can_add(key))\nfunction add_tag(key: i32): void {{ tags.add(key); }}\n{main}\n"
                 ),
             );
             let error = compiler
@@ -2906,11 +2906,62 @@ mod tests {
         let mut accepted = Compiler::new();
         accepted.upsert_file(
             "sample.stasis",
-            "global tags: set<i32, 2>;\n@requires(tags.can_add(key))\nfunction add_tag(key: i32): bool { return tags.add(key); }\nfunction main(): bool { if (tags.can_add(7)) { return add_tag(7); } else { return false; } }\n",
+            "global tags: set<i32, 2>;\n@requires(tags.can_add(key))\nfunction add_tag(key: i32): void { tags.add(key); }\nfunction main(): void { if (tags.can_add(7)) { add_tag(7); } }\n",
         );
         accepted
             .check()
             .expect("the exact direct can_add guard must authorize one matching add");
+    }
+
+    #[test]
+    fn guarded_collection_actions_require_one_exact_direct_precheck() {
+        let rejected = [
+            "global tags: set<i32, 2>;\nfunction main(): void { tags.add(7); }",
+            "global values: map<i32, i32, 2>;\nfunction main(): i32 { return values.get(7); }",
+            "global events: queue<i32, 2>;\nfunction main(): i32 { if (events.can_peek(0)) { return events.physical_index(1); } return -1; }",
+            "global history: ring_buffer<i32, 2>;\nfunction main(): i32 { return history.physical_index(0); }",
+            "global events: priority_queue<i32, 2>;\nfunction main(): i32 { return events.peek_priority(); }",
+            "global events: queue<i32, 2>;\nfunction main(): void { if (events.can_push()) { events.push(1); events.push(2); } }",
+        ];
+        for source in rejected {
+            let mut compiler = Compiler::new();
+            compiler.upsert_file("rejected.stasis", source);
+            let error = compiler
+                .check()
+                .expect_err("missing, mismatched, or consumed precheck must be rejected");
+            assert!(
+                format!("{error:?}").contains("requires a matching direct if"),
+                "{source}: {error:?}"
+            );
+        }
+
+        let accepted = [
+            "global tags: set<i32, 2>;\nfunction main(): void { if (tags.can_add(7)) { tags.add(7); } }",
+            "global values: map<i32, i32, 2>;\nfunction main(): i32 { if (values.can_get(7)) { return values.get(7); } return -1; }",
+            "global events: queue<i32, 2>;\nfunction main(): i32 { if (events.can_peek(0)) { return events.physical_index(0); } return -1; }",
+            "global history: ring_buffer<i32, 2>;\nfunction main(): i32 { if (history.can_peek(0)) { return history.physical_index(0); } return -1; }",
+            "global events: priority_queue<i32, 2>;\nfunction main(): i32 { if (events.can_peek()) { return events.peek_priority(); } return -1; }",
+        ];
+        for source in accepted {
+            let mut compiler = Compiler::new();
+            compiler.upsert_file("accepted.stasis", source);
+            compiler
+                .check()
+                .expect("one exact direct precheck must authorize one matching action");
+        }
+    }
+
+    #[test]
+    fn guarded_collection_mutators_are_void_not_recoverable_results() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            "global events: queue<i32, 2>;\nfunction main(): bool { if (events.can_push()) { return events.push(7); } return false; }\n",
+        );
+        let error = compiler
+            .check()
+            .expect_err("a guarded command must not expose a recoverable result");
+        assert!(format!("{error:?}").contains("void"), "{error:?}");
     }
 
     #[test]

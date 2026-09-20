@@ -6065,16 +6065,22 @@ function map_seed(): i32 {
     if (typed_map_error_exec_147.can_put(1)) { typed_map_error_exec_147.put(1, 10); }
     if (typed_map_error_exec_147.can_put(2)) { typed_map_error_exec_147.put(2, 20); }
     if (typed_map_error_exec_147.can_put(3)) { typed_map_error_exec_147.put(3, 30); }
-    return typed_map_error_exec_147.get(2);
+    let result: i32 = 0;
+    if (typed_map_error_exec_147.can_get(2)) { result = typed_map_error_exec_147.get(2); }
+    return result;
 }
 function map_update_full(): i32 {
     if (typed_map_error_exec_147.can_put(2)) { typed_map_error_exec_147.put(2, 25); }
     if (typed_map_error_exec_147.can_put(4)) { typed_map_error_exec_147.put(4, 40); }
-    return typed_map_error_exec_147.get(2) * 1000
-        + typed_map_error_exec_147.get(4);
+    let existing: i32 = 0;
+    if (typed_map_error_exec_147.can_get(2)) { existing = typed_map_error_exec_147.get(2); }
+    let rejected: i32 = 0;
+    if (typed_map_error_exec_147.can_get(4)) { rejected = typed_map_error_exec_147.get(4); }
+    return existing * 1000 + rejected;
 }
 function map_missing(): i32 {
-    let result: i32 = typed_map_error_exec_147.get(99);
+    let result: i32 = 0;
+    if (typed_map_error_exec_147.can_get(99)) { result = typed_map_error_exec_147.get(99); }
     if (typed_map_error_exec_147.contains(99)) { result += 100; }
     if (typed_map_error_exec_147.contains(2)) { result += 10; }
     return result;
@@ -6085,7 +6091,9 @@ function map_remove_run(): i32 {
 }
 function map_reuse(): i32 {
     if (typed_map_error_exec_147.can_put(4)) { typed_map_error_exec_147.put(4, 40); }
-    return typed_map_error_exec_147.get(4);
+    let result: i32 = 0;
+    if (typed_map_error_exec_147.can_get(4)) { result = typed_map_error_exec_147.get(4); }
+    return result;
 }
 function map_drop_run(): i32 {
     if (typed_map_drop_exec_147.can_put(1)) { typed_map_drop_exec_147.put(1, 10); }
@@ -6093,12 +6101,17 @@ function map_drop_run(): i32 {
     if (typed_map_drop_exec_147.can_put(3)) { typed_map_drop_exec_147.put(3, 30); }
     if (typed_map_drop_exec_147.can_put(2)) { typed_map_drop_exec_147.put(2, 25); }
     if (typed_map_drop_exec_147.can_put(4)) { typed_map_drop_exec_147.put(4, 40); }
-    return typed_map_drop_exec_147.get(2) * 100 + typed_map_drop_exec_147.get(4);
+    let existing: i32 = 0;
+    if (typed_map_drop_exec_147.can_get(2)) { existing = typed_map_drop_exec_147.get(2); }
+    let rejected: i32 = 0;
+    if (typed_map_drop_exec_147.can_get(4)) { rejected = typed_map_drop_exec_147.get(4); }
+    return existing * 100 + rejected;
 }
 function map_zero_run(): i32 {
     if (typed_map_zero_exec_147.can_put(1)) { typed_map_zero_exec_147.put(1, 7); }
     if (typed_map_zero_exec_147.can_remove(1)) { typed_map_zero_exec_147.remove(1); }
-    let result: i32 = typed_map_zero_exec_147.get(1);
+    let result: i32 = 0;
+    if (typed_map_zero_exec_147.can_get(1)) { result = typed_map_zero_exec_147.get(1); }
     if (typed_map_zero_exec_147.contains(1)) { result += 100; }
     return result;
 }
@@ -6418,7 +6431,7 @@ function set_zero_run(): i32 {
         process.upsert_file(
             "typed_pool_zero_execution.stasis",
             "global typed_pool_zero_exec_147: pool<i32, 0>;\n\
-             function exercise_zero(): i32 { let pushed: i32 = -1; if (typed_pool_zero_exec_147.can_push()) { pushed = typed_pool_zero_exec_147.push(7); } let removed: bool = false; if (typed_pool_zero_exec_147.can_remove(0)) { removed = typed_pool_zero_exec_147.remove(0); } typed_pool_zero_exec_147.clear(); if (removed) { return 99; } return pushed + typed_pool_zero_exec_147.count() + typed_pool_zero_exec_147.capacity(); }\n",
+             function exercise_zero(): i32 { let pushed: i32 = -1; if (typed_pool_zero_exec_147.can_push()) { pushed = typed_pool_zero_exec_147.push(7); } if (typed_pool_zero_exec_147.can_remove(0)) { typed_pool_zero_exec_147.remove(0); return 99; } typed_pool_zero_exec_147.clear(); return pushed + typed_pool_zero_exec_147.count() + typed_pool_zero_exec_147.capacity(); }\n",
         );
         process
             .compile()
@@ -6460,9 +6473,9 @@ function set_zero_run(): i32 {
             "typed_queue_error_execution.stasis",
             "global typed_queue_error_exec_147: queue<i32, 3>;\n\
              function queue_error_seed(): i32 { typed_queue_error_exec_147.clear(); let accepted: i32 = 0; if (typed_queue_error_exec_147.can_push()) { typed_queue_error_exec_147.push(10); accepted += 1; } if (typed_queue_error_exec_147.can_push()) { typed_queue_error_exec_147.push(20); accepted += 1; } if (typed_queue_error_exec_147.can_push()) { typed_queue_error_exec_147.push(30); accepted += 1; } if (typed_queue_error_exec_147.can_push()) { typed_queue_error_exec_147.push(40); accepted += 100; } return accepted; }\n\
-             function queue_error_observe(): i32 { let first: i32 = 0; if (typed_queue_error_exec_147.can_peek(0)) { first = typed_queue_error_exec_147.peek(0); } let third: i32 = 0; if (typed_queue_error_exec_147.can_peek(2)) { third = typed_queue_error_exec_147.peek(2); } return typed_queue_error_exec_147.count() * 100000 + typed_queue_error_exec_147.capacity() * 10000 + first * 1000 + third * 100 + typed_queue_error_exec_147.physical_index(0) * 10 + typed_queue_error_exec_147.physical_index(2); }\n\
+             function queue_error_observe(): i32 { let first: i32 = 0; if (typed_queue_error_exec_147.can_peek(0)) { first = typed_queue_error_exec_147.peek(0); } let third: i32 = 0; if (typed_queue_error_exec_147.can_peek(2)) { third = typed_queue_error_exec_147.peek(2); } let physical_first: i32 = -1; if (typed_queue_error_exec_147.can_peek(0)) { physical_first = typed_queue_error_exec_147.physical_index(0); } let physical_third: i32 = -1; if (typed_queue_error_exec_147.can_peek(2)) { physical_third = typed_queue_error_exec_147.physical_index(2); } return typed_queue_error_exec_147.count() * 100000 + typed_queue_error_exec_147.capacity() * 10000 + first * 1000 + third * 100 + physical_first * 10 + physical_third; }\n\
              function queue_error_invalid_peek(): i32 { let result: i32 = 0; if (typed_queue_error_exec_147.can_peek(9)) { result = typed_queue_error_exec_147.peek(9); } return result; }\n\
-             function queue_error_invalid_physical(): i32 { return typed_queue_error_exec_147.physical_index(-1); }\n\
+             function queue_error_invalid_physical(): i32 { if (typed_queue_error_exec_147.can_peek(-1)) { return typed_queue_error_exec_147.physical_index(-1); } return -1; }\n\
              function queue_error_pop(): i32 { if (typed_queue_error_exec_147.can_pop()) { typed_queue_error_exec_147.pop(); return 1; } return 0; }\n\
              function queue_error_push_wrap(): i32 { if (typed_queue_error_exec_147.can_push()) { typed_queue_error_exec_147.push(40); return 1; } return 0; }\n\
              function queue_error_push_second_wrap(): i32 { if (typed_queue_error_exec_147.can_push()) { typed_queue_error_exec_147.push(50); return 1; } return 0; }\n\
@@ -6940,7 +6953,7 @@ function priority_queue_preflight_max_order(): i32 {
              function queue_drop_clear(): i32 { typed_queue_drop_exec_147.clear(); return typed_queue_drop_exec_147.count(); }\n\
              function queue_overwrite_run(): i32 { typed_queue_overwrite_exec_147.clear(); let accepted: i32 = 0; if (typed_queue_overwrite_exec_147.can_push()) { typed_queue_overwrite_exec_147.push(1); accepted += 1; } if (typed_queue_overwrite_exec_147.can_push()) { typed_queue_overwrite_exec_147.push(2); accepted += 1; } typed_queue_overwrite_exec_147.overwrite_oldest(3); accepted += 1; let first: i32 = 0; if (typed_queue_overwrite_exec_147.can_peek(0)) { first = typed_queue_overwrite_exec_147.peek(0); } let second: i32 = 0; if (typed_queue_overwrite_exec_147.can_peek(1)) { second = typed_queue_overwrite_exec_147.peek(1); } return accepted * 100 + typed_queue_overwrite_exec_147.count() * 10 + first + second; }\n\
              function queue_overwrite_pop(): i32 { if (typed_queue_overwrite_exec_147.can_pop()) { typed_queue_overwrite_exec_147.pop(); return 1; } return 0; }\n\
-             function queue_zero_run(): i32 { typed_queue_zero_exec_147.clear(); let score: i32 = 0; if (typed_queue_zero_exec_147.can_push()) { typed_queue_zero_exec_147.push(7); score += 100; } if (typed_queue_zero_exec_147.can_pop()) { typed_queue_zero_exec_147.pop(); score += 10; } let peeked: i32 = 0; if (typed_queue_zero_exec_147.can_peek(0)) { peeked = typed_queue_zero_exec_147.peek(0); } return score + typed_queue_zero_exec_147.count() * 1000 + typed_queue_zero_exec_147.capacity() * 100 + peeked * 10 + typed_queue_zero_exec_147.physical_index(0); }\n",
+             function queue_zero_run(): i32 { typed_queue_zero_exec_147.clear(); let score: i32 = 0; if (typed_queue_zero_exec_147.can_push()) { typed_queue_zero_exec_147.push(7); score += 100; } if (typed_queue_zero_exec_147.can_pop()) { typed_queue_zero_exec_147.pop(); score += 10; } let peeked: i32 = 0; if (typed_queue_zero_exec_147.can_peek(0)) { peeked = typed_queue_zero_exec_147.peek(0); } let physical: i32 = -1; if (typed_queue_zero_exec_147.can_peek(0)) { physical = typed_queue_zero_exec_147.physical_index(0); } return score + typed_queue_zero_exec_147.count() * 1000 + typed_queue_zero_exec_147.capacity() * 100 + peeked * 10 + physical; }\n",
         );
         process.compile().expect("typed queue policy JIT compile");
 
@@ -7091,12 +7104,16 @@ function ring_error_observe(): i32 {
     if (typed_ring_error_exec_147.can_peek(0)) { first = typed_ring_error_exec_147.peek(0); }
     let third: i32 = 0;
     if (typed_ring_error_exec_147.can_peek(2)) { third = typed_ring_error_exec_147.peek(2); }
+    let physical_first: i32 = -1;
+    if (typed_ring_error_exec_147.can_peek(0)) { physical_first = typed_ring_error_exec_147.physical_index(0); }
+    let physical_third: i32 = -1;
+    if (typed_ring_error_exec_147.can_peek(2)) { physical_third = typed_ring_error_exec_147.physical_index(2); }
     return typed_ring_error_exec_147.count() * 100000
         + typed_ring_error_exec_147.capacity() * 10000
         + first * 1000
         + third * 100
-        + typed_ring_error_exec_147.physical_index(0) * 10
-        + typed_ring_error_exec_147.physical_index(2);
+        + physical_first * 10
+        + physical_third;
 }
 function ring_error_invalid_peek(): i32 {
     let result: i32 = 0;
@@ -7104,7 +7121,8 @@ function ring_error_invalid_peek(): i32 {
     return result;
 }
 function ring_error_invalid_physical(): i32 {
-    return typed_ring_error_exec_147.physical_index(-1);
+    if (typed_ring_error_exec_147.can_peek(-1)) { return typed_ring_error_exec_147.physical_index(-1); }
+    return -1;
 }
 function ring_error_pop(): i32 {
     if (typed_ring_error_exec_147.can_pop()) { typed_ring_error_exec_147.pop(); return 1; }
@@ -7165,10 +7183,12 @@ function ring_zero_run(): i32 {
     if (typed_ring_zero_exec_147.can_pop()) { typed_ring_zero_exec_147.pop(); score += 10; }
     let peeked: i32 = 0;
     if (typed_ring_zero_exec_147.can_peek(0)) { peeked = typed_ring_zero_exec_147.peek(0); }
+    let physical: i32 = -1;
+    if (typed_ring_zero_exec_147.can_peek(0)) { physical = typed_ring_zero_exec_147.physical_index(0); }
     return score + typed_ring_zero_exec_147.count() * 1000
         + typed_ring_zero_exec_147.capacity() * 100
         + peeked * 10
-        + typed_ring_zero_exec_147.physical_index(0);
+        + physical;
 }
 "#,
         );
@@ -7821,7 +7841,7 @@ function ring_zero_run(): i32 {
         let mut process = JitProcess::new();
         process.upsert_file(
             "requires.stasis",
-            "global events: queue<i32, 2>;\n@requires(events.can_push())\nfunction enqueue(value: i32): bool { return events.push(value); }\nfunction main(): i32 { if (events.can_push()) { enqueue(7); return 1; } return 0; }\n",
+            "global events: queue<i32, 2>;\n@requires(events.can_push())\nfunction enqueue(value: i32): void { events.push(value); }\nfunction main(): i32 { if (events.can_push()) { enqueue(7); return 1; } return 0; }\n",
         );
         let report = process.compile().expect("compile required-helper fixture");
 
@@ -7855,11 +7875,51 @@ function ring_zero_run(): i32 {
     }
 
     #[test]
+    fn typed_collection_metadata_checks_remain_fatal_at_zero_capacity() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "metadata.stasis",
+            "global pool_values: pool<i32, 0>;\n\
+             global stable_values: stable_pool<i32, 0>;\n\
+             global queued_values: queue<i32, 0>;\n\
+             global priority_values: priority_queue<i32, 0>;\n\
+             global mapped_values: map<i32, i32, 0>;\n\
+             global set_values: set<i32, 0>;\n\
+             function pool_count(): i32 { return pool_values.count(); }\n\
+             function stable_count(): i32 { return stable_values.count(); }\n\
+             function queue_count(): i32 { return queued_values.count(); }\n\
+             function priority_count(): i32 { return priority_values.count(); }\n\
+             function map_contains(): bool { return mapped_values.contains(1); }\n\
+             function set_contains(): bool { return set_values.contains(1); }\n\
+             function main(): i32 { let total: i32 = pool_count() + stable_count() + queue_count() + priority_count(); if (map_contains()) { total += 1; } if (set_contains()) { total += 1; } return total; }\n",
+        );
+        process
+            .compile()
+            .expect("compile zero-capacity metadata checks");
+        for function in [
+            "pool_count",
+            "stable_count",
+            "queue_count",
+            "priority_count",
+            "map_contains",
+            "set_contains",
+        ] {
+            let clif = process
+                .clif_for_function_name(function)
+                .unwrap_or_else(|| panic!("{function} CLIF"));
+            assert!(
+                clif.contains("trapz"),
+                "{function} converted corrupt metadata into a recoverable result:\n{clif}"
+            );
+        }
+    }
+
+    #[test]
     fn jit_requires_helper_fuses_nested_positive_source_guard() {
         let mut process = JitProcess::new();
         process.upsert_file(
             "requires_nested.stasis",
-            "global events: queue<i32, 2>;\n@requires(events.can_push())\nfunction enqueue(value: i32): bool { return events.push(value); }\nfunction main(): i32 { if (events.can_push()) { if (true) { enqueue(7); } return 1; } return 0; }\n",
+            "global events: queue<i32, 2>;\n@requires(events.can_push())\nfunction enqueue(value: i32): void { events.push(value); }\nfunction main(): i32 { if (events.can_push()) { if (true) { enqueue(7); } return 1; } return 0; }\n",
         );
         let report = process
             .compile()
@@ -7885,7 +7945,7 @@ function ring_zero_run(): i32 {
     fn jit_requires_helper_body_and_contract_edits_recompile_callers() {
         fn source(body: &str, contract: &str) -> String {
             format!(
-                "global events: queue<i32, 2>;\n@requires({contract})\nfunction enqueue(value: i32): bool {{ return events.push({body}); }}\nfunction main(): i32 {{ if (events.can_push()) {{ enqueue(7); }} return events.count(); }}\n"
+                "global events: queue<i32, 2>;\n@requires({contract})\nfunction enqueue(value: i32): void {{ events.push({body}); }}\nfunction main(): i32 {{ if (events.can_push()) {{ enqueue(7); }} return events.count(); }}\n"
             )
         }
 

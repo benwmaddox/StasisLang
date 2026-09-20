@@ -714,6 +714,24 @@ fn collection_guard_proofs_match(
                 ) | (
                     TypedCollectionOperation::BitsetSet,
                     TypedCollectionOperation::BitsetTest
+                ) | (
+                    TypedCollectionOperation::QueuePeek,
+                    TypedCollectionOperation::QueuePhysicalIndex
+                ) | (
+                    TypedCollectionOperation::QueuePhysicalIndex,
+                    TypedCollectionOperation::QueuePeek
+                ) | (
+                    TypedCollectionOperation::RingBufferPeek,
+                    TypedCollectionOperation::RingBufferPhysicalIndex
+                ) | (
+                    TypedCollectionOperation::RingBufferPhysicalIndex,
+                    TypedCollectionOperation::RingBufferPeek
+                ) | (
+                    TypedCollectionOperation::PriorityQueuePeek,
+                    TypedCollectionOperation::PriorityQueuePeekPriority
+                ) | (
+                    TypedCollectionOperation::PriorityQueuePeekPriority,
+                    TypedCollectionOperation::PriorityQueuePeek
                 )
             ))
 }
@@ -831,7 +849,7 @@ fn parse_requires_proof(
         })?;
     if !is_can_operation(operation) {
         return Err(format!(
-            "function '{}' @requires must name can_push, can_insert, can_put, can_remove, can_pop, can_peek, can_add, or can_access; '{}' is not a preflight",
+            "function '{}' @requires must name can_push, can_insert, can_put, can_get, can_remove, can_pop, can_peek, can_add, or can_access; '{}' is not a preflight",
             function.name, target
         ));
     }
@@ -934,7 +952,7 @@ fn validate_required_function_shape(
         })?;
     let Some(action_proof) = guard_proof_for_action(operation, args) else {
         return Err(format!(
-            "function '{}' @requires action '{}' is not a fallible collection action with a matching can_* preflight",
+            "function '{}' @requires action '{}' is not a guarded collection action with a matching can_* preflight",
             function.name, target
         ));
     };
@@ -1381,6 +1399,7 @@ fn is_can_operation(operation: TypedCollectionOperation) -> bool {
             | TypedCollectionOperation::StablePoolCanInsert
             | TypedCollectionOperation::StablePoolCanRemove
             | TypedCollectionOperation::MapCanPut
+            | TypedCollectionOperation::MapCanGet
             | TypedCollectionOperation::MapCanRemove
             | TypedCollectionOperation::SetCanAdd
             | TypedCollectionOperation::SetCanRemove
@@ -1415,20 +1434,28 @@ fn can_operation_for_action(
         TypedCollectionOperation::StablePoolInsert => TypedCollectionOperation::StablePoolCanInsert,
         TypedCollectionOperation::StablePoolRemove => TypedCollectionOperation::StablePoolCanRemove,
         TypedCollectionOperation::MapPut => TypedCollectionOperation::MapCanPut,
+        TypedCollectionOperation::MapGet => TypedCollectionOperation::MapCanGet,
         TypedCollectionOperation::MapRemove => TypedCollectionOperation::MapCanRemove,
         TypedCollectionOperation::SetAdd => TypedCollectionOperation::SetCanAdd,
         TypedCollectionOperation::SetRemove => TypedCollectionOperation::SetCanRemove,
         TypedCollectionOperation::QueuePush => TypedCollectionOperation::QueueCanPush,
         TypedCollectionOperation::QueuePop => TypedCollectionOperation::QueueCanPop,
         TypedCollectionOperation::QueuePeek => TypedCollectionOperation::QueueCanPeek,
+        TypedCollectionOperation::QueuePhysicalIndex => TypedCollectionOperation::QueueCanPeek,
         TypedCollectionOperation::RingBufferPush => TypedCollectionOperation::RingBufferCanPush,
         TypedCollectionOperation::RingBufferPop => TypedCollectionOperation::RingBufferCanPop,
         TypedCollectionOperation::RingBufferPeek => TypedCollectionOperation::RingBufferCanPeek,
+        TypedCollectionOperation::RingBufferPhysicalIndex => {
+            TypedCollectionOperation::RingBufferCanPeek
+        }
         TypedCollectionOperation::PriorityQueuePush => {
             TypedCollectionOperation::PriorityQueueCanPush
         }
         TypedCollectionOperation::PriorityQueuePop => TypedCollectionOperation::PriorityQueueCanPop,
         TypedCollectionOperation::PriorityQueuePeek => {
+            TypedCollectionOperation::PriorityQueueCanPeek
+        }
+        TypedCollectionOperation::PriorityQueuePeekPriority => {
             TypedCollectionOperation::PriorityQueueCanPeek
         }
         TypedCollectionOperation::GridGet | TypedCollectionOperation::GridSet => {
@@ -1446,11 +1473,14 @@ fn guard_key_argument_indices(operation: TypedCollectionOperation) -> &'static [
         TypedCollectionOperation::PoolRemove
         | TypedCollectionOperation::StablePoolRemove
         | TypedCollectionOperation::MapPut
+        | TypedCollectionOperation::MapGet
         | TypedCollectionOperation::MapRemove
         | TypedCollectionOperation::SetAdd
         | TypedCollectionOperation::SetRemove
         | TypedCollectionOperation::QueuePeek
+        | TypedCollectionOperation::QueuePhysicalIndex
         | TypedCollectionOperation::RingBufferPeek
+        | TypedCollectionOperation::RingBufferPhysicalIndex
         | TypedCollectionOperation::BitsetTest
         | TypedCollectionOperation::BitsetSet => &[1],
         TypedCollectionOperation::PoolPush
@@ -1461,7 +1491,8 @@ fn guard_key_argument_indices(operation: TypedCollectionOperation) -> &'static [
         | TypedCollectionOperation::RingBufferPop
         | TypedCollectionOperation::PriorityQueuePush
         | TypedCollectionOperation::PriorityQueuePop
-        | TypedCollectionOperation::PriorityQueuePeek => &[],
+        | TypedCollectionOperation::PriorityQueuePeek
+        | TypedCollectionOperation::PriorityQueuePeekPriority => &[],
         TypedCollectionOperation::GridGet | TypedCollectionOperation::GridSet => &[1, 2],
         _ => &[],
     }
@@ -1480,6 +1511,7 @@ fn guard_proof_for_can(
         TypedCollectionOperation::StablePoolCanInsert => TypedCollectionOperation::StablePoolInsert,
         TypedCollectionOperation::StablePoolCanRemove => TypedCollectionOperation::StablePoolRemove,
         TypedCollectionOperation::MapCanPut => TypedCollectionOperation::MapPut,
+        TypedCollectionOperation::MapCanGet => TypedCollectionOperation::MapGet,
         TypedCollectionOperation::MapCanRemove => TypedCollectionOperation::MapRemove,
         TypedCollectionOperation::SetCanAdd => TypedCollectionOperation::SetAdd,
         TypedCollectionOperation::SetCanRemove => TypedCollectionOperation::SetRemove,
@@ -1797,7 +1829,7 @@ fn validate_guarded_expression(
                     return Ok(());
                 }
                 // overwrite_oldest is intentionally unconditional.  All
-                // other non-fallible collection operations simply invalidate
+                // Other unguarded collection operations simply invalidate
                 // a proof conservatively because they may change state.
                 let _ = is_overwrite_oldest_operation(operation);
                 state.invalidate();
@@ -2064,6 +2096,7 @@ enum TypedCollectionOperation {
     MapContains,
     MapRemove,
     MapCanPut,
+    MapCanGet,
     MapCanRemove,
     SetAdd,
     SetContains,
@@ -2143,6 +2176,7 @@ impl TypedCollectionOperation {
             ("contains", Map) => Self::MapContains,
             ("remove", Map) => Self::MapRemove,
             ("can_put", Map) => Self::MapCanPut,
+            ("can_get", Map) => Self::MapCanGet,
             ("can_remove", Map) => Self::MapCanRemove,
 
             ("add", Set) => Self::SetAdd,
@@ -2227,6 +2261,7 @@ impl TypedCollectionOperation {
             | Self::StablePoolCanInsert
             | Self::StablePoolCanRemove
             | Self::MapCanPut
+            | Self::MapCanGet
             | Self::MapCanRemove
             | Self::SetCanAdd
             | Self::SetCanRemove
@@ -2236,20 +2271,8 @@ impl TypedCollectionOperation {
             | Self::RingBufferCanPush
             | Self::RingBufferCanPop
             | Self::RingBufferCanPeek
-            | Self::PoolRemove
-            | Self::StablePoolRemove
-            | Self::MapPut
             | Self::MapContains
-            | Self::MapRemove
-            | Self::SetAdd
             | Self::SetContains
-            | Self::SetRemove
-            | Self::QueuePush
-            | Self::QueuePop
-            | Self::RingBufferPush
-            | Self::RingBufferPop
-            | Self::PriorityQueuePush
-            | Self::PriorityQueuePop
             | Self::PriorityQueueCanPush
             | Self::PriorityQueueCanPop
             | Self::PriorityQueueCanPeek
@@ -2266,7 +2289,19 @@ impl TypedCollectionOperation {
             | Self::GridSet
             | Self::GridClear
             | Self::BitsetSet
-            | Self::BitsetClear => TYPE_ID_VOID,
+            | Self::BitsetClear
+            | Self::PoolRemove
+            | Self::StablePoolRemove
+            | Self::MapPut
+            | Self::MapRemove
+            | Self::SetAdd
+            | Self::SetRemove
+            | Self::QueuePush
+            | Self::QueuePop
+            | Self::RingBufferPush
+            | Self::RingBufferPop
+            | Self::PriorityQueuePush
+            | Self::PriorityQueuePop => TYPE_ID_VOID,
         }
     }
 
@@ -2291,6 +2326,7 @@ impl TypedCollectionOperation {
             | Self::MapContains
             | Self::MapRemove
             | Self::MapCanPut
+            | Self::MapCanGet
             | Self::MapCanRemove => TypedCollectionKind::Map,
             Self::SetAdd
             | Self::SetContains
@@ -2365,6 +2401,7 @@ impl TypedCollectionOperation {
             | Self::QueueCanPeek
             | Self::RingBufferCanPeek
             | Self::MapCanPut
+            | Self::MapCanGet
             | Self::MapCanRemove
             | Self::SetCanAdd
             | Self::SetCanRemove
@@ -2452,6 +2489,7 @@ impl TypedCollectionOperation {
             | Self::RingBufferCanPush
             | Self::RingBufferCanPop
             | Self::MapCanPut
+            | Self::MapCanGet
             | Self::MapCanRemove
             | Self::SetCanAdd
             | Self::SetCanRemove
@@ -2489,6 +2527,7 @@ impl TypedCollectionOperation {
             | Self::MapContains
             | Self::MapRemove
             | Self::MapCanPut
+            | Self::MapCanGet
             | Self::MapCanRemove
             | Self::SetAdd
             | Self::SetContains
@@ -4265,6 +4304,11 @@ fn analyze_typed_collection_operation(
                 effects.insert_read(format!("{path}.keys[*]"));
                 effects.insert_read(format!("{path}.values[*]"));
             }
+            TypedCollectionOperation::MapCanGet => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.occupied[*]"));
+                effects.insert_read(format!("{path}.keys[*]"));
+            }
             TypedCollectionOperation::MapContains => {
                 effects.insert_read(format!("{path}.count"));
                 effects.insert_read(format!("{path}.occupied[*]"));
@@ -5643,7 +5687,7 @@ mod tests {
                     SimpleExpr::Int(1),
                     SimpleExpr::Int(7),
                 ],
-                TYPE_ID_BOOL,
+                TYPE_ID_VOID,
                 vec!["entries.count", "entries.keys[*]", "entries.occupied[*]"],
                 vec![
                     "entries.count",
@@ -5651,6 +5695,16 @@ mod tests {
                     "entries.occupied[*]",
                     "entries.values[*]",
                 ],
+            ),
+            (
+                "can_get",
+                vec![
+                    SimpleExpr::Identifier("entries".to_string()),
+                    SimpleExpr::Int(1),
+                ],
+                TYPE_ID_BOOL,
+                vec!["entries.count", "entries.keys[*]", "entries.occupied[*]"],
+                Vec::<&str>::new(),
             ),
             (
                 "get",
@@ -5683,7 +5737,7 @@ mod tests {
                     SimpleExpr::Identifier("entries".to_string()),
                     SimpleExpr::Int(1),
                 ],
-                TYPE_ID_BOOL,
+                TYPE_ID_VOID,
                 vec!["entries.count", "entries.keys[*]", "entries.occupied[*]"],
                 vec![
                     "entries.count",
@@ -5698,7 +5752,7 @@ mod tests {
                     SimpleExpr::Identifier("members".to_string()),
                     SimpleExpr::Int(1),
                 ],
-                TYPE_ID_BOOL,
+                TYPE_ID_VOID,
                 vec!["members.count", "members.keys[*]", "members.occupied[*]"],
                 vec!["members.count", "members.keys[*]", "members.occupied[*]"],
             ),
@@ -5718,7 +5772,7 @@ mod tests {
                     SimpleExpr::Identifier("members".to_string()),
                     SimpleExpr::Int(1),
                 ],
-                TYPE_ID_BOOL,
+                TYPE_ID_VOID,
                 vec!["members.count", "members.keys[*]", "members.occupied[*]"],
                 vec!["members.count", "members.keys[*]", "members.occupied[*]"],
             ),
@@ -5806,6 +5860,7 @@ mod tests {
 
         for (target, path, arity) in [
             ("put", "empty_entries", 3),
+            ("can_get", "empty_entries", 2),
             ("get", "empty_entries", 2),
             ("contains", "empty_entries", 2),
             ("remove", "empty_entries", 2),
@@ -6193,7 +6248,7 @@ mod tests {
                     SimpleExpr::Identifier("actors".to_string()),
                     SimpleExpr::Int(1),
                 ],
-                TYPE_ID_BOOL,
+                TYPE_ID_VOID,
                 vec!["actors.count", "actors.values[*]"],
                 vec!["actors.count", "actors.values[*]"],
             ),
@@ -6284,7 +6339,7 @@ mod tests {
                     SimpleExpr::Identifier("actors".to_string()),
                     SimpleExpr::Int(1),
                 ],
-                TYPE_ID_BOOL,
+                TYPE_ID_VOID,
                 vec!["actors.count", "actors.occupied[*]"],
                 vec!["actors.count", "actors.occupied[*]", "actors.values[*]"],
             ),
@@ -6380,14 +6435,14 @@ mod tests {
                     SimpleExpr::Identifier("events".to_string()),
                     SimpleExpr::Int(7),
                 ],
-                TYPE_ID_BOOL,
+                TYPE_ID_VOID,
                 vec!["events.count", "events.head"],
                 vec!["events.count", "events.head", "events.values[*]"],
             ),
             (
                 "pop",
                 vec![SimpleExpr::Identifier("events".to_string())],
-                TYPE_ID_BOOL,
+                TYPE_ID_VOID,
                 vec!["events.count", "events.head", "events.values[*]"],
                 vec!["events.count", "events.head", "events.values[*]"],
             ),
@@ -6571,7 +6626,7 @@ mod tests {
                     SimpleExpr::Int(1),
                     SimpleExpr::Int(7),
                 ],
-                TYPE_ID_BOOL,
+                TYPE_ID_VOID,
                 vec![
                     "events.count",
                     "events.next_order",
@@ -6589,7 +6644,7 @@ mod tests {
             (
                 "pop",
                 vec![SimpleExpr::Identifier("events".to_string())],
-                TYPE_ID_BOOL,
+                TYPE_ID_VOID,
                 vec![
                     "events.count",
                     "events.order[*]",
@@ -6915,14 +6970,14 @@ mod tests {
                     SimpleExpr::Identifier("history".to_string()),
                     SimpleExpr::Int(7),
                 ],
-                TYPE_ID_BOOL,
+                TYPE_ID_VOID,
                 vec!["history.count", "history.head"],
                 vec!["history.count", "history.head", "history.values[*]"],
             ),
             (
                 "pop",
                 vec![SimpleExpr::Identifier("history".to_string())],
-                TYPE_ID_BOOL,
+                TYPE_ID_VOID,
                 vec!["history.count", "history.head", "history.values[*]"],
                 vec!["history.count", "history.head", "history.values[*]"],
             ),

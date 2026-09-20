@@ -280,6 +280,7 @@ enum TypedCollectionGuardAction {
     StablePoolInsert,
     StablePoolRemove,
     MapPut,
+    MapGet,
     MapRemove,
     SetAdd,
     SetRemove,
@@ -386,6 +387,7 @@ impl InternalCallMode<'_> {
             TypedCollectionGuardAction::PoolRemove
             | TypedCollectionGuardAction::StablePoolRemove
             | TypedCollectionGuardAction::MapPut
+            | TypedCollectionGuardAction::MapGet
             | TypedCollectionGuardAction::MapRemove
             | TypedCollectionGuardAction::SetAdd
             | TypedCollectionGuardAction::SetRemove
@@ -4754,190 +4756,6 @@ fn emit_direct_i32_store(
     builder.ins().store(MemFlags::new(), value, data, 0);
 }
 
-fn emit_typed_pool_push(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    values_ref: DirectArrayStorageRef,
-    capacity: usize,
-    value: Value,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
-    let capacity_i32 = i32::try_from(capacity)
-        .map_err(|_| format!("typed pool capacity {capacity} exceeds i32 operation range"))?;
-    if capacity_i32 == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, -1),
-            type_id: TYPE_ID_I32,
-        });
-    }
-
-    let non_negative = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, count, 0);
-    let below_capacity =
-        builder
-            .ins()
-            .icmp_imm(IntCC::SignedLessThan, count, i64::from(capacity_i32));
-    let can_insert = builder.ins().band(non_negative, below_capacity);
-    let insert_block = builder.create_block();
-    let reject_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(can_insert, insert_block, &[], reject_block, &[]);
-
-    builder.seal_block(insert_block);
-    builder.switch_to_block(insert_block);
-    emit_direct_array_store(
-        builder,
-        values_ref.slot,
-        count,
-        value,
-        TYPE_ID_I32,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    let next_count = builder.ins().iadd_imm(count, 1);
-    emit_direct_i32_store(builder, count_ref, next_count);
-    builder.ins().jump(merge_block, &[count]);
-
-    builder.seal_block(reject_block);
-    builder.switch_to_block(reject_block);
-    let rejected = builder.ins().iconst(types::I32, -1);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed pool push merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_I32,
-    })
-}
-
-fn emit_typed_pool_remove(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    values_ref: DirectArrayStorageRef,
-    capacity: usize,
-    index: Value,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
-    let capacity_i32 = i32::try_from(capacity)
-        .map_err(|_| format!("typed pool capacity {capacity} exceeds i32 operation range"))?;
-    if capacity_i32 == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_BOOL,
-        });
-    }
-
-    let non_negative = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
-    let below_count = builder.ins().icmp(IntCC::SignedLessThan, index, count);
-    let count_non_negative = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, count, 0);
-    let count_within_capacity =
-        builder
-            .ins()
-            .icmp_imm(IntCC::SignedLessThanOrEqual, count, i64::from(capacity_i32));
-    let count_well_formed = builder
-        .ins()
-        .band(count_non_negative, count_within_capacity);
-    let below_capacity =
-        builder
-            .ins()
-            .icmp_imm(IntCC::SignedLessThan, index, i64::from(capacity_i32));
-    let below_count_and_capacity = builder.ins().band(below_count, below_capacity);
-    let valid_index = builder.ins().band(non_negative, below_count_and_capacity);
-    let valid = builder.ins().band(count_well_formed, valid_index);
-    let valid_block = builder.create_block();
-    let invalid_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(valid, valid_block, &[], invalid_block, &[]);
-
-    builder.seal_block(valid_block);
-    builder.switch_to_block(valid_block);
-    let last_index = builder.ins().iadd_imm(count, -1);
-    let removing_last = builder.ins().icmp(IntCC::Equal, index, last_index);
-    let zero_last_block = builder.create_block();
-    let move_last_block = builder.create_block();
-    builder
-        .ins()
-        .brif(removing_last, zero_last_block, &[], move_last_block, &[]);
-
-    builder.seal_block(move_last_block);
-    builder.switch_to_block(move_last_block);
-    let moved_value = emit_direct_array_load(
-        builder,
-        values_ref.slot,
-        last_index,
-        TYPE_ID_I32,
-        type_table,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        values_ref.slot,
-        index,
-        moved_value,
-        TYPE_ID_I32,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    builder.ins().jump(zero_last_block, &[]);
-
-    builder.seal_block(zero_last_block);
-    builder.switch_to_block(zero_last_block);
-    let zero = builder.ins().iconst(types::I32, 0);
-    emit_direct_array_store(
-        builder,
-        values_ref.slot,
-        last_index,
-        zero,
-        TYPE_ID_I32,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    emit_direct_i32_store(builder, count_ref, last_index);
-    let removed = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[removed]);
-
-    builder.seal_block(invalid_block);
-    builder.switch_to_block(invalid_block);
-    let not_removed = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[not_removed]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed pool remove merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_BOOL,
-    })
-}
-
 fn emit_typed_pool_push_fast(
     builder: &mut FunctionBuilder<'_>,
     count_ref: DirectStorageRef,
@@ -4970,13 +4788,12 @@ fn emit_typed_pool_remove_fast(
     count: Value,
     index: Value,
     type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
+) -> Result<(), String> {
     let last_index = builder.ins().iadd_imm(count, -1);
     let removing_last = builder.ins().icmp(IntCC::Equal, index, last_index);
     let zero_last_block = builder.create_block();
     let move_last_block = builder.create_block();
     let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
     builder
         .ins()
         .brif(removing_last, zero_last_block, &[], move_last_block, &[]);
@@ -5019,15 +4836,11 @@ fn emit_typed_pool_remove_fast(
         true,
     )?;
     emit_direct_i32_store(builder, count_ref, last_index);
-    let removed = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[removed]);
+    builder.ins().jump(merge_block, &[]);
 
     builder.seal_block(merge_block);
     builder.switch_to_block(merge_block);
-    Ok(ValueBinding {
-        value: builder.block_params(merge_block)[0],
-        type_id: TYPE_ID_BOOL,
-    })
+    Ok(())
 }
 
 fn emit_typed_pool_clear(
@@ -5313,80 +5126,32 @@ fn emit_typed_circular_physical_index(
     builder.ins().ireduce(types::I32, remainder)
 }
 
-fn emit_typed_circular_index_state(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    head_ref: DirectStorageRef,
-    capacity: i32,
-    logical_index: Value,
-    type_table: &TypeTable,
-) -> Result<(Value, Value), String> {
-    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
-    let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
-    let metadata_valid = emit_typed_circular_metadata_valid(builder, count, head, capacity);
-    let logical_non_negative =
-        builder
-            .ins()
-            .icmp_imm(IntCC::SignedGreaterThanOrEqual, logical_index, 0);
-    let logical_below_count = builder
-        .ins()
-        .icmp(IntCC::SignedLessThan, logical_index, count);
-    let logical_below_capacity =
-        builder
-            .ins()
-            .icmp_imm(IntCC::SignedLessThan, logical_index, i64::from(capacity));
-    let logical_valid = builder
-        .ins()
-        .band(logical_non_negative, logical_below_count);
-    let logical_valid = builder.ins().band(logical_valid, logical_below_capacity);
-    let valid = builder.ins().band(metadata_valid, logical_valid);
-    let physical = emit_typed_circular_physical_index(builder, head, logical_index, capacity);
-    Ok((physical, valid))
-}
-
-fn emit_typed_circular_push(
+fn emit_typed_circular_overwrite_oldest(
     builder: &mut FunctionBuilder<'_>,
     count_ref: DirectStorageRef,
     head_ref: DirectStorageRef,
     values_ref: DirectArrayStorageRef,
     capacity: usize,
-    overwrite_oldest: bool,
     value: Value,
     type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
+) -> Result<(), String> {
     let capacity_i32 = i32::try_from(capacity).map_err(|_| {
         format!("typed circular collection capacity {capacity} exceeds i32 operation range")
     })?;
     if capacity_i32 == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_BOOL,
-        });
+        return Err("overwrite_oldest requires positive capacity".to_string());
     }
 
     let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
     let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
     let metadata_valid = emit_typed_circular_metadata_valid(builder, count, head, capacity_i32);
-    let valid_block = builder.create_block();
-    let invalid_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(metadata_valid, valid_block, &[], invalid_block, &[]);
-
-    builder.seal_block(invalid_block);
-    builder.switch_to_block(invalid_block);
-    let rejected = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(valid_block);
-    builder.switch_to_block(valid_block);
+    emit_typed_collection_metadata_trap(builder, metadata_valid);
     let full = builder
         .ins()
         .icmp_imm(IntCC::Equal, count, i64::from(capacity_i32));
     let full_block = builder.create_block();
     let nonfull_block = builder.create_block();
+    let merge_block = builder.create_block();
     builder
         .ins()
         .brif(full, full_block, &[], nonfull_block, &[]);
@@ -5406,43 +5171,28 @@ fn emit_typed_circular_push(
     )?;
     let next_count = builder.ins().iadd_imm(count, 1);
     emit_direct_i32_store(builder, count_ref, next_count);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
+    builder.ins().jump(merge_block, &[]);
 
     builder.seal_block(full_block);
     builder.switch_to_block(full_block);
-    if overwrite_oldest {
-        emit_direct_array_store(
-            builder,
-            values_ref.slot,
-            head,
-            value,
-            TYPE_ID_I32,
-            values_ref.storage_bytes,
-            values_ref.static_len,
-            true,
-        )?;
-        let one = builder.ins().iconst(types::I32, 1);
-        let next_head = emit_typed_circular_physical_index(builder, head, one, capacity_i32);
-        emit_direct_i32_store(builder, head_ref, next_head);
-        let accepted = builder.ins().iconst(types::I32, 1);
-        builder.ins().jump(merge_block, &[accepted]);
-    } else {
-        let rejected = builder.ins().iconst(types::I32, 0);
-        builder.ins().jump(merge_block, &[rejected]);
-    }
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        head,
+        value,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let one = builder.ins().iconst(types::I32, 1);
+    let next_head = emit_typed_circular_physical_index(builder, head, one, capacity_i32);
+    emit_direct_i32_store(builder, head_ref, next_head);
+    builder.ins().jump(merge_block, &[]);
 
     builder.seal_block(merge_block);
     builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed circular push merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_BOOL,
-    })
+    Ok(())
 }
 
 fn emit_typed_circular_guard_state(
@@ -5458,17 +5208,29 @@ fn emit_typed_circular_guard_state(
         format!("typed circular collection capacity {capacity} exceeds i32 operation range")
     })?;
     if capacity_i32 <= 0 {
+        let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+        let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
+        let count_zero = builder.ins().icmp_imm(IntCC::Equal, count, 0);
+        let head_zero = builder.ins().icmp_imm(IntCC::Equal, head, 0);
+        let metadata_valid = builder.ins().band(count_zero, head_zero);
+        emit_typed_collection_metadata_trap(builder, metadata_valid);
+        let physical = logical_index.map(|_| builder.ins().iconst(types::I32, 0));
         return Ok((
             ValueBinding {
                 value: builder.ins().iconst(types::I32, 0),
                 type_id: TYPE_ID_BOOL,
             },
-            None,
+            Some(TypedCollectionGuardState::Circular {
+                count,
+                head,
+                physical,
+            }),
         ));
     }
     let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
     let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
     let metadata_valid = emit_typed_circular_metadata_valid(builder, count, head, capacity_i32);
+    emit_typed_collection_metadata_trap(builder, metadata_valid);
     let (valid, physical) = if let Some(logical_index) = logical_index {
         let logical_non_negative =
             builder
@@ -5520,91 +5282,6 @@ fn emit_typed_circular_guard_state(
     ))
 }
 
-fn emit_typed_circular_pop(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    head_ref: DirectStorageRef,
-    values_ref: DirectArrayStorageRef,
-    capacity: usize,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
-        format!("typed circular collection capacity {capacity} exceeds i32 operation range")
-    })?;
-    if capacity_i32 == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_BOOL,
-        });
-    }
-
-    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
-    let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
-    let metadata_valid = emit_typed_circular_metadata_valid(builder, count, head, capacity_i32);
-    let nonempty = builder.ins().icmp_imm(IntCC::SignedGreaterThan, count, 0);
-    let can_pop = builder.ins().band(metadata_valid, nonempty);
-    let pop_block = builder.create_block();
-    let reject_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(can_pop, pop_block, &[], reject_block, &[]);
-
-    builder.seal_block(reject_block);
-    builder.switch_to_block(reject_block);
-    let rejected = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(pop_block);
-    builder.switch_to_block(pop_block);
-    let zero = builder.ins().iconst(types::I32, 0);
-    emit_direct_array_store(
-        builder,
-        values_ref.slot,
-        head,
-        zero,
-        TYPE_ID_I32,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    let next_count = builder.ins().iadd_imm(count, -1);
-    emit_direct_i32_store(builder, count_ref, next_count);
-    let now_empty = builder.ins().icmp_imm(IntCC::Equal, next_count, 0);
-    let reset_head_block = builder.create_block();
-    let advance_head_block = builder.create_block();
-    builder
-        .ins()
-        .brif(now_empty, reset_head_block, &[], advance_head_block, &[]);
-
-    builder.seal_block(reset_head_block);
-    builder.switch_to_block(reset_head_block);
-    emit_direct_i32_store(builder, head_ref, zero);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
-
-    builder.seal_block(advance_head_block);
-    builder.switch_to_block(advance_head_block);
-    let one = builder.ins().iconst(types::I32, 1);
-    let next_head = emit_typed_circular_physical_index(builder, head, one, capacity_i32);
-    emit_direct_i32_store(builder, head_ref, next_head);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed circular pop merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_BOOL,
-    })
-}
-
 fn emit_typed_circular_push_fast(
     builder: &mut FunctionBuilder<'_>,
     count_ref: DirectStorageRef,
@@ -5613,7 +5290,7 @@ fn emit_typed_circular_push_fast(
     count: Value,
     head: Value,
     value: Value,
-) -> Result<ValueBinding, String> {
+) -> Result<(), String> {
     let capacity_i32 = i32::try_from(capacity).map_err(|_| {
         format!("typed circular collection capacity {capacity} exceeds i32 operation range")
     })?;
@@ -5630,10 +5307,7 @@ fn emit_typed_circular_push_fast(
     )?;
     let next_count = builder.ins().iadd_imm(count, 1);
     emit_direct_i32_store(builder, count_ref, next_count);
-    Ok(ValueBinding {
-        value: builder.ins().iconst(types::I32, 1),
-        type_id: TYPE_ID_BOOL,
-    })
+    Ok(())
 }
 
 fn emit_typed_circular_pop_fast(
@@ -5644,7 +5318,7 @@ fn emit_typed_circular_pop_fast(
     capacity: usize,
     count: Value,
     head: Value,
-) -> Result<ValueBinding, String> {
+) -> Result<(), String> {
     let capacity_i32 = i32::try_from(capacity).map_err(|_| {
         format!("typed circular collection capacity {capacity} exceeds i32 operation range")
     })?;
@@ -5665,7 +5339,6 @@ fn emit_typed_circular_pop_fast(
     let reset_head_block = builder.create_block();
     let advance_head_block = builder.create_block();
     let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
     builder
         .ins()
         .brif(now_empty, reset_head_block, &[], advance_head_block, &[]);
@@ -5673,23 +5346,18 @@ fn emit_typed_circular_pop_fast(
     builder.seal_block(reset_head_block);
     builder.switch_to_block(reset_head_block);
     emit_direct_i32_store(builder, head_ref, zero);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
+    builder.ins().jump(merge_block, &[]);
 
     builder.seal_block(advance_head_block);
     builder.switch_to_block(advance_head_block);
     let one = builder.ins().iconst(types::I32, 1);
     let next_head = emit_typed_circular_physical_index(builder, head, one, capacity_i32);
     emit_direct_i32_store(builder, head_ref, next_head);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
+    builder.ins().jump(merge_block, &[]);
 
     builder.seal_block(merge_block);
     builder.switch_to_block(merge_block);
-    Ok(ValueBinding {
-        value: builder.block_params(merge_block)[0],
-        type_id: TYPE_ID_BOOL,
-    })
+    Ok(())
 }
 
 fn emit_typed_circular_peek_fast(
@@ -5773,162 +5441,18 @@ fn emit_typed_circular_count(
     let capacity_i32 = i32::try_from(capacity).map_err(|_| {
         format!("typed circular collection capacity {capacity} exceeds i32 operation range")
     })?;
-    if capacity_i32 == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_I32,
-        });
-    }
     let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
     let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
-    let valid = emit_typed_circular_metadata_valid(builder, count, head, capacity_i32);
-    let valid_block = builder.create_block();
-    let invalid_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(valid, valid_block, &[], invalid_block, &[]);
-
-    builder.seal_block(valid_block);
-    builder.switch_to_block(valid_block);
-    builder.ins().jump(merge_block, &[count]);
-
-    builder.seal_block(invalid_block);
-    builder.switch_to_block(invalid_block);
-    let zero = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[zero]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed circular count merge block missing result".to_string())?;
+    let valid = if capacity_i32 == 0 {
+        let count_zero = builder.ins().icmp_imm(IntCC::Equal, count, 0);
+        let head_zero = builder.ins().icmp_imm(IntCC::Equal, head, 0);
+        builder.ins().band(count_zero, head_zero)
+    } else {
+        emit_typed_circular_metadata_valid(builder, count, head, capacity_i32)
+    };
+    emit_typed_collection_metadata_trap(builder, valid);
     Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_I32,
-    })
-}
-
-fn emit_typed_circular_logical_index(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    head_ref: DirectStorageRef,
-    capacity: usize,
-    logical_index: Value,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
-        format!("typed circular collection capacity {capacity} exceeds i32 operation range")
-    })?;
-    if capacity_i32 == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, -1),
-            type_id: TYPE_ID_I32,
-        });
-    }
-    let (physical, valid) = emit_typed_circular_index_state(
-        builder,
-        count_ref,
-        head_ref,
-        capacity_i32,
-        logical_index,
-        type_table,
-    )?;
-    let valid_block = builder.create_block();
-    let invalid_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(valid, valid_block, &[], invalid_block, &[]);
-
-    builder.seal_block(valid_block);
-    builder.switch_to_block(valid_block);
-    builder.ins().jump(merge_block, &[physical]);
-
-    builder.seal_block(invalid_block);
-    builder.switch_to_block(invalid_block);
-    let invalid = builder.ins().iconst(types::I32, -1);
-    builder.ins().jump(merge_block, &[invalid]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed circular physical-index merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_I32,
-    })
-}
-
-fn emit_typed_circular_peek(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    head_ref: DirectStorageRef,
-    values_ref: DirectArrayStorageRef,
-    capacity: usize,
-    logical_index: Value,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
-        format!("typed circular collection capacity {capacity} exceeds i32 operation range")
-    })?;
-    if capacity_i32 == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_I32,
-        });
-    }
-    let (physical, valid) = emit_typed_circular_index_state(
-        builder,
-        count_ref,
-        head_ref,
-        capacity_i32,
-        logical_index,
-        type_table,
-    )?;
-    let valid_block = builder.create_block();
-    let invalid_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(valid, valid_block, &[], invalid_block, &[]);
-
-    builder.seal_block(valid_block);
-    builder.switch_to_block(valid_block);
-    let value = emit_direct_array_load(
-        builder,
-        values_ref.slot,
-        physical,
-        TYPE_ID_I32,
-        type_table,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    builder.ins().jump(merge_block, &[value]);
-
-    builder.seal_block(invalid_block);
-    builder.switch_to_block(invalid_block);
-    let zero = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[zero]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed circular peek merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
+        value: count,
         type_id: TYPE_ID_I32,
     })
 }
@@ -5999,7 +5523,7 @@ fn try_emit_typed_queue_call(
                     value.type_id
                 ));
             }
-            let result = match internal_calls
+            match internal_calls
                 .take_typed_collection_guard_state(TypedCollectionGuardAction::QueuePush, args)
             {
                 Some(TypedCollectionGuardState::Circular {
@@ -6015,18 +5539,18 @@ fn try_emit_typed_queue_call(
                     head,
                     value.value,
                 )?,
-                _ => emit_typed_circular_push(
-                    builder,
-                    count_ref,
-                    head_ref,
-                    values_ref,
-                    capacity,
-                    false,
-                    value.value,
-                    type_table,
-                )?,
-            };
-            Ok(Some(TypedCircularCallResult::Value(result)))
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for queue path '{path}' received an invalid can_push proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for queue path '{path}' requires its exact direct can_push guard"
+                    ));
+                }
+            }
+            Ok(Some(TypedCircularCallResult::Void))
         }
         TypedQueueCallKind::OverwriteOldest => {
             if capacity == 0 {
@@ -6055,18 +5579,16 @@ fn try_emit_typed_queue_call(
                     value.type_id
                 ));
             }
-            Ok(Some(TypedCircularCallResult::Value(
-                emit_typed_circular_push(
-                    builder,
-                    count_ref,
-                    head_ref,
-                    values_ref,
-                    capacity,
-                    true,
-                    value.value,
-                    type_table,
-                )?,
-            )))
+            emit_typed_circular_overwrite_oldest(
+                builder,
+                count_ref,
+                head_ref,
+                values_ref,
+                capacity,
+                value.value,
+                type_table,
+            )?;
+            Ok(Some(TypedCircularCallResult::Void))
         }
         TypedQueueCallKind::CanPush => {
             let (value, state) = emit_typed_circular_guard_state(
@@ -6150,7 +5672,7 @@ fn try_emit_typed_queue_call(
             Ok(Some(TypedCircularCallResult::Value(value)))
         }
         TypedQueueCallKind::Pop => {
-            let result = match internal_calls
+            match internal_calls
                 .take_typed_collection_guard_state(TypedCollectionGuardAction::QueuePop, args)
             {
                 Some(TypedCollectionGuardState::Circular {
@@ -6160,11 +5682,18 @@ fn try_emit_typed_queue_call(
                 }) => emit_typed_circular_pop_fast(
                     builder, count_ref, head_ref, values_ref, capacity, count, head,
                 )?,
-                _ => emit_typed_circular_pop(
-                    builder, count_ref, head_ref, values_ref, capacity, type_table,
-                )?,
-            };
-            Ok(Some(TypedCircularCallResult::Value(result)))
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for queue path '{path}' received an invalid can_pop proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for queue path '{path}' requires its exact direct can_pop guard"
+                    ));
+                }
+            }
+            Ok(Some(TypedCircularCallResult::Void))
         }
         TypedQueueCallKind::Peek => {
             let logical_index = emit_simple_expression(
@@ -6195,15 +5724,16 @@ fn try_emit_typed_queue_call(
                     physical: Some(physical),
                     ..
                 }) => emit_typed_circular_peek_fast(builder, values_ref, physical, type_table)?,
-                _ => emit_typed_circular_peek(
-                    builder,
-                    count_ref,
-                    head_ref,
-                    values_ref,
-                    capacity,
-                    logical_index.value,
-                    type_table,
-                )?,
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for queue path '{path}' received an invalid can_peek proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for queue path '{path}' requires its exact direct can_peek guard"
+                    ));
+                }
             };
             Ok(Some(TypedCircularCallResult::Value(result)))
         }
@@ -6229,16 +5759,28 @@ fn try_emit_typed_queue_call(
                     logical_index.type_id
                 ));
             }
-            Ok(Some(TypedCircularCallResult::Value(
-                emit_typed_circular_logical_index(
-                    builder,
-                    count_ref,
-                    head_ref,
-                    capacity,
-                    logical_index.value,
-                    type_table,
-                )?,
-            )))
+            let physical = match internal_calls
+                .take_typed_collection_guard_state(TypedCollectionGuardAction::QueuePeek, args)
+            {
+                Some(TypedCollectionGuardState::Circular {
+                    physical: Some(physical),
+                    ..
+                }) => physical,
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for queue path '{path}' received an invalid can_peek proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for queue path '{path}' requires its exact direct can_peek guard"
+                    ));
+                }
+            };
+            Ok(Some(TypedCircularCallResult::Value(ValueBinding {
+                value: physical,
+                type_id: TYPE_ID_I32,
+            })))
         }
         TypedQueueCallKind::Count => Ok(Some(TypedCircularCallResult::Value(
             emit_typed_circular_count(builder, count_ref, head_ref, capacity, type_table)?,
@@ -7082,310 +6624,6 @@ fn emit_typed_priority_queue_sift_down(
     Ok(())
 }
 
-fn emit_typed_priority_queue_push(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    next_order_ref: DirectStorageRef,
-    priority_ref: DirectArrayStorageRef,
-    order_ref: DirectArrayStorageRef,
-    values_ref: DirectArrayStorageRef,
-    capacity: usize,
-    priority: Value,
-    value: Value,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
-        format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
-    })?;
-    if capacity_i32 == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_BOOL,
-        });
-    }
-    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
-    let next_order = emit_direct_scalar_load(builder, next_order_ref, TYPE_ID_U32, type_table)?;
-    let count_valid = emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32);
-    let has_room = builder
-        .ins()
-        .icmp_imm(IntCC::SignedLessThan, count, i64::from(capacity_i32));
-    let order_available = builder.ins().icmp_imm(IntCC::NotEqual, next_order, -1);
-    let can_insert = builder.ins().band(count_valid, has_room);
-    let can_insert = builder.ins().band(can_insert, order_available);
-    let insert_block = builder.create_block();
-    let reject_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(can_insert, insert_block, &[], reject_block, &[]);
-
-    builder.seal_block(reject_block);
-    builder.switch_to_block(reject_block);
-    let rejected = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(insert_block);
-    builder.switch_to_block(insert_block);
-    emit_direct_array_store(
-        builder,
-        priority_ref.slot,
-        count,
-        priority,
-        TYPE_ID_I32,
-        priority_ref.storage_bytes,
-        priority_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        order_ref.slot,
-        count,
-        next_order,
-        TYPE_ID_U32,
-        order_ref.storage_bytes,
-        order_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        values_ref.slot,
-        count,
-        value,
-        TYPE_ID_I32,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    emit_typed_priority_queue_sift_up(
-        builder,
-        count,
-        priority_ref,
-        order_ref,
-        values_ref,
-        type_table,
-    )?;
-    let next_count = builder.ins().iadd_imm(count, 1);
-    let next_sequence = builder.ins().iadd_imm(next_order, 1);
-    emit_direct_i32_store(builder, count_ref, next_count);
-    emit_direct_i32_store(builder, next_order_ref, next_sequence);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed priority_queue push merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_BOOL,
-    })
-}
-
-fn emit_typed_priority_queue_pop(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    priority_ref: DirectArrayStorageRef,
-    order_ref: DirectArrayStorageRef,
-    values_ref: DirectArrayStorageRef,
-    capacity: usize,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
-        format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
-    })?;
-    if capacity_i32 == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_BOOL,
-        });
-    }
-    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
-    let count_valid = emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32);
-    let nonempty = builder.ins().icmp_imm(IntCC::SignedGreaterThan, count, 0);
-    let can_pop = builder.ins().band(count_valid, nonempty);
-    let pop_block = builder.create_block();
-    let reject_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(can_pop, pop_block, &[], reject_block, &[]);
-
-    builder.seal_block(reject_block);
-    builder.switch_to_block(reject_block);
-    let rejected = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(pop_block);
-    builder.switch_to_block(pop_block);
-    let last_index = builder.ins().iadd_imm(count, -1);
-    let zero = builder.ins().iconst(types::I32, 0);
-    let single = builder.ins().icmp_imm(IntCC::Equal, count, 1);
-    let single_block = builder.create_block();
-    let multi_block = builder.create_block();
-    builder
-        .ins()
-        .brif(single, single_block, &[], multi_block, &[]);
-
-    builder.seal_block(single_block);
-    builder.switch_to_block(single_block);
-    emit_direct_array_store(
-        builder,
-        priority_ref.slot,
-        last_index,
-        zero,
-        TYPE_ID_I32,
-        priority_ref.storage_bytes,
-        priority_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        order_ref.slot,
-        last_index,
-        zero,
-        TYPE_ID_U32,
-        order_ref.storage_bytes,
-        order_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        values_ref.slot,
-        last_index,
-        zero,
-        TYPE_ID_I32,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    emit_direct_i32_store(builder, count_ref, zero);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
-
-    builder.seal_block(multi_block);
-    builder.switch_to_block(multi_block);
-    let last_priority = emit_direct_array_load(
-        builder,
-        priority_ref.slot,
-        last_index,
-        TYPE_ID_I32,
-        type_table,
-        priority_ref.storage_bytes,
-        priority_ref.static_len,
-        true,
-    )?;
-    let last_order = emit_direct_array_load(
-        builder,
-        order_ref.slot,
-        last_index,
-        TYPE_ID_U32,
-        type_table,
-        order_ref.storage_bytes,
-        order_ref.static_len,
-        true,
-    )?;
-    let last_value = emit_direct_array_load(
-        builder,
-        values_ref.slot,
-        last_index,
-        TYPE_ID_I32,
-        type_table,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        priority_ref.slot,
-        zero,
-        last_priority,
-        TYPE_ID_I32,
-        priority_ref.storage_bytes,
-        priority_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        order_ref.slot,
-        zero,
-        last_order,
-        TYPE_ID_U32,
-        order_ref.storage_bytes,
-        order_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        values_ref.slot,
-        zero,
-        last_value,
-        TYPE_ID_I32,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        priority_ref.slot,
-        last_index,
-        zero,
-        TYPE_ID_I32,
-        priority_ref.storage_bytes,
-        priority_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        order_ref.slot,
-        last_index,
-        zero,
-        TYPE_ID_U32,
-        order_ref.storage_bytes,
-        order_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        values_ref.slot,
-        last_index,
-        zero,
-        TYPE_ID_I32,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    let next_count = builder.ins().iadd_imm(count, -1);
-    emit_direct_i32_store(builder, count_ref, next_count);
-    emit_typed_priority_queue_sift_down(
-        builder,
-        zero,
-        next_count,
-        priority_ref,
-        order_ref,
-        values_ref,
-        type_table,
-    )?;
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed priority_queue pop merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_BOOL,
-    })
-}
-
 fn emit_typed_priority_queue_push_fast(
     builder: &mut FunctionBuilder<'_>,
     count_ref: DirectStorageRef,
@@ -7398,7 +6636,7 @@ fn emit_typed_priority_queue_push_fast(
     priority: Value,
     value: Value,
     type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
+) -> Result<(), String> {
     emit_direct_array_store(
         builder,
         priority_ref.slot,
@@ -7441,10 +6679,7 @@ fn emit_typed_priority_queue_push_fast(
     let next_sequence = builder.ins().iadd_imm(next_order, 1);
     emit_direct_i32_store(builder, count_ref, next_count);
     emit_direct_i32_store(builder, next_order_ref, next_sequence);
-    Ok(ValueBinding {
-        value: builder.ins().iconst(types::I32, 1),
-        type_id: TYPE_ID_BOOL,
-    })
+    Ok(())
 }
 
 fn emit_typed_priority_queue_pop_fast(
@@ -7455,14 +6690,13 @@ fn emit_typed_priority_queue_pop_fast(
     values_ref: DirectArrayStorageRef,
     count: Value,
     type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
+) -> Result<(), String> {
     let last_index = builder.ins().iadd_imm(count, -1);
     let zero = builder.ins().iconst(types::I32, 0);
     let single = builder.ins().icmp_imm(IntCC::Equal, count, 1);
     let single_block = builder.create_block();
     let multi_block = builder.create_block();
     let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
     builder
         .ins()
         .brif(single, single_block, &[], multi_block, &[]);
@@ -7500,8 +6734,7 @@ fn emit_typed_priority_queue_pop_fast(
         true,
     )?;
     emit_direct_i32_store(builder, count_ref, zero);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
+    builder.ins().jump(merge_block, &[]);
 
     builder.seal_block(multi_block);
     builder.switch_to_block(multi_block);
@@ -7606,15 +6839,11 @@ fn emit_typed_priority_queue_pop_fast(
         values_ref,
         type_table,
     )?;
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
+    builder.ins().jump(merge_block, &[]);
 
     builder.seal_block(merge_block);
     builder.switch_to_block(merge_block);
-    Ok(ValueBinding {
-        value: builder.block_params(merge_block)[0],
-        type_id: TYPE_ID_BOOL,
-    })
+    Ok(())
 }
 
 fn emit_typed_priority_queue_peek_fast(
@@ -7638,6 +6867,27 @@ fn emit_typed_priority_queue_peek_fast(
     })
 }
 
+fn emit_typed_priority_queue_peek_priority_fast(
+    builder: &mut FunctionBuilder<'_>,
+    priority_ref: DirectArrayStorageRef,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let root = builder.ins().iconst(types::I32, 0);
+    Ok(ValueBinding {
+        value: emit_direct_array_load(
+            builder,
+            priority_ref.slot,
+            root,
+            TYPE_ID_I32,
+            type_table,
+            priority_ref.storage_bytes,
+            priority_ref.static_len,
+            true,
+        )?,
+        type_id: TYPE_ID_I32,
+    })
+}
+
 fn emit_typed_priority_queue_guard_state(
     builder: &mut FunctionBuilder<'_>,
     count_ref: DirectStorageRef,
@@ -7650,16 +6900,30 @@ fn emit_typed_priority_queue_guard_state(
         format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
     })?;
     if capacity_i32 <= 0 {
+        let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+        let metadata_valid = builder.ins().icmp_imm(IntCC::Equal, count, 0);
+        emit_typed_collection_metadata_trap(builder, metadata_valid);
+        let next_order = if mode == TypedCollectionGuardAction::PriorityQueuePush {
+            Some(emit_direct_scalar_load(
+                builder,
+                next_order_ref,
+                TYPE_ID_U32,
+                type_table,
+            )?)
+        } else {
+            None
+        };
         return Ok((
             ValueBinding {
                 value: builder.ins().iconst(types::I32, 0),
                 type_id: TYPE_ID_BOOL,
             },
-            None,
+            Some(TypedCollectionGuardState::PriorityQueue { count, next_order }),
         ));
     }
     let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
     let metadata_valid = emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32);
+    emit_typed_collection_metadata_trap(builder, metadata_valid);
     let (value, next_order) = match mode {
         TypedCollectionGuardAction::PriorityQueuePush => {
             let next_order =
@@ -7700,141 +6964,15 @@ fn emit_typed_priority_queue_count(
     let capacity_i32 = i32::try_from(capacity).map_err(|_| {
         format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
     })?;
-    if capacity_i32 == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_I32,
-        });
-    }
     let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
-    let valid = emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32);
-    let zero = builder.ins().iconst(types::I32, 0);
+    let valid = if capacity_i32 == 0 {
+        builder.ins().icmp_imm(IntCC::Equal, count, 0)
+    } else {
+        emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32)
+    };
+    emit_typed_collection_metadata_trap(builder, valid);
     Ok(ValueBinding {
-        value: builder.ins().select(valid, count, zero),
-        type_id: TYPE_ID_I32,
-    })
-}
-
-fn emit_typed_priority_queue_peek(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    values_ref: DirectArrayStorageRef,
-    capacity: usize,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
-        format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
-    })?;
-    if capacity_i32 == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_I32,
-        });
-    }
-    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
-    let valid = emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32);
-    let nonempty = builder.ins().icmp_imm(IntCC::SignedGreaterThan, count, 0);
-    let can_peek = builder.ins().band(valid, nonempty);
-    let valid_block = builder.create_block();
-    let invalid_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(can_peek, valid_block, &[], invalid_block, &[]);
-
-    builder.seal_block(invalid_block);
-    builder.switch_to_block(invalid_block);
-    let zero = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[zero]);
-
-    builder.seal_block(valid_block);
-    builder.switch_to_block(valid_block);
-    let root_index = builder.ins().iconst(types::I32, 0);
-    let value = emit_direct_array_load(
-        builder,
-        values_ref.slot,
-        root_index,
-        TYPE_ID_I32,
-        type_table,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    builder.ins().jump(merge_block, &[value]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed priority_queue peek merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_I32,
-    })
-}
-
-fn emit_typed_priority_queue_peek_priority(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    priority_ref: DirectArrayStorageRef,
-    capacity: usize,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
-        format!("typed priority_queue capacity {capacity} exceeds i32 operation range")
-    })?;
-    if capacity_i32 == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_I32,
-        });
-    }
-    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
-    let valid = emit_typed_priority_queue_metadata_valid(builder, count, capacity_i32);
-    let nonempty = builder.ins().icmp_imm(IntCC::SignedGreaterThan, count, 0);
-    let can_peek = builder.ins().band(valid, nonempty);
-    let valid_block = builder.create_block();
-    let invalid_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(can_peek, valid_block, &[], invalid_block, &[]);
-
-    builder.seal_block(invalid_block);
-    builder.switch_to_block(invalid_block);
-    let zero = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[zero]);
-
-    builder.seal_block(valid_block);
-    builder.switch_to_block(valid_block);
-    let root_index = builder.ins().iconst(types::I32, 0);
-    let value = emit_direct_array_load(
-        builder,
-        priority_ref.slot,
-        root_index,
-        TYPE_ID_I32,
-        type_table,
-        priority_ref.storage_bytes,
-        priority_ref.static_len,
-        true,
-    )?;
-    builder.ins().jump(merge_block, &[value]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| {
-            "typed priority_queue peek_priority merge block missing result".to_string()
-        })?;
-    Ok(ValueBinding {
-        value: result,
+        value: count,
         type_id: TYPE_ID_I32,
     })
 }
@@ -7992,7 +7130,7 @@ fn try_emit_typed_priority_queue_call(
                     value.type_id
                 ));
             }
-            let result = match internal_calls.take_typed_collection_guard_state(
+            match internal_calls.take_typed_collection_guard_state(
                 TypedCollectionGuardAction::PriorityQueuePush,
                 args,
             ) {
@@ -8012,23 +7150,21 @@ fn try_emit_typed_priority_queue_call(
                     value.value,
                     type_table,
                 )?,
-                _ => emit_typed_priority_queue_push(
-                    builder,
-                    count_ref,
-                    next_order_ref,
-                    priority_ref,
-                    order_ref,
-                    values_ref,
-                    capacity,
-                    priority.value,
-                    value.value,
-                    type_table,
-                )?,
-            };
-            Ok(Some(TypedPriorityQueueCallResult::Value(result)))
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for priority_queue path '{path}' received an invalid can_push proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for priority_queue path '{path}' requires its exact direct can_push guard"
+                    ));
+                }
+            }
+            Ok(Some(TypedPriorityQueueCallResult::Void))
         }
         TypedPriorityQueueCallKind::Pop => {
-            let result = match internal_calls.take_typed_collection_guard_state(
+            match internal_calls.take_typed_collection_guard_state(
                 TypedCollectionGuardAction::PriorityQueuePop,
                 args,
             ) {
@@ -8044,17 +7180,18 @@ fn try_emit_typed_priority_queue_call(
                     count,
                     type_table,
                 )?,
-                _ => emit_typed_priority_queue_pop(
-                    builder,
-                    count_ref,
-                    priority_ref,
-                    order_ref,
-                    values_ref,
-                    capacity,
-                    type_table,
-                )?,
-            };
-            Ok(Some(TypedPriorityQueueCallResult::Value(result)))
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for priority_queue path '{path}' received an invalid can_pop proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for priority_queue path '{path}' requires its exact direct can_pop guard"
+                    ));
+                }
+            }
+            Ok(Some(TypedPriorityQueueCallResult::Void))
         }
         TypedPriorityQueueCallKind::Peek => {
             let result = match internal_calls.take_typed_collection_guard_state(
@@ -8064,21 +7201,42 @@ fn try_emit_typed_priority_queue_call(
                 Some(TypedCollectionGuardState::PriorityQueue {
                     next_order: None, ..
                 }) => emit_typed_priority_queue_peek_fast(builder, values_ref, type_table)?,
-                _ => emit_typed_priority_queue_peek(
-                    builder, count_ref, values_ref, capacity, type_table,
-                )?,
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for priority_queue path '{path}' received an invalid can_peek proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for priority_queue path '{path}' requires its exact direct can_peek guard"
+                    ));
+                }
             };
             Ok(Some(TypedPriorityQueueCallResult::Value(result)))
         }
-        TypedPriorityQueueCallKind::PeekPriority => Ok(Some(TypedPriorityQueueCallResult::Value(
-            emit_typed_priority_queue_peek_priority(
-                builder,
-                count_ref,
-                priority_ref,
-                capacity,
-                type_table,
-            )?,
-        ))),
+        TypedPriorityQueueCallKind::PeekPriority => {
+            let result = match internal_calls.take_typed_collection_guard_state(
+                TypedCollectionGuardAction::PriorityQueuePeek,
+                args,
+            ) {
+                Some(TypedCollectionGuardState::PriorityQueue {
+                    next_order: None, ..
+                }) => {
+                    emit_typed_priority_queue_peek_priority_fast(builder, priority_ref, type_table)?
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for priority_queue path '{path}' received an invalid can_peek proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for priority_queue path '{path}' requires its exact direct can_peek guard"
+                    ));
+                }
+            };
+            Ok(Some(TypedPriorityQueueCallResult::Value(result)))
+        }
         TypedPriorityQueueCallKind::Count => Ok(Some(TypedPriorityQueueCallResult::Value(
             emit_typed_priority_queue_count(builder, count_ref, capacity, type_table)?,
         ))),
@@ -8262,7 +7420,7 @@ fn try_emit_typed_ring_buffer_call(
                     value.type_id
                 ));
             }
-            let result = match internal_calls
+            match internal_calls
                 .take_typed_collection_guard_state(TypedCollectionGuardAction::RingBufferPush, args)
             {
                 Some(TypedCollectionGuardState::Circular {
@@ -8278,18 +7436,18 @@ fn try_emit_typed_ring_buffer_call(
                     head,
                     value.value,
                 )?,
-                _ => emit_typed_circular_push(
-                    builder,
-                    count_ref,
-                    head_ref,
-                    values_ref,
-                    capacity,
-                    false,
-                    value.value,
-                    type_table,
-                )?,
-            };
-            Ok(Some(TypedCircularCallResult::Value(result)))
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for ring_buffer path '{path}' received an invalid can_push proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for ring_buffer path '{path}' requires its exact direct can_push guard"
+                    ));
+                }
+            }
+            Ok(Some(TypedCircularCallResult::Void))
         }
         TypedRingBufferCallKind::OverwriteOldest => {
             if capacity == 0 {
@@ -8318,18 +7476,16 @@ fn try_emit_typed_ring_buffer_call(
                     value.type_id
                 ));
             }
-            Ok(Some(TypedCircularCallResult::Value(
-                emit_typed_circular_push(
-                    builder,
-                    count_ref,
-                    head_ref,
-                    values_ref,
-                    capacity,
-                    true,
-                    value.value,
-                    type_table,
-                )?,
-            )))
+            emit_typed_circular_overwrite_oldest(
+                builder,
+                count_ref,
+                head_ref,
+                values_ref,
+                capacity,
+                value.value,
+                type_table,
+            )?;
+            Ok(Some(TypedCircularCallResult::Void))
         }
         TypedRingBufferCallKind::CanPush => {
             let (value, state) = emit_typed_circular_guard_state(
@@ -8413,7 +7569,7 @@ fn try_emit_typed_ring_buffer_call(
             Ok(Some(TypedCircularCallResult::Value(value)))
         }
         TypedRingBufferCallKind::Pop => {
-            let result = match internal_calls
+            match internal_calls
                 .take_typed_collection_guard_state(TypedCollectionGuardAction::RingBufferPop, args)
             {
                 Some(TypedCollectionGuardState::Circular {
@@ -8423,11 +7579,18 @@ fn try_emit_typed_ring_buffer_call(
                 }) => emit_typed_circular_pop_fast(
                     builder, count_ref, head_ref, values_ref, capacity, count, head,
                 )?,
-                _ => emit_typed_circular_pop(
-                    builder, count_ref, head_ref, values_ref, capacity, type_table,
-                )?,
-            };
-            Ok(Some(TypedCircularCallResult::Value(result)))
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for ring_buffer path '{path}' received an invalid can_pop proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for ring_buffer path '{path}' requires its exact direct can_pop guard"
+                    ));
+                }
+            }
+            Ok(Some(TypedCircularCallResult::Void))
         }
         TypedRingBufferCallKind::Peek => {
             let logical_index = emit_simple_expression(
@@ -8458,15 +7621,16 @@ fn try_emit_typed_ring_buffer_call(
                     physical: Some(physical),
                     ..
                 }) => emit_typed_circular_peek_fast(builder, values_ref, physical, type_table)?,
-                _ => emit_typed_circular_peek(
-                    builder,
-                    count_ref,
-                    head_ref,
-                    values_ref,
-                    capacity,
-                    logical_index.value,
-                    type_table,
-                )?,
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for ring_buffer path '{path}' received an invalid can_peek proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for ring_buffer path '{path}' requires its exact direct can_peek guard"
+                    ));
+                }
             };
             Ok(Some(TypedCircularCallResult::Value(result)))
         }
@@ -8492,16 +7656,28 @@ fn try_emit_typed_ring_buffer_call(
                     logical_index.type_id
                 ));
             }
-            Ok(Some(TypedCircularCallResult::Value(
-                emit_typed_circular_logical_index(
-                    builder,
-                    count_ref,
-                    head_ref,
-                    capacity,
-                    logical_index.value,
-                    type_table,
-                )?,
-            )))
+            let physical = match internal_calls
+                .take_typed_collection_guard_state(TypedCollectionGuardAction::RingBufferPeek, args)
+            {
+                Some(TypedCollectionGuardState::Circular {
+                    physical: Some(physical),
+                    ..
+                }) => physical,
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for ring_buffer path '{path}' received an invalid can_peek proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for ring_buffer path '{path}' requires its exact direct can_peek guard"
+                    ));
+                }
+            };
+            Ok(Some(TypedCircularCallResult::Value(ValueBinding {
+                value: physical,
+                type_id: TYPE_ID_I32,
+            })))
         }
         TypedRingBufferCallKind::Count => Ok(Some(TypedCircularCallResult::Value(
             emit_typed_circular_count(builder, count_ref, head_ref, capacity, type_table)?,
@@ -8818,203 +7994,6 @@ fn emit_typed_stable_pool_scan(
     Ok((count, scanned_first_free, metadata_valid))
 }
 
-fn emit_typed_stable_pool_insert(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    occupied_ref: DirectArrayStorageRef,
-    values_ref: DirectArrayStorageRef,
-    capacity: usize,
-    value: Value,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    if capacity == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, -1),
-            type_id: TYPE_ID_I32,
-        });
-    }
-    let (count, first_free, metadata_valid) =
-        emit_typed_stable_pool_scan(builder, count_ref, occupied_ref, capacity, type_table)?;
-    let valid_block = builder.create_block();
-    let invalid_block = builder.create_block();
-    let full_block = builder.create_block();
-    let insert_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(metadata_valid, valid_block, &[], invalid_block, &[]);
-
-    builder.seal_block(invalid_block);
-    builder.switch_to_block(invalid_block);
-    let rejected = builder.ins().iconst(types::I32, -1);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(valid_block);
-    builder.switch_to_block(valid_block);
-    let has_free = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, first_free, 0);
-    let count_has_capacity = builder.ins().icmp_imm(
-        IntCC::SignedLessThan,
-        count,
-        i64::try_from(capacity).unwrap_or(i64::MAX),
-    );
-    let can_insert = builder.ins().band(has_free, count_has_capacity);
-    builder
-        .ins()
-        .brif(can_insert, insert_block, &[], full_block, &[]);
-
-    builder.seal_block(full_block);
-    builder.switch_to_block(full_block);
-    let rejected = builder.ins().iconst(types::I32, -1);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(insert_block);
-    builder.switch_to_block(insert_block);
-    let occupied_one = builder.ins().iconst(types::I32, 1);
-    emit_direct_array_store(
-        builder,
-        occupied_ref.slot,
-        first_free,
-        occupied_one,
-        TYPE_ID_U8,
-        occupied_ref.storage_bytes,
-        occupied_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        values_ref.slot,
-        first_free,
-        value,
-        TYPE_ID_I32,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    let next_count = builder.ins().iadd_imm(count, 1);
-    emit_direct_i32_store(builder, count_ref, next_count);
-    builder.ins().jump(merge_block, &[first_free]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed stable_pool insert merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_I32,
-    })
-}
-
-fn emit_typed_stable_pool_remove(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    occupied_ref: DirectArrayStorageRef,
-    values_ref: DirectArrayStorageRef,
-    capacity: usize,
-    index: Value,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    if capacity == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_BOOL,
-        });
-    }
-    let (count, _first_free, metadata_valid) =
-        emit_typed_stable_pool_scan(builder, count_ref, occupied_ref, capacity, type_table)?;
-    let index_non_negative = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
-    let index_below_capacity = builder.ins().icmp_imm(
-        IntCC::SignedLessThan,
-        index,
-        i64::try_from(capacity).unwrap_or(i64::MAX),
-    );
-    let index_valid = builder.ins().band(index_non_negative, index_below_capacity);
-    let candidate = builder.ins().band(metadata_valid, index_valid);
-    let candidate_block = builder.create_block();
-    let reject_block = builder.create_block();
-    let occupied_block = builder.create_block();
-    let empty_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(candidate, candidate_block, &[], reject_block, &[]);
-
-    builder.seal_block(reject_block);
-    builder.switch_to_block(reject_block);
-    let rejected = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(candidate_block);
-    builder.switch_to_block(candidate_block);
-    let occupied_value = emit_direct_array_load(
-        builder,
-        occupied_ref.slot,
-        index,
-        TYPE_ID_U8,
-        type_table,
-        occupied_ref.storage_bytes,
-        occupied_ref.static_len,
-        true,
-    )?;
-    let occupied = builder.ins().icmp_imm(IntCC::Equal, occupied_value, 1);
-    builder
-        .ins()
-        .brif(occupied, occupied_block, &[], empty_block, &[]);
-
-    builder.seal_block(empty_block);
-    builder.switch_to_block(empty_block);
-    let rejected = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(occupied_block);
-    builder.switch_to_block(occupied_block);
-    let zero = builder.ins().iconst(types::I32, 0);
-    emit_direct_array_store(
-        builder,
-        occupied_ref.slot,
-        index,
-        zero,
-        TYPE_ID_U8,
-        occupied_ref.storage_bytes,
-        occupied_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        values_ref.slot,
-        index,
-        zero,
-        TYPE_ID_I32,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    let next_count = builder.ins().iadd_imm(count, -1);
-    emit_direct_i32_store(builder, count_ref, next_count);
-    let removed = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[removed]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed stable_pool remove merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_BOOL,
-    })
-}
-
 fn emit_typed_stable_pool_insert_fast(
     builder: &mut FunctionBuilder<'_>,
     count_ref: DirectStorageRef,
@@ -9060,7 +8039,7 @@ fn emit_typed_stable_pool_remove_fast(
     values_ref: DirectArrayStorageRef,
     count: Value,
     index: Value,
-) -> Result<ValueBinding, String> {
+) -> Result<(), String> {
     let zero = builder.ins().iconst(types::I32, 0);
     emit_direct_array_store(
         builder,
@@ -9084,10 +8063,7 @@ fn emit_typed_stable_pool_remove_fast(
     )?;
     let next_count = builder.ins().iadd_imm(count, -1);
     emit_direct_i32_store(builder, count_ref, next_count);
-    Ok(ValueBinding {
-        value: builder.ins().iconst(types::I32, 1),
-        type_id: TYPE_ID_BOOL,
-    })
+    Ok(())
 }
 
 fn emit_typed_stable_pool_clear(
@@ -9156,37 +8132,18 @@ fn emit_typed_stable_pool_count(
     capacity: usize,
     type_table: &TypeTable,
 ) -> Result<ValueBinding, String> {
-    if capacity == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_I32,
-        });
-    }
-    let (count, _first_free, metadata_valid) =
-        emit_typed_stable_pool_scan(builder, count_ref, occupied_ref, capacity, type_table)?;
-    let valid_block = builder.create_block();
-    let invalid_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(metadata_valid, valid_block, &[], invalid_block, &[]);
-    builder.seal_block(valid_block);
-    builder.switch_to_block(valid_block);
-    builder.ins().jump(merge_block, &[count]);
-    builder.seal_block(invalid_block);
-    builder.switch_to_block(invalid_block);
-    let zero = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[zero]);
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed stable_pool count merge block missing result".to_string())?;
+    let (count, metadata_valid) = if capacity == 0 {
+        let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+        let valid = builder.ins().icmp_imm(IntCC::Equal, count, 0);
+        (count, valid)
+    } else {
+        let (count, _first_free, valid) =
+            emit_typed_stable_pool_scan(builder, count_ref, occupied_ref, capacity, type_table)?;
+        (count, valid)
+    };
+    emit_typed_collection_metadata_trap(builder, metadata_valid);
     Ok(ValueBinding {
-        value: result,
+        value: count,
         type_id: TYPE_ID_I32,
     })
 }
@@ -9272,15 +8229,16 @@ fn try_emit_typed_stable_pool_call(
                     index_or_first_free,
                     value.value,
                 )?,
-                _ => emit_typed_stable_pool_insert(
-                    builder,
-                    count_ref,
-                    occupied_ref,
-                    values_ref,
-                    capacity,
-                    value.value,
-                    type_table,
-                )?,
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for stable_pool path '{path}' received an invalid can_insert proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for stable_pool path '{path}' requires its exact direct can_insert guard"
+                    ));
+                }
             };
             Ok(Some(TypedStablePoolCallResult::Value(result)))
         }
@@ -9306,7 +8264,7 @@ fn try_emit_typed_stable_pool_call(
                     index.type_id
                 ));
             }
-            let result = match internal_calls.take_typed_collection_guard_state(
+            match internal_calls.take_typed_collection_guard_state(
                 TypedCollectionGuardAction::StablePoolRemove,
                 args,
             ) {
@@ -9321,17 +8279,18 @@ fn try_emit_typed_stable_pool_call(
                     count,
                     index_or_first_free,
                 )?,
-                _ => emit_typed_stable_pool_remove(
-                    builder,
-                    count_ref,
-                    occupied_ref,
-                    values_ref,
-                    capacity,
-                    index.value,
-                    type_table,
-                )?,
-            };
-            Ok(Some(TypedStablePoolCallResult::Value(result)))
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for stable_pool path '{path}' received an invalid can_remove proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for stable_pool path '{path}' requires its exact direct can_remove guard"
+                    ));
+                }
+            }
+            Ok(Some(TypedStablePoolCallResult::Void))
         }
         TypedStablePoolCallKind::Count => Ok(Some(TypedStablePoolCallResult::Value(
             emit_typed_stable_pool_count(builder, count_ref, occupied_ref, capacity, type_table)?,
@@ -9351,7 +8310,16 @@ fn try_emit_typed_stable_pool_call(
         }
         TypedStablePoolCallKind::CanInsert => {
             let (valid, proof_state) = if capacity == 0 {
-                (builder.ins().iconst(types::I32, 0), None)
+                emit_typed_zero_capacity_count_trap(builder, count_ref, type_table)?;
+                let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+                let first_free = builder.ins().iconst(types::I32, -1);
+                (
+                    builder.ins().iconst(types::I32, 0),
+                    Some(TypedCollectionGuardState::StablePool {
+                        count,
+                        index_or_first_free: first_free,
+                    }),
+                )
             } else {
                 let (count, first_free, metadata_valid) = emit_typed_stable_pool_scan(
                     builder,
@@ -9360,6 +8328,7 @@ fn try_emit_typed_stable_pool_call(
                     capacity,
                     type_table,
                 )?;
+                emit_typed_collection_metadata_trap(builder, metadata_valid);
                 let has_free =
                     builder
                         .ins()
@@ -9414,7 +8383,15 @@ fn try_emit_typed_stable_pool_call(
                 ));
             }
             let (valid, proof_state) = if capacity == 0 {
-                (builder.ins().iconst(types::I32, 0), None)
+                emit_typed_zero_capacity_count_trap(builder, count_ref, type_table)?;
+                let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+                (
+                    builder.ins().iconst(types::I32, 0),
+                    Some(TypedCollectionGuardState::StablePool {
+                        count,
+                        index_or_first_free: index.value,
+                    }),
+                )
             } else {
                 let (count, _first_free, metadata_valid) = emit_typed_stable_pool_scan(
                     builder,
@@ -9423,6 +8400,7 @@ fn try_emit_typed_stable_pool_call(
                     capacity,
                     type_table,
                 )?;
+                emit_typed_collection_metadata_trap(builder, metadata_valid);
                 let index_non_negative =
                     builder
                         .ins()
@@ -9489,6 +8467,7 @@ fn try_emit_typed_stable_pool_call(
 #[derive(Clone, Copy)]
 enum TypedKeyedCallResult {
     Value(ValueBinding),
+    Void,
 }
 
 #[derive(Clone, Copy)]
@@ -9498,6 +8477,7 @@ enum TypedMapCallKind {
     Contains,
     Remove,
     CanPut,
+    CanGet,
     CanRemove,
 }
 
@@ -9509,6 +8489,7 @@ impl TypedMapCallKind {
             "contains" => Some(Self::Contains),
             "remove" => Some(Self::Remove),
             "can_put" => Some(Self::CanPut),
+            "can_get" => Some(Self::CanGet),
             "can_remove" => Some(Self::CanRemove),
             _ => None,
         }
@@ -9517,8 +8498,12 @@ impl TypedMapCallKind {
     fn expected_arity(self) -> usize {
         match self {
             Self::Put => 3,
-            Self::Get | Self::Contains | Self::Remove | Self::CanRemove => 2,
-            Self::CanPut => 2,
+            Self::Get
+            | Self::Contains
+            | Self::Remove
+            | Self::CanGet
+            | Self::CanRemove
+            | Self::CanPut => 2,
         }
     }
 }
@@ -10076,221 +9061,14 @@ fn emit_typed_keyed_state(
     builder.seal_block(valid_block);
     builder.seal_block(merge_block);
     builder.switch_to_block(merge_block);
+    let metadata_valid = builder.block_params(merge_block)[3];
+    emit_typed_collection_metadata_trap(builder, metadata_valid);
     Ok((
         builder.block_params(merge_block)[0],
         builder.block_params(merge_block)[1],
         builder.block_params(merge_block)[2],
-        builder.block_params(merge_block)[3],
+        metadata_valid,
     ))
-}
-
-fn emit_typed_map_put(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    occupied_ref: DirectArrayStorageRef,
-    keys_ref: DirectArrayStorageRef,
-    values_ref: DirectArrayStorageRef,
-    capacity: usize,
-    key: Value,
-    value: Value,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    if capacity == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_BOOL,
-        });
-    }
-    let capacity_i32 = i32::try_from(capacity)
-        .map_err(|_| format!("typed map capacity {capacity} exceeds i32 operation range"))?;
-    let (count, existing, first_free, metadata_valid) = emit_typed_keyed_state(
-        builder,
-        count_ref,
-        occupied_ref,
-        keys_ref,
-        capacity,
-        key,
-        type_table,
-    )?;
-    let valid_block = builder.create_block();
-    let invalid_block = builder.create_block();
-    let existing_block = builder.create_block();
-    let missing_block = builder.create_block();
-    let insert_block = builder.create_block();
-    let full_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(metadata_valid, valid_block, &[], invalid_block, &[]);
-
-    builder.seal_block(invalid_block);
-    builder.switch_to_block(invalid_block);
-    let rejected = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(valid_block);
-    builder.switch_to_block(valid_block);
-    let has_existing = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, existing, 0);
-    builder
-        .ins()
-        .brif(has_existing, existing_block, &[], missing_block, &[]);
-
-    builder.seal_block(existing_block);
-    builder.switch_to_block(existing_block);
-    emit_direct_array_store(
-        builder,
-        values_ref.slot,
-        existing,
-        value,
-        TYPE_ID_I32,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
-
-    builder.seal_block(missing_block);
-    builder.switch_to_block(missing_block);
-    let has_free = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, first_free, 0);
-    let has_capacity =
-        builder
-            .ins()
-            .icmp_imm(IntCC::SignedLessThan, count, i64::from(capacity_i32));
-    let can_insert = builder.ins().band(has_free, has_capacity);
-    builder
-        .ins()
-        .brif(can_insert, insert_block, &[], full_block, &[]);
-
-    builder.seal_block(full_block);
-    builder.switch_to_block(full_block);
-    let rejected = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(insert_block);
-    builder.switch_to_block(insert_block);
-    let occupied_one = builder.ins().iconst(types::I32, 1);
-    emit_direct_array_store(
-        builder,
-        occupied_ref.slot,
-        first_free,
-        occupied_one,
-        TYPE_ID_U8,
-        occupied_ref.storage_bytes,
-        occupied_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        keys_ref.slot,
-        first_free,
-        key,
-        TYPE_ID_I32,
-        keys_ref.storage_bytes,
-        keys_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        values_ref.slot,
-        first_free,
-        value,
-        TYPE_ID_I32,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    let next_count = builder.ins().iadd_imm(count, 1);
-    emit_direct_i32_store(builder, count_ref, next_count);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed map put merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_BOOL,
-    })
-}
-
-fn emit_typed_map_get(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    occupied_ref: DirectArrayStorageRef,
-    keys_ref: DirectArrayStorageRef,
-    values_ref: DirectArrayStorageRef,
-    capacity: usize,
-    key: Value,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    if capacity == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_I32,
-        });
-    }
-    let (count, existing, _first_free, metadata_valid) = emit_typed_keyed_state(
-        builder,
-        count_ref,
-        occupied_ref,
-        keys_ref,
-        capacity,
-        key,
-        type_table,
-    )?;
-    let _ = count;
-    let valid_existing = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, existing, 0);
-    let can_load = builder.ins().band(metadata_valid, valid_existing);
-    let load_block = builder.create_block();
-    let missing_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(can_load, load_block, &[], missing_block, &[]);
-
-    builder.seal_block(missing_block);
-    builder.switch_to_block(missing_block);
-    let zero = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[zero]);
-
-    builder.seal_block(load_block);
-    builder.switch_to_block(load_block);
-    let value = emit_direct_array_load(
-        builder,
-        values_ref.slot,
-        existing,
-        TYPE_ID_I32,
-        type_table,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    builder.ins().jump(merge_block, &[value]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed map get merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_I32,
-    })
 }
 
 fn emit_typed_map_contains(
@@ -10303,6 +9081,7 @@ fn emit_typed_map_contains(
     type_table: &TypeTable,
 ) -> Result<ValueBinding, String> {
     if capacity == 0 {
+        emit_typed_zero_capacity_count_trap(builder, count_ref, type_table)?;
         return Ok(ValueBinding {
             value: builder.ins().iconst(types::I32, 0),
             type_id: TYPE_ID_BOOL,
@@ -10323,216 +9102,6 @@ fn emit_typed_map_contains(
     let result_value = builder.ins().band(metadata_valid, has_existing);
     Ok(ValueBinding {
         value: result_value,
-        type_id: TYPE_ID_BOOL,
-    })
-}
-
-fn emit_typed_map_remove(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    occupied_ref: DirectArrayStorageRef,
-    keys_ref: DirectArrayStorageRef,
-    values_ref: DirectArrayStorageRef,
-    capacity: usize,
-    key: Value,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    if capacity == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_BOOL,
-        });
-    }
-    let (count, existing, _first_free, metadata_valid) = emit_typed_keyed_state(
-        builder,
-        count_ref,
-        occupied_ref,
-        keys_ref,
-        capacity,
-        key,
-        type_table,
-    )?;
-    let has_existing = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, existing, 0);
-    let can_remove = builder.ins().band(metadata_valid, has_existing);
-    let remove_block = builder.create_block();
-    let reject_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(can_remove, remove_block, &[], reject_block, &[]);
-
-    builder.seal_block(reject_block);
-    builder.switch_to_block(reject_block);
-    let rejected = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(remove_block);
-    builder.switch_to_block(remove_block);
-    let zero = builder.ins().iconst(types::I32, 0);
-    emit_direct_array_store(
-        builder,
-        occupied_ref.slot,
-        existing,
-        zero,
-        TYPE_ID_U8,
-        occupied_ref.storage_bytes,
-        occupied_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        keys_ref.slot,
-        existing,
-        zero,
-        TYPE_ID_I32,
-        keys_ref.storage_bytes,
-        keys_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        values_ref.slot,
-        existing,
-        zero,
-        TYPE_ID_I32,
-        values_ref.storage_bytes,
-        values_ref.static_len,
-        true,
-    )?;
-    let next_count = builder.ins().iadd_imm(count, -1);
-    emit_direct_i32_store(builder, count_ref, next_count);
-    let removed = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[removed]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed map remove merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
-        type_id: TYPE_ID_BOOL,
-    })
-}
-
-fn emit_typed_set_add(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    occupied_ref: DirectArrayStorageRef,
-    keys_ref: DirectArrayStorageRef,
-    capacity: usize,
-    key: Value,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    if capacity == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_BOOL,
-        });
-    }
-    let capacity_i32 = i32::try_from(capacity)
-        .map_err(|_| format!("typed set capacity {capacity} exceeds i32 operation range"))?;
-    let (count, existing, first_free, metadata_valid) = emit_typed_keyed_state(
-        builder,
-        count_ref,
-        occupied_ref,
-        keys_ref,
-        capacity,
-        key,
-        type_table,
-    )?;
-    let valid_block = builder.create_block();
-    let invalid_block = builder.create_block();
-    let existing_block = builder.create_block();
-    let missing_block = builder.create_block();
-    let insert_block = builder.create_block();
-    let full_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(metadata_valid, valid_block, &[], invalid_block, &[]);
-
-    builder.seal_block(invalid_block);
-    builder.switch_to_block(invalid_block);
-    let rejected = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(valid_block);
-    builder.switch_to_block(valid_block);
-    let has_existing = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, existing, 0);
-    builder
-        .ins()
-        .brif(has_existing, existing_block, &[], missing_block, &[]);
-
-    builder.seal_block(existing_block);
-    builder.switch_to_block(existing_block);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
-
-    builder.seal_block(missing_block);
-    builder.switch_to_block(missing_block);
-    let has_free = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, first_free, 0);
-    let has_capacity =
-        builder
-            .ins()
-            .icmp_imm(IntCC::SignedLessThan, count, i64::from(capacity_i32));
-    let can_insert = builder.ins().band(has_free, has_capacity);
-    builder
-        .ins()
-        .brif(can_insert, insert_block, &[], full_block, &[]);
-
-    builder.seal_block(full_block);
-    builder.switch_to_block(full_block);
-    let rejected = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(insert_block);
-    builder.switch_to_block(insert_block);
-    let occupied_one = builder.ins().iconst(types::I32, 1);
-    emit_direct_array_store(
-        builder,
-        occupied_ref.slot,
-        first_free,
-        occupied_one,
-        TYPE_ID_U8,
-        occupied_ref.storage_bytes,
-        occupied_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        keys_ref.slot,
-        first_free,
-        key,
-        TYPE_ID_I32,
-        keys_ref.storage_bytes,
-        keys_ref.static_len,
-        true,
-    )?;
-    let next_count = builder.ins().iadd_imm(count, 1);
-    emit_direct_i32_store(builder, count_ref, next_count);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed set add merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
         type_id: TYPE_ID_BOOL,
     })
 }
@@ -10547,6 +9116,7 @@ fn emit_typed_set_contains(
     type_table: &TypeTable,
 ) -> Result<ValueBinding, String> {
     if capacity == 0 {
+        emit_typed_zero_capacity_count_trap(builder, count_ref, type_table)?;
         return Ok(ValueBinding {
             value: builder.ins().iconst(types::I32, 0),
             type_id: TYPE_ID_BOOL,
@@ -10567,88 +9137,6 @@ fn emit_typed_set_contains(
     let result_value = builder.ins().band(metadata_valid, has_existing);
     Ok(ValueBinding {
         value: result_value,
-        type_id: TYPE_ID_BOOL,
-    })
-}
-
-fn emit_typed_set_remove(
-    builder: &mut FunctionBuilder<'_>,
-    count_ref: DirectStorageRef,
-    occupied_ref: DirectArrayStorageRef,
-    keys_ref: DirectArrayStorageRef,
-    capacity: usize,
-    key: Value,
-    type_table: &TypeTable,
-) -> Result<ValueBinding, String> {
-    if capacity == 0 {
-        return Ok(ValueBinding {
-            value: builder.ins().iconst(types::I32, 0),
-            type_id: TYPE_ID_BOOL,
-        });
-    }
-    let (count, existing, _first_free, metadata_valid) = emit_typed_keyed_state(
-        builder,
-        count_ref,
-        occupied_ref,
-        keys_ref,
-        capacity,
-        key,
-        type_table,
-    )?;
-    let has_existing = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, existing, 0);
-    let can_remove = builder.ins().band(metadata_valid, has_existing);
-    let remove_block = builder.create_block();
-    let reject_block = builder.create_block();
-    let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
-    builder
-        .ins()
-        .brif(can_remove, remove_block, &[], reject_block, &[]);
-
-    builder.seal_block(reject_block);
-    builder.switch_to_block(reject_block);
-    let rejected = builder.ins().iconst(types::I32, 0);
-    builder.ins().jump(merge_block, &[rejected]);
-
-    builder.seal_block(remove_block);
-    builder.switch_to_block(remove_block);
-    let zero = builder.ins().iconst(types::I32, 0);
-    emit_direct_array_store(
-        builder,
-        occupied_ref.slot,
-        existing,
-        zero,
-        TYPE_ID_U8,
-        occupied_ref.storage_bytes,
-        occupied_ref.static_len,
-        true,
-    )?;
-    emit_direct_array_store(
-        builder,
-        keys_ref.slot,
-        existing,
-        zero,
-        TYPE_ID_I32,
-        keys_ref.storage_bytes,
-        keys_ref.static_len,
-        true,
-    )?;
-    let next_count = builder.ins().iadd_imm(count, -1);
-    emit_direct_i32_store(builder, count_ref, next_count);
-    let removed = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[removed]);
-
-    builder.seal_block(merge_block);
-    builder.switch_to_block(merge_block);
-    let result = builder
-        .block_params(merge_block)
-        .first()
-        .copied()
-        .ok_or_else(|| "typed set remove merge block missing result".to_string())?;
-    Ok(ValueBinding {
-        value: result,
         type_id: TYPE_ID_BOOL,
     })
 }
@@ -10664,14 +9152,13 @@ fn emit_typed_map_put_fast(
     first_free: Value,
     key: Value,
     value: Value,
-) -> Result<ValueBinding, String> {
+) -> Result<(), String> {
     let has_existing = builder
         .ins()
         .icmp_imm(IntCC::SignedGreaterThanOrEqual, existing, 0);
     let existing_block = builder.create_block();
     let insert_block = builder.create_block();
     let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
     builder
         .ins()
         .brif(has_existing, existing_block, &[], insert_block, &[]);
@@ -10688,8 +9175,7 @@ fn emit_typed_map_put_fast(
         values_ref.static_len,
         true,
     )?;
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
+    builder.ins().jump(merge_block, &[]);
 
     builder.seal_block(insert_block);
     builder.switch_to_block(insert_block);
@@ -10726,14 +9212,31 @@ fn emit_typed_map_put_fast(
     )?;
     let next_count = builder.ins().iadd_imm(count, 1);
     emit_direct_i32_store(builder, count_ref, next_count);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
+    builder.ins().jump(merge_block, &[]);
 
     builder.seal_block(merge_block);
     builder.switch_to_block(merge_block);
+    Ok(())
+}
+
+fn emit_typed_map_get_fast(
+    builder: &mut FunctionBuilder<'_>,
+    values_ref: DirectArrayStorageRef,
+    existing: Value,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
     Ok(ValueBinding {
-        value: builder.block_params(merge_block)[0],
-        type_id: TYPE_ID_BOOL,
+        value: emit_direct_array_load(
+            builder,
+            values_ref.slot,
+            existing,
+            TYPE_ID_I32,
+            type_table,
+            values_ref.storage_bytes,
+            values_ref.static_len,
+            true,
+        )?,
+        type_id: TYPE_ID_I32,
     })
 }
 
@@ -10745,7 +9248,7 @@ fn emit_typed_keyed_remove_fast(
     values_ref: Option<DirectArrayStorageRef>,
     count: Value,
     existing: Value,
-) -> Result<ValueBinding, String> {
+) -> Result<(), String> {
     let zero = builder.ins().iconst(types::I32, 0);
     emit_direct_array_store(
         builder,
@@ -10781,10 +9284,7 @@ fn emit_typed_keyed_remove_fast(
     }
     let next_count = builder.ins().iadd_imm(count, -1);
     emit_direct_i32_store(builder, count_ref, next_count);
-    Ok(ValueBinding {
-        value: builder.ins().iconst(types::I32, 1),
-        type_id: TYPE_ID_BOOL,
-    })
+    Ok(())
 }
 
 fn emit_typed_set_add_fast(
@@ -10796,21 +9296,19 @@ fn emit_typed_set_add_fast(
     existing: Value,
     first_free: Value,
     key: Value,
-) -> Result<ValueBinding, String> {
+) -> Result<(), String> {
     let has_existing = builder
         .ins()
         .icmp_imm(IntCC::SignedGreaterThanOrEqual, existing, 0);
     let existing_block = builder.create_block();
     let insert_block = builder.create_block();
     let merge_block = builder.create_block();
-    builder.append_block_param(merge_block, types::I32);
     builder
         .ins()
         .brif(has_existing, existing_block, &[], insert_block, &[]);
     builder.seal_block(existing_block);
     builder.switch_to_block(existing_block);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
+    builder.ins().jump(merge_block, &[]);
     builder.seal_block(insert_block);
     builder.switch_to_block(insert_block);
     let occupied_one = builder.ins().iconst(types::I32, 1);
@@ -10836,14 +9334,10 @@ fn emit_typed_set_add_fast(
     )?;
     let next_count = builder.ins().iadd_imm(count, 1);
     emit_direct_i32_store(builder, count_ref, next_count);
-    let accepted = builder.ins().iconst(types::I32, 1);
-    builder.ins().jump(merge_block, &[accepted]);
+    builder.ins().jump(merge_block, &[]);
     builder.seal_block(merge_block);
     builder.switch_to_block(merge_block);
-    Ok(ValueBinding {
-        value: builder.block_params(merge_block)[0],
-        type_id: TYPE_ID_BOOL,
-    })
+    Ok(())
 }
 
 fn try_emit_typed_map_call(
@@ -10940,7 +9434,7 @@ fn try_emit_typed_map_call(
                     value.type_id
                 ));
             }
-            let result = match internal_calls
+            match internal_calls
                 .take_typed_collection_guard_state(TypedCollectionGuardAction::MapPut, args)
             {
                 Some(TypedCollectionGuardState::Keyed {
@@ -10959,30 +9453,39 @@ fn try_emit_typed_map_call(
                     key.value,
                     value.value,
                 )?,
-                _ => emit_typed_map_put(
-                    builder,
-                    count_ref,
-                    occupied_ref,
-                    keys_ref,
-                    values_ref,
-                    capacity,
-                    key.value,
-                    value.value,
-                    type_table,
-                )?,
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for map path '{path}' received an invalid can_put proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for map path '{path}' requires its exact direct can_put guard"
+                    ));
+                }
+            }
+            Ok(Some(TypedKeyedCallResult::Void))
+        }
+        TypedMapCallKind::Get => {
+            let result = match internal_calls
+                .take_typed_collection_guard_state(TypedCollectionGuardAction::MapGet, args)
+            {
+                Some(TypedCollectionGuardState::Keyed { existing, .. }) => {
+                    emit_typed_map_get_fast(builder, values_ref, existing, type_table)?
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for map path '{path}' received an invalid can_get proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for map path '{path}' requires its exact direct can_get guard"
+                    ));
+                }
             };
             Ok(Some(TypedKeyedCallResult::Value(result)))
         }
-        TypedMapCallKind::Get => Ok(Some(TypedKeyedCallResult::Value(emit_typed_map_get(
-            builder,
-            count_ref,
-            occupied_ref,
-            keys_ref,
-            values_ref,
-            capacity,
-            key.value,
-            type_table,
-        )?))),
         TypedMapCallKind::Contains => {
             Ok(Some(TypedKeyedCallResult::Value(emit_typed_map_contains(
                 builder,
@@ -10995,7 +9498,7 @@ fn try_emit_typed_map_call(
             )?)))
         }
         TypedMapCallKind::Remove => {
-            let result = match internal_calls
+            match internal_calls
                 .take_typed_collection_guard_state(TypedCollectionGuardAction::MapRemove, args)
             {
                 Some(TypedCollectionGuardState::Keyed {
@@ -11009,22 +9512,32 @@ fn try_emit_typed_map_call(
                     count,
                     existing,
                 )?,
-                _ => emit_typed_map_remove(
-                    builder,
-                    count_ref,
-                    occupied_ref,
-                    keys_ref,
-                    values_ref,
-                    capacity,
-                    key.value,
-                    type_table,
-                )?,
-            };
-            Ok(Some(TypedKeyedCallResult::Value(result)))
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for map path '{path}' received an invalid can_remove proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for map path '{path}' requires its exact direct can_remove guard"
+                    ));
+                }
+            }
+            Ok(Some(TypedKeyedCallResult::Void))
         }
         TypedMapCallKind::CanPut => {
             let (valid, state) = if capacity == 0 {
-                (builder.ins().iconst(types::I32, 0), None)
+                emit_typed_zero_capacity_count_trap(builder, count_ref, type_table)?;
+                let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+                let missing = builder.ins().iconst(types::I32, -1);
+                (
+                    builder.ins().iconst(types::I32, 0),
+                    Some(TypedCollectionGuardState::Keyed {
+                        count,
+                        existing: missing,
+                        first_free: missing,
+                    }),
+                )
             } else {
                 let (count, existing, first_free, metadata_valid) = emit_typed_keyed_state(
                     builder,
@@ -11072,9 +9585,68 @@ fn try_emit_typed_map_call(
                 type_id: TYPE_ID_BOOL,
             })))
         }
+        TypedMapCallKind::CanGet => {
+            let (valid, state) = if capacity == 0 {
+                emit_typed_zero_capacity_count_trap(builder, count_ref, type_table)?;
+                let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+                let missing = builder.ins().iconst(types::I32, -1);
+                (
+                    builder.ins().iconst(types::I32, 0),
+                    Some(TypedCollectionGuardState::Keyed {
+                        count,
+                        existing: missing,
+                        first_free: missing,
+                    }),
+                )
+            } else {
+                let (count, existing, first_free, metadata_valid) = emit_typed_keyed_state(
+                    builder,
+                    count_ref,
+                    occupied_ref,
+                    keys_ref,
+                    capacity,
+                    key.value,
+                    type_table,
+                )?;
+                let has_existing =
+                    builder
+                        .ins()
+                        .icmp_imm(IntCC::SignedGreaterThanOrEqual, existing, 0);
+                (
+                    builder.ins().band(metadata_valid, has_existing),
+                    Some(TypedCollectionGuardState::Keyed {
+                        count,
+                        existing,
+                        first_free,
+                    }),
+                )
+            };
+            if let Some(state) = state {
+                internal_calls.capture_typed_collection_guard_proof(
+                    target,
+                    TypedCollectionGuardAction::MapGet,
+                    args,
+                    state,
+                );
+            }
+            Ok(Some(TypedKeyedCallResult::Value(ValueBinding {
+                value: valid,
+                type_id: TYPE_ID_BOOL,
+            })))
+        }
         TypedMapCallKind::CanRemove => {
             let (valid, state) = if capacity == 0 {
-                (builder.ins().iconst(types::I32, 0), None)
+                emit_typed_zero_capacity_count_trap(builder, count_ref, type_table)?;
+                let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+                let missing = builder.ins().iconst(types::I32, -1);
+                (
+                    builder.ins().iconst(types::I32, 0),
+                    Some(TypedCollectionGuardState::Keyed {
+                        count,
+                        existing: missing,
+                        first_free: missing,
+                    }),
+                )
             } else {
                 let (count, existing, first_free, metadata_valid) = emit_typed_keyed_state(
                     builder,
@@ -11147,7 +9719,7 @@ fn try_emit_typed_set_call(
             args.len()
         ));
     }
-    let (_path, capacity, count_ref, occupied_ref, keys_ref, _values_ref) =
+    let (path, capacity, count_ref, occupied_ref, keys_ref, _values_ref) =
         typed_keyed_storage_bindings(
             target,
             args,
@@ -11180,7 +9752,7 @@ fn try_emit_typed_set_call(
     }
     match kind {
         TypedSetCallKind::Add => {
-            let result = match internal_calls
+            match internal_calls
                 .take_typed_collection_guard_state(TypedCollectionGuardAction::SetAdd, args)
             {
                 Some(TypedCollectionGuardState::Keyed {
@@ -11197,17 +9769,18 @@ fn try_emit_typed_set_call(
                     first_free,
                     key.value,
                 )?,
-                _ => emit_typed_set_add(
-                    builder,
-                    count_ref,
-                    occupied_ref,
-                    keys_ref,
-                    capacity,
-                    key.value,
-                    type_table,
-                )?,
-            };
-            Ok(Some(TypedKeyedCallResult::Value(result)))
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for set path '{path}' received an invalid can_add proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for set path '{path}' requires its exact direct can_add guard"
+                    ));
+                }
+            }
+            Ok(Some(TypedKeyedCallResult::Void))
         }
         TypedSetCallKind::Contains => {
             Ok(Some(TypedKeyedCallResult::Value(emit_typed_set_contains(
@@ -11221,7 +9794,7 @@ fn try_emit_typed_set_call(
             )?)))
         }
         TypedSetCallKind::Remove => {
-            let result = match internal_calls
+            match internal_calls
                 .take_typed_collection_guard_state(TypedCollectionGuardAction::SetRemove, args)
             {
                 Some(TypedCollectionGuardState::Keyed {
@@ -11235,21 +9808,32 @@ fn try_emit_typed_set_call(
                     count,
                     existing,
                 )?,
-                _ => emit_typed_set_remove(
-                    builder,
-                    count_ref,
-                    occupied_ref,
-                    keys_ref,
-                    capacity,
-                    key.value,
-                    type_table,
-                )?,
-            };
-            Ok(Some(TypedKeyedCallResult::Value(result)))
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for set path '{path}' received an invalid can_remove proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for set path '{path}' requires its exact direct can_remove guard"
+                    ));
+                }
+            }
+            Ok(Some(TypedKeyedCallResult::Void))
         }
         TypedSetCallKind::CanAdd => {
             let (valid, state) = if capacity == 0 {
-                (builder.ins().iconst(types::I32, 0), None)
+                emit_typed_zero_capacity_count_trap(builder, count_ref, type_table)?;
+                let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+                let missing = builder.ins().iconst(types::I32, -1);
+                (
+                    builder.ins().iconst(types::I32, 0),
+                    Some(TypedCollectionGuardState::Keyed {
+                        count,
+                        existing: missing,
+                        first_free: missing,
+                    }),
+                )
             } else {
                 let (count, existing, first_free, metadata_valid) = emit_typed_keyed_state(
                     builder,
@@ -11299,7 +9883,17 @@ fn try_emit_typed_set_call(
         }
         TypedSetCallKind::CanRemove => {
             let (valid, state) = if capacity == 0 {
-                (builder.ins().iconst(types::I32, 0), None)
+                emit_typed_zero_capacity_count_trap(builder, count_ref, type_table)?;
+                let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+                let missing = builder.ins().iconst(types::I32, -1);
+                (
+                    builder.ins().iconst(types::I32, 0),
+                    Some(TypedCollectionGuardState::Keyed {
+                        count,
+                        existing: missing,
+                        first_free: missing,
+                    }),
+                )
             } else {
                 let (count, existing, first_free, metadata_valid) = emit_typed_keyed_state(
                     builder,
@@ -11989,14 +10583,16 @@ fn try_emit_typed_pool_call(
                 Some(TypedCollectionGuardState::Pool { count, index: None }) => {
                     emit_typed_pool_push_fast(builder, count_ref, values_ref, count, value.value)?
                 }
-                _ => emit_typed_pool_push(
-                    builder,
-                    count_ref,
-                    values_ref,
-                    capacity,
-                    value.value,
-                    type_table,
-                )?,
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for pool path '{path}' received an invalid can_push proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for pool path '{path}' requires its exact direct can_push guard"
+                    ));
+                }
             };
             Ok(Some(TypedPoolCallResult::Value(result)))
         }
@@ -12022,7 +10618,7 @@ fn try_emit_typed_pool_call(
                     index.type_id
                 ));
             }
-            let result = match internal_calls
+            match internal_calls
                 .take_typed_collection_guard_state(TypedCollectionGuardAction::PoolRemove, args)
             {
                 Some(TypedCollectionGuardState::Pool {
@@ -12036,19 +10632,34 @@ fn try_emit_typed_pool_call(
                     proven_index,
                     type_table,
                 )?,
-                _ => emit_typed_pool_remove(
-                    builder,
-                    count_ref,
-                    values_ref,
-                    capacity,
-                    index.value,
-                    type_table,
-                )?,
-            };
-            Ok(Some(TypedPoolCallResult::Value(result)))
+                Some(_) => {
+                    return Err(format!(
+                        "{target} for pool path '{path}' received an invalid can_remove proof"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "{target} for pool path '{path}' requires its exact direct can_remove guard"
+                    ));
+                }
+            }
+            Ok(Some(TypedPoolCallResult::Void))
         }
         TypedPoolCallKind::Count => {
             let value = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+            let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+                format!("{target} pool path '{path}' capacity exceeds i32 operation range")
+            })?;
+            let non_negative = builder
+                .ins()
+                .icmp_imm(IntCC::SignedGreaterThanOrEqual, value, 0);
+            let within_capacity = builder.ins().icmp_imm(
+                IntCC::SignedLessThanOrEqual,
+                value,
+                i64::from(capacity_i32),
+            );
+            let metadata_valid = builder.ins().band(non_negative, within_capacity);
+            emit_typed_collection_metadata_trap(builder, metadata_valid);
             Ok(Some(TypedPoolCallResult::Value(ValueBinding {
                 value,
                 type_id: TYPE_ID_I32,
@@ -12072,19 +10683,20 @@ fn try_emit_typed_pool_call(
             let capacity_i32 = i32::try_from(capacity).map_err(|_| {
                 format!("{target} pool path '{path}' capacity exceeds i32 operation range")
             })?;
-            let valid = if capacity_i32 <= 0 {
-                builder.ins().iconst(types::I32, 0)
-            } else {
-                let non_negative =
-                    builder
-                        .ins()
-                        .icmp_imm(IntCC::SignedGreaterThanOrEqual, count, 0);
-                let below_capacity =
-                    builder
-                        .ins()
-                        .icmp_imm(IntCC::SignedLessThan, count, i64::from(capacity_i32));
-                builder.ins().band(non_negative, below_capacity)
-            };
+            let non_negative = builder
+                .ins()
+                .icmp_imm(IntCC::SignedGreaterThanOrEqual, count, 0);
+            let within_capacity = builder.ins().icmp_imm(
+                IntCC::SignedLessThanOrEqual,
+                count,
+                i64::from(capacity_i32),
+            );
+            let metadata_valid = builder.ins().band(non_negative, within_capacity);
+            emit_typed_collection_metadata_trap(builder, metadata_valid);
+            let valid =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::SignedLessThan, count, i64::from(capacity_i32));
             internal_calls.capture_typed_collection_guard_proof(
                 target,
                 TypedCollectionGuardAction::PoolPush,
@@ -12122,18 +10734,22 @@ fn try_emit_typed_pool_call(
             let capacity_i32 = i32::try_from(capacity).map_err(|_| {
                 format!("{target} pool path '{path}' capacity exceeds i32 operation range")
             })?;
+            let count_non_negative =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::SignedGreaterThanOrEqual, count, 0);
+            let count_within_capacity = builder.ins().icmp_imm(
+                IntCC::SignedLessThanOrEqual,
+                count,
+                i64::from(capacity_i32),
+            );
+            let count_valid = builder
+                .ins()
+                .band(count_non_negative, count_within_capacity);
+            emit_typed_collection_metadata_trap(builder, count_valid);
             let valid = if capacity_i32 <= 0 {
                 builder.ins().iconst(types::I32, 0)
             } else {
-                let count_non_negative =
-                    builder
-                        .ins()
-                        .icmp_imm(IntCC::SignedGreaterThanOrEqual, count, 0);
-                let count_within_capacity = builder.ins().icmp_imm(
-                    IntCC::SignedLessThanOrEqual,
-                    count,
-                    i64::from(capacity_i32),
-                );
                 let index_non_negative =
                     builder
                         .ins()
@@ -12147,12 +10763,9 @@ fn try_emit_typed_pool_call(
                     index.value,
                     i64::from(capacity_i32),
                 );
-                let count_valid = builder
-                    .ins()
-                    .band(count_non_negative, count_within_capacity);
                 let index_valid = builder.ins().band(index_non_negative, index_below_count);
                 let index_valid = builder.ins().band(index_valid, index_below_capacity);
-                builder.ins().band(count_valid, index_valid)
+                index_valid
             };
             internal_calls.capture_typed_collection_guard_proof(
                 target,
@@ -12648,6 +11261,10 @@ pub(crate) fn emit_simple_expression(
             )? {
                 return match result {
                     TypedKeyedCallResult::Value(value) => Ok(value),
+                    TypedKeyedCallResult::Void => Err(format!(
+                        "void call target '{}' cannot be used in value expression",
+                        target
+                    )),
                 };
             }
             if let Some(result) = try_emit_typed_set_call(
@@ -12667,6 +11284,10 @@ pub(crate) fn emit_simple_expression(
             )? {
                 return match result {
                     TypedKeyedCallResult::Value(value) => Ok(value),
+                    TypedKeyedCallResult::Void => Err(format!(
+                        "void call target '{}' cannot be used in value expression",
+                        target
+                    )),
                 };
             }
             if let Some(result) = try_emit_typed_grid_call(
@@ -14789,6 +13410,28 @@ fn emit_array_bounds_trap(builder: &mut FunctionBuilder<'_>, index: Value, len: 
     let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
     let valid = builder.ins().band(non_negative, below_len);
     builder.ins().trapz(valid, TrapCode::HEAP_OUT_OF_BOUNDS);
+}
+
+/// A typed collection's persistent metadata is part of the game state, not an
+/// expected operation result.  `can_*` predicates may report an unavailable
+/// operation, but they must not turn impossible metadata into a recoverable
+/// false value.  Reuse the normal fatal bounds trap used by direct storage
+/// accesses so corrupt metadata terminates the game execution path.
+fn emit_typed_collection_metadata_trap(builder: &mut FunctionBuilder<'_>, metadata_valid: Value) {
+    builder
+        .ins()
+        .trapz(metadata_valid, TrapCode::HEAP_OUT_OF_BOUNDS);
+}
+
+fn emit_typed_zero_capacity_count_trap(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    type_table: &TypeTable,
+) -> Result<(), String> {
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let metadata_valid = builder.ins().icmp_imm(IntCC::Equal, count, 0);
+    emit_typed_collection_metadata_trap(builder, metadata_valid);
+    Ok(())
 }
 
 fn emit_fixed_collection_bounds_trap(

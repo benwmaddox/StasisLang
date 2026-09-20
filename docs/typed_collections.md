@@ -8,7 +8,7 @@ struct with an array and a count, and it never allocates or resizes at runtime.
 Descriptor parsing, validation, interning, fingerprinting, and layout reporting
 cover all nine collection kinds. Executable direct storage covers persistent
 `i32` pool, stable-pool, queue, ring-buffer, map, set, priority-queue, and grid
-paths plus bitsets. The grammar is policy-free, rejecting actions use fused
+paths plus bitsets. The grammar is policy-free, state-dependent actions use fused
 caller-owned guards, and queue/ring overwrite is an explicit operation.
 Unsupported payload types fail at the production layout boundary instead of
 falling back to nominal scalar storage.
@@ -94,16 +94,17 @@ Values above `i32::MAX`, negative values, unresolved names, malformed
 applications, and checked dimension or byte arithmetic overflow are diagnostics.
 The compiler does not clamp, truncate, or substitute a fallback capacity.
 
-The type contains no hidden overflow mode. A rejecting insertion reports its
-ordinary failure result and leaves all lanes unchanged. In source, the caller
-chooses the consequence in the false arm of the required positive guard. An
-empty false arm is the explicit drop-newest behavior; it is not a second type
-identity or a hidden runtime branch.
+The type contains no hidden overflow mode. The side-effect-free `can_*`
+preflight reports whether an expected action is currently possible. In source,
+the caller chooses the consequence in the false arm of the required positive
+guard. An empty false arm is the explicit drop-newest behavior; it is not a
+second type identity or a hidden runtime branch. The action itself has no
+second success/failure result.
 
 `priority_queue` is a binary min-heap ordered by `(priority, insertion_order)`.
 Insertion order is a compiler-owned `u32` lane. Clearing resets it to zero;
-attempting an insertion when it is `u32::MAX` rejects without a write and never
-wraps the sequence.
+`can_push()` is false when another insertion would advance `u32::MAX`, so the
+sequence never wraps.
 
 ## Payload and operation contract
 
@@ -116,22 +117,24 @@ aggregate return ABI. Nested arrays, views, strings, recursive structs, opaque
 handles, and arbitrary generic composite copies remain unsupported.
 
 Pool operations are `collection.push(value) -> i32`,
-`collection.remove(index) -> bool`, `collection.count()`,
-`collection.capacity()`, and `collection.clear()`. `push` returns a physical
-slot on success and `-1` on its explicit false path. Removal is swap-removal:
-the removed index and any index to the moved last value become invalid.
+`collection.remove(index) -> void`, `collection.count()`,
+`collection.capacity()`, and `collection.clear()`. Under its required positive
+`can_push()` proof, `push` returns the new physical slot. It has no failure
+sentinel. Removal is swap-removal: the removed index and any index to the moved
+last value become invalid.
 
 `collection.insert(value) -> i32` on a stable pool returns the lowest free slot
-or `-1` on its explicit false path. `collection.remove(index) -> bool` leaves a
-tombstone without compacting any other value. A stable index remains valid
+under its required positive `can_insert()` proof. It has no failure sentinel.
+`collection.remove(index) -> void` leaves a tombstone without compacting any
+other value. A stable index remains valid
 while its `occupied` lane is set; later insertion reuses the lowest free slot.
 Stable pools also expose `count()`, `capacity()`, and `clear()`.
 
-Queue and ring operations are `push(value) -> bool`, `pop() -> bool`,
+Queue and ring operations are `push(value) -> void`, `pop() -> void`,
 `peek(logical_index) -> T` for scalar payloads,
 `physical_index(logical_index) -> i32`, `count()`, `capacity()`, and `clear()`.
-`push` requires the positive `can_push()` guard and has an explicit false path
-when full. `overwrite_oldest(value)` is a separate, unguarded operation on
+`push`, `pop`, `peek`, and `physical_index` require their matching positive
+guards. `overwrite_oldest(value)` is a separate, unguarded operation on
 queue and ring-buffer receivers: with room it appends; when full it evicts the
 FIFO-oldest item and appends the new value. It does not call `can_push()` and
 does not require a caller-side check. It is statically rejected only for
@@ -140,27 +143,27 @@ their other operations.
 
 FIFO logical index `j` maps to `(head + j) mod N`; `head` is normalized to zero
 when empty. A physical or logical index is valid only for the current count.
-The physical index helper returns `-1` when empty or out of range. An empty
-scalar peek is not executable because `can_peek(logical_index)` is false and the
-required positive arm is not entered.
+The physical index helper and scalar peek are not executable for an empty or
+out-of-range logical index because `can_peek(logical_index)` is false and the
+required positive arm is not entered. Neither operation has an invalid-input
+sentinel.
 
-Priority-queue operations are `push(priority, value) -> bool`, `pop() -> bool`,
+Priority-queue operations are `push(priority, value) -> void`, `pop() -> void`,
 `peek() -> i32`, `peek_priority() -> i32`, `count()`, `capacity()`, and
-`clear()` on the priority-queue receiver. `push` requires `can_push()` and its
-false arm leaves the heap unchanged. Lower priorities are returned first; equal
-priorities retain insertion order.
+`clear()` on the priority-queue receiver. `push` requires `can_push()`; `pop`,
+`peek`, and `peek_priority` require `can_pop()` or `can_peek()` as appropriate.
+Lower priorities are returned first; equal priorities retain insertion order.
 
-The executable i32 map operations are `put(key, value) -> bool`,
-`get(key) -> i32`, `contains(key) -> bool`, and `remove(key) -> bool` on the map
-receiver. Updating an existing key succeeds even when the map is full. A
-missing `get` returns zero; `contains` distinguishes that result from a stored
-zero. A missing key in a full map takes the explicit false path without writing.
-The executable i32 set operations are `add(key) -> bool`, `contains(key) ->
-bool`, and `remove(key) -> bool` on the set receiver. Adding an existing key is
-an idempotent success; adding a new key to a full set takes the explicit false
-path. Both scan keys linearly, reject corrupt count/occupancy or duplicate-key
-metadata without writing, iterate occupied slots in ascending physical order,
-and reuse the lowest free slot. Removal zeros the released key and map value.
+The executable i32 map operations are `put(key, value) -> void`,
+`get(key) -> i32`, `contains(key) -> bool`, and `remove(key) -> void` on the map
+receiver. Updating an existing key remains possible when the map is full.
+`get` requires `can_get(key)` and therefore has no missing-key sentinel;
+`contains` is the unguarded membership query. The executable i32 set operations
+are `add(key) -> void`, `contains(key) -> bool`, and `remove(key) -> void` on the
+set receiver. Adding an existing key is idempotent. Both scan keys linearly,
+iterate occupied slots in ascending physical order, and reuse the lowest free
+slot. Removal zeros the released key and map value. Corrupt count/occupancy or
+duplicate-key metadata is a fatal game error, not an ordinary false result.
 
 Grid receiver operations are `can_access(x, y)`, `get(x, y)`,
 `set(x, y, value)`, `capacity()`, and `clear()`. Grid coordinates use row-major
@@ -173,7 +176,7 @@ bit of word zero; unused tail bits are always masked to zero.
 
 ## Caller-owned proofs and fused lowering
 
-An operation that can reject is guard-required. The caller owns the proof and
+A state-dependent operation is guard-required. The caller owns the proof and
 must write the exact positive structural form, with the same receiver path in
 both calls:
 
@@ -218,15 +221,16 @@ There is no hidden runtime ABI argument or proof object. The proof is consumed
 by the expanded create/action, which uses the SSA values for straight-line
 mutation. The source-visible positive branch remains the one branch. The
 lowering emits no runtime helper call, duplicate scan, second `can_*`
-evaluation, hidden success/failure branch, or extra action branch. If a required
+evaluation, hidden success/failure branch, action success value, or extra action
+branch. If a required
 function cannot be expanded, compilation fails. The false arm remains the
 source-visible, write-free path.
 
-Every rejecting operation has a side-effect-free preflight with the same
+Every guarded operation has a side-effect-free preflight with the same
 immediate checks: pools expose `can_push()` and `can_remove(index)`; stable
 pools expose `can_insert()` and `can_remove(index)`; queues and ring buffers
 expose `can_push()`, `can_pop()`, and `can_peek(logical_index)`; maps expose
-`can_put(key)` and `can_remove(key)`; sets expose `can_add(key)` and
+`can_put(key)`, `can_get(key)`, and `can_remove(key)`; sets expose `can_add(key)` and
 `can_remove(key)`; priority queues expose `can_push()`, `can_pop()`, and
 `can_peek()`; grids and bitsets expose `can_access(...)`. A preflight reads only
 the state needed to decide the action and writes no lane. When paired with its
@@ -259,9 +263,15 @@ word counts, without confusing it with the collection's logical capacity.
 ## Diagnostics and execution parity
 
 Guard failures are ordinary source control flow, not collection errors or hidden
-telemetry events. The compiler instead diagnoses missing, mismatched, reused, or
-non-structural proofs before code generation. Runtime collection code contains
-only the source-visible condition and the fused operation in its positive arm.
+telemetry events. Stasis has no recoverable exception path for collection
+operations. The compiler diagnoses missing, mismatched, reused, or
+non-structural proofs before code generation. After a positive proof, the action
+completes without another success/failure channel. Corrupt metadata, an
+impossible post-proof index, or any other invariant violation is a fatal game
+execution error: it terminates execution and is never translated into `false`,
+`0`, `-1`, a catchable exception, or a partial write. Runtime collection code
+contains only the source-visible condition, fused action, and fatal invariant
+checks; it introduces no recovery branch or helper call.
 
 JIT and linked AOT consume the same descriptor, lane order, bounds, comparator,
 operation result, snapshot order, and diagnostic site table. A green acceptance

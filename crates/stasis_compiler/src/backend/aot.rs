@@ -4002,11 +4002,11 @@ global typed_pool_lanes_147: pool<i32, 2>;
 global typed_pool_zero_147: pool<i32, 0>;
 function main(): i32 {
     let first: i32 = -1;
-    if (typed_pool_parity_147.can_push()) { first = typed_pool_parity_147.push(10); }
+    if (typed_pool_parity_147.can_push()) { typed_pool_parity_147.push(10); first = 0; }
     let second: i32 = -1;
-    if (typed_pool_parity_147.can_push()) { second = typed_pool_parity_147.push(20); }
+    if (typed_pool_parity_147.can_push()) { typed_pool_parity_147.push(20); second = 1; }
     let rejected: i32 = -1;
-    if (typed_pool_parity_147.can_push()) { rejected = typed_pool_parity_147.push(30); }
+    if (typed_pool_parity_147.can_push()) { typed_pool_parity_147.push(30); rejected = 2; }
     let count_before: i32 = typed_pool_parity_147.count();
     let capacity: i32 = typed_pool_parity_147.capacity();
     let removed_code: i32 = 0;
@@ -4022,11 +4022,11 @@ function main(): i32 {
 }
 function fill_lanes(): i32 {
     let first: i32 = -1;
-    if (typed_pool_lanes_147.can_push()) { first = typed_pool_lanes_147.push(10); }
+    if (typed_pool_lanes_147.can_push()) { typed_pool_lanes_147.push(10); first = 0; }
     let second: i32 = -1;
-    if (typed_pool_lanes_147.can_push()) { second = typed_pool_lanes_147.push(20); }
+    if (typed_pool_lanes_147.can_push()) { typed_pool_lanes_147.push(20); second = 1; }
     let rejected: i32 = -1;
-    if (typed_pool_lanes_147.can_push()) { rejected = typed_pool_lanes_147.push(30); }
+    if (typed_pool_lanes_147.can_push()) { typed_pool_lanes_147.push(30); rejected = 2; }
     return first * 100 + second * 10 + rejected;
 }
 function remove_lanes(): i32 {
@@ -4043,7 +4043,7 @@ function clear_lanes(): i32 {
 }
 function zero_capacity(): i32 {
     let pushed: i32 = -1;
-    if (typed_pool_zero_147.can_push()) { pushed = typed_pool_zero_147.push(7); }
+    if (typed_pool_zero_147.can_push()) { typed_pool_zero_147.push(7); pushed = 0; }
     let rejected_code: i32 = 0;
     if (pushed == -1) { rejected_code = 1; }
     let removed_code: i32 = 0;
@@ -4181,20 +4181,20 @@ global typed_stable_zero_parity_147: stable_pool<i32, 0>;
 function stable_error_sequence(): i32 {
     typed_stable_error_parity_147.clear();
     let first: i32 = -1;
-    if (typed_stable_error_parity_147.can_insert()) { first = typed_stable_error_parity_147.insert(10); }
+    if (typed_stable_error_parity_147.can_insert()) { typed_stable_error_parity_147.insert(10); first = 0; }
     let second: i32 = -1;
-    if (typed_stable_error_parity_147.can_insert()) { second = typed_stable_error_parity_147.insert(20); }
+    if (typed_stable_error_parity_147.can_insert()) { typed_stable_error_parity_147.insert(20); second = 1; }
     let third: i32 = -1;
-    if (typed_stable_error_parity_147.can_insert()) { third = typed_stable_error_parity_147.insert(30); }
+    if (typed_stable_error_parity_147.can_insert()) { typed_stable_error_parity_147.insert(30); third = 2; }
     let full: i32 = -1;
-    if (typed_stable_error_parity_147.can_insert()) { full = typed_stable_error_parity_147.insert(40); }
+    if (typed_stable_error_parity_147.can_insert()) { typed_stable_error_parity_147.insert(40); full = 3; }
     let removed: i32 = 0;
     if (typed_stable_error_parity_147.can_remove(1)) { typed_stable_error_parity_147.remove(1); removed = 1; }
     let invalid: i32 = 0;
     if (typed_stable_error_parity_147.can_remove(1)) { typed_stable_error_parity_147.remove(1); invalid += 100; }
     if (typed_stable_error_parity_147.can_remove(9)) { typed_stable_error_parity_147.remove(9); invalid += 10; }
     let reused: i32 = -1;
-    if (typed_stable_error_parity_147.can_insert()) { reused = typed_stable_error_parity_147.insert(40); }
+    if (typed_stable_error_parity_147.can_insert()) { typed_stable_error_parity_147.insert(40); reused = 1; }
     let count_after: i32 = typed_stable_error_parity_147.count();
     let capacity: i32 = typed_stable_error_parity_147.capacity();
     typed_stable_error_parity_147.clear();
@@ -4205,11 +4205,11 @@ function stable_error_sequence(): i32 {
 function stable_drop_sequence(): i32 {
     typed_stable_drop_parity_147.clear();
     let first: i32 = -1;
-    if (typed_stable_drop_parity_147.can_insert()) { first = typed_stable_drop_parity_147.insert(1); }
+    if (typed_stable_drop_parity_147.can_insert()) { typed_stable_drop_parity_147.insert(1); first = 0; }
     let second: i32 = -1;
-    if (typed_stable_drop_parity_147.can_insert()) { second = typed_stable_drop_parity_147.insert(2); }
+    if (typed_stable_drop_parity_147.can_insert()) { typed_stable_drop_parity_147.insert(2); second = 1; }
     let rejected: i32 = -1;
-    if (typed_stable_drop_parity_147.can_insert()) { rejected = typed_stable_drop_parity_147.insert(3); }
+    if (typed_stable_drop_parity_147.can_insert()) { typed_stable_drop_parity_147.insert(3); rejected = 2; }
     let count: i32 = typed_stable_drop_parity_147.count();
     let capacity: i32 = typed_stable_drop_parity_147.capacity();
     typed_stable_drop_parity_147.clear();
@@ -4220,7 +4220,7 @@ function stable_drop_sequence(): i32 {
 function stable_zero_capacity(): i32 {
     typed_stable_zero_parity_147.clear();
     let inserted: i32 = -1;
-    if (typed_stable_zero_parity_147.can_insert()) { inserted = typed_stable_zero_parity_147.insert(7); }
+    if (typed_stable_zero_parity_147.can_insert()) { typed_stable_zero_parity_147.insert(7); inserted = 0; }
     let removed: i32 = 0;
     if (typed_stable_zero_parity_147.can_remove(0)) { typed_stable_zero_parity_147.remove(0); removed = 1; }
     let count: i32 = typed_stable_zero_parity_147.count();
@@ -4288,17 +4288,21 @@ function map_sequence(): i32 {
     if (typed_map_error_parity_147.can_put(1)) { typed_map_error_parity_147.put(1, 10); }
     if (typed_map_error_parity_147.can_put(2)) { typed_map_error_parity_147.put(2, 20); }
     if (typed_map_error_parity_147.can_put(3)) { typed_map_error_parity_147.put(3, 30); }
-    let before_update: i32 = typed_map_error_parity_147.get(2);
+    let before_update: i32 = 0;
+    if (typed_map_error_parity_147.can_get(2)) { before_update = typed_map_error_parity_147.get(2); }
     if (typed_map_error_parity_147.can_put(2)) { typed_map_error_parity_147.put(2, 25); }
-    let after_update: i32 = typed_map_error_parity_147.get(2);
+    let after_update: i32 = 0;
+    if (typed_map_error_parity_147.can_get(2)) { after_update = typed_map_error_parity_147.get(2); }
     if (typed_map_error_parity_147.can_put(4)) { typed_map_error_parity_147.put(4, 40); }
     let full_contains: i32 = 0;
     if (typed_map_error_parity_147.contains(4)) { full_contains = 1; }
     let removed: i32 = 0;
     if (typed_map_error_parity_147.can_remove(2)) { typed_map_error_parity_147.remove(2); removed = 1; }
-    let missing_after_remove: i32 = typed_map_error_parity_147.get(2);
+    let missing_after_remove: i32 = 0;
+    if (typed_map_error_parity_147.can_get(2)) { missing_after_remove = typed_map_error_parity_147.get(2); }
     if (typed_map_error_parity_147.can_put(4)) { typed_map_error_parity_147.put(4, 40); }
-    let reused: i32 = typed_map_error_parity_147.get(4);
+    let reused: i32 = 0;
+    if (typed_map_error_parity_147.can_get(4)) { reused = typed_map_error_parity_147.get(4); }
     return before_update * 1000000 + after_update * 10000
         + full_contains * 1000 + removed * 100
         + missing_after_remove * 10 + reused;
@@ -4309,12 +4313,16 @@ function map_drop_sequence(): i32 {
     if (typed_map_drop_parity_147.can_put(3)) { typed_map_drop_parity_147.put(3, 30); }
     if (typed_map_drop_parity_147.can_put(2)) { typed_map_drop_parity_147.put(2, 25); }
     if (typed_map_drop_parity_147.can_put(4)) { typed_map_drop_parity_147.put(4, 40); }
-    return typed_map_drop_parity_147.get(2) * 100
-        + typed_map_drop_parity_147.get(4);
+    let existing: i32 = 0;
+    if (typed_map_drop_parity_147.can_get(2)) { existing = typed_map_drop_parity_147.get(2); }
+    let rejected: i32 = 0;
+    if (typed_map_drop_parity_147.can_get(4)) { rejected = typed_map_drop_parity_147.get(4); }
+    return existing * 100 + rejected;
 }
 function map_zero_capacity(): i32 {
     if (typed_map_zero_parity_147.can_put(1)) { typed_map_zero_parity_147.put(1, 7); }
-    let result: i32 = typed_map_zero_parity_147.get(1);
+    let result: i32 = 0;
+    if (typed_map_zero_parity_147.can_get(1)) { result = typed_map_zero_parity_147.get(1); }
     if (typed_map_zero_parity_147.contains(1)) { result += 100; }
     if (typed_map_zero_parity_147.can_remove(1)) { typed_map_zero_parity_147.remove(1); result += 10; }
     return result;
@@ -4420,15 +4428,20 @@ function error_wraparound(): i32 {
     if (typed_queue_error_parity_147.can_peek(0)) { before_peek_zero = typed_queue_error_parity_147.peek(0); }
     let before_peek_two: i32 = -1;
     if (typed_queue_error_parity_147.can_peek(2)) { before_peek_two = typed_queue_error_parity_147.peek(2); }
+    let before_physical_zero: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(0)) { before_physical_zero = typed_queue_error_parity_147.physical_index(0); }
+    let before_physical_two: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(2)) { before_physical_two = typed_queue_error_parity_147.physical_index(2); }
     let before: i32 = typed_queue_error_parity_147.count() * 100000
         + typed_queue_error_parity_147.capacity() * 10000
         + before_peek_zero * 1000
         + before_peek_two * 100
-        + typed_queue_error_parity_147.physical_index(0) * 10
-        + typed_queue_error_parity_147.physical_index(2);
+        + before_physical_zero * 10
+        + before_physical_two;
     let invalid_peek: i32 = 0;
     if (typed_queue_error_parity_147.can_peek(9)) { invalid_peek = typed_queue_error_parity_147.peek(9); }
-    let invalid_physical: i32 = typed_queue_error_parity_147.physical_index(-1);
+    let invalid_physical: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(-1)) { invalid_physical = typed_queue_error_parity_147.physical_index(-1); }
     let popped: i32 = 0;
     if (typed_queue_error_parity_147.can_pop()) { typed_queue_error_parity_147.pop(); popped = 1; }
     let wrapped: i32 = 0;
@@ -4437,12 +4450,16 @@ function error_wraparound(): i32 {
     if (typed_queue_error_parity_147.can_peek(0)) { after_wrap_peek_zero = typed_queue_error_parity_147.peek(0); }
     let after_wrap_peek_two: i32 = -1;
     if (typed_queue_error_parity_147.can_peek(2)) { after_wrap_peek_two = typed_queue_error_parity_147.peek(2); }
+    let after_wrap_physical_zero: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(0)) { after_wrap_physical_zero = typed_queue_error_parity_147.physical_index(0); }
+    let after_wrap_physical_two: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(2)) { after_wrap_physical_two = typed_queue_error_parity_147.physical_index(2); }
     let after_wrap: i32 = typed_queue_error_parity_147.count() * 100000
         + typed_queue_error_parity_147.capacity() * 10000
         + after_wrap_peek_zero * 1000
         + after_wrap_peek_two * 100
-        + typed_queue_error_parity_147.physical_index(0) * 10
-        + typed_queue_error_parity_147.physical_index(2);
+        + after_wrap_physical_zero * 10
+        + after_wrap_physical_two;
     let popped_again: i32 = 0;
     if (typed_queue_error_parity_147.can_pop()) { typed_queue_error_parity_147.pop(); popped_again = 1; }
     let wrapped_again: i32 = 0;
@@ -4451,12 +4468,16 @@ function error_wraparound(): i32 {
     if (typed_queue_error_parity_147.can_peek(0)) { after_second_wrap_peek_zero = typed_queue_error_parity_147.peek(0); }
     let after_second_wrap_peek_two: i32 = -1;
     if (typed_queue_error_parity_147.can_peek(2)) { after_second_wrap_peek_two = typed_queue_error_parity_147.peek(2); }
+    let after_second_wrap_physical_zero: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(0)) { after_second_wrap_physical_zero = typed_queue_error_parity_147.physical_index(0); }
+    let after_second_wrap_physical_two: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(2)) { after_second_wrap_physical_two = typed_queue_error_parity_147.physical_index(2); }
     let after_second_wrap: i32 = typed_queue_error_parity_147.count() * 100000
         + typed_queue_error_parity_147.capacity() * 10000
         + after_second_wrap_peek_zero * 1000
         + after_second_wrap_peek_two * 100
-        + typed_queue_error_parity_147.physical_index(0) * 10
-        + typed_queue_error_parity_147.physical_index(2);
+        + after_second_wrap_physical_zero * 10
+        + after_second_wrap_physical_two;
     typed_queue_error_parity_147.clear();
     return accepted * 1000000 + rejected * 100000 + before
         + invalid_peek * 10000 + invalid_physical * 1000
@@ -4494,18 +4515,24 @@ function overwrite_replace(): i32 {
     if (typed_queue_overwrite_parity_147.can_peek(0)) { before_pop_peek_zero = typed_queue_overwrite_parity_147.peek(0); }
     let before_pop_peek_one: i32 = -1;
     if (typed_queue_overwrite_parity_147.can_peek(1)) { before_pop_peek_one = typed_queue_overwrite_parity_147.peek(1); }
+    let before_pop_physical_zero: i32 = -1;
+    if (typed_queue_overwrite_parity_147.can_peek(0)) { before_pop_physical_zero = typed_queue_overwrite_parity_147.physical_index(0); }
+    let before_pop_physical_one: i32 = -1;
+    if (typed_queue_overwrite_parity_147.can_peek(1)) { before_pop_physical_one = typed_queue_overwrite_parity_147.physical_index(1); }
     let before_pop: i32 = typed_queue_overwrite_parity_147.count() * 100000
         + typed_queue_overwrite_parity_147.capacity() * 10000
         + before_pop_peek_zero * 1000
         + before_pop_peek_one * 100
-        + typed_queue_overwrite_parity_147.physical_index(0) * 10
-        + typed_queue_overwrite_parity_147.physical_index(1);
+        + before_pop_physical_zero * 10
+        + before_pop_physical_one;
     let popped: i32 = 0;
     if (typed_queue_overwrite_parity_147.can_pop()) { typed_queue_overwrite_parity_147.pop(); popped = 1; }
     let after_pop_peek_zero: i32 = -1;
     if (typed_queue_overwrite_parity_147.can_peek(0)) { after_pop_peek_zero = typed_queue_overwrite_parity_147.peek(0); }
+    let after_pop_physical_zero: i32 = -1;
+    if (typed_queue_overwrite_parity_147.can_peek(0)) { after_pop_physical_zero = typed_queue_overwrite_parity_147.physical_index(0); }
     let after_pop: i32 = typed_queue_overwrite_parity_147.count() * 100
-        + typed_queue_overwrite_parity_147.physical_index(0) * 10
+        + after_pop_physical_zero * 10
         + after_pop_peek_zero;
     typed_queue_overwrite_parity_147.clear();
     return accepted * 1000000 + before_pop + popped * 1000 + after_pop
@@ -4519,11 +4546,13 @@ function zero_capacity(): i32 {
     if (typed_queue_zero_parity_147.can_pop()) { typed_queue_zero_parity_147.pop(); popped = 1; }
     let peeked: i32 = 0;
     if (typed_queue_zero_parity_147.can_peek(0)) { peeked = typed_queue_zero_parity_147.peek(0); }
+    let physical: i32 = -1;
+    if (typed_queue_zero_parity_147.can_peek(0)) { physical = typed_queue_zero_parity_147.physical_index(0); }
     return pushed * 100000 + popped * 10000
         + typed_queue_zero_parity_147.count() * 1000
         + typed_queue_zero_parity_147.capacity() * 100
         + peeked * 10
-        + typed_queue_zero_parity_147.physical_index(0);
+        + physical;
 }
 "#;
         const ROOTS: [&str; 4] = [
@@ -4768,12 +4797,16 @@ function error_wraparound(): i32 {
     if (typed_ring_error_parity_147.can_peek(0)) { before_peek_zero = typed_ring_error_parity_147.peek(0); }
     let before_peek_two: i32 = -1;
     if (typed_ring_error_parity_147.can_peek(2)) { before_peek_two = typed_ring_error_parity_147.peek(2); }
+    let before_physical_zero: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(0)) { before_physical_zero = typed_ring_error_parity_147.physical_index(0); }
+    let before_physical_two: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(2)) { before_physical_two = typed_ring_error_parity_147.physical_index(2); }
     let before: i32 = typed_ring_error_parity_147.count() * 100000
         + typed_ring_error_parity_147.capacity() * 10000
         + before_peek_zero * 1000
         + before_peek_two * 100
-        + typed_ring_error_parity_147.physical_index(0) * 10
-        + typed_ring_error_parity_147.physical_index(2);
+        + before_physical_zero * 10
+        + before_physical_two;
     let popped: i32 = 0;
     if (typed_ring_error_parity_147.can_pop()) { typed_ring_error_parity_147.pop(); popped = 1; }
     let wrapped: i32 = 0;
@@ -4782,12 +4815,16 @@ function error_wraparound(): i32 {
     if (typed_ring_error_parity_147.can_peek(0)) { after_wrap_peek_zero = typed_ring_error_parity_147.peek(0); }
     let after_wrap_peek_two: i32 = -1;
     if (typed_ring_error_parity_147.can_peek(2)) { after_wrap_peek_two = typed_ring_error_parity_147.peek(2); }
+    let after_wrap_physical_zero: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(0)) { after_wrap_physical_zero = typed_ring_error_parity_147.physical_index(0); }
+    let after_wrap_physical_two: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(2)) { after_wrap_physical_two = typed_ring_error_parity_147.physical_index(2); }
     let after_wrap: i32 = typed_ring_error_parity_147.count() * 100000
         + typed_ring_error_parity_147.capacity() * 10000
         + after_wrap_peek_zero * 1000
         + after_wrap_peek_two * 100
-        + typed_ring_error_parity_147.physical_index(0) * 10
-        + typed_ring_error_parity_147.physical_index(2);
+        + after_wrap_physical_zero * 10
+        + after_wrap_physical_two;
     typed_ring_error_parity_147.clear();
     return accepted * 1000000 + rejected * 100000 + before
         + popped * 100 + wrapped * 10 + after_wrap
@@ -4823,18 +4860,24 @@ function overwrite_replace(): i32 {
     if (typed_ring_overwrite_parity_147.can_peek(0)) { before_pop_peek_zero = typed_ring_overwrite_parity_147.peek(0); }
     let before_pop_peek_one: i32 = -1;
     if (typed_ring_overwrite_parity_147.can_peek(1)) { before_pop_peek_one = typed_ring_overwrite_parity_147.peek(1); }
+    let before_pop_physical_zero: i32 = -1;
+    if (typed_ring_overwrite_parity_147.can_peek(0)) { before_pop_physical_zero = typed_ring_overwrite_parity_147.physical_index(0); }
+    let before_pop_physical_one: i32 = -1;
+    if (typed_ring_overwrite_parity_147.can_peek(1)) { before_pop_physical_one = typed_ring_overwrite_parity_147.physical_index(1); }
     let before_pop: i32 = typed_ring_overwrite_parity_147.count() * 100000
         + typed_ring_overwrite_parity_147.capacity() * 10000
         + before_pop_peek_zero * 1000
         + before_pop_peek_one * 100
-        + typed_ring_overwrite_parity_147.physical_index(0) * 10
-        + typed_ring_overwrite_parity_147.physical_index(1);
+        + before_pop_physical_zero * 10
+        + before_pop_physical_one;
     let popped: i32 = 0;
     if (typed_ring_overwrite_parity_147.can_pop()) { typed_ring_overwrite_parity_147.pop(); popped = 1; }
     let after_pop_peek_zero: i32 = -1;
     if (typed_ring_overwrite_parity_147.can_peek(0)) { after_pop_peek_zero = typed_ring_overwrite_parity_147.peek(0); }
+    let after_pop_physical_zero: i32 = -1;
+    if (typed_ring_overwrite_parity_147.can_peek(0)) { after_pop_physical_zero = typed_ring_overwrite_parity_147.physical_index(0); }
     let after_pop: i32 = typed_ring_overwrite_parity_147.count() * 100
-        + typed_ring_overwrite_parity_147.physical_index(0) * 10
+        + after_pop_physical_zero * 10
         + after_pop_peek_zero;
     typed_ring_overwrite_parity_147.clear();
     return accepted * 1000000 + before_pop + popped * 1000 + after_pop
@@ -4848,11 +4891,13 @@ function zero_capacity(): i32 {
     if (typed_ring_zero_parity_147.can_pop()) { typed_ring_zero_parity_147.pop(); popped = 1; }
     let peeked: i32 = 0;
     if (typed_ring_zero_parity_147.can_peek(0)) { peeked = typed_ring_zero_parity_147.peek(0); }
+    let physical: i32 = -1;
+    if (typed_ring_zero_parity_147.can_peek(0)) { physical = typed_ring_zero_parity_147.physical_index(0); }
     return pushed * 100000 + popped * 10000
         + typed_ring_zero_parity_147.count() * 1000
         + typed_ring_zero_parity_147.capacity() * 100
         + peeked * 10
-        + typed_ring_zero_parity_147.physical_index(0);
+        + physical;
 }
 "#;
         const ROOTS: [&str; 4] = [
