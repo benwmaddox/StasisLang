@@ -755,14 +755,14 @@ fn validate_typed_collection_placement(
     }
     let supported_kind = matches!(
         descriptor.kind,
-        TypedCollectionKind::Pool | TypedCollectionKind::Queue
+        TypedCollectionKind::Pool | TypedCollectionKind::Queue | TypedCollectionKind::RingBuffer
     );
     let supported_policy = match descriptor.kind {
         TypedCollectionKind::Pool => matches!(
             descriptor.policy,
             TypedCollectionOverflowPolicy::Error | TypedCollectionOverflowPolicy::DropNewest
         ),
-        TypedCollectionKind::Queue => matches!(
+        TypedCollectionKind::Queue | TypedCollectionKind::RingBuffer => matches!(
             descriptor.policy,
             TypedCollectionOverflowPolicy::Error
                 | TypedCollectionOverflowPolicy::DropNewest
@@ -772,7 +772,7 @@ fn validate_typed_collection_placement(
     };
     if !supported_kind || descriptor.element_type != Some(TYPE_ID_I32) || !supported_policy {
         return Err(format!(
-            "typed collection state path '{path}' is not yet supported for production layout: only pool<i32,N,error|drop_newest> and queue<i32,N,error|drop_newest|overwrite_oldest> have a descriptor-defined state contract; got {}",
+            "typed collection state path '{path}' is not yet supported for production layout: only pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, and ring_buffer<i32,N,error|drop_newest|overwrite_oldest> have a descriptor-defined state contract; got {}",
             descriptor.canonical_type_name(type_table)
         ));
     }
@@ -1170,6 +1170,85 @@ mod tests {
     }
 
     #[test]
+    fn typed_ring_buffer_layout_has_exact_count_head_and_values_lanes_for_every_policy() {
+        for policy in ["error", "drop_newest", "overwrite_oldest"] {
+            let layout = typed_layout(&format!("ring_buffer<i32, 2, {policy}>"));
+            assert!(layout.scalars.iter().all(|scalar| scalar.path != "actors"));
+            let count = layout
+                .scalars
+                .iter()
+                .find(|scalar| scalar.path == "actors.count")
+                .expect("typed ring buffer count scalar");
+            assert_eq!(count.type_name, "i32");
+            assert_eq!(count.storage_type_name(), "i32");
+            let head = layout
+                .scalars
+                .iter()
+                .find(|scalar| scalar.path == "actors.head")
+                .expect("typed ring buffer head scalar");
+            assert_eq!(head.type_name, "i32");
+            assert_eq!(head.storage_type_name(), "i32");
+
+            let ring = layout
+                .collections
+                .iter()
+                .find(|collection| collection.path == "actors")
+                .expect("typed ring buffer collection layout");
+            assert_eq!(ring.capacity, 2);
+            assert!(!ring.fully_migratable);
+            assert_eq!(
+                ring.fields
+                    .iter()
+                    .map(|field| field.field.as_str())
+                    .collect::<Vec<_>>(),
+                ["values"]
+            );
+            assert_eq!(ring.fields[0].type_name, "i32");
+            assert_eq!(ring.fields[0].storage_type_name(), "i32");
+            assert_eq!(
+                ring.element_shape,
+                format!(
+                    "typed_collection{{type=ring_buffer<i32, 2, {policy}>;kind=ring_buffer;policy={policy};capacity=2;width=-;height=-;static_size=16;lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:2:8:8:4]}}"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn typed_ring_buffer_zero_capacity_has_exact_metadata_and_empty_values_lane() {
+        let layout = typed_layout("ring_buffer<i32, 0, overwrite_oldest>");
+        for lane in ["count", "head"] {
+            let scalar = layout
+                .scalars
+                .iter()
+                .find(|scalar| scalar.path == format!("actors.{lane}"))
+                .unwrap_or_else(|| panic!("typed ring buffer {lane} scalar"));
+            assert_eq!(scalar.type_name, "i32");
+            assert_eq!(scalar.storage_type_name(), "i32");
+        }
+        let ring = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("zero-capacity typed ring buffer layout");
+        assert_eq!(ring.capacity, 0);
+        assert!(!ring.fully_migratable);
+        assert_eq!(
+            ring.fields
+                .iter()
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["values"]
+        );
+        assert_eq!(ring.fields[0].type_name, "i32");
+        assert_eq!(ring.fields[0].storage_type_name(), "i32");
+        assert_eq!(
+            ring.element_shape,
+            "typed_collection{type=ring_buffer<i32, 0, overwrite_oldest>;kind=ring_buffer;policy=overwrite_oldest;capacity=0;width=-;height=-;static_size=8;lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:0:8:0:4]}"
+        );
+    }
+
+    #[test]
     fn typed_pool_policy_and_capacity_are_state_layout_identity() {
         let error = state_layout_digest(&typed_layout("pool<i32, 2, error>")).expect("digest");
         let drop = state_layout_digest(&typed_layout("pool<i32, 2, drop_newest>")).expect("digest");
@@ -1183,14 +1262,18 @@ mod tests {
         let bitset = typed_layout_result("bitset<8, error>")
             .expect_err("bitset layout must not claim pool-shaped storage");
         assert!(
-            bitset.contains("only pool<i32,N,error|drop_newest>"),
+            bitset.contains(
+                "only pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, and ring_buffer<i32,N,error|drop_newest|overwrite_oldest>"
+            ),
             "{bitset}"
         );
 
         let wide_pool = typed_layout_result("pool<f64, 2, error>")
             .expect_err("non-i32 pool payload layout must be rejected");
         assert!(
-            wide_pool.contains("only pool<i32,N,error|drop_newest>"),
+            wide_pool.contains(
+                "only pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, and ring_buffer<i32,N,error|drop_newest|overwrite_oldest>"
+            ),
             "{wide_pool}"
         );
     }

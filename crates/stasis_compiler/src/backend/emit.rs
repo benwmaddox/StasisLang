@@ -3099,6 +3099,25 @@ pub(crate) fn emit_simple_statements(
                     {
                         continue;
                     }
+                    if try_emit_typed_ring_buffer_call(
+                        builder,
+                        target,
+                        args,
+                        values_by_name,
+                        runtime_call_refs,
+                        internal_calls,
+                        call_signatures,
+                        type_table,
+                        global_path_types,
+                        constant_values,
+                        collection_infos,
+                        named_struct_field_types,
+                        foreach_bindings,
+                    )?
+                    .is_some()
+                    {
+                        continue;
+                    }
                     let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
                     let mut arg_types: Vec<TypeId> = Vec::with_capacity(args.len());
                     let expected_params =
@@ -4616,7 +4635,7 @@ fn emit_typed_pool_clear(
 }
 
 #[derive(Clone, Copy)]
-enum TypedQueueCallResult {
+enum TypedCircularCallResult {
     Value(ValueBinding),
     Void,
 }
@@ -4651,9 +4670,10 @@ impl TypedQueueCallKind {
     }
 }
 
-fn typed_queue_storage_bindings(
+fn typed_circular_storage_bindings(
     target: &str,
     args: &[SimpleExpr],
+    expected_kind: TypedCollectionKind,
     values_by_name: &BTreeMap<String, LocalBinding>,
     runtime_call_refs: &RuntimeCallRefs,
     global_path_types: &GlobalPathTypeMap,
@@ -4688,8 +4708,10 @@ fn typed_queue_storage_bindings(
     })?;
     if !type_table.is_typed_collection_type(type_id) {
         return Err(format!(
-            "{target} requires persistent queue path '{}', found non-typed state type {}",
-            path, type_id
+            "{target} requires persistent {} path '{}', found non-typed state type {}",
+            expected_kind.as_str(),
+            path,
+            type_id
         ));
     }
     let type_name = type_table
@@ -4704,28 +4726,33 @@ fn typed_queue_storage_bindings(
                 path
             )
         })?;
-    if descriptor.kind != TypedCollectionKind::Queue {
+    if descriptor.kind != expected_kind {
         return Err(format!(
-            "{target} requires persistent queue path '{}', found {}",
+            "{target} requires persistent {} path '{}', found {}",
+            expected_kind.as_str(),
             path,
             descriptor.kind_name()
         ));
     }
     if descriptor.element_type != Some(TYPE_ID_I32) {
         return Err(format!(
-            "{target} requires queue path '{}' with i32 payload",
+            "{target} requires {} path '{}' with i32 payload",
+            expected_kind.as_str(),
             path
         ));
     }
     let capacity = usize::try_from(descriptor.capacity).map_err(|_| {
         format!(
-            "{target} queue path '{}' capacity {} does not fit the target index type",
-            path, descriptor.capacity
+            "{target} {} path '{}' capacity {} does not fit the target index type",
+            expected_kind.as_str(),
+            path,
+            descriptor.capacity
         )
     })?;
     let direct_storage = runtime_call_refs.direct_storage.as_ref().ok_or_else(|| {
         format!(
-            "{target} for typed queue '{}' requires direct storage bindings",
+            "{target} for typed {} '{}' requires direct storage bindings",
+            expected_kind.as_str(),
             path
         )
     })?;
@@ -4736,8 +4763,10 @@ fn typed_queue_storage_bindings(
         .copied()
         .ok_or_else(|| {
             format!(
-                "{target} for typed queue '{}' is missing direct scalar binding '{}.count'",
-                path, path
+                "{target} for typed {} '{}' is missing direct scalar binding '{}.count'",
+                expected_kind.as_str(),
+                path,
+                path
             )
         })?;
     let head_path = format!("{path}.head");
@@ -4747,8 +4776,10 @@ fn typed_queue_storage_bindings(
         .copied()
         .ok_or_else(|| {
             format!(
-                "{target} for typed queue '{}' is missing direct scalar binding '{}.head'",
-                path, path
+                "{target} for typed {} '{}' is missing direct scalar binding '{}.head'",
+                expected_kind.as_str(),
+                path,
+                path
             )
         })?;
     let values = direct_storage
@@ -4757,14 +4788,20 @@ fn typed_queue_storage_bindings(
         .copied()
         .ok_or_else(|| {
             format!(
-                "{target} for typed queue '{}' is missing direct array binding '{}.values'",
-                path, path
+                "{target} for typed {} '{}' is missing direct array binding '{}.values'",
+                expected_kind.as_str(),
+                path,
+                path
             )
         })?;
     if values.storage_bytes != 4 || values.static_len != Some(capacity) {
         return Err(format!(
-            "{target} for typed queue '{}' requires an i32 values binding with static length {}, found {} bytes and length {:?}",
-            path, capacity, values.storage_bytes, values.static_len
+            "{target} for typed {} '{}' requires an i32 values binding with static length {}, found {} bytes and length {:?}",
+            expected_kind.as_str(),
+            path,
+            capacity,
+            values.storage_bytes,
+            values.static_len
         ));
     }
     Ok((
@@ -4777,7 +4814,7 @@ fn typed_queue_storage_bindings(
     ))
 }
 
-fn emit_typed_queue_metadata_valid(
+fn emit_typed_circular_metadata_valid(
     builder: &mut FunctionBuilder<'_>,
     count: Value,
     head: Value,
@@ -4804,7 +4841,7 @@ fn emit_typed_queue_metadata_valid(
     builder.ins().band(count_valid, head_valid)
 }
 
-fn emit_typed_queue_physical_index(
+fn emit_typed_circular_physical_index(
     builder: &mut FunctionBuilder<'_>,
     head: Value,
     logical_index: Value,
@@ -4821,7 +4858,7 @@ fn emit_typed_queue_physical_index(
     builder.ins().ireduce(types::I32, remainder)
 }
 
-fn emit_typed_queue_index_state(
+fn emit_typed_circular_index_state(
     builder: &mut FunctionBuilder<'_>,
     count_ref: DirectStorageRef,
     head_ref: DirectStorageRef,
@@ -4831,7 +4868,7 @@ fn emit_typed_queue_index_state(
 ) -> Result<(Value, Value), String> {
     let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
     let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
-    let metadata_valid = emit_typed_queue_metadata_valid(builder, count, head, capacity);
+    let metadata_valid = emit_typed_circular_metadata_valid(builder, count, head, capacity);
     let logical_non_negative =
         builder
             .ins()
@@ -4848,11 +4885,11 @@ fn emit_typed_queue_index_state(
         .band(logical_non_negative, logical_below_count);
     let logical_valid = builder.ins().band(logical_valid, logical_below_capacity);
     let valid = builder.ins().band(metadata_valid, logical_valid);
-    let physical = emit_typed_queue_physical_index(builder, head, logical_index, capacity);
+    let physical = emit_typed_circular_physical_index(builder, head, logical_index, capacity);
     Ok((physical, valid))
 }
 
-fn emit_typed_queue_push(
+fn emit_typed_circular_push(
     builder: &mut FunctionBuilder<'_>,
     count_ref: DirectStorageRef,
     head_ref: DirectStorageRef,
@@ -4862,8 +4899,9 @@ fn emit_typed_queue_push(
     value: Value,
     type_table: &TypeTable,
 ) -> Result<ValueBinding, String> {
-    let capacity_i32 = i32::try_from(capacity)
-        .map_err(|_| format!("typed queue capacity {capacity} exceeds i32 operation range"))?;
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed circular collection capacity {capacity} exceeds i32 operation range")
+    })?;
     if capacity_i32 == 0 {
         return Ok(ValueBinding {
             value: builder.ins().iconst(types::I32, 0),
@@ -4873,7 +4911,7 @@ fn emit_typed_queue_push(
 
     let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
     let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
-    let metadata_valid = emit_typed_queue_metadata_valid(builder, count, head, capacity_i32);
+    let metadata_valid = emit_typed_circular_metadata_valid(builder, count, head, capacity_i32);
     let valid_block = builder.create_block();
     let invalid_block = builder.create_block();
     let merge_block = builder.create_block();
@@ -4900,7 +4938,7 @@ fn emit_typed_queue_push(
 
     builder.seal_block(nonfull_block);
     builder.switch_to_block(nonfull_block);
-    let physical = emit_typed_queue_physical_index(builder, head, count, capacity_i32);
+    let physical = emit_typed_circular_physical_index(builder, head, count, capacity_i32);
     emit_direct_array_store(
         builder,
         values_ref.slot,
@@ -4930,7 +4968,7 @@ fn emit_typed_queue_push(
             true,
         )?;
         let one = builder.ins().iconst(types::I32, 1);
-        let next_head = emit_typed_queue_physical_index(builder, head, one, capacity_i32);
+        let next_head = emit_typed_circular_physical_index(builder, head, one, capacity_i32);
         emit_direct_i32_store(builder, head_ref, next_head);
         let accepted = builder.ins().iconst(types::I32, 1);
         builder.ins().jump(merge_block, &[accepted]);
@@ -4945,14 +4983,14 @@ fn emit_typed_queue_push(
         .block_params(merge_block)
         .first()
         .copied()
-        .ok_or_else(|| "typed queue push merge block missing result".to_string())?;
+        .ok_or_else(|| "typed circular push merge block missing result".to_string())?;
     Ok(ValueBinding {
         value: result,
         type_id: TYPE_ID_BOOL,
     })
 }
 
-fn emit_typed_queue_pop(
+fn emit_typed_circular_pop(
     builder: &mut FunctionBuilder<'_>,
     count_ref: DirectStorageRef,
     head_ref: DirectStorageRef,
@@ -4960,8 +4998,9 @@ fn emit_typed_queue_pop(
     capacity: usize,
     type_table: &TypeTable,
 ) -> Result<ValueBinding, String> {
-    let capacity_i32 = i32::try_from(capacity)
-        .map_err(|_| format!("typed queue capacity {capacity} exceeds i32 operation range"))?;
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed circular collection capacity {capacity} exceeds i32 operation range")
+    })?;
     if capacity_i32 == 0 {
         return Ok(ValueBinding {
             value: builder.ins().iconst(types::I32, 0),
@@ -4971,7 +5010,7 @@ fn emit_typed_queue_pop(
 
     let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
     let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
-    let metadata_valid = emit_typed_queue_metadata_valid(builder, count, head, capacity_i32);
+    let metadata_valid = emit_typed_circular_metadata_valid(builder, count, head, capacity_i32);
     let nonempty = builder.ins().icmp_imm(IntCC::SignedGreaterThan, count, 0);
     let can_pop = builder.ins().band(metadata_valid, nonempty);
     let pop_block = builder.create_block();
@@ -5018,7 +5057,7 @@ fn emit_typed_queue_pop(
     builder.seal_block(advance_head_block);
     builder.switch_to_block(advance_head_block);
     let one = builder.ins().iconst(types::I32, 1);
-    let next_head = emit_typed_queue_physical_index(builder, head, one, capacity_i32);
+    let next_head = emit_typed_circular_physical_index(builder, head, one, capacity_i32);
     emit_direct_i32_store(builder, head_ref, next_head);
     let accepted = builder.ins().iconst(types::I32, 1);
     builder.ins().jump(merge_block, &[accepted]);
@@ -5029,14 +5068,14 @@ fn emit_typed_queue_pop(
         .block_params(merge_block)
         .first()
         .copied()
-        .ok_or_else(|| "typed queue pop merge block missing result".to_string())?;
+        .ok_or_else(|| "typed circular pop merge block missing result".to_string())?;
     Ok(ValueBinding {
         value: result,
         type_id: TYPE_ID_BOOL,
     })
 }
 
-fn emit_typed_queue_clear(
+fn emit_typed_circular_clear(
     builder: &mut FunctionBuilder<'_>,
     count_ref: DirectStorageRef,
     head_ref: DirectStorageRef,
@@ -5049,8 +5088,9 @@ fn emit_typed_queue_clear(
     if capacity == 0 {
         return Ok(());
     }
-    let capacity_i32 = i32::try_from(capacity)
-        .map_err(|_| format!("typed queue capacity {capacity} exceeds i32 operation range"))?;
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed circular collection capacity {capacity} exceeds i32 operation range")
+    })?;
     let condition_block = builder.create_block();
     let body_block = builder.create_block();
     let exit_block = builder.create_block();
@@ -5085,15 +5125,16 @@ fn emit_typed_queue_clear(
     Ok(())
 }
 
-fn emit_typed_queue_count(
+fn emit_typed_circular_count(
     builder: &mut FunctionBuilder<'_>,
     count_ref: DirectStorageRef,
     head_ref: DirectStorageRef,
     capacity: usize,
     type_table: &TypeTable,
 ) -> Result<ValueBinding, String> {
-    let capacity_i32 = i32::try_from(capacity)
-        .map_err(|_| format!("typed queue capacity {capacity} exceeds i32 operation range"))?;
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed circular collection capacity {capacity} exceeds i32 operation range")
+    })?;
     if capacity_i32 == 0 {
         return Ok(ValueBinding {
             value: builder.ins().iconst(types::I32, 0),
@@ -5102,7 +5143,7 @@ fn emit_typed_queue_count(
     }
     let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
     let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
-    let valid = emit_typed_queue_metadata_valid(builder, count, head, capacity_i32);
+    let valid = emit_typed_circular_metadata_valid(builder, count, head, capacity_i32);
     let valid_block = builder.create_block();
     let invalid_block = builder.create_block();
     let merge_block = builder.create_block();
@@ -5126,14 +5167,14 @@ fn emit_typed_queue_count(
         .block_params(merge_block)
         .first()
         .copied()
-        .ok_or_else(|| "typed queue count merge block missing result".to_string())?;
+        .ok_or_else(|| "typed circular count merge block missing result".to_string())?;
     Ok(ValueBinding {
         value: result,
         type_id: TYPE_ID_I32,
     })
 }
 
-fn emit_typed_queue_logical_index(
+fn emit_typed_circular_logical_index(
     builder: &mut FunctionBuilder<'_>,
     count_ref: DirectStorageRef,
     head_ref: DirectStorageRef,
@@ -5141,15 +5182,16 @@ fn emit_typed_queue_logical_index(
     logical_index: Value,
     type_table: &TypeTable,
 ) -> Result<ValueBinding, String> {
-    let capacity_i32 = i32::try_from(capacity)
-        .map_err(|_| format!("typed queue capacity {capacity} exceeds i32 operation range"))?;
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed circular collection capacity {capacity} exceeds i32 operation range")
+    })?;
     if capacity_i32 == 0 {
         return Ok(ValueBinding {
             value: builder.ins().iconst(types::I32, -1),
             type_id: TYPE_ID_I32,
         });
     }
-    let (physical, valid) = emit_typed_queue_index_state(
+    let (physical, valid) = emit_typed_circular_index_state(
         builder,
         count_ref,
         head_ref,
@@ -5180,14 +5222,14 @@ fn emit_typed_queue_logical_index(
         .block_params(merge_block)
         .first()
         .copied()
-        .ok_or_else(|| "typed queue physical-index merge block missing result".to_string())?;
+        .ok_or_else(|| "typed circular physical-index merge block missing result".to_string())?;
     Ok(ValueBinding {
         value: result,
         type_id: TYPE_ID_I32,
     })
 }
 
-fn emit_typed_queue_peek(
+fn emit_typed_circular_peek(
     builder: &mut FunctionBuilder<'_>,
     count_ref: DirectStorageRef,
     head_ref: DirectStorageRef,
@@ -5196,15 +5238,16 @@ fn emit_typed_queue_peek(
     logical_index: Value,
     type_table: &TypeTable,
 ) -> Result<ValueBinding, String> {
-    let capacity_i32 = i32::try_from(capacity)
-        .map_err(|_| format!("typed queue capacity {capacity} exceeds i32 operation range"))?;
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed circular collection capacity {capacity} exceeds i32 operation range")
+    })?;
     if capacity_i32 == 0 {
         return Ok(ValueBinding {
             value: builder.ins().iconst(types::I32, 0),
             type_id: TYPE_ID_I32,
         });
     }
-    let (physical, valid) = emit_typed_queue_index_state(
+    let (physical, valid) = emit_typed_circular_index_state(
         builder,
         count_ref,
         head_ref,
@@ -5245,7 +5288,7 @@ fn emit_typed_queue_peek(
         .block_params(merge_block)
         .first()
         .copied()
-        .ok_or_else(|| "typed queue peek merge block missing result".to_string())?;
+        .ok_or_else(|| "typed circular peek merge block missing result".to_string())?;
     Ok(ValueBinding {
         value: result,
         type_id: TYPE_ID_I32,
@@ -5266,7 +5309,7 @@ fn try_emit_typed_queue_call(
     collection_infos: &CollectionInfoMap,
     named_struct_field_types: &NamedStructFieldTypeMap,
     foreach_bindings: &ForeachBindingMap,
-) -> Result<Option<TypedQueueCallResult>, String> {
+) -> Result<Option<TypedCircularCallResult>, String> {
     let Some(kind) = TypedQueueCallKind::from_target(target) else {
         return Ok(None);
     };
@@ -5277,14 +5320,16 @@ fn try_emit_typed_queue_call(
             args.len()
         ));
     }
-    let (path, capacity, policy, count_ref, head_ref, values_ref) = typed_queue_storage_bindings(
-        target,
-        args,
-        values_by_name,
-        runtime_call_refs,
-        global_path_types,
-        type_table,
-    )?;
+    let (path, capacity, policy, count_ref, head_ref, values_ref) =
+        typed_circular_storage_bindings(
+            target,
+            args,
+            TypedCollectionKind::Queue,
+            values_by_name,
+            runtime_call_refs,
+            global_path_types,
+            type_table,
+        )?;
     match kind {
         TypedQueueCallKind::Push => {
             let value = emit_simple_expression(
@@ -5308,20 +5353,24 @@ fn try_emit_typed_queue_call(
                     value.type_id
                 ));
             }
-            Ok(Some(TypedQueueCallResult::Value(emit_typed_queue_push(
-                builder,
-                count_ref,
-                head_ref,
-                values_ref,
-                capacity,
-                policy,
-                value.value,
-                type_table,
-            )?)))
+            Ok(Some(TypedCircularCallResult::Value(
+                emit_typed_circular_push(
+                    builder,
+                    count_ref,
+                    head_ref,
+                    values_ref,
+                    capacity,
+                    policy,
+                    value.value,
+                    type_table,
+                )?,
+            )))
         }
-        TypedQueueCallKind::Pop => Ok(Some(TypedQueueCallResult::Value(emit_typed_queue_pop(
-            builder, count_ref, head_ref, values_ref, capacity, type_table,
-        )?))),
+        TypedQueueCallKind::Pop => Ok(Some(TypedCircularCallResult::Value(
+            emit_typed_circular_pop(
+                builder, count_ref, head_ref, values_ref, capacity, type_table,
+            )?,
+        ))),
         TypedQueueCallKind::Peek => {
             let logical_index = emit_simple_expression(
                 builder,
@@ -5344,15 +5393,17 @@ fn try_emit_typed_queue_call(
                     logical_index.type_id
                 ));
             }
-            Ok(Some(TypedQueueCallResult::Value(emit_typed_queue_peek(
-                builder,
-                count_ref,
-                head_ref,
-                values_ref,
-                capacity,
-                logical_index.value,
-                type_table,
-            )?)))
+            Ok(Some(TypedCircularCallResult::Value(
+                emit_typed_circular_peek(
+                    builder,
+                    count_ref,
+                    head_ref,
+                    values_ref,
+                    capacity,
+                    logical_index.value,
+                    type_table,
+                )?,
+            )))
         }
         TypedQueueCallKind::PhysicalIndex => {
             let logical_index = emit_simple_expression(
@@ -5376,8 +5427,8 @@ fn try_emit_typed_queue_call(
                     logical_index.type_id
                 ));
             }
-            Ok(Some(TypedQueueCallResult::Value(
-                emit_typed_queue_logical_index(
+            Ok(Some(TypedCircularCallResult::Value(
+                emit_typed_circular_logical_index(
                     builder,
                     count_ref,
                     head_ref,
@@ -5387,21 +5438,213 @@ fn try_emit_typed_queue_call(
                 )?,
             )))
         }
-        TypedQueueCallKind::Count => Ok(Some(TypedQueueCallResult::Value(emit_typed_queue_count(
-            builder, count_ref, head_ref, capacity, type_table,
-        )?))),
+        TypedQueueCallKind::Count => Ok(Some(TypedCircularCallResult::Value(
+            emit_typed_circular_count(builder, count_ref, head_ref, capacity, type_table)?,
+        ))),
         TypedQueueCallKind::Capacity => {
             let capacity = i32::try_from(capacity).map_err(|_| {
                 format!("{target} queue path '{path}' capacity exceeds i32 operation range")
             })?;
-            Ok(Some(TypedQueueCallResult::Value(ValueBinding {
+            Ok(Some(TypedCircularCallResult::Value(ValueBinding {
                 value: builder.ins().iconst(types::I32, i64::from(capacity)),
                 type_id: TYPE_ID_I32,
             })))
         }
         TypedQueueCallKind::Clear => {
-            emit_typed_queue_clear(builder, count_ref, head_ref, values_ref, capacity)?;
-            Ok(Some(TypedQueueCallResult::Void))
+            emit_typed_circular_clear(builder, count_ref, head_ref, values_ref, capacity)?;
+            Ok(Some(TypedCircularCallResult::Void))
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TypedRingBufferCallKind {
+    Push,
+    Pop,
+    Peek,
+    PhysicalIndex,
+    Count,
+    Capacity,
+    Clear,
+}
+
+impl TypedRingBufferCallKind {
+    fn from_target(target: &str) -> Option<Self> {
+        match target {
+            "ring_buffer_push" => Some(Self::Push),
+            "ring_buffer_pop" => Some(Self::Pop),
+            "ring_buffer_peek" => Some(Self::Peek),
+            "ring_buffer_physical_index" => Some(Self::PhysicalIndex),
+            "ring_buffer_count" => Some(Self::Count),
+            "ring_buffer_capacity" => Some(Self::Capacity),
+            "ring_buffer_clear" => Some(Self::Clear),
+            _ => None,
+        }
+    }
+
+    fn expects_two_args(self) -> bool {
+        matches!(self, Self::Push | Self::Peek | Self::PhysicalIndex)
+    }
+}
+
+fn try_emit_typed_ring_buffer_call(
+    builder: &mut FunctionBuilder<'_>,
+    target: &str,
+    args: &[SimpleExpr],
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<Option<TypedCircularCallResult>, String> {
+    let Some(kind) = TypedRingBufferCallKind::from_target(target) else {
+        return Ok(None);
+    };
+    let expected_arity = if kind.expects_two_args() { 2 } else { 1 };
+    if args.len() != expected_arity {
+        return Err(format!(
+            "{target} expects {expected_arity} argument(s), found {}",
+            args.len()
+        ));
+    }
+    let (path, capacity, policy, count_ref, head_ref, values_ref) =
+        typed_circular_storage_bindings(
+            target,
+            args,
+            TypedCollectionKind::RingBuffer,
+            values_by_name,
+            runtime_call_refs,
+            global_path_types,
+            type_table,
+        )?;
+    match kind {
+        TypedRingBufferCallKind::Push => {
+            let value = emit_simple_expression(
+                builder,
+                &args[1],
+                Some(TYPE_ID_I32),
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )?;
+            if value.type_id != TYPE_ID_I32 {
+                return Err(format!(
+                    "{target} value argument must have exact i32 type, found {}",
+                    value.type_id
+                ));
+            }
+            Ok(Some(TypedCircularCallResult::Value(
+                emit_typed_circular_push(
+                    builder,
+                    count_ref,
+                    head_ref,
+                    values_ref,
+                    capacity,
+                    policy,
+                    value.value,
+                    type_table,
+                )?,
+            )))
+        }
+        TypedRingBufferCallKind::Pop => Ok(Some(TypedCircularCallResult::Value(
+            emit_typed_circular_pop(
+                builder, count_ref, head_ref, values_ref, capacity, type_table,
+            )?,
+        ))),
+        TypedRingBufferCallKind::Peek => {
+            let logical_index = emit_simple_expression(
+                builder,
+                &args[1],
+                Some(TYPE_ID_I32),
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )?;
+            if logical_index.type_id != TYPE_ID_I32 {
+                return Err(format!(
+                    "{target} logical index argument must have exact i32 type, found {}",
+                    logical_index.type_id
+                ));
+            }
+            Ok(Some(TypedCircularCallResult::Value(
+                emit_typed_circular_peek(
+                    builder,
+                    count_ref,
+                    head_ref,
+                    values_ref,
+                    capacity,
+                    logical_index.value,
+                    type_table,
+                )?,
+            )))
+        }
+        TypedRingBufferCallKind::PhysicalIndex => {
+            let logical_index = emit_simple_expression(
+                builder,
+                &args[1],
+                Some(TYPE_ID_I32),
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )?;
+            if logical_index.type_id != TYPE_ID_I32 {
+                return Err(format!(
+                    "{target} logical index argument must have exact i32 type, found {}",
+                    logical_index.type_id
+                ));
+            }
+            Ok(Some(TypedCircularCallResult::Value(
+                emit_typed_circular_logical_index(
+                    builder,
+                    count_ref,
+                    head_ref,
+                    capacity,
+                    logical_index.value,
+                    type_table,
+                )?,
+            )))
+        }
+        TypedRingBufferCallKind::Count => Ok(Some(TypedCircularCallResult::Value(
+            emit_typed_circular_count(builder, count_ref, head_ref, capacity, type_table)?,
+        ))),
+        TypedRingBufferCallKind::Capacity => {
+            let capacity = i32::try_from(capacity).map_err(|_| {
+                format!("{target} ring_buffer path '{path}' capacity exceeds i32 operation range")
+            })?;
+            Ok(Some(TypedCircularCallResult::Value(ValueBinding {
+                value: builder.ins().iconst(types::I32, i64::from(capacity)),
+                type_id: TYPE_ID_I32,
+            })))
+        }
+        TypedRingBufferCallKind::Clear => {
+            emit_typed_circular_clear(builder, count_ref, head_ref, values_ref, capacity)?;
+            Ok(Some(TypedCircularCallResult::Void))
         }
     }
 }
@@ -5909,8 +6152,31 @@ pub(crate) fn emit_simple_expression(
                 foreach_bindings,
             )? {
                 return match result {
-                    TypedQueueCallResult::Value(value) => Ok(value),
-                    TypedQueueCallResult::Void => Err(format!(
+                    TypedCircularCallResult::Value(value) => Ok(value),
+                    TypedCircularCallResult::Void => Err(format!(
+                        "void call target '{}' cannot be used in value expression",
+                        target
+                    )),
+                };
+            }
+            if let Some(result) = try_emit_typed_ring_buffer_call(
+                builder,
+                target,
+                args,
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )? {
+                return match result {
+                    TypedCircularCallResult::Value(value) => Ok(value),
+                    TypedCircularCallResult::Void => Err(format!(
                         "void call target '{}' cannot be used in value expression",
                         target
                     )),

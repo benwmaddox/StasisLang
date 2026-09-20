@@ -711,6 +711,13 @@ enum TypedCollectionOperation {
     QueueCount,
     QueueCapacity,
     QueueClear,
+    RingBufferPush,
+    RingBufferPop,
+    RingBufferPeek,
+    RingBufferPhysicalIndex,
+    RingBufferCount,
+    RingBufferCapacity,
+    RingBufferClear,
 }
 
 impl TypedCollectionOperation {
@@ -728,6 +735,13 @@ impl TypedCollectionOperation {
             "queue_count" => Some(Self::QueueCount),
             "queue_capacity" => Some(Self::QueueCapacity),
             "queue_clear" => Some(Self::QueueClear),
+            "ring_buffer_push" => Some(Self::RingBufferPush),
+            "ring_buffer_pop" => Some(Self::RingBufferPop),
+            "ring_buffer_peek" => Some(Self::RingBufferPeek),
+            "ring_buffer_physical_index" => Some(Self::RingBufferPhysicalIndex),
+            "ring_buffer_count" => Some(Self::RingBufferCount),
+            "ring_buffer_capacity" => Some(Self::RingBufferCapacity),
+            "ring_buffer_clear" => Some(Self::RingBufferClear),
             _ => None,
         }
     }
@@ -740,9 +754,17 @@ impl TypedCollectionOperation {
             | Self::QueuePeek
             | Self::QueuePhysicalIndex
             | Self::QueueCount
-            | Self::QueueCapacity => TYPE_ID_I32,
-            Self::PoolRemove | Self::QueuePush | Self::QueuePop => TYPE_ID_BOOL,
-            Self::PoolClear | Self::QueueClear => TYPE_ID_VOID,
+            | Self::QueueCapacity
+            | Self::RingBufferPeek
+            | Self::RingBufferPhysicalIndex
+            | Self::RingBufferCount
+            | Self::RingBufferCapacity => TYPE_ID_I32,
+            Self::PoolRemove
+            | Self::QueuePush
+            | Self::QueuePop
+            | Self::RingBufferPush
+            | Self::RingBufferPop => TYPE_ID_BOOL,
+            Self::PoolClear | Self::QueueClear | Self::RingBufferClear => TYPE_ID_VOID,
         }
     }
 
@@ -760,19 +782,35 @@ impl TypedCollectionOperation {
             | Self::QueueCount
             | Self::QueueCapacity
             | Self::QueueClear => TypedCollectionKind::Queue,
+            Self::RingBufferPush
+            | Self::RingBufferPop
+            | Self::RingBufferPeek
+            | Self::RingBufferPhysicalIndex
+            | Self::RingBufferCount
+            | Self::RingBufferCapacity
+            | Self::RingBufferClear => TypedCollectionKind::RingBuffer,
         }
     }
 
     fn expected_arity(self) -> usize {
         match self {
-            Self::PoolPush | Self::PoolRemove | Self::QueuePush => 2,
+            Self::PoolPush
+            | Self::PoolRemove
+            | Self::QueuePush
+            | Self::RingBufferPush
+            | Self::RingBufferPeek
+            | Self::RingBufferPhysicalIndex => 2,
             Self::PoolCount
             | Self::PoolCapacity
             | Self::PoolClear
             | Self::QueuePop
             | Self::QueueCount
             | Self::QueueCapacity
-            | Self::QueueClear => 1,
+            | Self::QueueClear
+            | Self::RingBufferPop
+            | Self::RingBufferCount
+            | Self::RingBufferCapacity
+            | Self::RingBufferClear => 1,
             Self::QueuePeek | Self::QueuePhysicalIndex => 2,
         }
     }
@@ -784,13 +822,20 @@ impl TypedCollectionOperation {
             Self::QueuePush => Some((1, "value")),
             Self::QueuePeek => Some((1, "logical_index")),
             Self::QueuePhysicalIndex => Some((1, "logical_index")),
+            Self::RingBufferPush => Some((1, "value")),
+            Self::RingBufferPeek => Some((1, "logical_index")),
+            Self::RingBufferPhysicalIndex => Some((1, "logical_index")),
             Self::PoolCount
             | Self::PoolCapacity
             | Self::PoolClear
             | Self::QueuePop
             | Self::QueueCount
             | Self::QueueCapacity
-            | Self::QueueClear => None,
+            | Self::QueueClear
+            | Self::RingBufferPop
+            | Self::RingBufferCount
+            | Self::RingBufferCapacity
+            | Self::RingBufferClear => None,
         }
     }
 }
@@ -2454,6 +2499,39 @@ fn analyze_typed_collection_operation(
                 effects.insert_write(format!("{path}.head"));
                 effects.insert_write(format!("{path}.values[*]"));
             }
+            TypedCollectionOperation::RingBufferPush => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.head"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.head"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::RingBufferPop => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.head"));
+                effects.insert_read(format!("{path}.values[*]"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.head"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::RingBufferPeek => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.head"));
+                effects.insert_read(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::RingBufferPhysicalIndex => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.head"));
+            }
+            TypedCollectionOperation::RingBufferCount => {
+                effects.insert_read(format!("{path}.count"));
+            }
+            TypedCollectionOperation::RingBufferCapacity => {}
+            TypedCollectionOperation::RingBufferClear => {
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.head"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
         }
         for argument in args.iter().skip(1) {
             analyze_expression(argument, context, locals, local_types, aliases, effects);
@@ -3408,6 +3486,35 @@ mod tests {
         build_context(files, &[], types).expect("typed queue analysis context")
     }
 
+    fn typed_ring_buffer_fixture(extra: &str) -> (TypeTable, Vec<SourceFile>) {
+        let source = format!(
+            "global history: ring_buffer<i32, 2, overwrite_oldest>;\nglobal empty_history: ring_buffer<i32, 0, drop_newest>;\nglobal actors: pool<i32, 2, error>;\nglobal events: queue<i32, 2, overwrite_oldest>;\n{extra}"
+        );
+        let mut types = TypeTable::new();
+        for type_name in [
+            "ring_buffer<i32, 2, overwrite_oldest>",
+            "ring_buffer<i32, 0, drop_newest>",
+            "pool<i32, 2, error>",
+            "queue<i32, 2, overwrite_oldest>",
+        ] {
+            types
+                .resolve_or_intern(type_name)
+                .expect("typed ring buffer fixture type");
+        }
+        let file = SourceFile {
+            path: "ring_buffer_semantics.stasis".to_string(),
+            content: source.clone(),
+            original_content: source,
+            hash: 0,
+            functions: Vec::new(),
+        };
+        (types, vec![file])
+    }
+
+    fn ring_buffer_context<'a>(types: &'a TypeTable, files: &[SourceFile]) -> AnalysisContext<'a> {
+        build_context(files, &[], types).expect("typed ring buffer analysis context")
+    }
+
     fn pool_call(target: &str, args: Vec<SimpleExpr>) -> SimpleExpr {
         SimpleExpr::Call {
             target: target.to_string(),
@@ -3726,6 +3833,255 @@ mod tests {
     }
 
     #[test]
+    fn typed_ring_buffer_operations_have_fixed_return_types_and_explicit_effects() {
+        let (types, files) = typed_ring_buffer_fixture("");
+        let context = ring_buffer_context(&types, &files);
+        assert!(context
+            .typed_collection_descriptors
+            .contains_key("empty_history"));
+        assert_eq!(
+            context.typed_collection_descriptors["empty_history"].capacity,
+            0
+        );
+        assert_eq!(
+            context.typed_collection_descriptors["history"].kind,
+            TypedCollectionKind::RingBuffer
+        );
+        let local_types = BTreeMap::new();
+        let locals = BTreeSet::new();
+        let aliases = BTreeMap::new();
+        let operations = [
+            (
+                "ring_buffer_push",
+                vec![
+                    SimpleExpr::Identifier("history".to_string()),
+                    SimpleExpr::Int(7),
+                ],
+                TYPE_ID_BOOL,
+                vec!["history.count", "history.head"],
+                vec!["history.count", "history.head", "history.values[*]"],
+            ),
+            (
+                "ring_buffer_pop",
+                vec![SimpleExpr::Identifier("history".to_string())],
+                TYPE_ID_BOOL,
+                vec!["history.count", "history.head", "history.values[*]"],
+                vec!["history.count", "history.head", "history.values[*]"],
+            ),
+            (
+                "ring_buffer_peek",
+                vec![
+                    SimpleExpr::Identifier("history".to_string()),
+                    SimpleExpr::Int(0),
+                ],
+                TYPE_ID_I32,
+                vec!["history.count", "history.head", "history.values[*]"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "ring_buffer_physical_index",
+                vec![
+                    SimpleExpr::Identifier("history".to_string()),
+                    SimpleExpr::Int(0),
+                ],
+                TYPE_ID_I32,
+                vec!["history.count", "history.head"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "ring_buffer_count",
+                vec![SimpleExpr::Identifier("history".to_string())],
+                TYPE_ID_I32,
+                vec!["history.count"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "ring_buffer_capacity",
+                vec![SimpleExpr::Identifier("history".to_string())],
+                TYPE_ID_I32,
+                Vec::<&str>::new(),
+                Vec::<&str>::new(),
+            ),
+            (
+                "ring_buffer_clear",
+                vec![SimpleExpr::Identifier("history".to_string())],
+                TYPE_ID_VOID,
+                Vec::<&str>::new(),
+                vec!["history.count", "history.head", "history.values[*]"],
+            ),
+        ];
+
+        for (target, args, expected_type, expected_reads, expected_writes) in operations {
+            let expression = pool_call(target, args);
+            assert_eq!(
+                expression_type(&expression, &context, &local_types, &aliases),
+                Some(expected_type),
+                "{target} return type"
+            );
+            validate_expression_access(&expression, &context, &local_types)
+                .expect("valid typed ring buffer operation");
+            let mut effects = EffectSets::default();
+            analyze_expression(
+                &expression,
+                &context,
+                &locals,
+                &local_types,
+                &aliases,
+                &mut effects,
+            );
+            let reads: Vec<_> = effects.reads.iter().map(String::as_str).collect();
+            let writes: Vec<_> = effects.writes.iter().map(String::as_str).collect();
+            assert_eq!(reads, expected_reads, "{target} reads");
+            assert_eq!(writes, expected_writes, "{target} writes");
+            assert!(effects.calls.is_empty(), "{target} became an internal call");
+            assert!(effects.host_calls.is_empty(), "{target} leaked a host call");
+            assert!(
+                effects.host_effects.is_empty(),
+                "{target} leaked a host capability"
+            );
+        }
+
+        for target in [
+            "ring_buffer_push",
+            "ring_buffer_pop",
+            "ring_buffer_peek",
+            "ring_buffer_physical_index",
+            "ring_buffer_count",
+            "ring_buffer_capacity",
+            "ring_buffer_clear",
+        ] {
+            let args = match target {
+                "ring_buffer_push" => vec![
+                    SimpleExpr::Identifier("empty_history".to_string()),
+                    SimpleExpr::Int(7),
+                ],
+                "ring_buffer_peek" | "ring_buffer_physical_index" => vec![
+                    SimpleExpr::Identifier("empty_history".to_string()),
+                    SimpleExpr::Int(0),
+                ],
+                _ => vec![SimpleExpr::Identifier("empty_history".to_string())],
+            };
+            typed_collection_operation(target, &args, &context, &local_types)
+                .expect("zero-capacity ring buffer operation must be valid")
+                .expect("ring-buffer operation should be compiler-owned");
+        }
+    }
+
+    #[test]
+    fn typed_ring_buffer_operations_require_exact_persistent_paths_and_i32_arguments() {
+        let (types, files) =
+            typed_ring_buffer_fixture("global floats: ring_buffer<f32, 2, error>;\n");
+        let context = ring_buffer_context(&types, &files);
+        let mut local_types = BTreeMap::new();
+        local_types.insert(
+            "history".to_string(),
+            types
+                .resolve("ring_buffer<i32, 2, overwrite_oldest>")
+                .expect("ring buffer type id"),
+        );
+
+        let local_error = typed_collection_operation(
+            "ring_buffer_count",
+            &[SimpleExpr::Identifier("history".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("local ring buffer value must not be a persistent path");
+        assert!(local_error.contains("exact persistent typed collection path"));
+
+        local_types.clear();
+        let field_error = typed_collection_operation(
+            "ring_buffer_count",
+            &[SimpleExpr::Identifier("history.values".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("ring buffer field must not be accepted as descriptor path");
+        assert!(field_error.contains("exact persistent typed collection path"));
+
+        let wrong_kind = typed_collection_operation(
+            "ring_buffer_count",
+            &[SimpleExpr::Identifier("events".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("queue descriptor must be rejected by ring buffer operation");
+        assert!(wrong_kind.contains("requires persistent ring_buffer path"));
+
+        let wrong_payload = typed_collection_operation(
+            "ring_buffer_count",
+            &[SimpleExpr::Identifier("floats".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("non-i32 ring buffer must be rejected");
+        assert!(wrong_payload.contains("with i32 payload"));
+
+        let peek_index = typed_collection_operation(
+            "ring_buffer_peek",
+            &[
+                SimpleExpr::Identifier("history".to_string()),
+                SimpleExpr::Float(0.0),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect_err("ring_buffer_peek logical index must be i32");
+        assert!(peek_index.contains("ring_buffer_peek logical_index argument"));
+
+        let physical_index = typed_collection_operation(
+            "ring_buffer_physical_index",
+            &[
+                SimpleExpr::Identifier("history".to_string()),
+                SimpleExpr::Bool(true),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect_err("ring_buffer_physical_index logical index must be i32");
+        assert!(physical_index.contains("ring_buffer_physical_index logical_index argument"));
+
+        let push_value = typed_collection_operation(
+            "ring_buffer_push",
+            &[
+                SimpleExpr::Identifier("history".to_string()),
+                SimpleExpr::Bool(true),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect_err("ring_buffer_push value must be i32");
+        assert!(push_value.contains("ring_buffer_push value argument"));
+
+        let pop_arity = typed_collection_operation(
+            "ring_buffer_pop",
+            &[
+                SimpleExpr::Identifier("history".to_string()),
+                SimpleExpr::Int(0),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect_err("ring_buffer_pop must not accept an output argument");
+        assert!(pop_arity.contains("ring_buffer_pop expects 1 arguments"));
+    }
+
+    #[test]
+    fn qualified_ring_buffer_operation_names_are_not_hijacked() {
+        let (types, files) = typed_ring_buffer_fixture("");
+        let context = ring_buffer_context(&types, &files);
+        let local_types = BTreeMap::new();
+        assert!(typed_collection_operation(
+            "module.ring_buffer_count",
+            &[SimpleExpr::Identifier("history".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect("qualified name should be treated as an ordinary target")
+        .is_none());
+    }
+
+    #[test]
     fn qualified_collection_operation_names_are_not_hijacked() {
         let (types, files) = typed_queue_fixture("");
         let context = queue_context(&types, &files);
@@ -3986,6 +4342,14 @@ mod tests {
             ),
             (
                 "extern function queue_pop(): bool;\nfunction main(): i32 { return 0; }",
+                "compiler-owned typed collection operation name",
+            ),
+            (
+                "function ring_buffer_count(value: i32): i32 { return value; }\nfunction main(): i32 { return ring_buffer_count(1); }",
+                "compiler-owned typed collection operation name",
+            ),
+            (
+                "extern function ring_buffer_pop(): bool;\nfunction main(): i32 { return 0; }",
                 "compiler-owned typed collection operation name",
             ),
         ] {

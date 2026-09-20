@@ -3365,6 +3365,92 @@ mod tests {
     }
 
     #[test]
+    fn typed_ring_buffer_aot_storage_plan_and_symbols_match_jit_lanes() {
+        for policy in ["error", "drop_newest", "overwrite_oldest"] {
+            for capacity in [2_u32, 0_u32] {
+                let mut process = AotProcess::new();
+                process.upsert_file(
+                    "typed_ring_buffer_storage.stasis",
+                    format!(
+                        "global actors: ring_buffer<i32, {capacity}, {policy}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed ring-buffer AOT compile");
+
+                let snapshot = process
+                    .program_snapshot()
+                    .expect("typed ring-buffer snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed ring-buffer descriptor");
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("ring_buffer<i32, {capacity}, {policy}>")
+                );
+                let bindings = build_aot_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                )
+                .expect("typed ring-buffer AOT direct storage plan");
+                for metadata in ["count", "head"] {
+                    let path = format!("actors.{metadata}");
+                    assert!(matches!(
+                        bindings.scalars.get(&path),
+                        Some(DirectStorageBinding::Symbol(symbol))
+                            if symbol == &aot_storage_symbol(
+                                AotStorageSymbolKind::Scalar,
+                                &path,
+                                "",
+                            )
+                    ));
+                }
+                assert!(!bindings.scalars.contains_key("actors"));
+                assert_eq!(bindings.scalars.len(), 2);
+                let values = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("values")))
+                    .expect("typed ring-buffer values array binding");
+                assert!(matches!(
+                    &values.slot,
+                    DirectStorageBinding::Symbol(symbol)
+                        if symbol == &aot_storage_symbol(
+                            AotStorageSymbolKind::Array,
+                            "actors",
+                            "values",
+                        )
+                ));
+                assert_eq!(values.static_len, Some(capacity as usize));
+                assert_eq!(values.storage_bytes, 4);
+                assert_eq!(bindings.arrays.len(), 1);
+
+                let (bytes, _) = process
+                    .compile_standalone_storage_object("aot_fn_0")
+                    .expect("standalone typed ring-buffer storage object")
+                    .expect("typed ring-buffer storage required");
+                let object =
+                    File::parse(bytes.as_slice()).expect("parse typed ring-buffer storage object");
+                let symbols: BTreeSet<String> = object
+                    .symbols()
+                    .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                    .collect();
+                for expected in [
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.count", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.head", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values"),
+                ] {
+                    assert!(
+                        symbols.contains(&expected),
+                        "typed ring-buffer storage object missing '{expected}' for {policy}, capacity {capacity}: {symbols:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn typed_queue_aot_head_storage_symbol_collision_is_rejected() {
         let mut process = AotProcess::new();
         process.upsert_file(
@@ -3761,6 +3847,138 @@ function zero_capacity(): i32 {
                 assert_eq!(
                     linked, expected,
                     "linked AOT/JIT typed queue operation parity for {root}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_ring_buffer_linked_aot_matches_jit_operation_sequence() {
+        const SOURCE: &str = r#"global typed_ring_error_parity_147: ring_buffer<i32, 3, error>;
+global typed_ring_drop_parity_147: ring_buffer<i32, 2, drop_newest>;
+global typed_ring_overwrite_parity_147: ring_buffer<i32, 2, overwrite_oldest>;
+global typed_ring_zero_parity_147: ring_buffer<i32, 0, drop_newest>;
+function error_wraparound(): i32 {
+    ring_buffer_clear(typed_ring_error_parity_147);
+    let accepted: i32 = 0;
+    if (ring_buffer_push(typed_ring_error_parity_147, 10)) { accepted += 1; }
+    if (ring_buffer_push(typed_ring_error_parity_147, 20)) { accepted += 1; }
+    if (ring_buffer_push(typed_ring_error_parity_147, 30)) { accepted += 1; }
+    let rejected: i32 = 0;
+    if (ring_buffer_push(typed_ring_error_parity_147, 40)) { rejected = 1; }
+    let before: i32 = ring_buffer_count(typed_ring_error_parity_147) * 100000
+        + ring_buffer_capacity(typed_ring_error_parity_147) * 10000
+        + ring_buffer_peek(typed_ring_error_parity_147, 0) * 1000
+        + ring_buffer_peek(typed_ring_error_parity_147, 2) * 100
+        + ring_buffer_physical_index(typed_ring_error_parity_147, 0) * 10
+        + ring_buffer_physical_index(typed_ring_error_parity_147, 2);
+    let popped: i32 = 0;
+    if (ring_buffer_pop(typed_ring_error_parity_147)) { popped = 1; }
+    let wrapped: i32 = 0;
+    if (ring_buffer_push(typed_ring_error_parity_147, 40)) { wrapped = 1; }
+    let after_wrap: i32 = ring_buffer_count(typed_ring_error_parity_147) * 100000
+        + ring_buffer_capacity(typed_ring_error_parity_147) * 10000
+        + ring_buffer_peek(typed_ring_error_parity_147, 0) * 1000
+        + ring_buffer_peek(typed_ring_error_parity_147, 2) * 100
+        + ring_buffer_physical_index(typed_ring_error_parity_147, 0) * 10
+        + ring_buffer_physical_index(typed_ring_error_parity_147, 2);
+    ring_buffer_clear(typed_ring_error_parity_147);
+    return accepted * 1000000 + rejected * 100000 + before
+        + popped * 100 + wrapped * 10 + after_wrap
+        + ring_buffer_count(typed_ring_error_parity_147);
+}
+function drop_rejection(): i32 {
+    ring_buffer_clear(typed_ring_drop_parity_147);
+    let first: i32 = 0;
+    if (ring_buffer_push(typed_ring_drop_parity_147, 1)) { first = 1; }
+    let second: i32 = 0;
+    if (ring_buffer_push(typed_ring_drop_parity_147, 2)) { second = 1; }
+    let rejected: i32 = 0;
+    if (ring_buffer_push(typed_ring_drop_parity_147, 3)) { rejected = 1; }
+    let observed: i32 = ring_buffer_count(typed_ring_drop_parity_147) * 100
+        + ring_buffer_capacity(typed_ring_drop_parity_147) * 10
+        + ring_buffer_peek(typed_ring_drop_parity_147, 0)
+        + ring_buffer_peek(typed_ring_drop_parity_147, 1);
+    ring_buffer_clear(typed_ring_drop_parity_147);
+    return first * 1000000 + second * 100000 + rejected * 10000
+        + observed * 100 + ring_buffer_count(typed_ring_drop_parity_147);
+}
+function overwrite_replace(): i32 {
+    ring_buffer_clear(typed_ring_overwrite_parity_147);
+    let accepted: i32 = 0;
+    if (ring_buffer_push(typed_ring_overwrite_parity_147, 1)) { accepted += 1; }
+    if (ring_buffer_push(typed_ring_overwrite_parity_147, 2)) { accepted += 1; }
+    if (ring_buffer_push(typed_ring_overwrite_parity_147, 3)) { accepted += 1; }
+    let before_pop: i32 = ring_buffer_count(typed_ring_overwrite_parity_147) * 100000
+        + ring_buffer_capacity(typed_ring_overwrite_parity_147) * 10000
+        + ring_buffer_peek(typed_ring_overwrite_parity_147, 0) * 1000
+        + ring_buffer_peek(typed_ring_overwrite_parity_147, 1) * 100
+        + ring_buffer_physical_index(typed_ring_overwrite_parity_147, 0) * 10
+        + ring_buffer_physical_index(typed_ring_overwrite_parity_147, 1);
+    let popped: i32 = 0;
+    if (ring_buffer_pop(typed_ring_overwrite_parity_147)) { popped = 1; }
+    let after_pop: i32 = ring_buffer_count(typed_ring_overwrite_parity_147) * 100
+        + ring_buffer_physical_index(typed_ring_overwrite_parity_147, 0) * 10
+        + ring_buffer_peek(typed_ring_overwrite_parity_147, 0);
+    ring_buffer_clear(typed_ring_overwrite_parity_147);
+    return accepted * 1000000 + before_pop + popped * 1000 + after_pop
+        + ring_buffer_count(typed_ring_overwrite_parity_147);
+}
+function zero_capacity(): i32 {
+    ring_buffer_clear(typed_ring_zero_parity_147);
+    let pushed: i32 = 0;
+    if (ring_buffer_push(typed_ring_zero_parity_147, 7)) { pushed = 1; }
+    let popped: i32 = 0;
+    if (ring_buffer_pop(typed_ring_zero_parity_147)) { popped = 1; }
+    return pushed * 100000 + popped * 10000
+        + ring_buffer_count(typed_ring_zero_parity_147) * 1000
+        + ring_buffer_capacity(typed_ring_zero_parity_147) * 100
+        + ring_buffer_peek(typed_ring_zero_parity_147, 0) * 10
+        + ring_buffer_physical_index(typed_ring_zero_parity_147, 0);
+}
+"#;
+        const ROOTS: [&str; 4] = [
+            "error_wraparound",
+            "drop_rejection",
+            "overwrite_replace",
+            "zero_capacity",
+        ];
+        const EXPECTED: [i32; 4] = [3_697_122, 1_122_300, 3_223_413, -1];
+
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&ROOTS.map(str::to_string));
+        jit.upsert_file("typed_ring_buffer_parity_147.stasis", SOURCE);
+        jit.compile().expect("typed ring-buffer JIT parity compile");
+        for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+            assert_eq!(
+                jit.execute_i32_noarg_by_name(root)
+                    .unwrap_or_else(|_| panic!("typed ring-buffer JIT root {root}")),
+                expected,
+                "typed ring-buffer JIT operation oracle for {root}"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let mut aot = AotProcess::new();
+            aot.set_required_emit_roots(&ROOTS.map(str::to_string));
+            aot.upsert_file("typed_ring_buffer_parity_147.stasis", SOURCE);
+            aot.compile().expect("typed ring-buffer AOT parity compile");
+
+            for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+                let linked = run_linked_i32_noarg_fixture(
+                    &aot,
+                    root,
+                    &format!("typed_ring_buffer_{root}_parity"),
+                    &link_config,
+                )
+                .unwrap_or_else(|| panic!("linked typed ring-buffer root {root}"));
+                assert_eq!(
+                    linked, expected,
+                    "linked AOT/JIT typed ring-buffer operation parity for {root}"
                 );
             }
         }

@@ -5143,6 +5143,63 @@ function main(): i32 {
     }
 
     #[test]
+    fn typed_ring_buffer_jit_storage_plan_provisions_metadata_and_values_lanes() {
+        for policy in ["error", "drop_newest", "overwrite_oldest"] {
+            for capacity in [2_u32, 0_u32] {
+                let mut process = JitProcess::new();
+                process.upsert_file(
+                    "typed_ring_buffer_storage.stasis",
+                    format!(
+                        "global actors: ring_buffer<i32, {capacity}, {policy}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed ring-buffer JIT compile");
+
+                let snapshot = process
+                    .program_snapshot()
+                    .expect("typed ring-buffer snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed ring-buffer descriptor");
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("ring_buffer<i32, {capacity}, {policy}>")
+                );
+                let bindings = build_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                    false,
+                )
+                .expect("typed ring-buffer JIT direct storage plan");
+                for metadata in ["count", "head"] {
+                    assert!(bindings.scalars.contains_key(&format!("actors.{metadata}")));
+                }
+                assert!(!bindings.scalars.contains_key("actors"));
+                assert_eq!(bindings.scalars.len(), 2);
+                let values = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("values")))
+                    .expect("typed ring-buffer values array binding");
+                assert_eq!(values.static_len, Some(capacity as usize));
+                assert_eq!(values.storage_bytes, 4);
+                assert_eq!(bindings.arrays.len(), 1);
+                assert_eq!(
+                    stasis_dynload::direct_array_storage_slot_len_for_test(
+                        stasis_dynload::JitStorageKind::I32,
+                        hash_global_path("actors"),
+                        crate::backend::emit::hash_foreach_field_suffix("values"),
+                    ),
+                    Some(capacity as usize),
+                    "JIT provisioned typed ring-buffer values lane must retain descriptor capacity"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn typed_pool_operations_execute_with_bounded_swap_remove_and_clear_semantics() {
         let mut process = JitProcess::new();
         process.set_required_emit_roots(&[
@@ -5590,6 +5647,385 @@ function main(): i32 {
             stasis_dynload::direct_array_storage_slot_len_for_test(
                 stasis_dynload::JitStorageKind::I32,
                 hash_global_path("typed_queue_zero_exec_147"),
+                crate::backend::emit::hash_foreach_field_suffix("values"),
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn typed_ring_buffer_operations_execute_all_policies_and_zero_capacity() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&[
+            "ring_error_seed".to_string(),
+            "ring_error_observe".to_string(),
+            "ring_error_invalid_peek".to_string(),
+            "ring_error_invalid_physical".to_string(),
+            "ring_error_pop".to_string(),
+            "ring_error_push_wrap".to_string(),
+            "ring_error_push_second_wrap".to_string(),
+            "ring_error_pop_second_wrap".to_string(),
+            "ring_error_clear".to_string(),
+            "ring_drop_run".to_string(),
+            "ring_drop_clear".to_string(),
+            "ring_overwrite_run".to_string(),
+            "ring_overwrite_pop".to_string(),
+            "ring_zero_run".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_ring_buffer_execution.stasis",
+            r#"global typed_ring_error_exec_147: ring_buffer<i32, 3, error>;
+global typed_ring_drop_exec_147: ring_buffer<i32, 2, drop_newest>;
+global typed_ring_overwrite_exec_147: ring_buffer<i32, 2, overwrite_oldest>;
+global typed_ring_zero_exec_147: ring_buffer<i32, 0, drop_newest>;
+function ring_error_seed(): i32 {
+    ring_buffer_clear(typed_ring_error_exec_147);
+    let accepted: i32 = 0;
+    if (ring_buffer_push(typed_ring_error_exec_147, 10)) { accepted += 1; }
+    if (ring_buffer_push(typed_ring_error_exec_147, 20)) { accepted += 1; }
+    if (ring_buffer_push(typed_ring_error_exec_147, 30)) { accepted += 1; }
+    if (ring_buffer_push(typed_ring_error_exec_147, 40)) { accepted += 100; }
+    return accepted;
+}
+function ring_error_observe(): i32 {
+    return ring_buffer_count(typed_ring_error_exec_147) * 100000
+        + ring_buffer_capacity(typed_ring_error_exec_147) * 10000
+        + ring_buffer_peek(typed_ring_error_exec_147, 0) * 1000
+        + ring_buffer_peek(typed_ring_error_exec_147, 2) * 100
+        + ring_buffer_physical_index(typed_ring_error_exec_147, 0) * 10
+        + ring_buffer_physical_index(typed_ring_error_exec_147, 2);
+}
+function ring_error_invalid_peek(): i32 {
+    return ring_buffer_peek(typed_ring_error_exec_147, 9);
+}
+function ring_error_invalid_physical(): i32 {
+    return ring_buffer_physical_index(typed_ring_error_exec_147, -1);
+}
+function ring_error_pop(): i32 {
+    if (ring_buffer_pop(typed_ring_error_exec_147)) { return 1; }
+    return 0;
+}
+function ring_error_push_wrap(): i32 {
+    if (ring_buffer_push(typed_ring_error_exec_147, 40)) { return 1; }
+    return 0;
+}
+function ring_error_push_second_wrap(): i32 {
+    if (ring_buffer_push(typed_ring_error_exec_147, 50)) { return 1; }
+    return 0;
+}
+function ring_error_pop_second_wrap(): i32 {
+    if (ring_buffer_pop(typed_ring_error_exec_147)) { return 1; }
+    return 0;
+}
+function ring_error_clear(): i32 {
+    ring_buffer_clear(typed_ring_error_exec_147);
+    return ring_buffer_count(typed_ring_error_exec_147);
+}
+function ring_drop_run(): i32 {
+    ring_buffer_clear(typed_ring_drop_exec_147);
+    let accepted: i32 = 0;
+    if (ring_buffer_push(typed_ring_drop_exec_147, 1)) { accepted += 1; }
+    if (ring_buffer_push(typed_ring_drop_exec_147, 2)) { accepted += 1; }
+    if (ring_buffer_push(typed_ring_drop_exec_147, 3)) { accepted += 100; }
+    return accepted * 100 + ring_buffer_count(typed_ring_drop_exec_147) * 10
+        + ring_buffer_peek(typed_ring_drop_exec_147, 0)
+        + ring_buffer_peek(typed_ring_drop_exec_147, 1);
+}
+function ring_drop_clear(): i32 {
+    ring_buffer_clear(typed_ring_drop_exec_147);
+    return ring_buffer_count(typed_ring_drop_exec_147);
+}
+function ring_overwrite_run(): i32 {
+    ring_buffer_clear(typed_ring_overwrite_exec_147);
+    let accepted: i32 = 0;
+    if (ring_buffer_push(typed_ring_overwrite_exec_147, 1)) { accepted += 1; }
+    if (ring_buffer_push(typed_ring_overwrite_exec_147, 2)) { accepted += 1; }
+    if (ring_buffer_push(typed_ring_overwrite_exec_147, 3)) { accepted += 1; }
+    return accepted * 100 + ring_buffer_count(typed_ring_overwrite_exec_147) * 10
+        + ring_buffer_peek(typed_ring_overwrite_exec_147, 0)
+        + ring_buffer_peek(typed_ring_overwrite_exec_147, 1);
+}
+function ring_overwrite_pop(): i32 {
+    if (ring_buffer_pop(typed_ring_overwrite_exec_147)) { return 1; }
+    return 0;
+}
+function ring_zero_run(): i32 {
+    ring_buffer_clear(typed_ring_zero_exec_147);
+    let score: i32 = 0;
+    if (ring_buffer_push(typed_ring_zero_exec_147, 7)) { score += 100; }
+    if (ring_buffer_pop(typed_ring_zero_exec_147)) { score += 10; }
+    return score + ring_buffer_count(typed_ring_zero_exec_147) * 1000
+        + ring_buffer_capacity(typed_ring_zero_exec_147) * 100
+        + ring_buffer_peek(typed_ring_zero_exec_147, 0) * 10
+        + ring_buffer_physical_index(typed_ring_zero_exec_147, 0);
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("typed ring-buffer operation JIT compile");
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_seed")
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.head"),
+            0
+        );
+        assert_eq!(
+            process.global_collection_capacity("typed_ring_error_exec_147"),
+            Some(3)
+        );
+        assert_eq!(
+            process.global_collection_field_type("typed_ring_error_exec_147", "values"),
+            Some("i32")
+        );
+        for (index, expected) in [10, 20, 30].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_ring_error_exec_147",
+                        "values",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(expected)
+            );
+        }
+        let memory = process
+            .state_memory_report(&BTreeMap::new(), u64::MAX)
+            .expect("typed ring-buffer memory report");
+        assert_eq!(
+            memory
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_ring_error_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(3)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_observe")
+                .unwrap(),
+            343002
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_invalid_peek")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_invalid_physical")
+                .unwrap(),
+            -1
+        );
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("ring_error_pop").unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.head"),
+            1
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_error_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_push_wrap")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_observe")
+                .unwrap(),
+            354010
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_error_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(40)
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("ring_error_pop").unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.head"),
+            2
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_error_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_push_second_wrap")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_pop_second_wrap")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.head"),
+            0
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_error_exec_147", "values", 2)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_error_clear")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_error_exec_147.head"),
+            0
+        );
+        for index in 0..3 {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_ring_error_exec_147", "values", index,)
+                    .unwrap(),
+                JitScalarValue::I32(0)
+            );
+        }
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("ring_drop_run").unwrap(),
+            223
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_drop_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_drop_exec_147.head"),
+            0
+        );
+        for (index, expected) in [1, 2].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_ring_drop_exec_147",
+                        "values",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(expected)
+            );
+        }
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_drop_clear")
+                .unwrap(),
+            0
+        );
+        for index in 0..2 {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_ring_drop_exec_147", "values", index)
+                    .unwrap(),
+                JitScalarValue::I32(0)
+            );
+        }
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_overwrite_run")
+                .unwrap(),
+            325
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_overwrite_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_overwrite_exec_147.head"),
+            1
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_overwrite_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(3)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_overwrite_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(2)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("ring_overwrite_pop")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_overwrite_exec_147.count"),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_overwrite_exec_147.head"),
+            0
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_ring_overwrite_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+
+        assert_eq!(
+            process.execute_i32_noarg_by_name("ring_zero_run").unwrap(),
+            -1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_zero_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_ring_zero_exec_147.head"),
+            0
+        );
+        assert_eq!(
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::I32,
+                hash_global_path("typed_ring_zero_exec_147"),
                 crate::backend::emit::hash_foreach_field_suffix("values"),
             ),
             Some(0)

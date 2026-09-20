@@ -9,18 +9,19 @@ Implementation status: the compiler parses, validates, interns, fingerprints,
 and reports descriptor layouts for all nine collection kinds. The production
 state layout and executable operation surface currently support persistent
 global `pool<i32, N, error|drop_newest>` and
-`queue<i32, N, error|drop_newest|overwrite_oldest>` values. Other collection
-kinds and payload types are rejected at the production layout boundary instead
-of falling back to nominal scalar storage. Pool and queue operations lower
-through the same direct-storage emitter for JIT and native AOT, and their
-metadata/payload lanes are exposed through program snapshots and state
-inspection.
+`queue<i32, N, error|drop_newest|overwrite_oldest>` and
+`ring_buffer<i32, N, error|drop_newest|overwrite_oldest>` values. Other
+collection kinds and payload types are rejected at the production layout
+boundary instead of falling back to nominal scalar storage. Pool, queue, and
+ring-buffer operations lower through the same direct-storage emitter for JIT
+and native AOT, and their metadata/payload lanes are exposed through program
+snapshots and state inspection.
 
 The remaining operation descriptions in this document are the normative target
-contract for task #147. Ring-buffer, stable-pool, map, set, priority-queue,
-grid, and bitset operations are not executable yet. Structured overflow
-telemetry and migration between changed descriptors also remain pending. The
-current executable slice includes:
+contract for task #147. Stable-pool, map, set, priority-queue, grid, and bitset
+operations are not executable yet. Structured overflow telemetry and migration
+between changed descriptors also remain pending. The current executable slice
+includes:
 
 ```stasis
 global actors: pool<i32, 2, error>;
@@ -37,11 +38,12 @@ function enqueue_event(value: i32): bool {
 }
 ```
 
-The parser retains the ordinary call and indexed-path syntax. Current pool and
-queue lowering and later collection slices resolve compiler-owned operations
-by the collection descriptor. `src/stdlib` may expose thin declarations for future
-operations, but it does not define another backing container, generic push
-helper, aggregate return type, or implicit `foreach` implementation.
+The parser retains the ordinary call and indexed-path syntax. Current pool,
+queue, and ring-buffer lowering and later collection slices resolve
+compiler-owned operations by the collection descriptor. `src/stdlib` may
+expose thin declarations for future operations, but it does not define another
+backing container, generic push helper, aggregate return type, or implicit
+`foreach` implementation.
 
 The persistent inventory follows direct named-struct fields from global roots
 and global-block fields. Generic-instantiated struct roots, fixed-array wrappers
