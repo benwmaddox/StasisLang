@@ -1549,7 +1549,7 @@ mod tests {
     fn typed_collection_ids_are_not_numeric_or_supported_call_lanes() {
         let mut type_table = TypeTable::new();
         let typed = type_table
-            .resolve_or_intern("pool<i32, 2, error>")
+            .resolve_or_intern("pool<i32, 2>")
             .expect("typed pool type");
 
         assert_eq!(
@@ -1568,7 +1568,7 @@ mod tests {
     fn supported_call_signatures_exclude_typed_collection_params_and_returns() {
         let mut type_table = TypeTable::new();
         let typed = type_table
-            .resolve_or_intern("pool<i32, 2, error>")
+            .resolve_or_intern("pool<i32, 2>")
             .expect("typed pool type");
         let signatures = vec![
             ResolvedExternCallSignature {
@@ -1599,13 +1599,13 @@ mod tests {
         let files = vec![SourceFile {
             path: "typed_collections.stasis".to_string(),
             content: concat!(
-                "struct NestedState { history: ring_buffer<u8, 4, drop_newest>; }\n",
-                "struct AppState { pending: queue<i32, 2, overwrite_oldest>; nested: NestedState; }\n",
-                "global actors: pool<i32, 2, error>;\n",
+                "struct NestedState { history: ring_buffer<u8, 4>; }\n",
+                "struct AppState { pending: queue<i32, 2>; nested: NestedState; }\n",
+                "global actors: pool<i32, 2>;\n",
                 "global ordinary: Buffer<i32, 2>;\n",
                 "global app: AppState;\n",
                 "global State {\n",
-                "    events: queue<i32, 2, overwrite_oldest>;\n",
+                "    events: queue<i32, 2>;\n",
                 "}\n",
             )
             .to_string(),
@@ -1620,12 +1620,12 @@ mod tests {
         assert_eq!(descriptors.len(), 4);
         assert_eq!(
             descriptors["actors"].canonical_type_name(&type_table),
-            "pool<i32, 2, error>"
+            "pool<i32, 2>"
         );
         assert_eq!(descriptors["app.pending"].static_size_bytes, 16);
         assert_eq!(
-            descriptors["app.nested.history"].policy_name(),
-            "drop_newest"
+            descriptors["app.nested.history"].canonical_type_name(&type_table),
+            "ring_buffer<u8, 4>"
         );
         assert_eq!(descriptors["State.events"].static_size_bytes, 16);
         assert!(!descriptors.contains_key("ordinary"));
@@ -1636,8 +1636,8 @@ mod tests {
         let files = vec![SourceFile {
             path: "typed_collections.stasis".to_string(),
             content: concat!(
-                "struct AppState { pending: queue<i32, 2, overwrite_oldest>; }\n",
-                "global actors: pool<i32, 2, error>;\n",
+                "struct AppState { pending: queue<i32, 2>; }\n",
+                "global actors: pool<i32, 2>;\n",
                 "global app: AppState;\n",
             )
             .to_string(),
@@ -1659,11 +1659,11 @@ mod tests {
         assert_eq!(cache.typed_collection_descriptors.len(), 2);
         assert_eq!(
             cache.typed_collection_descriptors["actors"].canonical_type_name(&type_table),
-            "pool<i32, 2, error>"
+            "pool<i32, 2>"
         );
         assert_eq!(
-            cache.typed_collection_descriptors["app.pending"].policy_name(),
-            "overwrite_oldest"
+            cache.typed_collection_descriptors["app.pending"].canonical_type_name(&type_table),
+            "queue<i32, 2>"
         );
     }
 
@@ -1672,14 +1672,14 @@ mod tests {
         let files = vec![
             SourceFile {
                 path: "first.stasis".to_string(),
-                content: "global actors: pool<i32, 2, error>;\n".to_string(),
+                content: "global actors: pool<i32, 2>;\n".to_string(),
                 original_content: String::new(),
                 hash: 0,
                 functions: Vec::new(),
             },
             SourceFile {
                 path: "second.stasis".to_string(),
-                content: "global actors: pool<i32, 3, error>;\n".to_string(),
+                content: "global actors: pool<i32, 3>;\n".to_string(),
                 original_content: String::new(),
                 hash: 0,
                 functions: Vec::new(),
@@ -1698,27 +1698,24 @@ mod tests {
     fn typed_collection_inventory_attaches_state_path_and_source_to_type_errors() {
         let files = vec![SourceFile {
             path: "bad_collections.stasis".to_string(),
-            content: "global State { flags: bitset<8, drop_newest>; }\n".to_string(),
+            content: "global State { flags: pool<i32, -1>; }\n".to_string(),
             original_content: String::new(),
             hash: 0,
             functions: Vec::new(),
         }];
         let mut type_table = TypeTable::new();
         let error = collect_typed_collection_descriptors(&files, &mut type_table)
-            .expect_err("unsupported policy should be a state declaration error");
+            .expect_err("invalid capacity should be a state declaration error");
         assert!(error.contains("State.flags"), "{error}");
         assert!(error.contains("bad_collections.stasis"), "{error}");
-        assert!(
-            error.contains("does not support overflow policy"),
-            "{error}"
-        );
+        assert!(error.contains("nonnegative decimal"), "{error}");
     }
 
     #[test]
     fn production_cache_rejects_invalid_typed_collection_descriptors() {
         let files = vec![SourceFile {
             path: "bad_collections.stasis".to_string(),
-            content: "global State { flags: bitset<8, drop_newest>; }\n".to_string(),
+            content: "global State { flags: bitset<invalid>; }\n".to_string(),
             original_content: String::new(),
             hash: 0,
             functions: Vec::new(),
@@ -1734,13 +1731,7 @@ mod tests {
         )
         .expect_err("production cache construction must reject invalid descriptors");
 
-        assert!(
-            error.contains("invalid typed collection state path 'State.flags'"),
-            "{error}"
-        );
-        assert!(
-            error.contains("does not support overflow policy"),
-            "{error}"
-        );
+        assert!(error.contains("State.flags"), "{error}");
+        assert!(error.contains("nonnegative decimal constant"), "{error}");
     }
 }

@@ -1,8 +1,7 @@
 use super::compile_analysis::{CollectionInfoMap, GlobalPathTypeMap, TypedCollectionInfoMap};
 use crate::frontend::types::{
-    TypeCategory, TypeTable, TypedCollectionDescriptor, TypedCollectionKind,
-    TypedCollectionOverflowPolicy, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
-    TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8,
+    TypeCategory, TypeTable, TypedCollectionDescriptor, TypedCollectionKind, TYPE_ID_BOOL,
+    TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -709,10 +708,9 @@ pub(crate) fn typed_collection_layout_metadata(
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "typed_collection{{type={};kind={};policy={};capacity={};width={};height={};static_size={};lanes=[{}]}}",
+        "typed_collection{{type={};kind={};capacity={};width={};height={};static_size={};lanes=[{}]}}",
         descriptor.canonical_type_name(type_table),
         descriptor.kind_name(),
-        descriptor.policy_name(),
         descriptor.capacity,
         descriptor.width.map_or_else(|| "-".to_string(), |value| value.to_string()),
         descriptor.height.map_or_else(|| "-".to_string(), |value| value.to_string()),
@@ -763,23 +761,6 @@ fn validate_typed_collection_placement(
             | TypedCollectionKind::Map
             | TypedCollectionKind::Set
     );
-    let supported_policy = match descriptor.kind {
-        TypedCollectionKind::Pool
-        | TypedCollectionKind::StablePool
-        | TypedCollectionKind::PriorityQueue
-        | TypedCollectionKind::Map
-        | TypedCollectionKind::Set => matches!(
-            descriptor.policy,
-            TypedCollectionOverflowPolicy::Error | TypedCollectionOverflowPolicy::DropNewest
-        ),
-        TypedCollectionKind::Queue | TypedCollectionKind::RingBuffer => matches!(
-            descriptor.policy,
-            TypedCollectionOverflowPolicy::Error
-                | TypedCollectionOverflowPolicy::DropNewest
-                | TypedCollectionOverflowPolicy::OverwriteOldest
-        ),
-        _ => false,
-    };
     let supported_payload = match descriptor.kind {
         TypedCollectionKind::Pool
         | TypedCollectionKind::StablePool
@@ -792,9 +773,9 @@ fn validate_typed_collection_placement(
         TypedCollectionKind::Set => descriptor.key_type == Some(TYPE_ID_I32),
         _ => false,
     };
-    if !supported_kind || !supported_payload || !supported_policy {
+    if !supported_kind || !supported_payload {
         return Err(format!(
-            "typed collection state path '{path}' is not yet supported for production layout: only pool<i32,N,error|drop_newest>, stable_pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, ring_buffer<i32,N,error|drop_newest|overwrite_oldest>, priority_queue<i32,N,error|drop_newest>, map<i32,i32,N,error|drop_newest>, and set<i32,N,error|drop_newest> have a descriptor-defined state contract; got {}",
+            "typed collection state path '{path}' is not yet supported for production layout: only pool<i32,N>, stable_pool<i32,N>, queue<i32,N>, ring_buffer<i32,N>, priority_queue<i32,N>, map<i32,i32,N>, and set<i32,N> have a descriptor-defined state contract; got {}",
             descriptor.canonical_type_name(type_table)
         ));
     }
@@ -1225,7 +1206,7 @@ mod tests {
 
     #[test]
     fn typed_pool_layout_is_descriptor_owned_and_has_count_then_values_lanes() {
-        let layout = typed_layout("pool<i32, 2, error>");
+        let layout = typed_layout("pool<i32, 2>");
         assert!(layout.scalars.iter().all(|scalar| scalar.path != "actors"));
         let count = layout
             .scalars
@@ -1251,7 +1232,7 @@ mod tests {
         assert_eq!(pool.fields[0].storage_type_name(), "i32");
         assert!(pool
             .element_shape
-            .contains("typed_collection{type=pool<i32, 2, error>"));
+            .contains("typed_collection{type=pool<i32, 2>;kind=pool;capacity=2"));
         assert!(pool
             .element_shape
             .contains("lanes=[count:i32:1:0:4:4,values:i32:2:4:8:4]"));
@@ -1261,7 +1242,7 @@ mod tests {
     fn typed_collection_root_is_not_a_named_scalar_state_path() {
         let mut types = TypeTable::new();
         let typed = types
-            .resolve_or_intern("pool<i32, 2, error>")
+            .resolve_or_intern("pool<i32, 2>")
             .expect("typed pool type");
         let nominal = types
             .resolve_or_intern("Entity")
@@ -1291,7 +1272,7 @@ mod tests {
 
     #[test]
     fn typed_pool_zero_capacity_keeps_metadata_lane_without_payload_bytes() {
-        let layout = typed_layout("pool<i32, 0, drop_newest>");
+        let layout = typed_layout("pool<i32, 0>");
         assert!(layout.scalars.iter().all(|scalar| scalar.path != "actors"));
         assert!(layout
             .scalars
@@ -1310,115 +1291,108 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["values"]
         );
-        assert!(pool.element_shape.contains("type=pool<i32, 0, drop_newest"));
+        assert!(pool
+            .element_shape
+            .contains("type=pool<i32, 0>;kind=pool;capacity=0"));
         assert!(pool
             .element_shape
             .contains("lanes=[count:i32:1:0:4:4,values:i32:0:4:0:4]"));
     }
 
     #[test]
-    fn typed_stable_pool_layout_has_exact_lanes_for_every_supported_policy() {
-        for policy in ["error", "drop_newest"] {
-            let layout = typed_layout(&format!("stable_pool<i32, 2, {policy}>"));
-            assert!(layout.scalars.iter().all(|scalar| scalar.path != "actors"));
-            let count = layout
-                .scalars
-                .iter()
-                .find(|scalar| scalar.path == "actors.count")
-                .expect("typed stable pool count scalar");
-            assert_eq!(count.type_name, "i32");
-            assert_eq!(count.storage_type_name(), "i32");
+    fn typed_stable_pool_layout_has_exact_lanes() {
+        let layout = typed_layout("stable_pool<i32, 2>");
+        assert!(layout.scalars.iter().all(|scalar| scalar.path != "actors"));
+        let count = layout
+            .scalars
+            .iter()
+            .find(|scalar| scalar.path == "actors.count")
+            .expect("typed stable pool count scalar");
+        assert_eq!(count.type_name, "i32");
+        assert_eq!(count.storage_type_name(), "i32");
 
-            let pool = layout
-                .collections
+        let pool = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("typed stable pool collection layout");
+        assert_eq!(pool.capacity, 2);
+        assert!(!pool.fully_migratable);
+        assert_eq!(
+            pool.fields
                 .iter()
-                .find(|collection| collection.path == "actors")
-                .expect("typed stable pool collection layout");
-            assert_eq!(pool.capacity, 2);
-            assert!(!pool.fully_migratable);
-            assert_eq!(
-                pool.fields
-                    .iter()
-                    .map(|field| field.field.as_str())
-                    .collect::<Vec<_>>(),
-                ["occupied", "values"]
-            );
-            assert_eq!(pool.fields[0].type_name, "u8");
-            assert_eq!(pool.fields[0].storage_type_name(), "u8");
-            assert_eq!(pool.fields[1].type_name, "i32");
-            assert_eq!(pool.fields[1].storage_type_name(), "i32");
-            assert_eq!(
-                pool.element_shape,
-                format!(
-                    "typed_collection{{type=stable_pool<i32, 2, {policy}>;kind=stable_pool;policy={policy};capacity=2;width=-;height=-;static_size=16;lanes=[count:i32:1:0:4:4,occupied:u8:2:4:2:1,values:i32:2:8:8:4]}}"
-                )
-            );
-        }
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["occupied", "values"]
+        );
+        assert_eq!(pool.fields[0].type_name, "u8");
+        assert_eq!(pool.fields[0].storage_type_name(), "u8");
+        assert_eq!(pool.fields[1].type_name, "i32");
+        assert_eq!(pool.fields[1].storage_type_name(), "i32");
+        assert_eq!(
+            pool.element_shape,
+            "typed_collection{type=stable_pool<i32, 2>;kind=stable_pool;capacity=2;width=-;height=-;static_size=16;lanes=[count:i32:1:0:4:4,occupied:u8:2:4:2:1,values:i32:2:8:8:4]}"
+        );
     }
 
     #[test]
     fn typed_stable_pool_zero_capacity_keeps_occupied_and_values_lanes_empty() {
-        for policy in ["error", "drop_newest"] {
-            let layout = typed_layout(&format!("stable_pool<i32, 0, {policy}>"));
-            let count = layout
-                .scalars
+        let layout = typed_layout("stable_pool<i32, 0>");
+        let count = layout
+            .scalars
+            .iter()
+            .find(|scalar| scalar.path == "actors.count")
+            .expect("zero-capacity typed stable pool count scalar");
+        assert_eq!(count.storage_type_name(), "i32");
+        let pool = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("zero-capacity typed stable pool collection layout");
+        assert_eq!(pool.capacity, 0);
+        assert_eq!(
+            pool.fields
                 .iter()
-                .find(|scalar| scalar.path == "actors.count")
-                .expect("zero-capacity typed stable pool count scalar");
-            assert_eq!(count.storage_type_name(), "i32");
-            let pool = layout
-                .collections
-                .iter()
-                .find(|collection| collection.path == "actors")
-                .expect("zero-capacity typed stable pool collection layout");
-            assert_eq!(pool.capacity, 0);
-            assert_eq!(
-                pool.fields
-                    .iter()
-                    .map(|field| field.field.as_str())
-                    .collect::<Vec<_>>(),
-                ["occupied", "values"]
-            );
-            assert_eq!(
-                pool.element_shape,
-                format!(
-                    "typed_collection{{type=stable_pool<i32, 0, {policy}>;kind=stable_pool;policy={policy};capacity=0;width=-;height=-;static_size=4;lanes=[count:i32:1:0:4:4,occupied:u8:0:4:0:1,values:i32:0:4:0:4]}}"
-                )
-            );
-        }
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["occupied", "values"]
+        );
+        assert_eq!(
+            pool.element_shape,
+            "typed_collection{type=stable_pool<i32, 0>;kind=stable_pool;capacity=0;width=-;height=-;static_size=4;lanes=[count:i32:1:0:4:4,occupied:u8:0:4:0:1,values:i32:0:4:0:4]}"
+        );
     }
 
     #[test]
-    fn typed_map_and_set_layouts_have_exact_i32_lanes_for_every_policy_and_capacity() {
-        for policy in ["error", "drop_newest"] {
-            for capacity in [0, 1, 3] {
-                let map = typed_layout(&format!("map<i32, i32, {capacity}, {policy}>"));
-                assert_eq!(
-                    map.scalars
-                        .iter()
-                        .map(|scalar| scalar.path.as_str())
-                        .collect::<Vec<_>>(),
-                    ["actors.count"]
-                );
-                let map_layout = map
-                    .collections
+    fn typed_map_and_set_layouts_have_exact_i32_lanes_for_every_capacity() {
+        for capacity in [0, 1, 3] {
+            let map = typed_layout(&format!("map<i32, i32, {capacity}>"));
+            assert_eq!(
+                map.scalars
                     .iter()
-                    .find(|collection| collection.path == "actors")
-                    .expect("typed map collection layout");
-                assert_eq!(map_layout.capacity, capacity);
-                assert!(!map_layout.fully_migratable);
-                assert_eq!(
-                    map_layout
-                        .fields
-                        .iter()
-                        .map(|field| field.field.as_str())
-                        .collect::<Vec<_>>(),
-                    ["occupied", "keys", "values"]
-                );
-                assert_eq!(
+                    .map(|scalar| scalar.path.as_str())
+                    .collect::<Vec<_>>(),
+                ["actors.count"]
+            );
+            let map_layout = map
+                .collections
+                .iter()
+                .find(|collection| collection.path == "actors")
+                .expect("typed map collection layout");
+            assert_eq!(map_layout.capacity, capacity);
+            assert!(!map_layout.fully_migratable);
+            assert_eq!(
+                map_layout
+                    .fields
+                    .iter()
+                    .map(|field| field.field.as_str())
+                    .collect::<Vec<_>>(),
+                ["occupied", "keys", "values"]
+            );
+            assert_eq!(
                     map_layout.element_shape,
                     format!(
-                        "typed_collection{{type=map<i32, i32, {capacity}, {policy}>;kind=map;policy={policy};capacity={capacity};width=-;height=-;static_size={};lanes=[{}]}}",
+                        "typed_collection{{type=map<i32, i32, {capacity}>;kind=map;capacity={capacity};width=-;height=-;static_size={};lanes=[{}]}}",
                         match capacity {
                             0 => 4,
                             1 => 16,
@@ -1434,33 +1408,33 @@ mod tests {
                     )
                 );
 
-                let set = typed_layout(&format!("set<i32, {capacity}, {policy}>"));
-                assert_eq!(
-                    set.scalars
-                        .iter()
-                        .map(|scalar| scalar.path.as_str())
-                        .collect::<Vec<_>>(),
-                    ["actors.count"]
-                );
-                let set_layout = set
-                    .collections
+            let set = typed_layout(&format!("set<i32, {capacity}>"));
+            assert_eq!(
+                set.scalars
                     .iter()
-                    .find(|collection| collection.path == "actors")
-                    .expect("typed set collection layout");
-                assert_eq!(set_layout.capacity, capacity);
-                assert!(!set_layout.fully_migratable);
-                assert_eq!(
-                    set_layout
-                        .fields
-                        .iter()
-                        .map(|field| field.field.as_str())
-                        .collect::<Vec<_>>(),
-                    ["occupied", "keys"]
-                );
-                assert_eq!(
+                    .map(|scalar| scalar.path.as_str())
+                    .collect::<Vec<_>>(),
+                ["actors.count"]
+            );
+            let set_layout = set
+                .collections
+                .iter()
+                .find(|collection| collection.path == "actors")
+                .expect("typed set collection layout");
+            assert_eq!(set_layout.capacity, capacity);
+            assert!(!set_layout.fully_migratable);
+            assert_eq!(
+                set_layout
+                    .fields
+                    .iter()
+                    .map(|field| field.field.as_str())
+                    .collect::<Vec<_>>(),
+                ["occupied", "keys"]
+            );
+            assert_eq!(
                     set_layout.element_shape,
                     format!(
-                        "typed_collection{{type=set<i32, {capacity}, {policy}>;kind=set;policy={policy};capacity={capacity};width=-;height=-;static_size={};lanes=[{}]}}",
+                        "typed_collection{{type=set<i32, {capacity}>;kind=set;capacity={capacity};width=-;height=-;static_size={};lanes=[{}]}}",
                         match capacity {
                             0 => 4,
                             1 => 12,
@@ -1475,52 +1449,50 @@ mod tests {
                         }
                     )
                 );
-            }
         }
     }
 
     #[test]
     fn typed_priority_queue_layout_has_exact_metadata_and_soa_lanes() {
-        for policy in ["error", "drop_newest"] {
-            for capacity in [0, 1, 3] {
-                let layout = typed_layout(&format!("priority_queue<i32, {capacity}, {policy}>"));
-                assert_eq!(
-                    layout
-                        .scalars
-                        .iter()
-                        .map(|scalar| scalar.path.as_str())
-                        .collect::<Vec<_>>(),
-                    ["actors.count", "actors.next_order"]
-                );
-                let count = layout
+        for capacity in [0, 1, 3] {
+            let layout = typed_layout(&format!("priority_queue<i32, {capacity}>"));
+            assert_eq!(
+                layout
                     .scalars
                     .iter()
-                    .find(|scalar| scalar.path == "actors.count")
-                    .expect("priority queue count scalar");
-                assert_eq!(count.storage_type_name(), "i32");
-                let next_order = layout
-                    .scalars
-                    .iter()
-                    .find(|scalar| scalar.path == "actors.next_order")
-                    .expect("priority queue next_order scalar");
-                assert_eq!(next_order.storage_type_name(), "u32");
+                    .map(|scalar| scalar.path.as_str())
+                    .collect::<Vec<_>>(),
+                ["actors.count", "actors.next_order"]
+            );
+            let count = layout
+                .scalars
+                .iter()
+                .find(|scalar| scalar.path == "actors.count")
+                .expect("priority queue count scalar");
+            assert_eq!(count.storage_type_name(), "i32");
+            let next_order = layout
+                .scalars
+                .iter()
+                .find(|scalar| scalar.path == "actors.next_order")
+                .expect("priority queue next_order scalar");
+            assert_eq!(next_order.storage_type_name(), "u32");
 
-                let queue = layout
-                    .collections
+            let queue = layout
+                .collections
+                .iter()
+                .find(|collection| collection.path == "actors")
+                .expect("priority queue collection layout");
+            assert_eq!(queue.capacity, capacity);
+            assert!(!queue.fully_migratable);
+            assert_eq!(
+                queue
+                    .fields
                     .iter()
-                    .find(|collection| collection.path == "actors")
-                    .expect("priority queue collection layout");
-                assert_eq!(queue.capacity, capacity);
-                assert!(!queue.fully_migratable);
-                assert_eq!(
-                    queue
-                        .fields
-                        .iter()
-                        .map(|field| field.field.as_str())
-                        .collect::<Vec<_>>(),
-                    ["priority", "order", "values"]
-                );
-                let (static_size, lanes) = match capacity {
+                    .map(|field| field.field.as_str())
+                    .collect::<Vec<_>>(),
+                ["priority", "order", "values"]
+            );
+            let (static_size, lanes) = match capacity {
                     0 => (
                         8,
                         "count:i32:1:0:4:4,next_order:u32:1:4:4:4,priority:i32:0:8:0:4,order:u32:0:8:0:4,values:i32:0:8:0:4",
@@ -1535,54 +1507,51 @@ mod tests {
                     ),
                     _ => unreachable!(),
                 };
-                assert_eq!(
+            assert_eq!(
                     queue.element_shape,
                     format!(
-                        "typed_collection{{type=priority_queue<i32, {capacity}, {policy}>;kind=priority_queue;policy={policy};capacity={capacity};width=-;height=-;static_size={static_size};lanes=[{lanes}]}}"
+                        "typed_collection{{type=priority_queue<i32, {capacity}>;kind=priority_queue;capacity={capacity};width=-;height=-;static_size={static_size};lanes=[{lanes}]}}"
                     )
                 );
-            }
         }
     }
 
     #[test]
-    fn typed_queue_layout_keeps_count_and_head_metadata_for_every_policy() {
-        for policy in ["error", "drop_newest", "overwrite_oldest"] {
-            let layout = typed_layout(&format!("queue<i32, 2, {policy}>"));
-            let queue = layout
-                .collections
+    fn typed_queue_layout_keeps_count_and_head_metadata() {
+        let layout = typed_layout("queue<i32, 2>");
+        let queue = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("typed queue collection layout");
+        assert_eq!(queue.capacity, 2);
+        assert_eq!(
+            queue
+                .fields
                 .iter()
-                .find(|collection| collection.path == "actors")
-                .expect("typed queue collection layout");
-            assert_eq!(queue.capacity, 2);
-            assert_eq!(
-                queue
-                    .fields
-                    .iter()
-                    .map(|field| field.field.as_str())
-                    .collect::<Vec<_>>(),
-                ["values"]
-            );
-            assert!(queue
-                .element_shape
-                .contains(&format!("typed_collection{{type=queue<i32, 2, {policy}>")));
-            assert!(queue
-                .element_shape
-                .contains("lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:2:8:8:4]"));
-            for lane in ["count", "head"] {
-                let scalar = layout
-                    .scalars
-                    .iter()
-                    .find(|scalar| scalar.path == format!("actors.{lane}"))
-                    .unwrap_or_else(|| panic!("typed queue {lane} scalar"));
-                assert_eq!(scalar.storage_type_name(), "i32");
-            }
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["values"]
+        );
+        assert!(queue
+            .element_shape
+            .contains("typed_collection{type=queue<i32, 2>;kind=queue;capacity=2"));
+        assert!(queue
+            .element_shape
+            .contains("lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:2:8:8:4]"));
+        for lane in ["count", "head"] {
+            let scalar = layout
+                .scalars
+                .iter()
+                .find(|scalar| scalar.path == format!("actors.{lane}"))
+                .unwrap_or_else(|| panic!("typed queue {lane} scalar"));
+            assert_eq!(scalar.storage_type_name(), "i32");
         }
     }
 
     #[test]
     fn typed_queue_zero_capacity_retains_count_head_and_empty_values_lane() {
-        let layout = typed_layout("queue<i32, 0, overwrite_oldest>");
+        let layout = typed_layout("queue<i32, 0>");
         for lane in ["count", "head"] {
             assert!(layout
                 .scalars
@@ -1605,60 +1574,56 @@ mod tests {
         );
         assert!(queue
             .element_shape
-            .contains("type=queue<i32, 0, overwrite_oldest"));
+            .contains("type=queue<i32, 0>;kind=queue;capacity=0"));
         assert!(queue
             .element_shape
             .contains("lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:0:8:0:4]"));
     }
 
     #[test]
-    fn typed_ring_buffer_layout_has_exact_count_head_and_values_lanes_for_every_policy() {
-        for policy in ["error", "drop_newest", "overwrite_oldest"] {
-            let layout = typed_layout(&format!("ring_buffer<i32, 2, {policy}>"));
-            assert!(layout.scalars.iter().all(|scalar| scalar.path != "actors"));
-            let count = layout
-                .scalars
-                .iter()
-                .find(|scalar| scalar.path == "actors.count")
-                .expect("typed ring buffer count scalar");
-            assert_eq!(count.type_name, "i32");
-            assert_eq!(count.storage_type_name(), "i32");
-            let head = layout
-                .scalars
-                .iter()
-                .find(|scalar| scalar.path == "actors.head")
-                .expect("typed ring buffer head scalar");
-            assert_eq!(head.type_name, "i32");
-            assert_eq!(head.storage_type_name(), "i32");
+    fn typed_ring_buffer_layout_has_exact_count_head_and_values_lanes() {
+        let layout = typed_layout("ring_buffer<i32, 2>");
+        assert!(layout.scalars.iter().all(|scalar| scalar.path != "actors"));
+        let count = layout
+            .scalars
+            .iter()
+            .find(|scalar| scalar.path == "actors.count")
+            .expect("typed ring buffer count scalar");
+        assert_eq!(count.type_name, "i32");
+        assert_eq!(count.storage_type_name(), "i32");
+        let head = layout
+            .scalars
+            .iter()
+            .find(|scalar| scalar.path == "actors.head")
+            .expect("typed ring buffer head scalar");
+        assert_eq!(head.type_name, "i32");
+        assert_eq!(head.storage_type_name(), "i32");
 
-            let ring = layout
-                .collections
+        let ring = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("typed ring buffer collection layout");
+        assert_eq!(ring.capacity, 2);
+        assert!(!ring.fully_migratable);
+        assert_eq!(
+            ring.fields
                 .iter()
-                .find(|collection| collection.path == "actors")
-                .expect("typed ring buffer collection layout");
-            assert_eq!(ring.capacity, 2);
-            assert!(!ring.fully_migratable);
-            assert_eq!(
-                ring.fields
-                    .iter()
-                    .map(|field| field.field.as_str())
-                    .collect::<Vec<_>>(),
-                ["values"]
-            );
-            assert_eq!(ring.fields[0].type_name, "i32");
-            assert_eq!(ring.fields[0].storage_type_name(), "i32");
-            assert_eq!(
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["values"]
+        );
+        assert_eq!(ring.fields[0].type_name, "i32");
+        assert_eq!(ring.fields[0].storage_type_name(), "i32");
+        assert_eq!(
                 ring.element_shape,
-                format!(
-                    "typed_collection{{type=ring_buffer<i32, 2, {policy}>;kind=ring_buffer;policy={policy};capacity=2;width=-;height=-;static_size=16;lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:2:8:8:4]}}"
-                )
+                "typed_collection{type=ring_buffer<i32, 2>;kind=ring_buffer;capacity=2;width=-;height=-;static_size=16;lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:2:8:8:4]}"
             );
-        }
     }
 
     #[test]
     fn typed_ring_buffer_zero_capacity_has_exact_metadata_and_empty_values_lane() {
-        let layout = typed_layout("ring_buffer<i32, 0, overwrite_oldest>");
+        let layout = typed_layout("ring_buffer<i32, 0>");
         for lane in ["count", "head"] {
             let scalar = layout
                 .scalars
@@ -1686,22 +1651,20 @@ mod tests {
         assert_eq!(ring.fields[0].storage_type_name(), "i32");
         assert_eq!(
             ring.element_shape,
-            "typed_collection{type=ring_buffer<i32, 0, overwrite_oldest>;kind=ring_buffer;policy=overwrite_oldest;capacity=0;width=-;height=-;static_size=8;lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:0:8:0:4]}"
+            "typed_collection{type=ring_buffer<i32, 0>;kind=ring_buffer;capacity=0;width=-;height=-;static_size=8;lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:0:8:0:4]}"
         );
     }
 
     #[test]
-    fn typed_pool_policy_and_capacity_are_state_layout_identity() {
-        let error = state_layout_digest(&typed_layout("pool<i32, 2, error>")).expect("digest");
-        let drop = state_layout_digest(&typed_layout("pool<i32, 2, drop_newest>")).expect("digest");
-        let larger = state_layout_digest(&typed_layout("pool<i32, 3, error>")).expect("digest");
-        assert_ne!(error, drop, "overflow policy is part of layout identity");
-        assert_ne!(error, larger, "capacity is part of layout identity");
+    fn typed_pool_capacity_is_state_layout_identity() {
+        let smaller = state_layout_digest(&typed_layout("pool<i32, 2>")).expect("digest");
+        let larger = state_layout_digest(&typed_layout("pool<i32, 3>")).expect("digest");
+        assert_ne!(smaller, larger, "capacity is part of layout identity");
     }
 
     #[test]
     fn typed_stable_pool_memory_report_counts_each_soa_lane_exactly() {
-        let layout = typed_layout("stable_pool<i32, 2, error>");
+        let layout = typed_layout("stable_pool<i32, 2>");
         let active_counts = BTreeMap::from([("actors".to_string(), 1)]);
         let capacity_overrides = BTreeMap::from([("actors".to_string(), 4)]);
         let report =
@@ -1754,97 +1717,14 @@ mod tests {
 
     #[test]
     fn typed_map_and_set_memory_reports_count_each_soa_lane_exactly() {
-        for policy in ["error", "drop_newest"] {
-            for kind in ["map", "set"] {
-                for capacity in [0_u64, 1, 3] {
-                    let type_name = if kind == "map" {
-                        format!("map<i32, i32, {capacity}, {policy}>")
-                    } else {
-                        format!("set<i32, {capacity}, {policy}>")
-                    };
-                    let layout = typed_layout(&type_name);
-                    let active_counts = BTreeMap::from([("actors".to_string(), 1)]);
-                    let capacity_overrides = BTreeMap::from([("actors".to_string(), capacity + 1)]);
-                    let report = build_state_memory_report(
-                        &layout,
-                        &active_counts,
-                        &capacity_overrides,
-                        u64::MAX,
-                    )
-                    .expect("typed map/set memory report");
-
-                    let fields = if kind == "map" {
-                        vec![("occupied", 1_u64), ("keys", 4), ("values", 4)]
-                    } else {
-                        vec![("occupied", 1_u64), ("keys", 4)]
-                    };
-                    assert_eq!(report.entries.len(), fields.len() + 1);
-                    let count = report
-                        .entries
-                        .iter()
-                        .find(|entry| entry.path == "actors.count")
-                        .expect("typed map/set count report entry");
-                    assert_eq!(count.element_bytes, 4);
-                    assert_eq!(count.capacity, 1);
-                    assert_eq!(count.capacity_bytes, 4);
-
-                    let active_capacity = capacity.min(1);
-                    for (field, element_bytes) in &fields {
-                        let entry = report
-                            .entries
-                            .iter()
-                            .find(|entry| entry.path == "actors" && entry.field == *field)
-                            .unwrap_or_else(|| panic!("typed {kind} {field} report entry"));
-                        assert_eq!(entry.element_bytes, *element_bytes);
-                        assert_eq!(entry.capacity, capacity);
-                        assert_eq!(entry.active_count, Some(active_capacity));
-                        assert_eq!(entry.capacity_bytes, capacity * element_bytes);
-                        assert_eq!(entry.active_bytes, Some(active_capacity * element_bytes));
-                    }
-
-                    let bytes_per_element = fields
-                        .iter()
-                        .map(|(_, element_bytes)| element_bytes)
-                        .sum::<u64>();
-                    let pool = report
-                        .largest_pools
-                        .iter()
-                        .find(|pool| pool.path == "actors")
-                        .expect("typed map/set pool report");
-                    assert_eq!(pool.capacity, capacity);
-                    assert_eq!(pool.active_count, Some(active_capacity));
-                    assert_eq!(pool.bytes_per_element, bytes_per_element);
-                    assert_eq!(pool.capacity_bytes, capacity * bytes_per_element);
-                    assert_eq!(pool.active_bytes, Some(active_capacity * bytes_per_element));
-                    assert_eq!(
-                        report.total_capacity_bytes,
-                        4 + capacity * bytes_per_element
-                    );
-                    assert_eq!(
-                        report.projected_capacity_bytes,
-                        4 + (capacity + 1) * bytes_per_element
-                    );
-                    assert_eq!(report.capacity_changes.len(), 1);
-                    assert_eq!(report.capacity_changes[0].old_capacity, capacity);
-                    assert_eq!(report.capacity_changes[0].new_capacity, capacity + 1);
-                    assert_eq!(
-                        report.capacity_changes[0].bytes_per_element,
-                        bytes_per_element
-                    );
-                    assert_eq!(
-                        report.capacity_changes[0].delta_bytes,
-                        i64::try_from(bytes_per_element).expect("report delta")
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn typed_priority_queue_memory_reports_each_lane_and_metadata_exactly() {
-        for policy in ["error", "drop_newest"] {
+        for kind in ["map", "set"] {
             for capacity in [0_u64, 1, 3] {
-                let layout = typed_layout(&format!("priority_queue<i32, {capacity}, {policy}>"));
+                let type_name = if kind == "map" {
+                    format!("map<i32, i32, {capacity}>")
+                } else {
+                    format!("set<i32, {capacity}>")
+                };
+                let layout = typed_layout(&type_name);
                 let active_counts = BTreeMap::from([("actors".to_string(), 1)]);
                 let capacity_overrides = BTreeMap::from([("actors".to_string(), capacity + 1)]);
                 let report = build_state_memory_report(
@@ -1853,71 +1733,146 @@ mod tests {
                     &capacity_overrides,
                     u64::MAX,
                 )
-                .expect("priority queue memory report");
+                .expect("typed map/set memory report");
 
-                assert_eq!(report.entries.len(), 5);
-                for path in ["actors.count", "actors.next_order"] {
-                    let scalar = report
-                        .entries
-                        .iter()
-                        .find(|entry| entry.path == path)
-                        .unwrap_or_else(|| panic!("priority queue scalar report entry {path}"));
-                    assert_eq!(scalar.element_bytes, 4);
-                    assert_eq!(scalar.capacity, 1);
-                    assert_eq!(scalar.capacity_bytes, 4);
-                }
+                let fields = if kind == "map" {
+                    vec![("occupied", 1_u64), ("keys", 4), ("values", 4)]
+                } else {
+                    vec![("occupied", 1_u64), ("keys", 4)]
+                };
+                assert_eq!(report.entries.len(), fields.len() + 1);
+                let count = report
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == "actors.count")
+                    .expect("typed map/set count report entry");
+                assert_eq!(count.element_bytes, 4);
+                assert_eq!(count.capacity, 1);
+                assert_eq!(count.capacity_bytes, 4);
 
                 let active_capacity = capacity.min(1);
-                for field in ["priority", "order", "values"] {
+                for (field, element_bytes) in &fields {
                     let entry = report
                         .entries
                         .iter()
-                        .find(|entry| entry.path == "actors" && entry.field == field)
-                        .unwrap_or_else(|| panic!("priority queue {field} report entry"));
-                    assert_eq!(entry.element_bytes, 4);
+                        .find(|entry| entry.path == "actors" && entry.field == *field)
+                        .unwrap_or_else(|| panic!("typed {kind} {field} report entry"));
+                    assert_eq!(entry.element_bytes, *element_bytes);
                     assert_eq!(entry.capacity, capacity);
                     assert_eq!(entry.active_count, Some(active_capacity));
-                    assert_eq!(entry.capacity_bytes, capacity * 4);
-                    assert_eq!(entry.active_bytes, Some(active_capacity * 4));
+                    assert_eq!(entry.capacity_bytes, capacity * element_bytes);
+                    assert_eq!(entry.active_bytes, Some(active_capacity * element_bytes));
                 }
 
+                let bytes_per_element = fields
+                    .iter()
+                    .map(|(_, element_bytes)| element_bytes)
+                    .sum::<u64>();
                 let pool = report
                     .largest_pools
                     .iter()
                     .find(|pool| pool.path == "actors")
-                    .expect("priority queue pool report");
+                    .expect("typed map/set pool report");
                 assert_eq!(pool.capacity, capacity);
                 assert_eq!(pool.active_count, Some(active_capacity));
-                assert_eq!(pool.bytes_per_element, 12);
-                assert_eq!(pool.capacity_bytes, capacity * 12);
-                assert_eq!(pool.active_bytes, Some(active_capacity * 12));
-                assert_eq!(report.total_capacity_bytes, 8 + capacity * 12);
-                assert_eq!(report.projected_capacity_bytes, 8 + (capacity + 1) * 12);
+                assert_eq!(pool.bytes_per_element, bytes_per_element);
+                assert_eq!(pool.capacity_bytes, capacity * bytes_per_element);
+                assert_eq!(pool.active_bytes, Some(active_capacity * bytes_per_element));
+                assert_eq!(
+                    report.total_capacity_bytes,
+                    4 + capacity * bytes_per_element
+                );
+                assert_eq!(
+                    report.projected_capacity_bytes,
+                    4 + (capacity + 1) * bytes_per_element
+                );
                 assert_eq!(report.capacity_changes.len(), 1);
                 assert_eq!(report.capacity_changes[0].old_capacity, capacity);
                 assert_eq!(report.capacity_changes[0].new_capacity, capacity + 1);
-                assert_eq!(report.capacity_changes[0].bytes_per_element, 12);
-                assert_eq!(report.capacity_changes[0].delta_bytes, 12);
+                assert_eq!(
+                    report.capacity_changes[0].bytes_per_element,
+                    bytes_per_element
+                );
+                assert_eq!(
+                    report.capacity_changes[0].delta_bytes,
+                    i64::try_from(bytes_per_element).expect("report delta")
+                );
             }
         }
     }
 
     #[test]
+    fn typed_priority_queue_memory_reports_each_lane_and_metadata_exactly() {
+        for capacity in [0_u64, 1, 3] {
+            let layout = typed_layout(&format!("priority_queue<i32, {capacity}>"));
+            let active_counts = BTreeMap::from([("actors".to_string(), 1)]);
+            let capacity_overrides = BTreeMap::from([("actors".to_string(), capacity + 1)]);
+            let report =
+                build_state_memory_report(&layout, &active_counts, &capacity_overrides, u64::MAX)
+                    .expect("priority queue memory report");
+
+            assert_eq!(report.entries.len(), 5);
+            for path in ["actors.count", "actors.next_order"] {
+                let scalar = report
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == path)
+                    .unwrap_or_else(|| panic!("priority queue scalar report entry {path}"));
+                assert_eq!(scalar.element_bytes, 4);
+                assert_eq!(scalar.capacity, 1);
+                assert_eq!(scalar.capacity_bytes, 4);
+            }
+
+            let active_capacity = capacity.min(1);
+            for field in ["priority", "order", "values"] {
+                let entry = report
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == "actors" && entry.field == field)
+                    .unwrap_or_else(|| panic!("priority queue {field} report entry"));
+                assert_eq!(entry.element_bytes, 4);
+                assert_eq!(entry.capacity, capacity);
+                assert_eq!(entry.active_count, Some(active_capacity));
+                assert_eq!(entry.capacity_bytes, capacity * 4);
+                assert_eq!(entry.active_bytes, Some(active_capacity * 4));
+            }
+
+            let pool = report
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "actors")
+                .expect("priority queue pool report");
+            assert_eq!(pool.capacity, capacity);
+            assert_eq!(pool.active_count, Some(active_capacity));
+            assert_eq!(pool.bytes_per_element, 12);
+            assert_eq!(pool.capacity_bytes, capacity * 12);
+            assert_eq!(pool.active_bytes, Some(active_capacity * 12));
+            assert_eq!(report.total_capacity_bytes, 8 + capacity * 12);
+            assert_eq!(report.projected_capacity_bytes, 8 + (capacity + 1) * 12);
+            assert_eq!(report.capacity_changes.len(), 1);
+            assert_eq!(report.capacity_changes[0].old_capacity, capacity);
+            assert_eq!(report.capacity_changes[0].new_capacity, capacity + 1);
+            assert_eq!(report.capacity_changes[0].bytes_per_element, 12);
+            assert_eq!(report.capacity_changes[0].delta_bytes, 12);
+        }
+    }
+
+    #[test]
     fn unsupported_typed_collection_kinds_are_rejected_at_state_layout_boundary() {
-        let bitset = typed_layout_result("bitset<8, error>")
+        let bitset = typed_layout_result("bitset<8>")
             .expect_err("bitset layout must not claim pool-shaped storage");
         assert!(
             bitset.contains(
-                "only pool<i32,N,error|drop_newest>, stable_pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, ring_buffer<i32,N,error|drop_newest|overwrite_oldest>, priority_queue<i32,N,error|drop_newest>, map<i32,i32,N,error|drop_newest>, and set<i32,N,error|drop_newest>"
+                "only pool<i32,N>, stable_pool<i32,N>, queue<i32,N>, ring_buffer<i32,N>, priority_queue<i32,N>, map<i32,i32,N>, and set<i32,N>"
             ),
             "{bitset}"
         );
 
-        let wide_pool = typed_layout_result("pool<f64, 2, error>")
+        let wide_pool = typed_layout_result("pool<f64, 2>")
             .expect_err("non-i32 pool payload layout must be rejected");
         assert!(
             wide_pool.contains(
-                "only pool<i32,N,error|drop_newest>, stable_pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, ring_buffer<i32,N,error|drop_newest|overwrite_oldest>, priority_queue<i32,N,error|drop_newest>, map<i32,i32,N,error|drop_newest>, and set<i32,N,error|drop_newest>"
+                "only pool<i32,N>, stable_pool<i32,N>, queue<i32,N>, ring_buffer<i32,N>, priority_queue<i32,N>, map<i32,i32,N>, and set<i32,N>"
             ),
             "{wide_pool}"
         );

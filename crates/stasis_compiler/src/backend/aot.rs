@@ -505,7 +505,9 @@ impl AotProcess {
                 .compiler
                 .functions()
                 .iter()
-                .filter(|function| matches_root(function, name))
+                .filter(|function| {
+                    function.requires_contract.is_none() && matches_root(function, name)
+                })
                 .count();
             if count > 1 {
                 return Err(format!(
@@ -3198,7 +3200,7 @@ mod tests {
             process.upsert_file(
                 "typed_pool_storage.stasis",
                 format!(
-                    "global actors: pool<i32, {capacity}, error>;\nfunction main(): i32 {{ return 0; }}\n"
+                    "global actors: pool<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
                 ),
             );
             process.compile().expect("typed pool AOT compile");
@@ -3211,7 +3213,7 @@ mod tests {
             assert_eq!(descriptor.capacity, capacity);
             assert_eq!(
                 descriptor.canonical_type_name(snapshot.types()),
-                format!("pool<i32, {capacity}, error>")
+                format!("pool<i32, {capacity}>")
             );
 
             let bindings = build_aot_direct_storage_bindings(
@@ -3281,13 +3283,13 @@ mod tests {
 
     #[test]
     fn typed_stable_pool_aot_storage_plan_and_symbols_match_jit_lanes() {
-        for policy in ["error", "drop_newest"] {
+        for _ in [()] {
             for capacity in [2_u32, 0_u32] {
                 let mut process = AotProcess::new();
                 process.upsert_file(
                     "typed_stable_pool_storage.stasis",
                     format!(
-                        "global actors: stable_pool<i32, {capacity}, {policy}>;\nfunction main(): i32 {{ return 0; }}\n"
+                        "global actors: stable_pool<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
                     ),
                 );
                 process.compile().expect("typed stable-pool AOT compile");
@@ -3301,7 +3303,7 @@ mod tests {
                     .expect("typed stable-pool descriptor");
                 assert_eq!(
                     descriptor.canonical_type_name(snapshot.types()),
-                    format!("stable_pool<i32, {capacity}, {policy}>")
+                    format!("stable_pool<i32, {capacity}>")
                 );
                 let bindings = build_aot_direct_storage_bindings(
                     &snapshot.analysis.global_path_types,
@@ -3370,7 +3372,7 @@ mod tests {
                 ] {
                     assert!(
                         symbols.contains(&expected),
-                        "typed stable-pool storage object missing '{expected}' for {policy}, capacity {capacity}: {symbols:?}"
+                        "typed stable-pool storage object missing '{expected}' capacity {capacity}: {symbols:?}"
                     );
                 }
             }
@@ -3380,12 +3382,12 @@ mod tests {
     #[test]
     fn typed_map_and_set_aot_storage_plan_and_symbols_match_jit_lanes() {
         for kind in ["map", "set"] {
-            for policy in ["error", "drop_newest"] {
+            for _ in [()] {
                 for capacity in [3_u32, 0_u32] {
                     let mut process = AotProcess::new();
                     let declaration = match kind {
-                        "map" => format!("global collection: map<i32, i32, {capacity}, {policy}>;"),
-                        "set" => format!("global collection: set<i32, {capacity}, {policy}>;"),
+                        "map" => format!("global collection: map<i32, i32, {capacity}>;"),
+                        "set" => format!("global collection: set<i32, {capacity}>;"),
                         _ => unreachable!(),
                     };
                     process.upsert_file(
@@ -3404,8 +3406,8 @@ mod tests {
                     assert_eq!(
                         descriptor.canonical_type_name(snapshot.types()),
                         match kind {
-                            "map" => format!("map<i32, i32, {capacity}, {policy}>"),
-                            "set" => format!("set<i32, {capacity}, {policy}>"),
+                            "map" => format!("map<i32, i32, {capacity}>"),
+                            "set" => format!("set<i32, {capacity}>"),
                             _ => unreachable!(),
                         }
                     );
@@ -3468,7 +3470,7 @@ mod tests {
                             "collection.count",
                             "",
                         )),
-                        "typed {kind} count symbol missing for {policy}, capacity {capacity}: {symbols:?}"
+                        "typed {kind} count symbol missing capacity {capacity}: {symbols:?}"
                     );
                     for (field, _) in expected_arrays {
                         assert!(
@@ -3477,7 +3479,7 @@ mod tests {
                                 "collection",
                                 field,
                             )),
-                            "typed {kind} {field} symbol missing for {policy}, capacity {capacity}: {symbols:?}"
+                            "typed {kind} {field} symbol missing capacity {capacity}: {symbols:?}"
                         );
                     }
                     assert!(
@@ -3495,13 +3497,13 @@ mod tests {
 
     #[test]
     fn typed_queue_aot_storage_plan_and_symbols_match_jit_lanes() {
-        for policy in ["error", "drop_newest", "overwrite_oldest"] {
+        for _ in [()] {
             for capacity in [2_u32, 0_u32] {
                 let mut process = AotProcess::new();
                 process.upsert_file(
                     "typed_queue_storage.stasis",
                     format!(
-                        "global actors: queue<i32, {capacity}, {policy}>;\nfunction main(): i32 {{ return 0; }}\n"
+                        "global actors: queue<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
                     ),
                 );
                 process.compile().expect("typed queue AOT compile");
@@ -3514,7 +3516,7 @@ mod tests {
                 assert_eq!(descriptor.capacity, capacity);
                 assert_eq!(
                     descriptor.canonical_type_name(snapshot.types()),
-                    format!("queue<i32, {capacity}, {policy}>")
+                    format!("queue<i32, {capacity}>")
                 );
                 let bindings = build_aot_direct_storage_bindings(
                     &snapshot.analysis.global_path_types,
@@ -3571,7 +3573,7 @@ mod tests {
                 ] {
                     assert!(
                         symbols.contains(&expected),
-                        "typed queue storage object missing '{expected}' for {policy}, capacity {capacity}: {symbols:?}"
+                        "typed queue storage object missing '{expected}' capacity {capacity}: {symbols:?}"
                     );
                 }
             }
@@ -3580,13 +3582,13 @@ mod tests {
 
     #[test]
     fn typed_priority_queue_aot_storage_plan_and_symbols_match_jit_lanes() {
-        for policy in ["error", "drop_newest"] {
+        for _ in [()] {
             for capacity in [3_u32, 0_u32] {
                 let mut process = AotProcess::new();
                 process.upsert_file(
                     "typed_priority_queue_storage.stasis",
                     format!(
-                        "global actors: priority_queue<i32, {capacity}, {policy}>;\nfunction main(): i32 {{ return 0; }}\n"
+                        "global actors: priority_queue<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
                     ),
                 );
                 process.compile().expect("typed priority-queue AOT compile");
@@ -3601,7 +3603,7 @@ mod tests {
                 assert_eq!(descriptor.capacity, capacity);
                 assert_eq!(
                     descriptor.canonical_type_name(snapshot.types()),
-                    format!("priority_queue<i32, {capacity}, {policy}>")
+                    format!("priority_queue<i32, {capacity}>")
                 );
                 let bindings = build_aot_direct_storage_bindings(
                     &snapshot.analysis.global_path_types,
@@ -3661,7 +3663,7 @@ mod tests {
                 ] {
                     assert!(
                         symbols.contains(&expected),
-                        "typed priority-queue storage object missing '{expected}' for {policy}, capacity {capacity}: {symbols:?}"
+                        "typed priority-queue storage object missing '{expected}' capacity {capacity}: {symbols:?}"
                     );
                 }
                 assert!(
@@ -3674,13 +3676,13 @@ mod tests {
 
     #[test]
     fn typed_ring_buffer_aot_storage_plan_and_symbols_match_jit_lanes() {
-        for policy in ["error", "drop_newest", "overwrite_oldest"] {
+        for _ in [()] {
             for capacity in [2_u32, 0_u32] {
                 let mut process = AotProcess::new();
                 process.upsert_file(
                     "typed_ring_buffer_storage.stasis",
                     format!(
-                        "global actors: ring_buffer<i32, {capacity}, {policy}>;\nfunction main(): i32 {{ return 0; }}\n"
+                        "global actors: ring_buffer<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
                     ),
                 );
                 process.compile().expect("typed ring-buffer AOT compile");
@@ -3694,7 +3696,7 @@ mod tests {
                     .expect("typed ring-buffer descriptor");
                 assert_eq!(
                     descriptor.canonical_type_name(snapshot.types()),
-                    format!("ring_buffer<i32, {capacity}, {policy}>")
+                    format!("ring_buffer<i32, {capacity}>")
                 );
                 let bindings = build_aot_direct_storage_bindings(
                     &snapshot.analysis.global_path_types,
@@ -3751,7 +3753,7 @@ mod tests {
                 ] {
                     assert!(
                         symbols.contains(&expected),
-                        "typed ring-buffer storage object missing '{expected}' for {policy}, capacity {capacity}: {symbols:?}"
+                        "typed ring-buffer storage object missing '{expected}' capacity {capacity}: {symbols:?}"
                     );
                 }
             }
@@ -3763,7 +3765,7 @@ mod tests {
         let mut process = AotProcess::new();
         process.upsert_file(
             "typed_queue_head_collision.stasis",
-            "global actors: queue<i32, 2, overwrite_oldest>;\n\
+            "global actors: queue<i32, 2>;\n\
              global actors__head: i32;\n\
              function main(): i32 { return 0; }\n",
         );
@@ -3814,7 +3816,7 @@ mod tests {
             process.upsert_file(
                 fixture_name,
                 format!(
-                    "global actors: pool<i32, 2, error>;\n{extra_global}\nfunction main(): i32 {{ return 0; }}\n"
+                    "global actors: pool<i32, 2>;\n{extra_global}\nfunction main(): i32 {{ return 0; }}\n"
                 ),
             );
 
@@ -3845,54 +3847,61 @@ mod tests {
 
     #[test]
     fn typed_pool_linked_aot_matches_jit_operation_sequence() {
-        const SOURCE: &str = r#"global typed_pool_parity_147: pool<i32, 2, error>;
-global typed_pool_lanes_147: pool<i32, 2, error>;
-global typed_pool_zero_147: pool<i32, 0, drop_newest>;
+        const SOURCE: &str = r#"global typed_pool_parity_147: pool<i32, 2>;
+global typed_pool_lanes_147: pool<i32, 2>;
+global typed_pool_zero_147: pool<i32, 0>;
 function main(): i32 {
-    let first: i32 = pool_push(typed_pool_parity_147, 10);
-    let second: i32 = pool_push(typed_pool_parity_147, 20);
-    let rejected: i32 = pool_push(typed_pool_parity_147, 30);
-    let count_before: i32 = pool_count(typed_pool_parity_147);
-    let capacity: i32 = pool_capacity(typed_pool_parity_147);
+    let first: i32 = -1;
+    if (typed_pool_parity_147.can_push()) { first = typed_pool_parity_147.push(10); }
+    let second: i32 = -1;
+    if (typed_pool_parity_147.can_push()) { second = typed_pool_parity_147.push(20); }
+    let rejected: i32 = -1;
+    if (typed_pool_parity_147.can_push()) { rejected = typed_pool_parity_147.push(30); }
+    let count_before: i32 = typed_pool_parity_147.count();
+    let capacity: i32 = typed_pool_parity_147.capacity();
     let removed_code: i32 = 0;
-    if (pool_remove(typed_pool_parity_147, 0)) { removed_code = 1; }
+    if (typed_pool_parity_147.can_remove(0)) { typed_pool_parity_147.remove(0); removed_code = 1; }
     let invalid_code: i32 = 0;
-    if (pool_remove(typed_pool_parity_147, 9)) { invalid_code = 1; }
-    let count_after: i32 = pool_count(typed_pool_parity_147);
-    pool_clear(typed_pool_parity_147);
-    let count_cleared: i32 = pool_count(typed_pool_parity_147);
+    if (typed_pool_parity_147.can_remove(9)) { typed_pool_parity_147.remove(9); invalid_code = 1; }
+    let count_after: i32 = typed_pool_parity_147.count();
+    typed_pool_parity_147.clear();
+    let count_cleared: i32 = typed_pool_parity_147.count();
     return first * 1000000 + second * 100000 + rejected * 10000
         + count_before * 1000 + capacity * 100 + removed_code * 10
         + invalid_code * 2 + count_after + count_cleared;
 }
 function fill_lanes(): i32 {
-    let first: i32 = pool_push(typed_pool_lanes_147, 10);
-    let second: i32 = pool_push(typed_pool_lanes_147, 20);
-    let rejected: i32 = pool_push(typed_pool_lanes_147, 30);
+    let first: i32 = -1;
+    if (typed_pool_lanes_147.can_push()) { first = typed_pool_lanes_147.push(10); }
+    let second: i32 = -1;
+    if (typed_pool_lanes_147.can_push()) { second = typed_pool_lanes_147.push(20); }
+    let rejected: i32 = -1;
+    if (typed_pool_lanes_147.can_push()) { rejected = typed_pool_lanes_147.push(30); }
     return first * 100 + second * 10 + rejected;
 }
 function remove_lanes(): i32 {
-    if (pool_remove(typed_pool_lanes_147, 0)) { return 1; }
+    if (typed_pool_lanes_147.can_remove(0)) { typed_pool_lanes_147.remove(0); return 1; }
     return 0;
 }
 function remove_invalid_lanes(): i32 {
-    if (pool_remove(typed_pool_lanes_147, 9)) { return 1; }
+    if (typed_pool_lanes_147.can_remove(9)) { typed_pool_lanes_147.remove(9); return 1; }
     return 0;
 }
 function clear_lanes(): i32 {
-    pool_clear(typed_pool_lanes_147);
-    return pool_count(typed_pool_lanes_147);
+    typed_pool_lanes_147.clear();
+    return typed_pool_lanes_147.count();
 }
 function zero_capacity(): i32 {
-    let pushed: i32 = pool_push(typed_pool_zero_147, 7);
+    let pushed: i32 = -1;
+    if (typed_pool_zero_147.can_push()) { pushed = typed_pool_zero_147.push(7); }
     let rejected_code: i32 = 0;
     if (pushed == -1) { rejected_code = 1; }
     let removed_code: i32 = 0;
-    if (pool_remove(typed_pool_zero_147, 0)) { removed_code = 1; }
-    pool_clear(typed_pool_zero_147);
+    if (typed_pool_zero_147.can_remove(0)) { typed_pool_zero_147.remove(0); removed_code = 1; }
+    typed_pool_zero_147.clear();
     return rejected_code * 1000 + removed_code * 100
-        + pool_count(typed_pool_zero_147) * 10
-        + pool_capacity(typed_pool_zero_147);
+        + typed_pool_zero_147.count() * 10
+        + typed_pool_zero_147.capacity();
 }
 "#;
         const EXPECTED_MAIN: i32 = 92211;
@@ -4016,49 +4025,58 @@ function zero_capacity(): i32 {
 
     #[test]
     fn typed_stable_pool_linked_aot_matches_jit_operation_sequence() {
-        const SOURCE: &str = r#"global typed_stable_error_parity_147: stable_pool<i32, 3, error>;
-global typed_stable_drop_parity_147: stable_pool<i32, 2, drop_newest>;
-global typed_stable_zero_parity_147: stable_pool<i32, 0, drop_newest>;
+        const SOURCE: &str = r#"global typed_stable_error_parity_147: stable_pool<i32, 3>;
+global typed_stable_drop_parity_147: stable_pool<i32, 2>;
+global typed_stable_zero_parity_147: stable_pool<i32, 0>;
 function stable_error_sequence(): i32 {
-    stable_pool_clear(typed_stable_error_parity_147);
-    let first: i32 = stable_pool_insert(typed_stable_error_parity_147, 10);
-    let second: i32 = stable_pool_insert(typed_stable_error_parity_147, 20);
-    let third: i32 = stable_pool_insert(typed_stable_error_parity_147, 30);
-    let full: i32 = stable_pool_insert(typed_stable_error_parity_147, 40);
+    typed_stable_error_parity_147.clear();
+    let first: i32 = -1;
+    if (typed_stable_error_parity_147.can_insert()) { first = typed_stable_error_parity_147.insert(10); }
+    let second: i32 = -1;
+    if (typed_stable_error_parity_147.can_insert()) { second = typed_stable_error_parity_147.insert(20); }
+    let third: i32 = -1;
+    if (typed_stable_error_parity_147.can_insert()) { third = typed_stable_error_parity_147.insert(30); }
+    let full: i32 = -1;
+    if (typed_stable_error_parity_147.can_insert()) { full = typed_stable_error_parity_147.insert(40); }
     let removed: i32 = 0;
-    if (stable_pool_remove(typed_stable_error_parity_147, 1)) { removed = 1; }
+    if (typed_stable_error_parity_147.can_remove(1)) { typed_stable_error_parity_147.remove(1); removed = 1; }
     let invalid: i32 = 0;
-    if (stable_pool_remove(typed_stable_error_parity_147, 1)) { invalid += 100; }
-    if (stable_pool_remove(typed_stable_error_parity_147, 9)) { invalid += 10; }
-    let reused: i32 = stable_pool_insert(typed_stable_error_parity_147, 40);
-    let count_after: i32 = stable_pool_count(typed_stable_error_parity_147);
-    let capacity: i32 = stable_pool_capacity(typed_stable_error_parity_147);
-    stable_pool_clear(typed_stable_error_parity_147);
-    let cleared: i32 = stable_pool_count(typed_stable_error_parity_147);
+    if (typed_stable_error_parity_147.can_remove(1)) { typed_stable_error_parity_147.remove(1); invalid += 100; }
+    if (typed_stable_error_parity_147.can_remove(9)) { typed_stable_error_parity_147.remove(9); invalid += 10; }
+    let reused: i32 = -1;
+    if (typed_stable_error_parity_147.can_insert()) { reused = typed_stable_error_parity_147.insert(40); }
+    let count_after: i32 = typed_stable_error_parity_147.count();
+    let capacity: i32 = typed_stable_error_parity_147.capacity();
+    typed_stable_error_parity_147.clear();
+    let cleared: i32 = typed_stable_error_parity_147.count();
     return first * 1000000 + second * 100000 + third * 10000 + full * 1000
         + removed * 100 + invalid + reused + count_after * 10 + capacity + cleared;
 }
 function stable_drop_sequence(): i32 {
-    stable_pool_clear(typed_stable_drop_parity_147);
-    let first: i32 = stable_pool_insert(typed_stable_drop_parity_147, 1);
-    let second: i32 = stable_pool_insert(typed_stable_drop_parity_147, 2);
-    let rejected: i32 = stable_pool_insert(typed_stable_drop_parity_147, 3);
-    let count: i32 = stable_pool_count(typed_stable_drop_parity_147);
-    let capacity: i32 = stable_pool_capacity(typed_stable_drop_parity_147);
-    stable_pool_clear(typed_stable_drop_parity_147);
-    let cleared: i32 = stable_pool_count(typed_stable_drop_parity_147);
+    typed_stable_drop_parity_147.clear();
+    let first: i32 = -1;
+    if (typed_stable_drop_parity_147.can_insert()) { first = typed_stable_drop_parity_147.insert(1); }
+    let second: i32 = -1;
+    if (typed_stable_drop_parity_147.can_insert()) { second = typed_stable_drop_parity_147.insert(2); }
+    let rejected: i32 = -1;
+    if (typed_stable_drop_parity_147.can_insert()) { rejected = typed_stable_drop_parity_147.insert(3); }
+    let count: i32 = typed_stable_drop_parity_147.count();
+    let capacity: i32 = typed_stable_drop_parity_147.capacity();
+    typed_stable_drop_parity_147.clear();
+    let cleared: i32 = typed_stable_drop_parity_147.count();
     return first * 1000000 + second * 100000 + rejected * 10000
         + count * 100 + capacity * 10 + cleared;
 }
 function stable_zero_capacity(): i32 {
-    stable_pool_clear(typed_stable_zero_parity_147);
-    let inserted: i32 = stable_pool_insert(typed_stable_zero_parity_147, 7);
+    typed_stable_zero_parity_147.clear();
+    let inserted: i32 = -1;
+    if (typed_stable_zero_parity_147.can_insert()) { inserted = typed_stable_zero_parity_147.insert(7); }
     let removed: i32 = 0;
-    if (stable_pool_remove(typed_stable_zero_parity_147, 0)) { removed = 1; }
-    let count: i32 = stable_pool_count(typed_stable_zero_parity_147);
-    let capacity: i32 = stable_pool_capacity(typed_stable_zero_parity_147);
-    stable_pool_clear(typed_stable_zero_parity_147);
-    let cleared: i32 = stable_pool_count(typed_stable_zero_parity_147);
+    if (typed_stable_zero_parity_147.can_remove(0)) { typed_stable_zero_parity_147.remove(0); removed = 1; }
+    let count: i32 = typed_stable_zero_parity_147.count();
+    let capacity: i32 = typed_stable_zero_parity_147.capacity();
+    typed_stable_zero_parity_147.clear();
+    let cleared: i32 = typed_stable_zero_parity_147.count();
     return inserted + removed * 10 + count * 100 + capacity * 1000 + cleared;
 }
 "#;
@@ -4110,78 +4128,78 @@ function stable_zero_capacity(): i32 {
 
     #[test]
     fn typed_map_and_set_linked_aot_matches_jit_operation_sequence() {
-        const SOURCE: &str = r#"global typed_map_error_parity_147: map<i32, i32, 3, error>;
-global typed_map_drop_parity_147: map<i32, i32, 3, drop_newest>;
-global typed_map_zero_parity_147: map<i32, i32, 0, drop_newest>;
-global typed_set_error_parity_147: set<i32, 3, error>;
-global typed_set_drop_parity_147: set<i32, 3, drop_newest>;
-global typed_set_zero_parity_147: set<i32, 0, drop_newest>;
+        const SOURCE: &str = r#"global typed_map_error_parity_147: map<i32, i32, 3>;
+global typed_map_drop_parity_147: map<i32, i32, 3>;
+global typed_map_zero_parity_147: map<i32, i32, 0>;
+global typed_set_error_parity_147: set<i32, 3>;
+global typed_set_drop_parity_147: set<i32, 3>;
+global typed_set_zero_parity_147: set<i32, 0>;
 function map_sequence(): i32 {
-    map_put(typed_map_error_parity_147, 1, 10);
-    map_put(typed_map_error_parity_147, 2, 20);
-    map_put(typed_map_error_parity_147, 3, 30);
-    let before_update: i32 = map_get(typed_map_error_parity_147, 2);
-    map_put(typed_map_error_parity_147, 2, 25);
-    let after_update: i32 = map_get(typed_map_error_parity_147, 2);
-    map_put(typed_map_error_parity_147, 4, 40);
+    if (typed_map_error_parity_147.can_put(1)) { typed_map_error_parity_147.put(1, 10); }
+    if (typed_map_error_parity_147.can_put(2)) { typed_map_error_parity_147.put(2, 20); }
+    if (typed_map_error_parity_147.can_put(3)) { typed_map_error_parity_147.put(3, 30); }
+    let before_update: i32 = typed_map_error_parity_147.get(2);
+    if (typed_map_error_parity_147.can_put(2)) { typed_map_error_parity_147.put(2, 25); }
+    let after_update: i32 = typed_map_error_parity_147.get(2);
+    if (typed_map_error_parity_147.can_put(4)) { typed_map_error_parity_147.put(4, 40); }
     let full_contains: i32 = 0;
-    if (map_contains(typed_map_error_parity_147, 4)) { full_contains = 1; }
+    if (typed_map_error_parity_147.contains(4)) { full_contains = 1; }
     let removed: i32 = 0;
-    if (map_remove(typed_map_error_parity_147, 2)) { removed = 1; }
-    let missing_after_remove: i32 = map_get(typed_map_error_parity_147, 2);
-    map_put(typed_map_error_parity_147, 4, 40);
-    let reused: i32 = map_get(typed_map_error_parity_147, 4);
+    if (typed_map_error_parity_147.can_remove(2)) { typed_map_error_parity_147.remove(2); removed = 1; }
+    let missing_after_remove: i32 = typed_map_error_parity_147.get(2);
+    if (typed_map_error_parity_147.can_put(4)) { typed_map_error_parity_147.put(4, 40); }
+    let reused: i32 = typed_map_error_parity_147.get(4);
     return before_update * 1000000 + after_update * 10000
         + full_contains * 1000 + removed * 100
         + missing_after_remove * 10 + reused;
 }
 function map_drop_sequence(): i32 {
-    map_put(typed_map_drop_parity_147, 1, 10);
-    map_put(typed_map_drop_parity_147, 2, 20);
-    map_put(typed_map_drop_parity_147, 3, 30);
-    map_put(typed_map_drop_parity_147, 2, 25);
-    map_put(typed_map_drop_parity_147, 4, 40);
-    return map_get(typed_map_drop_parity_147, 2) * 100
-        + map_get(typed_map_drop_parity_147, 4);
+    if (typed_map_drop_parity_147.can_put(1)) { typed_map_drop_parity_147.put(1, 10); }
+    if (typed_map_drop_parity_147.can_put(2)) { typed_map_drop_parity_147.put(2, 20); }
+    if (typed_map_drop_parity_147.can_put(3)) { typed_map_drop_parity_147.put(3, 30); }
+    if (typed_map_drop_parity_147.can_put(2)) { typed_map_drop_parity_147.put(2, 25); }
+    if (typed_map_drop_parity_147.can_put(4)) { typed_map_drop_parity_147.put(4, 40); }
+    return typed_map_drop_parity_147.get(2) * 100
+        + typed_map_drop_parity_147.get(4);
 }
 function map_zero_capacity(): i32 {
-    map_put(typed_map_zero_parity_147, 1, 7);
-    let result: i32 = map_get(typed_map_zero_parity_147, 1);
-    if (map_contains(typed_map_zero_parity_147, 1)) { result += 100; }
-    if (map_remove(typed_map_zero_parity_147, 1)) { result += 10; }
+    if (typed_map_zero_parity_147.can_put(1)) { typed_map_zero_parity_147.put(1, 7); }
+    let result: i32 = typed_map_zero_parity_147.get(1);
+    if (typed_map_zero_parity_147.contains(1)) { result += 100; }
+    if (typed_map_zero_parity_147.can_remove(1)) { typed_map_zero_parity_147.remove(1); result += 10; }
     return result;
 }
 function set_sequence(): i32 {
-    set_add(typed_set_error_parity_147, 1);
-    set_add(typed_set_error_parity_147, 2);
-    set_add(typed_set_error_parity_147, 3);
-    set_add(typed_set_error_parity_147, 2);
+    if (typed_set_error_parity_147.can_add(1)) { typed_set_error_parity_147.add(1); }
+    if (typed_set_error_parity_147.can_add(2)) { typed_set_error_parity_147.add(2); }
+    if (typed_set_error_parity_147.can_add(3)) { typed_set_error_parity_147.add(3); }
+    if (typed_set_error_parity_147.can_add(2)) { typed_set_error_parity_147.add(2); }
     let duplicate_present: i32 = 0;
-    if (set_contains(typed_set_error_parity_147, 2)) { duplicate_present = 1; }
-    set_add(typed_set_error_parity_147, 4);
+    if (typed_set_error_parity_147.contains(2)) { duplicate_present = 1; }
+    if (typed_set_error_parity_147.can_add(4)) { typed_set_error_parity_147.add(4); }
     let full_present: i32 = 0;
-    if (set_contains(typed_set_error_parity_147, 4)) { full_present = 1; }
-    set_remove(typed_set_error_parity_147, 2);
+    if (typed_set_error_parity_147.contains(4)) { full_present = 1; }
+    if (typed_set_error_parity_147.can_remove(2)) { typed_set_error_parity_147.remove(2); }
     let removed_present: i32 = 0;
-    if (set_contains(typed_set_error_parity_147, 2)) { removed_present = 1; }
-    set_add(typed_set_error_parity_147, 4);
+    if (typed_set_error_parity_147.contains(2)) { removed_present = 1; }
+    if (typed_set_error_parity_147.can_add(4)) { typed_set_error_parity_147.add(4); }
     let reused_present: i32 = 0;
-    if (set_contains(typed_set_error_parity_147, 4)) { reused_present = 1; }
+    if (typed_set_error_parity_147.contains(4)) { reused_present = 1; }
     return duplicate_present * 1000 + full_present * 100
         + removed_present * 10 + reused_present;
 }
 function set_drop_sequence(): i32 {
-    set_add(typed_set_drop_parity_147, 1);
-    set_add(typed_set_drop_parity_147, 2);
-    set_add(typed_set_drop_parity_147, 3);
-    set_add(typed_set_drop_parity_147, 4);
-    if (set_contains(typed_set_drop_parity_147, 4)) { return 1; }
+    if (typed_set_drop_parity_147.can_add(1)) { typed_set_drop_parity_147.add(1); }
+    if (typed_set_drop_parity_147.can_add(2)) { typed_set_drop_parity_147.add(2); }
+    if (typed_set_drop_parity_147.can_add(3)) { typed_set_drop_parity_147.add(3); }
+    if (typed_set_drop_parity_147.can_add(4)) { typed_set_drop_parity_147.add(4); }
+    if (typed_set_drop_parity_147.contains(4)) { return 1; }
     return 0;
 }
 function set_zero_capacity(): i32 {
-    set_add(typed_set_zero_parity_147, 1);
-    set_remove(typed_set_zero_parity_147, 1);
-    if (set_contains(typed_set_zero_parity_147, 1)) { return 100; }
+    if (typed_set_zero_parity_147.can_add(1)) { typed_set_zero_parity_147.add(1); }
+    if (typed_set_zero_parity_147.can_remove(1)) { typed_set_zero_parity_147.remove(1); }
+    if (typed_set_zero_parity_147.contains(1)) { return 100; }
     return 0;
 }
 "#;
@@ -4236,101 +4254,126 @@ function set_zero_capacity(): i32 {
 
     #[test]
     fn typed_queue_linked_aot_matches_jit_operation_sequence() {
-        const SOURCE: &str = r#"global typed_queue_error_parity_147: queue<i32, 3, error>;
-global typed_queue_drop_parity_147: queue<i32, 2, drop_newest>;
-global typed_queue_overwrite_parity_147: queue<i32, 2, overwrite_oldest>;
-global typed_queue_zero_parity_147: queue<i32, 0, drop_newest>;
+        const SOURCE: &str = r#"global typed_queue_error_parity_147: queue<i32, 3>;
+global typed_queue_drop_parity_147: queue<i32, 2>;
+global typed_queue_overwrite_parity_147: queue<i32, 2>;
+global typed_queue_zero_parity_147: queue<i32, 0>;
 function error_wraparound(): i32 {
-    queue_clear(typed_queue_error_parity_147);
+    typed_queue_error_parity_147.clear();
     let accepted: i32 = 0;
-    if (queue_push(typed_queue_error_parity_147, 10)) { accepted += 1; }
-    if (queue_push(typed_queue_error_parity_147, 20)) { accepted += 1; }
-    if (queue_push(typed_queue_error_parity_147, 30)) { accepted += 1; }
+    if (typed_queue_error_parity_147.can_push()) { typed_queue_error_parity_147.push(10); accepted += 1; }
+    if (typed_queue_error_parity_147.can_push()) { typed_queue_error_parity_147.push(20); accepted += 1; }
+    if (typed_queue_error_parity_147.can_push()) { typed_queue_error_parity_147.push(30); accepted += 1; }
     let rejected: i32 = 0;
-    if (queue_push(typed_queue_error_parity_147, 40)) { rejected = 1; }
-    let before: i32 = queue_count(typed_queue_error_parity_147) * 100000
-        + queue_capacity(typed_queue_error_parity_147) * 10000
-        + queue_peek(typed_queue_error_parity_147, 0) * 1000
-        + queue_peek(typed_queue_error_parity_147, 2) * 100
-        + queue_physical_index(typed_queue_error_parity_147, 0) * 10
-        + queue_physical_index(typed_queue_error_parity_147, 2);
-    let invalid_peek: i32 = queue_peek(typed_queue_error_parity_147, 9);
-    let invalid_physical: i32 = queue_physical_index(typed_queue_error_parity_147, -1);
+    if (typed_queue_error_parity_147.can_push()) { typed_queue_error_parity_147.push(40); rejected = 1; }
+    let before_peek_zero: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(0)) { before_peek_zero = typed_queue_error_parity_147.peek(0); }
+    let before_peek_two: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(2)) { before_peek_two = typed_queue_error_parity_147.peek(2); }
+    let before: i32 = typed_queue_error_parity_147.count() * 100000
+        + typed_queue_error_parity_147.capacity() * 10000
+        + before_peek_zero * 1000
+        + before_peek_two * 100
+        + typed_queue_error_parity_147.physical_index(0) * 10
+        + typed_queue_error_parity_147.physical_index(2);
+    let invalid_peek: i32 = 0;
+    if (typed_queue_error_parity_147.can_peek(9)) { invalid_peek = typed_queue_error_parity_147.peek(9); }
+    let invalid_physical: i32 = typed_queue_error_parity_147.physical_index(-1);
     let popped: i32 = 0;
-    if (queue_pop(typed_queue_error_parity_147)) { popped = 1; }
+    if (typed_queue_error_parity_147.can_pop()) { typed_queue_error_parity_147.pop(); popped = 1; }
     let wrapped: i32 = 0;
-    if (queue_push(typed_queue_error_parity_147, 40)) { wrapped = 1; }
-    let after_wrap: i32 = queue_count(typed_queue_error_parity_147) * 100000
-        + queue_capacity(typed_queue_error_parity_147) * 10000
-        + queue_peek(typed_queue_error_parity_147, 0) * 1000
-        + queue_peek(typed_queue_error_parity_147, 2) * 100
-        + queue_physical_index(typed_queue_error_parity_147, 0) * 10
-        + queue_physical_index(typed_queue_error_parity_147, 2);
+    if (typed_queue_error_parity_147.can_push()) { typed_queue_error_parity_147.push(40); wrapped = 1; }
+    let after_wrap_peek_zero: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(0)) { after_wrap_peek_zero = typed_queue_error_parity_147.peek(0); }
+    let after_wrap_peek_two: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(2)) { after_wrap_peek_two = typed_queue_error_parity_147.peek(2); }
+    let after_wrap: i32 = typed_queue_error_parity_147.count() * 100000
+        + typed_queue_error_parity_147.capacity() * 10000
+        + after_wrap_peek_zero * 1000
+        + after_wrap_peek_two * 100
+        + typed_queue_error_parity_147.physical_index(0) * 10
+        + typed_queue_error_parity_147.physical_index(2);
     let popped_again: i32 = 0;
-    if (queue_pop(typed_queue_error_parity_147)) { popped_again = 1; }
+    if (typed_queue_error_parity_147.can_pop()) { typed_queue_error_parity_147.pop(); popped_again = 1; }
     let wrapped_again: i32 = 0;
-    if (queue_push(typed_queue_error_parity_147, 50)) { wrapped_again = 1; }
-    let after_second_wrap: i32 = queue_count(typed_queue_error_parity_147) * 100000
-        + queue_capacity(typed_queue_error_parity_147) * 10000
-        + queue_peek(typed_queue_error_parity_147, 0) * 1000
-        + queue_peek(typed_queue_error_parity_147, 2) * 100
-        + queue_physical_index(typed_queue_error_parity_147, 0) * 10
-        + queue_physical_index(typed_queue_error_parity_147, 2);
-    queue_clear(typed_queue_error_parity_147);
+    if (typed_queue_error_parity_147.can_push()) { typed_queue_error_parity_147.push(50); wrapped_again = 1; }
+    let after_second_wrap_peek_zero: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(0)) { after_second_wrap_peek_zero = typed_queue_error_parity_147.peek(0); }
+    let after_second_wrap_peek_two: i32 = -1;
+    if (typed_queue_error_parity_147.can_peek(2)) { after_second_wrap_peek_two = typed_queue_error_parity_147.peek(2); }
+    let after_second_wrap: i32 = typed_queue_error_parity_147.count() * 100000
+        + typed_queue_error_parity_147.capacity() * 10000
+        + after_second_wrap_peek_zero * 1000
+        + after_second_wrap_peek_two * 100
+        + typed_queue_error_parity_147.physical_index(0) * 10
+        + typed_queue_error_parity_147.physical_index(2);
+    typed_queue_error_parity_147.clear();
     return accepted * 1000000 + rejected * 100000 + before
         + invalid_peek * 10000 + invalid_physical * 1000
         + popped * 100 + wrapped * 10 + after_wrap
         + popped_again * 1000000 + wrapped_again * 100000
-        + after_second_wrap + queue_count(typed_queue_error_parity_147);
+        + after_second_wrap + typed_queue_error_parity_147.count();
 }
 function drop_rejection(): i32 {
-    queue_clear(typed_queue_drop_parity_147);
+    typed_queue_drop_parity_147.clear();
     let first: i32 = 0;
-    if (queue_push(typed_queue_drop_parity_147, 1)) { first = 1; }
+    if (typed_queue_drop_parity_147.can_push()) { typed_queue_drop_parity_147.push(1); first = 1; }
     let second: i32 = 0;
-    if (queue_push(typed_queue_drop_parity_147, 2)) { second = 1; }
+    if (typed_queue_drop_parity_147.can_push()) { typed_queue_drop_parity_147.push(2); second = 1; }
     let rejected: i32 = 0;
-    if (queue_push(typed_queue_drop_parity_147, 3)) { rejected = 1; }
-    let observed: i32 = queue_count(typed_queue_drop_parity_147) * 100
-        + queue_capacity(typed_queue_drop_parity_147) * 10
-        + queue_peek(typed_queue_drop_parity_147, 0)
-        + queue_peek(typed_queue_drop_parity_147, 1);
-    queue_clear(typed_queue_drop_parity_147);
+    if (typed_queue_drop_parity_147.can_push()) { typed_queue_drop_parity_147.push(3); rejected = 1; }
+    let observed_peek_zero: i32 = -1;
+    if (typed_queue_drop_parity_147.can_peek(0)) { observed_peek_zero = typed_queue_drop_parity_147.peek(0); }
+    let observed_peek_one: i32 = -1;
+    if (typed_queue_drop_parity_147.can_peek(1)) { observed_peek_one = typed_queue_drop_parity_147.peek(1); }
+    let observed: i32 = typed_queue_drop_parity_147.count() * 100
+        + typed_queue_drop_parity_147.capacity() * 10
+        + observed_peek_zero
+        + observed_peek_one;
+    typed_queue_drop_parity_147.clear();
     return first * 1000000 + second * 100000 + rejected * 10000
-        + observed * 100 + queue_count(typed_queue_drop_parity_147);
+        + observed * 100 + typed_queue_drop_parity_147.count();
 }
 function overwrite_replace(): i32 {
-    queue_clear(typed_queue_overwrite_parity_147);
+    typed_queue_overwrite_parity_147.clear();
     let accepted: i32 = 0;
-    if (queue_push(typed_queue_overwrite_parity_147, 1)) { accepted += 1; }
-    if (queue_push(typed_queue_overwrite_parity_147, 2)) { accepted += 1; }
-    if (queue_push(typed_queue_overwrite_parity_147, 3)) { accepted += 1; }
-    let before_pop: i32 = queue_count(typed_queue_overwrite_parity_147) * 100000
-        + queue_capacity(typed_queue_overwrite_parity_147) * 10000
-        + queue_peek(typed_queue_overwrite_parity_147, 0) * 1000
-        + queue_peek(typed_queue_overwrite_parity_147, 1) * 100
-        + queue_physical_index(typed_queue_overwrite_parity_147, 0) * 10
-        + queue_physical_index(typed_queue_overwrite_parity_147, 1);
+    if (typed_queue_overwrite_parity_147.can_push()) { typed_queue_overwrite_parity_147.push(1); accepted += 1; }
+    if (typed_queue_overwrite_parity_147.can_push()) { typed_queue_overwrite_parity_147.push(2); accepted += 1; }
+    typed_queue_overwrite_parity_147.overwrite_oldest(3); accepted += 1;
+    let before_pop_peek_zero: i32 = -1;
+    if (typed_queue_overwrite_parity_147.can_peek(0)) { before_pop_peek_zero = typed_queue_overwrite_parity_147.peek(0); }
+    let before_pop_peek_one: i32 = -1;
+    if (typed_queue_overwrite_parity_147.can_peek(1)) { before_pop_peek_one = typed_queue_overwrite_parity_147.peek(1); }
+    let before_pop: i32 = typed_queue_overwrite_parity_147.count() * 100000
+        + typed_queue_overwrite_parity_147.capacity() * 10000
+        + before_pop_peek_zero * 1000
+        + before_pop_peek_one * 100
+        + typed_queue_overwrite_parity_147.physical_index(0) * 10
+        + typed_queue_overwrite_parity_147.physical_index(1);
     let popped: i32 = 0;
-    if (queue_pop(typed_queue_overwrite_parity_147)) { popped = 1; }
-    let after_pop: i32 = queue_count(typed_queue_overwrite_parity_147) * 100
-        + queue_physical_index(typed_queue_overwrite_parity_147, 0) * 10
-        + queue_peek(typed_queue_overwrite_parity_147, 0);
-    queue_clear(typed_queue_overwrite_parity_147);
+    if (typed_queue_overwrite_parity_147.can_pop()) { typed_queue_overwrite_parity_147.pop(); popped = 1; }
+    let after_pop_peek_zero: i32 = -1;
+    if (typed_queue_overwrite_parity_147.can_peek(0)) { after_pop_peek_zero = typed_queue_overwrite_parity_147.peek(0); }
+    let after_pop: i32 = typed_queue_overwrite_parity_147.count() * 100
+        + typed_queue_overwrite_parity_147.physical_index(0) * 10
+        + after_pop_peek_zero;
+    typed_queue_overwrite_parity_147.clear();
     return accepted * 1000000 + before_pop + popped * 1000 + after_pop
-        + queue_count(typed_queue_overwrite_parity_147);
+        + typed_queue_overwrite_parity_147.count();
 }
 function zero_capacity(): i32 {
-    queue_clear(typed_queue_zero_parity_147);
+    typed_queue_zero_parity_147.clear();
     let pushed: i32 = 0;
-    if (queue_push(typed_queue_zero_parity_147, 7)) { pushed = 1; }
+    if (typed_queue_zero_parity_147.can_push()) { typed_queue_zero_parity_147.push(7); pushed = 1; }
     let popped: i32 = 0;
-    if (queue_pop(typed_queue_zero_parity_147)) { popped = 1; }
+    if (typed_queue_zero_parity_147.can_pop()) { typed_queue_zero_parity_147.pop(); popped = 1; }
+    let peeked: i32 = 0;
+    if (typed_queue_zero_parity_147.can_peek(0)) { peeked = typed_queue_zero_parity_147.peek(0); }
     return pushed * 100000 + popped * 10000
-        + queue_count(typed_queue_zero_parity_147) * 1000
-        + queue_capacity(typed_queue_zero_parity_147) * 100
-        + queue_peek(typed_queue_zero_parity_147, 0) * 10
-        + queue_physical_index(typed_queue_zero_parity_147, 0);
+        + typed_queue_zero_parity_147.count() * 1000
+        + typed_queue_zero_parity_147.capacity() * 100
+        + peeked * 10
+        + typed_queue_zero_parity_147.physical_index(0);
 }
 "#;
         const ROOTS: [&str; 4] = [
@@ -4382,69 +4425,82 @@ function zero_capacity(): i32 {
 
     #[test]
     fn typed_priority_queue_linked_aot_matches_jit_operation_sequence() {
-        const SOURCE: &str = r#"global typed_priority_queue_error_parity_147: priority_queue<i32, 5, error>;
-global typed_priority_queue_drop_parity_147: priority_queue<i32, 2, drop_newest>;
-global typed_priority_queue_zero_parity_147: priority_queue<i32, 0, drop_newest>;
+        const SOURCE: &str = r#"global typed_priority_queue_error_parity_147: priority_queue<i32, 5>;
+global typed_priority_queue_drop_parity_147: priority_queue<i32, 2>;
+global typed_priority_queue_zero_parity_147: priority_queue<i32, 0>;
 function signed_order(): i32 {
     typed_priority_queue_error_parity_147.clear();
-    typed_priority_queue_error_parity_147.push(7, 70);
-    typed_priority_queue_error_parity_147.push(-2, 20);
-    typed_priority_queue_error_parity_147.push(7, 71);
-    typed_priority_queue_error_parity_147.push(0, 0);
-    typed_priority_queue_error_parity_147.push(-2, 21);
-    let first: i32 = typed_priority_queue_error_parity_147.peek();
-    typed_priority_queue_error_parity_147.pop();
-    let second: i32 = typed_priority_queue_error_parity_147.peek();
-    typed_priority_queue_error_parity_147.pop();
-    let third: i32 = typed_priority_queue_error_parity_147.peek();
-    typed_priority_queue_error_parity_147.pop();
-    let fourth: i32 = typed_priority_queue_error_parity_147.peek();
-    typed_priority_queue_error_parity_147.pop();
-    let fifth: i32 = typed_priority_queue_error_parity_147.peek();
-    typed_priority_queue_error_parity_147.pop();
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(7, 70); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-2, 20); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(7, 71); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(0, 0); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-2, 21); }
+    let first: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { first = typed_priority_queue_error_parity_147.peek(); }
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); }
+    let second: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { second = typed_priority_queue_error_parity_147.peek(); }
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); }
+    let third: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { third = typed_priority_queue_error_parity_147.peek(); }
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); }
+    let fourth: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { fourth = typed_priority_queue_error_parity_147.peek(); }
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); }
+    let fifth: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { fifth = typed_priority_queue_error_parity_147.peek(); }
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); }
     return first * 1000000 + second * 10000 + third * 100 + fourth * 10 + fifth
         + typed_priority_queue_error_parity_147.count() * 100000000;
 }
 function full_error(): i32 {
     typed_priority_queue_error_parity_147.clear();
-    typed_priority_queue_error_parity_147.push(3, 30);
-    typed_priority_queue_error_parity_147.push(1, 10);
-    typed_priority_queue_error_parity_147.push(2, 20);
-    typed_priority_queue_error_parity_147.push(0, 40);
-    typed_priority_queue_error_parity_147.push(-1, 50);
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(3, 30); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(1, 10); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(2, 20); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(0, 40); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-1, 50); }
     let accepted: i32 = 0;
-    if (typed_priority_queue_error_parity_147.push(-9, 90)) { accepted = 1; }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-9, 90); accepted = 1; }
+    let peeked: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { peeked = typed_priority_queue_error_parity_147.peek(); }
     return accepted * 1000 + typed_priority_queue_error_parity_147.count() * 100
-        + typed_priority_queue_error_parity_147.peek();
+        + peeked;
 }
 function full_drop(): i32 {
     typed_priority_queue_drop_parity_147.clear();
-    typed_priority_queue_drop_parity_147.push(3, 30);
-    typed_priority_queue_drop_parity_147.push(1, 10);
+    if (typed_priority_queue_drop_parity_147.can_push()) { typed_priority_queue_drop_parity_147.push(3, 30); }
+    if (typed_priority_queue_drop_parity_147.can_push()) { typed_priority_queue_drop_parity_147.push(1, 10); }
     let accepted: i32 = 0;
-    if (typed_priority_queue_drop_parity_147.push(-9, 90)) { accepted = 1; }
+    if (typed_priority_queue_drop_parity_147.can_push()) { typed_priority_queue_drop_parity_147.push(-9, 90); accepted = 1; }
+    let peeked: i32 = 0;
+    if (typed_priority_queue_drop_parity_147.can_peek()) { peeked = typed_priority_queue_drop_parity_147.peek(); }
     return accepted * 1000 + typed_priority_queue_drop_parity_147.count() * 100
-        + typed_priority_queue_drop_parity_147.peek();
+        + peeked;
 }
 function zero_capacity(): i32 {
     typed_priority_queue_zero_parity_147.clear();
     let pushed: i32 = 0;
-    if (typed_priority_queue_zero_parity_147.push(-1, 7)) { pushed = 1; }
+    if (typed_priority_queue_zero_parity_147.can_push()) { typed_priority_queue_zero_parity_147.push(-1, 7); pushed = 1; }
     let popped: i32 = 0;
-    if (typed_priority_queue_zero_parity_147.pop()) { popped = 1; }
+    if (typed_priority_queue_zero_parity_147.can_pop()) { typed_priority_queue_zero_parity_147.pop(); popped = 1; }
+    let peeked: i32 = 0;
+    if (typed_priority_queue_zero_parity_147.can_peek()) { peeked = typed_priority_queue_zero_parity_147.peek(); }
     return pushed * 1000 + popped * 100 + typed_priority_queue_zero_parity_147.count() * 10
-        + typed_priority_queue_zero_parity_147.peek()
+        + peeked
         + typed_priority_queue_zero_parity_147.capacity();
 }
 function clear_reset(): i32 {
     typed_priority_queue_error_parity_147.clear();
-    typed_priority_queue_error_parity_147.push(-1, 9);
-    typed_priority_queue_error_parity_147.push(1, 8);
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-1, 9); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(1, 8); }
     typed_priority_queue_error_parity_147.clear();
     let popped: i32 = 0;
-    if (typed_priority_queue_error_parity_147.pop()) { popped = 1; }
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); popped = 1; }
+    let peeked: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { peeked = typed_priority_queue_error_parity_147.peek(); }
     return typed_priority_queue_error_parity_147.count() * 100
-        + typed_priority_queue_error_parity_147.peek() * 10 + popped;
+        + peeked * 10 + popped;
 }
 function preflight_empty(): i32 {
     typed_priority_queue_error_parity_147.clear();
@@ -4455,17 +4511,19 @@ function preflight_empty(): i32 {
     let can_peek: i32 = 0;
     if (typed_priority_queue_error_parity_147.can_peek()) { can_peek = 1; }
     let popped: i32 = 0;
-    if (typed_priority_queue_error_parity_147.pop()) { popped = 1; }
+    if (typed_priority_queue_error_parity_147.can_pop()) { typed_priority_queue_error_parity_147.pop(); popped = 1; }
+    let peeked: i32 = 0;
+    if (typed_priority_queue_error_parity_147.can_peek()) { peeked = typed_priority_queue_error_parity_147.peek(); }
     return can_push * 100 + can_pop * 10 + can_peek + popped * 1000
-        + typed_priority_queue_error_parity_147.peek();
+        + peeked;
 }
 function preflight_full(): i32 {
     typed_priority_queue_error_parity_147.clear();
-    typed_priority_queue_error_parity_147.push(3, 30);
-    typed_priority_queue_error_parity_147.push(1, 10);
-    typed_priority_queue_error_parity_147.push(2, 20);
-    typed_priority_queue_error_parity_147.push(0, 40);
-    typed_priority_queue_error_parity_147.push(-1, 50);
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(3, 30); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(1, 10); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(2, 20); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(0, 40); }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-1, 50); }
     let can_push: i32 = 0;
     if (typed_priority_queue_error_parity_147.can_push()) { can_push = 1; }
     let can_pop: i32 = 0;
@@ -4473,7 +4531,7 @@ function preflight_full(): i32 {
     let can_peek: i32 = 0;
     if (typed_priority_queue_error_parity_147.can_peek()) { can_peek = 1; }
     let accepted: i32 = 0;
-    if (typed_priority_queue_error_parity_147.push(-9, 90)) { accepted = 1; }
+    if (typed_priority_queue_error_parity_147.can_push()) { typed_priority_queue_error_parity_147.push(-9, 90); accepted = 1; }
     return can_push * 100 + can_pop * 10 + can_peek + accepted * 1000;
 }
 function preflight_zero(): i32 {
@@ -4485,7 +4543,7 @@ function preflight_zero(): i32 {
     let can_peek: i32 = 0;
     if (typed_priority_queue_zero_parity_147.can_peek()) { can_peek = 1; }
     let accepted: i32 = 0;
-    if (typed_priority_queue_zero_parity_147.push(-9, 90)) { accepted = 1; }
+    if (typed_priority_queue_zero_parity_147.can_push()) { typed_priority_queue_zero_parity_147.push(-9, 90); accepted = 1; }
     return can_push * 100 + can_pop * 10 + can_peek + accepted * 1000;
 }
 "#;
@@ -4544,87 +4602,107 @@ function preflight_zero(): i32 {
 
     #[test]
     fn typed_ring_buffer_linked_aot_matches_jit_operation_sequence() {
-        const SOURCE: &str = r#"global typed_ring_error_parity_147: ring_buffer<i32, 3, error>;
-global typed_ring_drop_parity_147: ring_buffer<i32, 2, drop_newest>;
-global typed_ring_overwrite_parity_147: ring_buffer<i32, 2, overwrite_oldest>;
-global typed_ring_zero_parity_147: ring_buffer<i32, 0, drop_newest>;
+        const SOURCE: &str = r#"global typed_ring_error_parity_147: ring_buffer<i32, 3>;
+global typed_ring_drop_parity_147: ring_buffer<i32, 2>;
+global typed_ring_overwrite_parity_147: ring_buffer<i32, 2>;
+global typed_ring_zero_parity_147: ring_buffer<i32, 0>;
 function error_wraparound(): i32 {
-    ring_buffer_clear(typed_ring_error_parity_147);
+    typed_ring_error_parity_147.clear();
     let accepted: i32 = 0;
-    if (ring_buffer_push(typed_ring_error_parity_147, 10)) { accepted += 1; }
-    if (ring_buffer_push(typed_ring_error_parity_147, 20)) { accepted += 1; }
-    if (ring_buffer_push(typed_ring_error_parity_147, 30)) { accepted += 1; }
+    if (typed_ring_error_parity_147.can_push()) { typed_ring_error_parity_147.push(10); accepted += 1; }
+    if (typed_ring_error_parity_147.can_push()) { typed_ring_error_parity_147.push(20); accepted += 1; }
+    if (typed_ring_error_parity_147.can_push()) { typed_ring_error_parity_147.push(30); accepted += 1; }
     let rejected: i32 = 0;
-    if (ring_buffer_push(typed_ring_error_parity_147, 40)) { rejected = 1; }
-    let before: i32 = ring_buffer_count(typed_ring_error_parity_147) * 100000
-        + ring_buffer_capacity(typed_ring_error_parity_147) * 10000
-        + ring_buffer_peek(typed_ring_error_parity_147, 0) * 1000
-        + ring_buffer_peek(typed_ring_error_parity_147, 2) * 100
-        + ring_buffer_physical_index(typed_ring_error_parity_147, 0) * 10
-        + ring_buffer_physical_index(typed_ring_error_parity_147, 2);
+    if (typed_ring_error_parity_147.can_push()) { typed_ring_error_parity_147.push(40); rejected = 1; }
+    let before_peek_zero: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(0)) { before_peek_zero = typed_ring_error_parity_147.peek(0); }
+    let before_peek_two: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(2)) { before_peek_two = typed_ring_error_parity_147.peek(2); }
+    let before: i32 = typed_ring_error_parity_147.count() * 100000
+        + typed_ring_error_parity_147.capacity() * 10000
+        + before_peek_zero * 1000
+        + before_peek_two * 100
+        + typed_ring_error_parity_147.physical_index(0) * 10
+        + typed_ring_error_parity_147.physical_index(2);
     let popped: i32 = 0;
-    if (ring_buffer_pop(typed_ring_error_parity_147)) { popped = 1; }
+    if (typed_ring_error_parity_147.can_pop()) { typed_ring_error_parity_147.pop(); popped = 1; }
     let wrapped: i32 = 0;
-    if (ring_buffer_push(typed_ring_error_parity_147, 40)) { wrapped = 1; }
-    let after_wrap: i32 = ring_buffer_count(typed_ring_error_parity_147) * 100000
-        + ring_buffer_capacity(typed_ring_error_parity_147) * 10000
-        + ring_buffer_peek(typed_ring_error_parity_147, 0) * 1000
-        + ring_buffer_peek(typed_ring_error_parity_147, 2) * 100
-        + ring_buffer_physical_index(typed_ring_error_parity_147, 0) * 10
-        + ring_buffer_physical_index(typed_ring_error_parity_147, 2);
-    ring_buffer_clear(typed_ring_error_parity_147);
+    if (typed_ring_error_parity_147.can_push()) { typed_ring_error_parity_147.push(40); wrapped = 1; }
+    let after_wrap_peek_zero: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(0)) { after_wrap_peek_zero = typed_ring_error_parity_147.peek(0); }
+    let after_wrap_peek_two: i32 = -1;
+    if (typed_ring_error_parity_147.can_peek(2)) { after_wrap_peek_two = typed_ring_error_parity_147.peek(2); }
+    let after_wrap: i32 = typed_ring_error_parity_147.count() * 100000
+        + typed_ring_error_parity_147.capacity() * 10000
+        + after_wrap_peek_zero * 1000
+        + after_wrap_peek_two * 100
+        + typed_ring_error_parity_147.physical_index(0) * 10
+        + typed_ring_error_parity_147.physical_index(2);
+    typed_ring_error_parity_147.clear();
     return accepted * 1000000 + rejected * 100000 + before
         + popped * 100 + wrapped * 10 + after_wrap
-        + ring_buffer_count(typed_ring_error_parity_147);
+        + typed_ring_error_parity_147.count();
 }
 function drop_rejection(): i32 {
-    ring_buffer_clear(typed_ring_drop_parity_147);
+    typed_ring_drop_parity_147.clear();
     let first: i32 = 0;
-    if (ring_buffer_push(typed_ring_drop_parity_147, 1)) { first = 1; }
+    if (typed_ring_drop_parity_147.can_push()) { typed_ring_drop_parity_147.push(1); first = 1; }
     let second: i32 = 0;
-    if (ring_buffer_push(typed_ring_drop_parity_147, 2)) { second = 1; }
+    if (typed_ring_drop_parity_147.can_push()) { typed_ring_drop_parity_147.push(2); second = 1; }
     let rejected: i32 = 0;
-    if (ring_buffer_push(typed_ring_drop_parity_147, 3)) { rejected = 1; }
-    let observed: i32 = ring_buffer_count(typed_ring_drop_parity_147) * 100
-        + ring_buffer_capacity(typed_ring_drop_parity_147) * 10
-        + ring_buffer_peek(typed_ring_drop_parity_147, 0)
-        + ring_buffer_peek(typed_ring_drop_parity_147, 1);
-    ring_buffer_clear(typed_ring_drop_parity_147);
+    if (typed_ring_drop_parity_147.can_push()) { typed_ring_drop_parity_147.push(3); rejected = 1; }
+    let observed_peek_zero: i32 = -1;
+    if (typed_ring_drop_parity_147.can_peek(0)) { observed_peek_zero = typed_ring_drop_parity_147.peek(0); }
+    let observed_peek_one: i32 = -1;
+    if (typed_ring_drop_parity_147.can_peek(1)) { observed_peek_one = typed_ring_drop_parity_147.peek(1); }
+    let observed: i32 = typed_ring_drop_parity_147.count() * 100
+        + typed_ring_drop_parity_147.capacity() * 10
+        + observed_peek_zero
+        + observed_peek_one;
+    typed_ring_drop_parity_147.clear();
     return first * 1000000 + second * 100000 + rejected * 10000
-        + observed * 100 + ring_buffer_count(typed_ring_drop_parity_147);
+        + observed * 100 + typed_ring_drop_parity_147.count();
 }
 function overwrite_replace(): i32 {
-    ring_buffer_clear(typed_ring_overwrite_parity_147);
+    typed_ring_overwrite_parity_147.clear();
     let accepted: i32 = 0;
-    if (ring_buffer_push(typed_ring_overwrite_parity_147, 1)) { accepted += 1; }
-    if (ring_buffer_push(typed_ring_overwrite_parity_147, 2)) { accepted += 1; }
-    if (ring_buffer_push(typed_ring_overwrite_parity_147, 3)) { accepted += 1; }
-    let before_pop: i32 = ring_buffer_count(typed_ring_overwrite_parity_147) * 100000
-        + ring_buffer_capacity(typed_ring_overwrite_parity_147) * 10000
-        + ring_buffer_peek(typed_ring_overwrite_parity_147, 0) * 1000
-        + ring_buffer_peek(typed_ring_overwrite_parity_147, 1) * 100
-        + ring_buffer_physical_index(typed_ring_overwrite_parity_147, 0) * 10
-        + ring_buffer_physical_index(typed_ring_overwrite_parity_147, 1);
+    if (typed_ring_overwrite_parity_147.can_push()) { typed_ring_overwrite_parity_147.push(1); accepted += 1; }
+    if (typed_ring_overwrite_parity_147.can_push()) { typed_ring_overwrite_parity_147.push(2); accepted += 1; }
+    typed_ring_overwrite_parity_147.overwrite_oldest(3); accepted += 1;
+    let before_pop_peek_zero: i32 = -1;
+    if (typed_ring_overwrite_parity_147.can_peek(0)) { before_pop_peek_zero = typed_ring_overwrite_parity_147.peek(0); }
+    let before_pop_peek_one: i32 = -1;
+    if (typed_ring_overwrite_parity_147.can_peek(1)) { before_pop_peek_one = typed_ring_overwrite_parity_147.peek(1); }
+    let before_pop: i32 = typed_ring_overwrite_parity_147.count() * 100000
+        + typed_ring_overwrite_parity_147.capacity() * 10000
+        + before_pop_peek_zero * 1000
+        + before_pop_peek_one * 100
+        + typed_ring_overwrite_parity_147.physical_index(0) * 10
+        + typed_ring_overwrite_parity_147.physical_index(1);
     let popped: i32 = 0;
-    if (ring_buffer_pop(typed_ring_overwrite_parity_147)) { popped = 1; }
-    let after_pop: i32 = ring_buffer_count(typed_ring_overwrite_parity_147) * 100
-        + ring_buffer_physical_index(typed_ring_overwrite_parity_147, 0) * 10
-        + ring_buffer_peek(typed_ring_overwrite_parity_147, 0);
-    ring_buffer_clear(typed_ring_overwrite_parity_147);
+    if (typed_ring_overwrite_parity_147.can_pop()) { typed_ring_overwrite_parity_147.pop(); popped = 1; }
+    let after_pop_peek_zero: i32 = -1;
+    if (typed_ring_overwrite_parity_147.can_peek(0)) { after_pop_peek_zero = typed_ring_overwrite_parity_147.peek(0); }
+    let after_pop: i32 = typed_ring_overwrite_parity_147.count() * 100
+        + typed_ring_overwrite_parity_147.physical_index(0) * 10
+        + after_pop_peek_zero;
+    typed_ring_overwrite_parity_147.clear();
     return accepted * 1000000 + before_pop + popped * 1000 + after_pop
-        + ring_buffer_count(typed_ring_overwrite_parity_147);
+        + typed_ring_overwrite_parity_147.count();
 }
 function zero_capacity(): i32 {
-    ring_buffer_clear(typed_ring_zero_parity_147);
+    typed_ring_zero_parity_147.clear();
     let pushed: i32 = 0;
-    if (ring_buffer_push(typed_ring_zero_parity_147, 7)) { pushed = 1; }
+    if (typed_ring_zero_parity_147.can_push()) { typed_ring_zero_parity_147.push(7); pushed = 1; }
     let popped: i32 = 0;
-    if (ring_buffer_pop(typed_ring_zero_parity_147)) { popped = 1; }
+    if (typed_ring_zero_parity_147.can_pop()) { typed_ring_zero_parity_147.pop(); popped = 1; }
+    let peeked: i32 = 0;
+    if (typed_ring_zero_parity_147.can_peek(0)) { peeked = typed_ring_zero_parity_147.peek(0); }
     return pushed * 100000 + popped * 10000
-        + ring_buffer_count(typed_ring_zero_parity_147) * 1000
-        + ring_buffer_capacity(typed_ring_zero_parity_147) * 100
-        + ring_buffer_peek(typed_ring_zero_parity_147, 0) * 10
-        + ring_buffer_physical_index(typed_ring_zero_parity_147, 0);
+        + typed_ring_zero_parity_147.count() * 1000
+        + typed_ring_zero_parity_147.capacity() * 100
+        + peeked * 10
+        + typed_ring_zero_parity_147.physical_index(0);
 }
 "#;
         const ROOTS: [&str; 4] = [

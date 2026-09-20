@@ -1026,7 +1026,7 @@ function render(): void {
 
     #[test]
     fn typed_pool_snapshot_uses_shared_descriptor_layout_identity() {
-        let source = "global actors: pool<i32, 2, error>;\nfunction main(): i32 { return 0; }\n";
+        let source = "global actors: pool<i32, 2>;\nfunction main(): i32 { return 0; }\n";
         let snapshot_digest = canonical_layout_digest_for_files(vec![(
             "main.stasis".to_string(),
             source.to_string(),
@@ -1044,17 +1044,10 @@ function render(): void {
 
         let no_payload_digest = canonical_state_layout_digest_for_files(vec![(
             "main.stasis".to_string(),
-            "global actors: pool<i32, 0, error>;\nfunction main(): i32 { return 0; }\n".to_string(),
+            "global actors: pool<i32, 0>;\nfunction main(): i32 { return 0; }\n".to_string(),
         )])
         .expect("zero-capacity typed pool state digest");
-        let changed_policy_digest = canonical_state_layout_digest_for_files(vec![(
-            "main.stasis".to_string(),
-            "global actors: pool<i32, 2, drop_newest>;\nfunction main(): i32 { return 0; }\n"
-                .to_string(),
-        )])
-        .expect("changed-policy typed pool state digest");
         assert_ne!(state_digest, no_payload_digest);
-        assert_ne!(state_digest, changed_policy_digest);
     }
 
     #[test]
@@ -1064,7 +1057,7 @@ function render(): void {
             aot.upsert_file(
                 "typed_pool_inventory.stasis",
                 format!(
-                    "global actors: pool<i32, {capacity}, error>;\nfunction main(): i32 {{ return 0; }}\n"
+                    "global actors: pool<i32, {capacity}>;\nfunction main(): i32 {{ return 0; }}\n"
                 ),
             );
             aot.compile().expect("compile typed pool inventory fixture");

@@ -38,12 +38,11 @@ enum TypeKey {
     },
     /// A compiler-owned collection application. This is intentionally a
     /// distinct key from both `Named` and `InstantiatedNominal`: collection
-    /// identity includes the descriptor's policy, dimensions, and lane
-    /// schema, even while the legacy public category remains source-ABI
-    /// compatible for this metadata-only slice.
+    /// identity includes the descriptor's dimensions and lane schema, even
+    /// while the legacy public category remains source-ABI compatible for
+    /// this metadata-only slice.
     TypedCollection {
         kind: TypedCollectionKind,
-        policy: TypedCollectionOverflowPolicy,
         element_type: Option<TypeId>,
         key_type: Option<TypeId>,
         value_type: Option<TypeId>,
@@ -98,8 +97,8 @@ pub struct TypeInfo {
 /// Compiler-owned fixed-capacity collection applications.
 ///
 /// These names are deliberately distinct from ordinary source-defined generic
-/// structs.  A collection descriptor owns the storage policy and lane order;
-/// it is not a second spelling for an array/count struct in the stdlib.
+/// structs. A collection descriptor owns the storage shape and lane order; it
+/// is not a second spelling for an array/count struct in the stdlib.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TypedCollectionKind {
     Pool,
@@ -129,25 +128,6 @@ impl TypedCollectionKind {
     }
 }
 
-/// Overflow behavior is part of a typed collection's identity and layout
-/// contract.  It is parsed only for compiler-recognized collection kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum TypedCollectionOverflowPolicy {
-    Error,
-    DropNewest,
-    OverwriteOldest,
-}
-
-impl TypedCollectionOverflowPolicy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Error => "error",
-            Self::DropNewest => "drop_newest",
-            Self::OverwriteOldest => "overwrite_oldest",
-        }
-    }
-}
-
 /// One statically laid out structure-of-arrays lane in a typed collection.
 ///
 /// `element_count` is one for metadata lanes and the fixed lane capacity for
@@ -171,7 +151,6 @@ pub struct TypedCollectionLane {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedCollectionDescriptor {
     pub kind: TypedCollectionKind,
-    pub policy: TypedCollectionOverflowPolicy,
     pub element_type: Option<TypeId>,
     pub key_type: Option<TypeId>,
     pub value_type: Option<TypeId>,
@@ -187,10 +166,6 @@ impl TypedCollectionDescriptor {
         self.kind.as_str()
     }
 
-    pub fn policy_name(&self) -> &'static str {
-        self.policy.as_str()
-    }
-
     /// Return a canonical type spelling for identity and layout diagnostics.
     pub fn canonical_type_name(&self, type_table: &TypeTable) -> String {
         let type_name = |type_id: Option<TypeId>| {
@@ -204,35 +179,27 @@ impl TypedCollectionDescriptor {
             | TypedCollectionKind::Queue
             | TypedCollectionKind::RingBuffer
             | TypedCollectionKind::PriorityQueue => format!(
-                "{}<{}, {}, {}>",
+                "{}<{}, {}>",
                 self.kind_name(),
                 type_name(self.element_type),
-                self.capacity,
-                self.policy_name()
+                self.capacity
             ),
             TypedCollectionKind::Map => format!(
-                "map<{}, {}, {}, {}>",
+                "map<{}, {}, {}>",
                 type_name(self.key_type),
                 type_name(self.value_type),
-                self.capacity,
-                self.policy_name()
+                self.capacity
             ),
-            TypedCollectionKind::Set => format!(
-                "set<{}, {}, {}>",
-                type_name(self.key_type),
-                self.capacity,
-                self.policy_name()
-            ),
+            TypedCollectionKind::Set => {
+                format!("set<{}, {}>", type_name(self.key_type), self.capacity)
+            }
             TypedCollectionKind::Grid => format!(
-                "grid<{}, {}, {}, {}>",
+                "grid<{}, {}, {}>",
                 type_name(self.element_type),
                 self.width.unwrap_or_default(),
-                self.height.unwrap_or_default(),
-                self.policy_name()
+                self.height.unwrap_or_default()
             ),
-            TypedCollectionKind::Bitset => {
-                format!("bitset<{}, {}>", self.capacity, self.policy_name())
-            }
+            TypedCollectionKind::Bitset => format!("bitset<{}>", self.capacity),
         }
     }
 }
@@ -276,9 +243,10 @@ impl TypeTable {
     /// `Ok(None)` is returned for ordinary source-defined types, including
     /// ordinary generic applications.  This keeps existing generic behavior
     /// unchanged until the shared compiler lowering consumes the descriptor.
-    /// Recognized collection names are validated eagerly, so malformed policy,
+    /// Recognized collection names are validated eagerly, so malformed
     /// capacity, key, and payload arguments cannot silently become nominal
-    /// user types.
+    /// user types. Legacy trailing overflow-policy arguments are rejected with
+    /// an actionable migration diagnostic rather than normalized.
     pub fn parse_typed_collection_descriptor(
         &self,
         type_name: &str,
@@ -301,12 +269,17 @@ impl TypeTable {
             return Ok(None);
         };
 
-        let expected_arity = match kind {
-            TypedCollectionKind::Map => 4,
-            TypedCollectionKind::Grid => 4,
-            TypedCollectionKind::Bitset => 2,
-            _ => 3,
-        };
+        let expected_arity = typed_collection_arity(kind);
+        if arguments.len() == expected_arity + 1
+            && is_legacy_typed_collection_policy(arguments[expected_arity])
+        {
+            return Err(legacy_typed_collection_policy_diagnostic(
+                trimmed,
+                kind,
+                &arguments,
+                expected_arity,
+            ));
+        }
         if arguments.len() != expected_arity {
             return Err(format!(
                 "typed collection '{}' expects {} arguments, got {}",
@@ -316,11 +289,8 @@ impl TypeTable {
             ));
         }
 
-        let policy_text = arguments[arguments.len() - 1];
-        let policy = parse_typed_collection_policy(kind, policy_text)?;
         let mut descriptor = TypedCollectionDescriptor {
             kind,
-            policy,
             element_type: None,
             key_type: None,
             value_type: None,
@@ -598,7 +568,6 @@ impl TypeTable {
     ) -> Result<TypeId, String> {
         let key = TypeKey::TypedCollection {
             kind: descriptor.kind,
-            policy: descriptor.policy,
             element_type: descriptor.element_type,
             key_type: descriptor.key_type,
             value_type: descriptor.value_type,
@@ -803,7 +772,6 @@ impl TypeTable {
         if let Ok(Some(descriptor)) = self.parse_typed_collection_descriptor(type_name) {
             let key = TypeKey::TypedCollection {
                 kind: descriptor.kind,
-                policy: descriptor.policy,
                 element_type: descriptor.element_type,
                 key_type: descriptor.key_type,
                 value_type: descriptor.value_type,
@@ -1051,46 +1019,37 @@ fn parse_typed_collection_kind(name: &str) -> Option<TypedCollectionKind> {
     }
 }
 
-fn parse_typed_collection_policy(
-    kind: TypedCollectionKind,
-    text: &str,
-) -> Result<TypedCollectionOverflowPolicy, String> {
-    let policy = match text.trim() {
-        "error" => TypedCollectionOverflowPolicy::Error,
-        "drop_newest" => TypedCollectionOverflowPolicy::DropNewest,
-        "overwrite_oldest" => TypedCollectionOverflowPolicy::OverwriteOldest,
-        other => {
-            return Err(format!(
-                "typed collection '{}' has unknown overflow policy '{}'; expected error, drop_newest, or overwrite_oldest",
-                kind.as_str(),
-                other
-            ));
-        }
-    };
-    let allowed = match kind {
+fn typed_collection_arity(kind: TypedCollectionKind) -> usize {
+    match kind {
         TypedCollectionKind::Pool
         | TypedCollectionKind::StablePool
-        | TypedCollectionKind::Map
+        | TypedCollectionKind::Queue
+        | TypedCollectionKind::RingBuffer
         | TypedCollectionKind::Set
-        | TypedCollectionKind::PriorityQueue => {
-            matches!(
-                policy,
-                TypedCollectionOverflowPolicy::Error | TypedCollectionOverflowPolicy::DropNewest
-            )
-        }
-        TypedCollectionKind::Queue | TypedCollectionKind::RingBuffer => true,
-        TypedCollectionKind::Grid | TypedCollectionKind::Bitset => {
-            policy == TypedCollectionOverflowPolicy::Error
-        }
-    };
-    if !allowed {
-        return Err(format!(
-            "typed collection '{}' does not support overflow policy '{}'",
-            kind.as_str(),
-            policy.as_str()
-        ));
+        | TypedCollectionKind::PriorityQueue => 2,
+        TypedCollectionKind::Map => 3,
+        TypedCollectionKind::Grid => 3,
+        TypedCollectionKind::Bitset => 1,
     }
-    Ok(policy)
+}
+
+fn is_legacy_typed_collection_policy(text: &str) -> bool {
+    matches!(text.trim(), "error" | "drop_newest" | "overwrite_oldest")
+}
+
+fn legacy_typed_collection_policy_diagnostic(
+    source: &str,
+    kind: TypedCollectionKind,
+    arguments: &[&str],
+    canonical_arity: usize,
+) -> String {
+    let policy = arguments[canonical_arity].trim();
+    let canonical_arguments = arguments[..canonical_arity].join(", ");
+    format!(
+        "typed collection '{source}' uses legacy trailing overflow policy '{policy}'; remove that argument and migrate to '{}<{}>'",
+        kind.as_str(),
+        canonical_arguments
+    )
 }
 
 fn parse_typed_capacity(kind: TypedCollectionKind, text: &str, role: &str) -> Result<u32, String> {
@@ -1816,35 +1775,25 @@ mod tests {
     fn typed_collection_descriptors_cover_all_kinds_with_exact_lane_costs() {
         let table = TypeTable::new();
         let cases = [
-            ("pool<i32, 2, error>", TypedCollectionKind::Pool, 12, 2),
+            ("pool<i32, 2>", TypedCollectionKind::Pool, 12, 2),
             (
-                "stable_pool<u16, 3, error>",
+                "stable_pool<u16, 3>",
                 TypedCollectionKind::StablePool,
                 16,
                 3,
             ),
+            ("queue<f64, 2>", TypedCollectionKind::Queue, 24, 2),
+            ("ring_buffer<u8, 4>", TypedCollectionKind::RingBuffer, 12, 4),
+            ("map<u8, f64, 3>", TypedCollectionKind::Map, 40, 3),
+            ("set<u32, 3>", TypedCollectionKind::Set, 20, 3),
             (
-                "queue<f64, 2, overwrite_oldest>",
-                TypedCollectionKind::Queue,
-                24,
-                2,
-            ),
-            (
-                "ring_buffer<u8, 4, drop_newest>",
-                TypedCollectionKind::RingBuffer,
-                12,
-                4,
-            ),
-            ("map<u8, f64, 3, error>", TypedCollectionKind::Map, 40, 3),
-            ("set<u32, 3, drop_newest>", TypedCollectionKind::Set, 20, 3),
-            (
-                "priority_queue<i32, 2, error>",
+                "priority_queue<i32, 2>",
                 TypedCollectionKind::PriorityQueue,
                 32,
                 2,
             ),
-            ("grid<u16, 2, 3, error>", TypedCollectionKind::Grid, 12, 6),
-            ("bitset<33, error>", TypedCollectionKind::Bitset, 8, 33),
+            ("grid<u16, 2, 3>", TypedCollectionKind::Grid, 12, 6),
+            ("bitset<33>", TypedCollectionKind::Bitset, 8, 33),
         ];
 
         for (source, expected_kind, expected_bytes, expected_capacity) in cases {
@@ -1871,37 +1820,43 @@ mod tests {
     }
 
     #[test]
-    fn typed_collection_descriptor_accepts_zero_and_rejects_invalid_contracts() {
+    fn typed_collection_descriptor_accepts_zero_capacity_for_every_kind() {
         let table = TypeTable::new();
-        let pool_zero = table
-            .parse_typed_collection_descriptor("pool<i32, 0, drop_newest>")
-            .expect("zero-capacity pool")
-            .expect("recognized zero-capacity pool");
-        assert_eq!(pool_zero.static_size_bytes, 4);
-        assert_eq!(pool_zero.lanes[1].byte_size, 0);
+        let cases = [
+            ("pool<i32, 0>", TypedCollectionKind::Pool, 4, 0),
+            ("stable_pool<i32, 0>", TypedCollectionKind::StablePool, 4, 0),
+            ("queue<i32, 0>", TypedCollectionKind::Queue, 8, 0),
+            ("ring_buffer<i32, 0>", TypedCollectionKind::RingBuffer, 8, 0),
+            ("map<u8, i32, 0>", TypedCollectionKind::Map, 4, 0),
+            ("set<u32, 0>", TypedCollectionKind::Set, 4, 0),
+            (
+                "priority_queue<i32, 0>",
+                TypedCollectionKind::PriorityQueue,
+                8,
+                0,
+            ),
+            ("grid<u8, 0, 3>", TypedCollectionKind::Grid, 0, 0),
+            ("bitset<0>", TypedCollectionKind::Bitset, 0, 0),
+        ];
 
-        let wide_pool_zero = table
-            .parse_typed_collection_descriptor("pool<f64, 0, error>")
-            .expect("zero-capacity wide pool")
-            .expect("recognized zero-capacity wide pool");
-        assert_eq!(
-            wide_pool_zero.static_size_bytes, 4,
-            "an absent payload lane must not add alignment padding"
-        );
-
-        let queue_zero = table
-            .parse_typed_collection_descriptor("queue<i32, 0, overwrite_oldest>")
-            .expect("zero-capacity queue")
-            .expect("recognized zero-capacity queue");
-        assert_eq!(queue_zero.static_size_bytes, 8);
-        assert_eq!(queue_zero.lanes[2].byte_size, 0);
-
-        let bitset_zero = table
-            .parse_typed_collection_descriptor("bitset<0, error>")
-            .expect("zero-capacity bitset")
-            .expect("recognized zero-capacity bitset");
-        assert_eq!(bitset_zero.static_size_bytes, 0);
-        assert_eq!(bitset_zero.lanes[0].element_count, 0);
+        for (source, expected_kind, expected_bytes, expected_capacity) in cases {
+            let descriptor = table
+                .parse_typed_collection_descriptor(source)
+                .expect("zero capacity remains a valid type")
+                .expect("recognized zero-capacity collection");
+            assert_eq!(descriptor.kind, expected_kind, "{source}");
+            assert_eq!(descriptor.static_size_bytes, expected_bytes, "{source}");
+            assert_eq!(descriptor.capacity, expected_capacity, "{source}");
+            assert_eq!(descriptor.canonical_type_name(&table), source, "{source}");
+            assert!(
+                descriptor
+                    .lanes
+                    .iter()
+                    .filter(|lane| lane.element_count == 0)
+                    .all(|lane| lane.byte_size == 0),
+                "zero-capacity payload lanes must have zero size for {source}"
+            );
+        }
 
         assert!(table
             .parse_typed_collection_descriptor("Buffer<i32, 2>")
@@ -1911,22 +1866,46 @@ mod tests {
             .parse_typed_collection_descriptor("Buffer<i32, 4>[2]")
             .expect("ordinary generic array applications remain outside this descriptor")
             .is_none());
+    }
+
+    #[test]
+    fn typed_collection_descriptor_rejects_invalid_contracts_and_legacy_policies() {
+        let table = TypeTable::new();
         for (source, expected) in [
-            (
-                "pool<i32, 2, overwrite_oldest>",
-                "does not support overflow policy",
-            ),
-            ("bitset<8, drop_newest>", "does not support overflow policy"),
-            ("map<f32, i32, 2, error>", "key type"),
-            ("pool<i32, -1, error>", "nonnegative decimal"),
-            ("queue<i32, N, error>", "nonnegative decimal"),
-            ("pool<Entity, 2, error>", "supported scalar"),
-            ("pool<i32, 2, unknown>", "unknown overflow policy"),
+            ("map<f32, i32, 2>", "key type"),
+            ("pool<i32, -1>", "nonnegative decimal"),
+            ("queue<i32, N>", "nonnegative decimal"),
+            ("pool<Entity, 2>", "supported scalar"),
+            ("pool<i32, 2, unknown>", "expects 2 arguments"),
         ] {
             let error = table
                 .parse_typed_collection_descriptor(source)
                 .expect_err("invalid typed collection must be rejected");
             assert!(error.contains(expected), "{source}: {error}");
+        }
+
+        let legacy_cases = [
+            ("pool<i32, 2>", TypedCollectionKind::Pool),
+            ("stable_pool<u16, 3>", TypedCollectionKind::StablePool),
+            ("queue<f64, 2>", TypedCollectionKind::Queue),
+            ("ring_buffer<u8, 4>", TypedCollectionKind::RingBuffer),
+            ("map<u8, f64, 3>", TypedCollectionKind::Map),
+            ("set<u32, 3>", TypedCollectionKind::Set),
+            ("priority_queue<i32, 2>", TypedCollectionKind::PriorityQueue),
+            ("grid<u16, 2, 3>", TypedCollectionKind::Grid),
+            ("bitset<33>", TypedCollectionKind::Bitset),
+        ];
+        for (canonical, kind) in legacy_cases {
+            for policy in ["error", "drop_newest", "overwrite_oldest"] {
+                let source = format!("{}, {}>", canonical.trim_end_matches('>'), policy);
+                let error = table
+                    .parse_typed_collection_descriptor(&source)
+                    .expect_err("legacy policy syntax must require migration");
+                let expected = format!(
+                    "typed collection '{source}' uses legacy trailing overflow policy '{policy}'; remove that argument and migrate to '{canonical}'"
+                );
+                assert_eq!(error, expected, "{kind:?}, {policy}");
+            }
         }
     }
 
@@ -1934,13 +1913,13 @@ mod tests {
     fn typed_collection_application_has_compiler_owned_identity() {
         let mut table = TypeTable::new();
         let typed = table
-            .resolve_or_intern("pool<i32,2,error>")
+            .resolve_or_intern("pool<i32,2>")
             .expect("typed pool type");
         let same = table
-            .resolve_or_intern("pool<i32, 2, error>")
+            .resolve_or_intern("pool<i32, 2>")
             .expect("canonical typed pool type");
         let spaced_kind = table
-            .resolve_or_intern("pool <i32, 2, error>")
+            .resolve_or_intern("pool <i32, 2>")
             .expect("typed pool type with whitespace before '<'");
         let nominal = table
             .resolve_or_intern("PoolLike<i32, 2, error>")
@@ -1951,7 +1930,11 @@ mod tests {
             typed, spaced_kind,
             "whitespace before '<' must not change identity"
         );
-        assert_eq!(table.resolve("pool <i32, 2, error>"), Some(typed));
+        assert_eq!(table.resolve("pool <i32, 2>"), Some(typed));
+        let legacy = table
+            .resolve_or_intern("pool<i32, 2, error>")
+            .expect_err("legacy policy must not normalize into canonical identity");
+        assert!(legacy.contains("migrate to 'pool<i32, 2>'"), "{legacy}");
         assert_ne!(typed, nominal, "typed pools must not be nominal aliases");
         assert!(table.is_typed_collection_type(typed));
         assert!(!table.is_typed_collection_type(nominal));
@@ -1973,27 +1956,27 @@ mod tests {
     fn typed_collection_descriptor_enforces_runtime_dimension_and_layout_limits() {
         let table = TypeTable::new();
         let exact_dimension_limit = table
-            .parse_typed_collection_descriptor("grid<u8, 2147483647, 1, error>")
+            .parse_typed_collection_descriptor("grid<u8, 2147483647, 1>")
             .expect("exact i32 dimension product should be representable")
             .expect("recognized grid descriptor");
         assert_eq!(exact_dimension_limit.capacity, 2_147_483_647);
         let error = table
-            .parse_typed_collection_descriptor("grid<i32, 2147483647, 2, error>")
+            .parse_typed_collection_descriptor("grid<i32, 2147483647, 2>")
             .expect_err("grid product must be checked");
         assert!(error.contains("i32 runtime index capacity"), "{error}");
 
         let error = table
-            .parse_typed_collection_descriptor("grid<u8, 2147483647, 2, error>")
+            .parse_typed_collection_descriptor("grid<u8, 2147483647, 2>")
             .expect_err("dimension product above runtime index width must be rejected");
         assert!(error.contains("i32 runtime index capacity"), "{error}");
 
         let fitting = table
-            .parse_typed_collection_descriptor("pool<i32, 1073741822, error>")
+            .parse_typed_collection_descriptor("pool<i32, 1073741822>")
             .expect("last fitting u32 static layout")
             .expect("recognized pool descriptor");
         assert_eq!(fitting.static_size_bytes, 4_294_967_292);
         let error = table
-            .parse_typed_collection_descriptor("pool<i32, 1073741823, error>")
+            .parse_typed_collection_descriptor("pool<i32, 1073741823>")
             .expect_err("static layout above u32 representation must be rejected");
         assert!(error.contains("u32 layout representation"), "{error}");
 

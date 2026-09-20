@@ -6155,7 +6155,7 @@ mod tests {
         compiler.upsert_file(
             "typed_collection_global.stasis",
             "struct Buffer<N: i32> { value: i32; }\n\
-             global actors: pool<i32, 4, error>;\n\
+             global actors: pool<i32, 4>;\n\
              global buffer: Buffer<4>;\n\
              function main(): i32 { return 0; }\n",
         );
@@ -6165,7 +6165,7 @@ mod tests {
             .expect("an unrelated generic must not hide compiler-owned typed collections");
         assert!(compiler.files()[0]
             .content
-            .contains("global actors: pool<i32, 4, error>;"));
+            .contains("global actors: pool<i32, 4>;"));
     }
 
     #[test]

@@ -22,6 +22,7 @@ pub struct IndexedFunction {
     pub return_type: TypeId,
     pub inline: bool,
     pub effect_contract: Option<Vec<String>>,
+    pub requires_contract: Option<Vec<String>>,
     pub dependencies: Vec<IndexedCallDependency>,
 }
 
@@ -95,6 +96,10 @@ pub fn index_file_with_diagnostic(
         let effect_contract = parse_effect_contract(&function.annotations).map_err(|message| {
             diagnostic_for_function(&function, message, signature_range.clone())
         })?;
+        let requires_contract =
+            parse_requires_contract(&function.annotations).map_err(|message| {
+                diagnostic_for_function(&function, message, signature_range.clone())
+            })?;
         let signature_hash = hash_signature(name_hash, &params, return_type, inline);
         let body_text = source.get(function.body_range.clone()).ok_or_else(|| {
             diagnostic_for_function(
@@ -103,7 +108,20 @@ pub fn index_file_with_diagnostic(
                 body_range.clone(),
             )
         })?;
-        let body_hash = hash_text(body_text);
+        let mut body_hash = hash_text(body_text);
+        if let Some(requirements) = &requires_contract {
+            // Preconditions are not ABI, but callers embed required helpers.
+            // Treat metadata edits like body edits so patch planning invalidates
+            // and regenerates those callers without changing the signature.
+            body_hash = body_hash
+                .wrapping_mul(1099511628211)
+                .wrapping_add(hash_text("@requires"));
+            for requirement in requirements {
+                body_hash = body_hash
+                    .wrapping_mul(1099511628211)
+                    .wrapping_add(hash_text(requirement));
+            }
+        }
         let dependencies = collect_dependencies(body_text)
             .map_err(|message| diagnostic_for_function(&function, message, body_range.clone()))?;
         out.push(IndexedFunction {
@@ -121,6 +139,7 @@ pub fn index_file_with_diagnostic(
             return_type,
             inline,
             effect_contract,
+            requires_contract,
             dependencies,
         });
     }
@@ -208,6 +227,40 @@ fn parse_effect_contract(
         regions.push(region.to_string());
     }
     Ok(Some(regions))
+}
+
+fn parse_requires_contract(
+    annotations: &[crate::frontend::parser::ParsedFunctionAnnotation],
+) -> Result<Option<Vec<String>>, String> {
+    let mut matches = annotations
+        .iter()
+        .filter(|annotation| annotation.name == "requires");
+    let Some(annotation) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err("a function may declare @requires only once".to_string());
+    }
+    if !annotation.has_parentheses {
+        return Err(
+            "@requires requires parentheses, for example @requires(events.can_push())".to_string(),
+        );
+    }
+    if annotation.arguments.is_empty() {
+        return Err("@requires must name at least one collection preflight".to_string());
+    }
+    let mut requirements = Vec::with_capacity(annotation.arguments.len());
+    for argument in &annotation.arguments {
+        let requirement = argument.text.trim();
+        if requirement.is_empty() {
+            return Err("@requires contains an empty preflight".to_string());
+        }
+        if requirements.iter().any(|existing| existing == requirement) {
+            return Err(format!("duplicate @requires preflight '{requirement}'"));
+        }
+        requirements.push(requirement.to_string());
+    }
+    Ok(Some(requirements))
 }
 
 fn collect_dependencies(body_text: &str) -> Result<Vec<IndexedCallDependency>, String> {
@@ -298,6 +351,7 @@ mod tests {
         );
         assert!(!indexed[0].inline);
         assert_eq!(indexed[0].effect_contract, None);
+        assert_eq!(indexed[0].requires_contract, None);
     }
 
     #[test]
@@ -332,6 +386,34 @@ mod tests {
         .unwrap_err();
         assert!(
             duplicate.contains("duplicate @effects region"),
+            "{duplicate}"
+        );
+    }
+
+    #[test]
+    fn indexes_collection_requirements_as_compile_time_body_contracts() {
+        let mut types = TypeTable::new();
+        let plain =
+            index_file("function enqueue(value: i32): void { return; }", &mut types).unwrap();
+        let required = index_file(
+            "@requires(events.can_push())\nfunction enqueue(value: i32): void { return; }",
+            &mut types,
+        )
+        .unwrap();
+        assert_eq!(
+            required[0].requires_contract,
+            Some(vec!["events.can_push()".to_string()])
+        );
+        assert_eq!(plain[0].signature_hash, required[0].signature_hash);
+        assert_ne!(plain[0].body_hash, required[0].body_hash);
+
+        let duplicate = index_file(
+            "@requires(events.can_push(), events.can_push())\nfunction enqueue(): void { return; }",
+            &mut types,
+        )
+        .unwrap_err();
+        assert!(
+            duplicate.contains("duplicate @requires preflight"),
             "{duplicate}"
         );
     }
