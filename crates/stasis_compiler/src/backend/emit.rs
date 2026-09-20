@@ -3118,6 +3118,25 @@ pub(crate) fn emit_simple_statements(
                     {
                         continue;
                     }
+                    if try_emit_typed_stable_pool_call(
+                        builder,
+                        target,
+                        args,
+                        values_by_name,
+                        runtime_call_refs,
+                        internal_calls,
+                        call_signatures,
+                        type_table,
+                        global_path_types,
+                        constant_values,
+                        collection_infos,
+                        named_struct_field_types,
+                        foreach_bindings,
+                    )?
+                    .is_some()
+                    {
+                        continue;
+                    }
                     let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
                     let mut arg_types: Vec<TypeId> = Vec::with_capacity(args.len());
                     let expected_params =
@@ -5649,6 +5668,714 @@ fn try_emit_typed_ring_buffer_call(
     }
 }
 
+#[derive(Clone, Copy)]
+enum TypedStablePoolCallResult {
+    Value(ValueBinding),
+    Void,
+}
+
+#[derive(Clone, Copy)]
+enum TypedStablePoolCallKind {
+    Insert,
+    Remove,
+    Count,
+    Capacity,
+    Clear,
+}
+
+impl TypedStablePoolCallKind {
+    fn from_target(target: &str) -> Option<Self> {
+        match target {
+            "stable_pool_insert" => Some(Self::Insert),
+            "stable_pool_remove" => Some(Self::Remove),
+            "stable_pool_count" => Some(Self::Count),
+            "stable_pool_capacity" => Some(Self::Capacity),
+            "stable_pool_clear" => Some(Self::Clear),
+            _ => None,
+        }
+    }
+
+    fn expects_value(self) -> bool {
+        matches!(self, Self::Insert | Self::Remove)
+    }
+}
+
+fn typed_stable_pool_storage_bindings(
+    target: &str,
+    args: &[SimpleExpr],
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+) -> Result<
+    (
+        String,
+        usize,
+        DirectStorageRef,
+        DirectArrayStorageRef,
+        DirectArrayStorageRef,
+    ),
+    String,
+> {
+    let Some(SimpleExpr::Identifier(path)) = args.first() else {
+        return Err(format!(
+            "{target} first argument must be an exact persistent typed collection path"
+        ));
+    };
+    let root = path.split('.').next().unwrap_or(path);
+    if values_by_name.contains_key(root) {
+        return Err(format!(
+            "{target} first argument must be an exact persistent typed collection path"
+        ));
+    }
+    let type_id = global_path_types.get(path).copied().ok_or_else(|| {
+        format!(
+            "{target} first argument '{}' is not a persistent typed collection path",
+            path
+        )
+    })?;
+    if !type_table.is_typed_collection_type(type_id) {
+        return Err(format!(
+            "{target} requires persistent stable_pool path '{}', found non-typed state type {}",
+            path, type_id
+        ));
+    }
+    let type_name = type_table
+        .type_info(type_id)
+        .map(|info| info.name.as_str())
+        .ok_or_else(|| format!("{target} path '{}' has unknown type {}", path, type_id))?;
+    let descriptor = type_table
+        .parse_typed_collection_descriptor(type_name)?
+        .ok_or_else(|| {
+            format!(
+                "{target} path '{}' has no compiler-owned typed collection descriptor",
+                path
+            )
+        })?;
+    if descriptor.kind != TypedCollectionKind::StablePool {
+        return Err(format!(
+            "{target} requires persistent stable_pool path '{}', found {}",
+            path,
+            descriptor.kind_name()
+        ));
+    }
+    if descriptor.element_type != Some(TYPE_ID_I32) {
+        return Err(format!(
+            "{target} requires stable_pool path '{}' with i32 payload",
+            path
+        ));
+    }
+    let capacity = usize::try_from(descriptor.capacity).map_err(|_| {
+        format!(
+            "{target} stable_pool path '{}' capacity {} does not fit the target index type",
+            path, descriptor.capacity
+        )
+    })?;
+    let direct_storage = runtime_call_refs.direct_storage.as_ref().ok_or_else(|| {
+        format!(
+            "{target} for typed stable_pool '{}' requires direct storage bindings",
+            path
+        )
+    })?;
+    let count_path = format!("{path}.count");
+    let count = direct_storage
+        .scalars
+        .get(&count_path)
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "{target} for typed stable_pool '{}' is missing direct scalar binding '{}.count'",
+                path, path
+            )
+        })?;
+    let occupied = direct_storage
+        .arrays
+        .get(&(path.to_string(), String::from("occupied")))
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "{target} for typed stable_pool '{}' is missing direct array binding '{}.occupied'",
+                path, path
+            )
+        })?;
+    if occupied.storage_bytes != 1 || occupied.static_len != Some(capacity) {
+        return Err(format!(
+            "{target} for typed stable_pool '{}' requires a u8 occupied binding with static length {}, found {} bytes and length {:?}",
+            path,
+            capacity,
+            occupied.storage_bytes,
+            occupied.static_len
+        ));
+    }
+    let values = direct_storage
+        .arrays
+        .get(&(path.to_string(), String::from("values")))
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "{target} for typed stable_pool '{}' is missing direct array binding '{}.values'",
+                path, path
+            )
+        })?;
+    if values.storage_bytes != 4 || values.static_len != Some(capacity) {
+        return Err(format!(
+            "{target} for typed stable_pool '{}' requires an i32 values binding with static length {}, found {} bytes and length {:?}",
+            path,
+            capacity,
+            values.storage_bytes,
+            values.static_len
+        ));
+    }
+    Ok((path.clone(), capacity, count, occupied, values))
+}
+
+fn emit_typed_stable_pool_scan(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    occupied_ref: DirectArrayStorageRef,
+    capacity: usize,
+    type_table: &TypeTable,
+) -> Result<(Value, Value, Value), String> {
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed stable_pool capacity {capacity} exceeds i32 operation range")
+    })?;
+    if capacity_i32 <= 0 {
+        return Err("typed stable_pool metadata scan requires positive capacity".to_string());
+    }
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let count_non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, count, 0);
+    let count_within_capacity =
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedLessThanOrEqual, count, i64::from(capacity_i32));
+    let count_valid = builder
+        .ins()
+        .band(count_non_negative, count_within_capacity);
+
+    let scan_block = builder.create_block();
+    builder.append_block_param(scan_block, types::I32);
+    builder.append_block_param(scan_block, types::I32);
+    builder.append_block_param(scan_block, types::I32);
+    let body_block = builder.create_block();
+    builder.append_block_param(body_block, types::I32);
+    builder.append_block_param(body_block, types::I32);
+    builder.append_block_param(body_block, types::I32);
+    let invalid_count_block = builder.create_block();
+    let invalid_occupied_block = builder.create_block();
+    let result_block = builder.create_block();
+    builder.append_block_param(result_block, types::I32);
+    builder.append_block_param(result_block, types::I32);
+    builder.append_block_param(result_block, types::I8);
+    let initial_index = builder.ins().iconst(types::I32, 0);
+    let initial_total = builder.ins().iconst(types::I32, 0);
+    let initial_first_free = builder.ins().iconst(types::I32, -1);
+    builder.ins().brif(
+        count_valid,
+        scan_block,
+        &[initial_index, initial_total, initial_first_free],
+        invalid_count_block,
+        &[],
+    );
+
+    builder.seal_block(invalid_count_block);
+    builder.switch_to_block(invalid_count_block);
+    let zero = builder.ins().iconst(types::I32, 0);
+    let invalid_first_free = builder.ins().iconst(types::I32, -1);
+    let invalid = builder.ins().iconst(types::I8, 0);
+    builder
+        .ins()
+        .jump(result_block, &[zero, invalid_first_free, invalid]);
+
+    builder.switch_to_block(scan_block);
+    let index = builder.block_params(scan_block)[0];
+    let occupied_total = builder.block_params(scan_block)[1];
+    let first_free = builder.block_params(scan_block)[2];
+    let more = builder
+        .ins()
+        .icmp_imm(IntCC::SignedLessThan, index, i64::from(capacity_i32));
+    let scan_valid = builder.ins().iconst(types::I8, 1);
+    builder.ins().brif(
+        more,
+        body_block,
+        &[index, occupied_total, first_free],
+        result_block,
+        &[occupied_total, first_free, scan_valid],
+    );
+
+    builder.switch_to_block(body_block);
+    let body_index = builder.block_params(body_block)[0];
+    let body_total = builder.block_params(body_block)[1];
+    let body_first_free = builder.block_params(body_block)[2];
+    let occupied_value = emit_direct_array_load(
+        builder,
+        occupied_ref.slot,
+        body_index,
+        TYPE_ID_U8,
+        type_table,
+        occupied_ref.storage_bytes,
+        occupied_ref.static_len,
+        true,
+    )?;
+    let is_zero = builder.ins().icmp_imm(IntCC::Equal, occupied_value, 0);
+    let is_one = builder.ins().icmp_imm(IntCC::Equal, occupied_value, 1);
+    let occupied_valid = builder.ins().bor(is_zero, is_one);
+    let next_index = builder.ins().iadd_imm(body_index, 1);
+    let next_total = builder.ins().iadd(body_total, occupied_value);
+    let no_free_recorded = builder.ins().icmp_imm(IntCC::Equal, body_first_free, -1);
+    let record_free = builder.ins().band(no_free_recorded, is_zero);
+    let next_first_free = builder
+        .ins()
+        .select(record_free, body_index, body_first_free);
+    builder.ins().brif(
+        occupied_valid,
+        scan_block,
+        &[next_index, next_total, next_first_free],
+        invalid_occupied_block,
+        &[],
+    );
+
+    builder.seal_block(invalid_occupied_block);
+    builder.switch_to_block(invalid_occupied_block);
+    let zero = builder.ins().iconst(types::I32, 0);
+    let invalid_first_free = builder.ins().iconst(types::I32, -1);
+    let invalid = builder.ins().iconst(types::I8, 0);
+    builder
+        .ins()
+        .jump(result_block, &[zero, invalid_first_free, invalid]);
+
+    builder.seal_block(scan_block);
+    builder.seal_block(body_block);
+    builder.seal_block(result_block);
+    builder.switch_to_block(result_block);
+    let scanned_total = builder.block_params(result_block)[0];
+    let scanned_first_free = builder.block_params(result_block)[1];
+    let scanned_valid = builder.block_params(result_block)[2];
+    let count_matches = builder.ins().icmp(IntCC::Equal, scanned_total, count);
+    let metadata_valid = builder.ins().band(scanned_valid, count_matches);
+    Ok((count, scanned_first_free, metadata_valid))
+}
+
+fn emit_typed_stable_pool_insert(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    occupied_ref: DirectArrayStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+    value: Value,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    if capacity == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, -1),
+            type_id: TYPE_ID_I32,
+        });
+    }
+    let (count, first_free, metadata_valid) =
+        emit_typed_stable_pool_scan(builder, count_ref, occupied_ref, capacity, type_table)?;
+    let valid_block = builder.create_block();
+    let invalid_block = builder.create_block();
+    let full_block = builder.create_block();
+    let insert_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(metadata_valid, valid_block, &[], invalid_block, &[]);
+
+    builder.seal_block(invalid_block);
+    builder.switch_to_block(invalid_block);
+    let rejected = builder.ins().iconst(types::I32, -1);
+    builder.ins().jump(merge_block, &[rejected]);
+
+    builder.seal_block(valid_block);
+    builder.switch_to_block(valid_block);
+    let has_free = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, first_free, 0);
+    let count_has_capacity = builder.ins().icmp_imm(
+        IntCC::SignedLessThan,
+        count,
+        i64::try_from(capacity).unwrap_or(i64::MAX),
+    );
+    let can_insert = builder.ins().band(has_free, count_has_capacity);
+    builder
+        .ins()
+        .brif(can_insert, insert_block, &[], full_block, &[]);
+
+    builder.seal_block(full_block);
+    builder.switch_to_block(full_block);
+    let rejected = builder.ins().iconst(types::I32, -1);
+    builder.ins().jump(merge_block, &[rejected]);
+
+    builder.seal_block(insert_block);
+    builder.switch_to_block(insert_block);
+    let occupied_one = builder.ins().iconst(types::I32, 1);
+    emit_direct_array_store(
+        builder,
+        occupied_ref.slot,
+        first_free,
+        occupied_one,
+        TYPE_ID_U8,
+        occupied_ref.storage_bytes,
+        occupied_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        first_free,
+        value,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let next_count = builder.ins().iadd_imm(count, 1);
+    emit_direct_i32_store(builder, count_ref, next_count);
+    builder.ins().jump(merge_block, &[first_free]);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "typed stable_pool insert merge block missing result".to_string())?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_I32,
+    })
+}
+
+fn emit_typed_stable_pool_remove(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    occupied_ref: DirectArrayStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+    index: Value,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    if capacity == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_BOOL,
+        });
+    }
+    let (count, _first_free, metadata_valid) =
+        emit_typed_stable_pool_scan(builder, count_ref, occupied_ref, capacity, type_table)?;
+    let index_non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
+    let index_below_capacity = builder.ins().icmp_imm(
+        IntCC::SignedLessThan,
+        index,
+        i64::try_from(capacity).unwrap_or(i64::MAX),
+    );
+    let index_valid = builder.ins().band(index_non_negative, index_below_capacity);
+    let candidate = builder.ins().band(metadata_valid, index_valid);
+    let candidate_block = builder.create_block();
+    let reject_block = builder.create_block();
+    let occupied_block = builder.create_block();
+    let empty_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(candidate, candidate_block, &[], reject_block, &[]);
+
+    builder.seal_block(reject_block);
+    builder.switch_to_block(reject_block);
+    let rejected = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(merge_block, &[rejected]);
+
+    builder.seal_block(candidate_block);
+    builder.switch_to_block(candidate_block);
+    let occupied_value = emit_direct_array_load(
+        builder,
+        occupied_ref.slot,
+        index,
+        TYPE_ID_U8,
+        type_table,
+        occupied_ref.storage_bytes,
+        occupied_ref.static_len,
+        true,
+    )?;
+    let occupied = builder.ins().icmp_imm(IntCC::Equal, occupied_value, 1);
+    builder
+        .ins()
+        .brif(occupied, occupied_block, &[], empty_block, &[]);
+
+    builder.seal_block(empty_block);
+    builder.switch_to_block(empty_block);
+    let rejected = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(merge_block, &[rejected]);
+
+    builder.seal_block(occupied_block);
+    builder.switch_to_block(occupied_block);
+    let zero = builder.ins().iconst(types::I32, 0);
+    emit_direct_array_store(
+        builder,
+        occupied_ref.slot,
+        index,
+        zero,
+        TYPE_ID_U8,
+        occupied_ref.storage_bytes,
+        occupied_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        index,
+        zero,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let next_count = builder.ins().iadd_imm(count, -1);
+    emit_direct_i32_store(builder, count_ref, next_count);
+    let removed = builder.ins().iconst(types::I32, 1);
+    builder.ins().jump(merge_block, &[removed]);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "typed stable_pool remove merge block missing result".to_string())?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_BOOL,
+    })
+}
+
+fn emit_typed_stable_pool_clear(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    occupied_ref: DirectArrayStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+) -> Result<(), String> {
+    let zero = builder.ins().iconst(types::I32, 0);
+    emit_direct_i32_store(builder, count_ref, zero);
+    if capacity == 0 {
+        return Ok(());
+    }
+    let capacity_i32 = i32::try_from(capacity).map_err(|_| {
+        format!("typed stable_pool capacity {capacity} exceeds i32 operation range")
+    })?;
+    let condition_block = builder.create_block();
+    let body_block = builder.create_block();
+    let exit_block = builder.create_block();
+    builder.append_block_param(condition_block, types::I32);
+    builder.ins().jump(condition_block, &[zero]);
+
+    builder.switch_to_block(condition_block);
+    let index = builder.block_params(condition_block)[0];
+    let more = builder
+        .ins()
+        .icmp_imm(IntCC::SignedLessThan, index, i64::from(capacity_i32));
+    builder.ins().brif(more, body_block, &[], exit_block, &[]);
+
+    builder.seal_block(body_block);
+    builder.switch_to_block(body_block);
+    emit_direct_array_store(
+        builder,
+        occupied_ref.slot,
+        index,
+        zero,
+        TYPE_ID_U8,
+        occupied_ref.storage_bytes,
+        occupied_ref.static_len,
+        true,
+    )?;
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        index,
+        zero,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let next = builder.ins().iadd_imm(index, 1);
+    builder.ins().jump(condition_block, &[next]);
+    builder.seal_block(condition_block);
+
+    builder.seal_block(exit_block);
+    builder.switch_to_block(exit_block);
+    Ok(())
+}
+
+fn emit_typed_stable_pool_count(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    occupied_ref: DirectArrayStorageRef,
+    capacity: usize,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    if capacity == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_I32,
+        });
+    }
+    let (count, _first_free, metadata_valid) =
+        emit_typed_stable_pool_scan(builder, count_ref, occupied_ref, capacity, type_table)?;
+    let valid_block = builder.create_block();
+    let invalid_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(metadata_valid, valid_block, &[], invalid_block, &[]);
+    builder.seal_block(valid_block);
+    builder.switch_to_block(valid_block);
+    builder.ins().jump(merge_block, &[count]);
+    builder.seal_block(invalid_block);
+    builder.switch_to_block(invalid_block);
+    let zero = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(merge_block, &[zero]);
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "typed stable_pool count merge block missing result".to_string())?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_I32,
+    })
+}
+
+fn try_emit_typed_stable_pool_call(
+    builder: &mut FunctionBuilder<'_>,
+    target: &str,
+    args: &[SimpleExpr],
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<Option<TypedStablePoolCallResult>, String> {
+    let Some(kind) = TypedStablePoolCallKind::from_target(target) else {
+        return Ok(None);
+    };
+    let expected_arity = if kind.expects_value() { 2 } else { 1 };
+    if args.len() != expected_arity {
+        return Err(format!(
+            "{target} expects {expected_arity} argument(s), found {}",
+            args.len()
+        ));
+    }
+    let (path, capacity, count_ref, occupied_ref, values_ref) = typed_stable_pool_storage_bindings(
+        target,
+        args,
+        values_by_name,
+        runtime_call_refs,
+        global_path_types,
+        type_table,
+    )?;
+    match kind {
+        TypedStablePoolCallKind::Insert => {
+            let value = emit_simple_expression(
+                builder,
+                &args[1],
+                Some(TYPE_ID_I32),
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )?;
+            if value.type_id != TYPE_ID_I32 {
+                return Err(format!(
+                    "{target} value argument must have exact i32 type, found {}",
+                    value.type_id
+                ));
+            }
+            Ok(Some(TypedStablePoolCallResult::Value(
+                emit_typed_stable_pool_insert(
+                    builder,
+                    count_ref,
+                    occupied_ref,
+                    values_ref,
+                    capacity,
+                    value.value,
+                    type_table,
+                )?,
+            )))
+        }
+        TypedStablePoolCallKind::Remove => {
+            let index = emit_simple_expression(
+                builder,
+                &args[1],
+                Some(TYPE_ID_I32),
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )?;
+            if index.type_id != TYPE_ID_I32 {
+                return Err(format!(
+                    "{target} index argument must have exact i32 type, found {}",
+                    index.type_id
+                ));
+            }
+            Ok(Some(TypedStablePoolCallResult::Value(
+                emit_typed_stable_pool_remove(
+                    builder,
+                    count_ref,
+                    occupied_ref,
+                    values_ref,
+                    capacity,
+                    index.value,
+                    type_table,
+                )?,
+            )))
+        }
+        TypedStablePoolCallKind::Count => Ok(Some(TypedStablePoolCallResult::Value(
+            emit_typed_stable_pool_count(builder, count_ref, occupied_ref, capacity, type_table)?,
+        ))),
+        TypedStablePoolCallKind::Capacity => {
+            let capacity = i32::try_from(capacity).map_err(|_| {
+                format!("{target} stable_pool path '{path}' capacity exceeds i32 operation range")
+            })?;
+            Ok(Some(TypedStablePoolCallResult::Value(ValueBinding {
+                value: builder.ins().iconst(types::I32, i64::from(capacity)),
+                type_id: TYPE_ID_I32,
+            })))
+        }
+        TypedStablePoolCallKind::Clear => {
+            emit_typed_stable_pool_clear(builder, count_ref, occupied_ref, values_ref, capacity)?;
+            Ok(Some(TypedStablePoolCallResult::Void))
+        }
+    }
+}
+
 fn try_emit_typed_pool_call(
     builder: &mut FunctionBuilder<'_>,
     target: &str,
@@ -6177,6 +6904,29 @@ pub(crate) fn emit_simple_expression(
                 return match result {
                     TypedCircularCallResult::Value(value) => Ok(value),
                     TypedCircularCallResult::Void => Err(format!(
+                        "void call target '{}' cannot be used in value expression",
+                        target
+                    )),
+                };
+            }
+            if let Some(result) = try_emit_typed_stable_pool_call(
+                builder,
+                target,
+                args,
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )? {
+                return match result {
+                    TypedStablePoolCallResult::Value(value) => Ok(value),
+                    TypedStablePoolCallResult::Void => Err(format!(
                         "void call target '{}' cannot be used in value expression",
                         target
                     )),

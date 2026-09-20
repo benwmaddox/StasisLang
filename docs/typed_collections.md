@@ -8,20 +8,20 @@ struct with an array and a count, and it never allocates or resizes at runtime.
 Implementation status: the compiler parses, validates, interns, fingerprints,
 and reports descriptor layouts for all nine collection kinds. The production
 state layout and executable operation surface currently support persistent
-global `pool<i32, N, error|drop_newest>` and
-`queue<i32, N, error|drop_newest|overwrite_oldest>` and
+global `pool<i32, N, error|drop_newest>`,
+`stable_pool<i32, N, error|drop_newest>`, and
+`queue<i32, N, error|drop_newest|overwrite_oldest>`, and
 `ring_buffer<i32, N, error|drop_newest|overwrite_oldest>` values. Other
 collection kinds and payload types are rejected at the production layout
-boundary instead of falling back to nominal scalar storage. Pool, queue, and
-ring-buffer operations lower through the same direct-storage emitter for JIT
-and native AOT, and their metadata/payload lanes are exposed through program
-snapshots and state inspection.
+boundary instead of falling back to nominal scalar storage. Pool, stable-pool,
+queue, and ring-buffer operations lower through the same direct-storage emitter
+for JIT and native AOT, and their metadata/payload lanes are exposed through
+program snapshots and state inspection.
 
 The remaining operation descriptions in this document are the normative target
-contract for task #147. Stable-pool, map, set, priority-queue, grid, and bitset
-operations are not executable yet. Structured overflow telemetry and migration
-between changed descriptors also remain pending. The current executable slice
-includes:
+contract for task #147. Map, set, priority-queue, grid, and bitset operations
+are not executable yet. Structured overflow telemetry and migration between
+changed descriptors also remain pending. The current executable slice includes:
 
 ```stasis
 global actors: pool<i32, 2, error>;
@@ -39,11 +39,11 @@ function enqueue_event(value: i32): bool {
 ```
 
 The parser retains the ordinary call and indexed-path syntax. Current pool,
-queue, and ring-buffer lowering and later collection slices resolve
-compiler-owned operations by the collection descriptor. `src/stdlib` may
-expose thin declarations for future operations, but it does not define another
-backing container, generic push helper, aggregate return type, or implicit
-`foreach` implementation.
+stable-pool, queue, and ring-buffer lowering and later collection slices
+resolve compiler-owned operations by the collection descriptor. `src/stdlib`
+may expose thin declarations for future operations, but it does not define
+another backing container, generic push helper, aggregate return type, or
+implicit `foreach` implementation.
 
 The persistent inventory follows direct named-struct fields from global roots
 and global-block fields. Generic-instantiated struct roots, fixed-array wrappers
@@ -103,9 +103,12 @@ The pool operations are `pool_push(collection, value) -> i32`,
 rejected insertion. Removal is swap-removal: the removed index and any index to
 the moved last value become invalid.
 
-`stable_pool_insert` and `stable_pool_remove` have the same result shape. A
-stable index remains valid while its `occupied` lane is set; removal leaves a
-tombstone and later insertion reuses the lowest free slot.
+`stable_pool_insert(collection, value) -> i32` returns the lowest free slot or
+`-1` on rejection. `stable_pool_remove(collection, index) -> bool` leaves a
+tombstone without compacting any other value. A stable index remains valid
+while its `occupied` lane is set; later insertion reuses the lowest free slot.
+Stable pools also expose `stable_pool_count`, `stable_pool_capacity`, and
+`stable_pool_clear`.
 
 Queue and ring operations are `<kind>_push -> bool`, `<kind>_pop -> bool`,
 `<kind>_peek -> T` for scalar payloads, `<kind>_physical_index -> i32`,

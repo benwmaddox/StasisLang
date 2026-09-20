@@ -3280,6 +3280,104 @@ mod tests {
     }
 
     #[test]
+    fn typed_stable_pool_aot_storage_plan_and_symbols_match_jit_lanes() {
+        for policy in ["error", "drop_newest"] {
+            for capacity in [2_u32, 0_u32] {
+                let mut process = AotProcess::new();
+                process.upsert_file(
+                    "typed_stable_pool_storage.stasis",
+                    format!(
+                        "global actors: stable_pool<i32, {capacity}, {policy}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed stable-pool AOT compile");
+
+                let snapshot = process
+                    .program_snapshot()
+                    .expect("typed stable-pool snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed stable-pool descriptor");
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("stable_pool<i32, {capacity}, {policy}>")
+                );
+                let bindings = build_aot_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                )
+                .expect("typed stable-pool AOT direct storage plan");
+                assert!(matches!(
+                    bindings.scalars.get("actors.count"),
+                    Some(DirectStorageBinding::Symbol(symbol))
+                        if symbol == &aot_storage_symbol(
+                            AotStorageSymbolKind::Scalar,
+                            "actors.count",
+                            "",
+                        )
+                ));
+                assert!(!bindings.scalars.contains_key("actors"));
+                assert_eq!(bindings.scalars.len(), 1);
+                let occupied = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("occupied")))
+                    .expect("typed stable-pool occupied array binding");
+                assert!(matches!(
+                    &occupied.slot,
+                    DirectStorageBinding::Symbol(symbol)
+                        if symbol == &aot_storage_symbol(
+                            AotStorageSymbolKind::Array,
+                            "actors",
+                            "occupied",
+                        )
+                ));
+                assert_eq!(occupied.static_len, Some(capacity as usize));
+                assert_eq!(occupied.storage_bytes, 1);
+                let values = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("values")))
+                    .expect("typed stable-pool values array binding");
+                assert!(matches!(
+                    &values.slot,
+                    DirectStorageBinding::Symbol(symbol)
+                        if symbol == &aot_storage_symbol(
+                            AotStorageSymbolKind::Array,
+                            "actors",
+                            "values",
+                        )
+                ));
+                assert_eq!(values.static_len, Some(capacity as usize));
+                assert_eq!(values.storage_bytes, 4);
+                assert_eq!(bindings.arrays.len(), 2);
+
+                let (bytes, _) = process
+                    .compile_standalone_storage_object("aot_fn_0")
+                    .expect("standalone typed stable-pool storage object")
+                    .expect("typed stable-pool storage required");
+                let object =
+                    File::parse(bytes.as_slice()).expect("parse typed stable-pool storage object");
+                let symbols: BTreeSet<String> = object
+                    .symbols()
+                    .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                    .collect();
+                for expected in [
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.count", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "occupied"),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values"),
+                ] {
+                    assert!(
+                        symbols.contains(&expected),
+                        "typed stable-pool storage object missing '{expected}' for {policy}, capacity {capacity}: {symbols:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn typed_queue_aot_storage_plan_and_symbols_match_jit_lanes() {
         for policy in ["error", "drop_newest", "overwrite_oldest"] {
             for capacity in [2_u32, 0_u32] {
@@ -3703,6 +3801,100 @@ function zero_capacity(): i32 {
                 linked_zero, EXPECTED_ZERO,
                 "linked AOT/JIT zero-capacity typed pool parity"
             );
+        }
+    }
+
+    #[test]
+    fn typed_stable_pool_linked_aot_matches_jit_operation_sequence() {
+        const SOURCE: &str = r#"global typed_stable_error_parity_147: stable_pool<i32, 3, error>;
+global typed_stable_drop_parity_147: stable_pool<i32, 2, drop_newest>;
+global typed_stable_zero_parity_147: stable_pool<i32, 0, drop_newest>;
+function stable_error_sequence(): i32 {
+    stable_pool_clear(typed_stable_error_parity_147);
+    let first: i32 = stable_pool_insert(typed_stable_error_parity_147, 10);
+    let second: i32 = stable_pool_insert(typed_stable_error_parity_147, 20);
+    let third: i32 = stable_pool_insert(typed_stable_error_parity_147, 30);
+    let full: i32 = stable_pool_insert(typed_stable_error_parity_147, 40);
+    let removed: i32 = 0;
+    if (stable_pool_remove(typed_stable_error_parity_147, 1)) { removed = 1; }
+    let invalid: i32 = 0;
+    if (stable_pool_remove(typed_stable_error_parity_147, 1)) { invalid += 100; }
+    if (stable_pool_remove(typed_stable_error_parity_147, 9)) { invalid += 10; }
+    let reused: i32 = stable_pool_insert(typed_stable_error_parity_147, 40);
+    let count_after: i32 = stable_pool_count(typed_stable_error_parity_147);
+    let capacity: i32 = stable_pool_capacity(typed_stable_error_parity_147);
+    stable_pool_clear(typed_stable_error_parity_147);
+    let cleared: i32 = stable_pool_count(typed_stable_error_parity_147);
+    return first * 1000000 + second * 100000 + third * 10000 + full * 1000
+        + removed * 100 + invalid + reused + count_after * 10 + capacity + cleared;
+}
+function stable_drop_sequence(): i32 {
+    stable_pool_clear(typed_stable_drop_parity_147);
+    let first: i32 = stable_pool_insert(typed_stable_drop_parity_147, 1);
+    let second: i32 = stable_pool_insert(typed_stable_drop_parity_147, 2);
+    let rejected: i32 = stable_pool_insert(typed_stable_drop_parity_147, 3);
+    let count: i32 = stable_pool_count(typed_stable_drop_parity_147);
+    let capacity: i32 = stable_pool_capacity(typed_stable_drop_parity_147);
+    stable_pool_clear(typed_stable_drop_parity_147);
+    let cleared: i32 = stable_pool_count(typed_stable_drop_parity_147);
+    return first * 1000000 + second * 100000 + rejected * 10000
+        + count * 100 + capacity * 10 + cleared;
+}
+function stable_zero_capacity(): i32 {
+    stable_pool_clear(typed_stable_zero_parity_147);
+    let inserted: i32 = stable_pool_insert(typed_stable_zero_parity_147, 7);
+    let removed: i32 = 0;
+    if (stable_pool_remove(typed_stable_zero_parity_147, 0)) { removed = 1; }
+    let count: i32 = stable_pool_count(typed_stable_zero_parity_147);
+    let capacity: i32 = stable_pool_capacity(typed_stable_zero_parity_147);
+    stable_pool_clear(typed_stable_zero_parity_147);
+    let cleared: i32 = stable_pool_count(typed_stable_zero_parity_147);
+    return inserted + removed * 10 + count * 100 + capacity * 1000 + cleared;
+}
+"#;
+        const ROOTS: [&str; 3] = [
+            "stable_error_sequence",
+            "stable_drop_sequence",
+            "stable_zero_capacity",
+        ];
+        const EXPECTED: [i32; 3] = [119_134, 90_220, -1];
+
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&ROOTS.map(str::to_string));
+        jit.upsert_file("typed_stable_pool_parity_147.stasis", SOURCE);
+        jit.compile().expect("typed stable-pool JIT parity compile");
+        for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+            assert_eq!(
+                jit.execute_i32_noarg_by_name(root)
+                    .unwrap_or_else(|_| panic!("typed stable-pool JIT root {root}")),
+                expected,
+                "typed stable-pool JIT operation oracle for {root}"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let mut aot = AotProcess::new();
+            aot.set_required_emit_roots(&ROOTS.map(str::to_string));
+            aot.upsert_file("typed_stable_pool_parity_147.stasis", SOURCE);
+            aot.compile().expect("typed stable-pool AOT parity compile");
+
+            for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+                let linked = run_linked_i32_noarg_fixture(
+                    &aot,
+                    root,
+                    &format!("typed_stable_pool_{root}_parity"),
+                    &link_config,
+                )
+                .unwrap_or_else(|| panic!("linked typed stable-pool root {root}"));
+                assert_eq!(
+                    linked, expected,
+                    "linked AOT/JIT typed stable-pool operation parity for {root}"
+                );
+            }
         }
     }
 

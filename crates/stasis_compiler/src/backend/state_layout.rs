@@ -755,10 +755,13 @@ fn validate_typed_collection_placement(
     }
     let supported_kind = matches!(
         descriptor.kind,
-        TypedCollectionKind::Pool | TypedCollectionKind::Queue | TypedCollectionKind::RingBuffer
+        TypedCollectionKind::Pool
+            | TypedCollectionKind::StablePool
+            | TypedCollectionKind::Queue
+            | TypedCollectionKind::RingBuffer
     );
     let supported_policy = match descriptor.kind {
-        TypedCollectionKind::Pool => matches!(
+        TypedCollectionKind::Pool | TypedCollectionKind::StablePool => matches!(
             descriptor.policy,
             TypedCollectionOverflowPolicy::Error | TypedCollectionOverflowPolicy::DropNewest
         ),
@@ -772,8 +775,16 @@ fn validate_typed_collection_placement(
     };
     if !supported_kind || descriptor.element_type != Some(TYPE_ID_I32) || !supported_policy {
         return Err(format!(
-            "typed collection state path '{path}' is not yet supported for production layout: only pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, and ring_buffer<i32,N,error|drop_newest|overwrite_oldest> have a descriptor-defined state contract; got {}",
+            "typed collection state path '{path}' is not yet supported for production layout: only pool<i32,N,error|drop_newest>, stable_pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, and ring_buffer<i32,N,error|drop_newest|overwrite_oldest> have a descriptor-defined state contract; got {}",
             descriptor.canonical_type_name(type_table)
+        ));
+    }
+
+    if descriptor.kind == TypedCollectionKind::StablePool
+        && !stable_pool_lane_schema_matches(descriptor)
+    {
+        return Err(format!(
+            "typed collection state path '{path}' stable_pool descriptor must use exact count:i32@0, occupied:u8[N], and aligned values:i32[N] lanes"
         ));
     }
 
@@ -865,6 +876,45 @@ fn validate_typed_collection_placement(
         ));
     }
     Ok(())
+}
+
+fn stable_pool_lane_schema_matches(descriptor: &TypedCollectionDescriptor) -> bool {
+    if descriptor.lanes.len() != 3 {
+        return false;
+    }
+
+    let [count, occupied, values] = descriptor.lanes.as_slice() else {
+        return false;
+    };
+    let capacity = u64::from(descriptor.capacity);
+    let values_offset = if capacity == 0 {
+        count.offset_bytes.checked_add(4).unwrap_or(u64::MAX)
+    } else {
+        count
+            .offset_bytes
+            .checked_add(4)
+            .and_then(|offset| align_state_layout_offset(offset + capacity, 4).ok())
+            .unwrap_or(u64::MAX)
+    };
+
+    count.name == "count"
+        && count.type_id == TYPE_ID_I32
+        && count.element_count == 1
+        && count.offset_bytes == 0
+        && count.byte_size == 4
+        && count.alignment_bytes == 4
+        && occupied.name == "occupied"
+        && occupied.type_id == TYPE_ID_U8
+        && occupied.element_count == capacity
+        && occupied.offset_bytes == 4
+        && occupied.byte_size == capacity
+        && occupied.alignment_bytes == 1
+        && values.name == "values"
+        && values.type_id == TYPE_ID_I32
+        && values.element_count == capacity
+        && values.offset_bytes == values_offset
+        && values.byte_size == capacity.saturating_mul(4)
+        && values.alignment_bytes == 4
 }
 
 fn typed_lane_storage_type_name(type_id: u16) -> Option<&'static str> {
@@ -1104,6 +1154,78 @@ mod tests {
     }
 
     #[test]
+    fn typed_stable_pool_layout_has_exact_lanes_for_every_supported_policy() {
+        for policy in ["error", "drop_newest"] {
+            let layout = typed_layout(&format!("stable_pool<i32, 2, {policy}>"));
+            assert!(layout.scalars.iter().all(|scalar| scalar.path != "actors"));
+            let count = layout
+                .scalars
+                .iter()
+                .find(|scalar| scalar.path == "actors.count")
+                .expect("typed stable pool count scalar");
+            assert_eq!(count.type_name, "i32");
+            assert_eq!(count.storage_type_name(), "i32");
+
+            let pool = layout
+                .collections
+                .iter()
+                .find(|collection| collection.path == "actors")
+                .expect("typed stable pool collection layout");
+            assert_eq!(pool.capacity, 2);
+            assert!(!pool.fully_migratable);
+            assert_eq!(
+                pool.fields
+                    .iter()
+                    .map(|field| field.field.as_str())
+                    .collect::<Vec<_>>(),
+                ["occupied", "values"]
+            );
+            assert_eq!(pool.fields[0].type_name, "u8");
+            assert_eq!(pool.fields[0].storage_type_name(), "u8");
+            assert_eq!(pool.fields[1].type_name, "i32");
+            assert_eq!(pool.fields[1].storage_type_name(), "i32");
+            assert_eq!(
+                pool.element_shape,
+                format!(
+                    "typed_collection{{type=stable_pool<i32, 2, {policy}>;kind=stable_pool;policy={policy};capacity=2;width=-;height=-;static_size=16;lanes=[count:i32:1:0:4:4,occupied:u8:2:4:2:1,values:i32:2:8:8:4]}}"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn typed_stable_pool_zero_capacity_keeps_occupied_and_values_lanes_empty() {
+        for policy in ["error", "drop_newest"] {
+            let layout = typed_layout(&format!("stable_pool<i32, 0, {policy}>"));
+            let count = layout
+                .scalars
+                .iter()
+                .find(|scalar| scalar.path == "actors.count")
+                .expect("zero-capacity typed stable pool count scalar");
+            assert_eq!(count.storage_type_name(), "i32");
+            let pool = layout
+                .collections
+                .iter()
+                .find(|collection| collection.path == "actors")
+                .expect("zero-capacity typed stable pool collection layout");
+            assert_eq!(pool.capacity, 0);
+            assert_eq!(
+                pool.fields
+                    .iter()
+                    .map(|field| field.field.as_str())
+                    .collect::<Vec<_>>(),
+                ["occupied", "values"]
+            );
+            assert_eq!(
+                pool.element_shape,
+                format!(
+                    "typed_collection{{type=stable_pool<i32, 0, {policy}>;kind=stable_pool;policy={policy};capacity=0;width=-;height=-;static_size=4;lanes=[count:i32:1:0:4:4,occupied:u8:0:4:0:1,values:i32:0:4:0:4]}}"
+                )
+            );
+        }
+    }
+
+    #[test]
     fn typed_queue_layout_keeps_count_and_head_metadata_for_every_policy() {
         for policy in ["error", "drop_newest", "overwrite_oldest"] {
             let layout = typed_layout(&format!("queue<i32, 2, {policy}>"));
@@ -1258,12 +1380,65 @@ mod tests {
     }
 
     #[test]
+    fn typed_stable_pool_memory_report_counts_each_soa_lane_exactly() {
+        let layout = typed_layout("stable_pool<i32, 2, error>");
+        let active_counts = BTreeMap::from([("actors".to_string(), 1)]);
+        let capacity_overrides = BTreeMap::from([("actors".to_string(), 4)]);
+        let report =
+            build_state_memory_report(&layout, &active_counts, &capacity_overrides, u64::MAX)
+                .expect("stable pool memory report");
+
+        let count = report
+            .entries
+            .iter()
+            .find(|entry| entry.path == "actors.count")
+            .expect("stable pool count report entry");
+        assert_eq!(count.element_bytes, 4);
+        assert_eq!(count.capacity, 1);
+        assert_eq!(count.capacity_bytes, 4);
+
+        let occupied = report
+            .entries
+            .iter()
+            .find(|entry| entry.path == "actors" && entry.field == "occupied")
+            .expect("stable pool occupied report entry");
+        assert_eq!(occupied.element_bytes, 1);
+        assert_eq!(occupied.capacity, 2);
+        assert_eq!(occupied.active_count, Some(1));
+        assert_eq!(occupied.capacity_bytes, 2);
+        assert_eq!(occupied.active_bytes, Some(1));
+
+        let values = report
+            .entries
+            .iter()
+            .find(|entry| entry.path == "actors" && entry.field == "values")
+            .expect("stable pool values report entry");
+        assert_eq!(values.element_bytes, 4);
+        assert_eq!(values.capacity, 2);
+        assert_eq!(values.capacity_bytes, 8);
+        assert_eq!(values.active_bytes, Some(4));
+
+        let pool = report
+            .largest_pools
+            .iter()
+            .find(|pool| pool.path == "actors")
+            .expect("stable pool report");
+        assert_eq!(pool.bytes_per_element, 5);
+        assert_eq!(pool.capacity_bytes, 10);
+        assert_eq!(pool.active_count, Some(1));
+        assert_eq!(pool.active_bytes, Some(5));
+        assert_eq!(report.total_capacity_bytes, 14);
+        assert_eq!(report.projected_capacity_bytes, 24);
+        assert_eq!(report.capacity_changes[0].delta_bytes, 10);
+    }
+
+    #[test]
     fn unsupported_typed_collection_kinds_are_rejected_at_state_layout_boundary() {
         let bitset = typed_layout_result("bitset<8, error>")
             .expect_err("bitset layout must not claim pool-shaped storage");
         assert!(
             bitset.contains(
-                "only pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, and ring_buffer<i32,N,error|drop_newest|overwrite_oldest>"
+                "only pool<i32,N,error|drop_newest>, stable_pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, and ring_buffer<i32,N,error|drop_newest|overwrite_oldest>"
             ),
             "{bitset}"
         );
@@ -1272,7 +1447,7 @@ mod tests {
             .expect_err("non-i32 pool payload layout must be rejected");
         assert!(
             wide_pool.contains(
-                "only pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, and ring_buffer<i32,N,error|drop_newest|overwrite_oldest>"
+                "only pool<i32,N,error|drop_newest>, stable_pool<i32,N,error|drop_newest>, queue<i32,N,error|drop_newest|overwrite_oldest>, and ring_buffer<i32,N,error|drop_newest|overwrite_oldest>"
             ),
             "{wide_pool}"
         );

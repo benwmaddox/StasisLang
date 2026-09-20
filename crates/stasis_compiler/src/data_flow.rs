@@ -704,6 +704,11 @@ enum TypedCollectionOperation {
     PoolCount,
     PoolCapacity,
     PoolClear,
+    StablePoolInsert,
+    StablePoolRemove,
+    StablePoolCount,
+    StablePoolCapacity,
+    StablePoolClear,
     QueuePush,
     QueuePop,
     QueuePeek,
@@ -728,6 +733,11 @@ impl TypedCollectionOperation {
             "pool_count" => Some(Self::PoolCount),
             "pool_capacity" => Some(Self::PoolCapacity),
             "pool_clear" => Some(Self::PoolClear),
+            "stable_pool_insert" => Some(Self::StablePoolInsert),
+            "stable_pool_remove" => Some(Self::StablePoolRemove),
+            "stable_pool_count" => Some(Self::StablePoolCount),
+            "stable_pool_capacity" => Some(Self::StablePoolCapacity),
+            "stable_pool_clear" => Some(Self::StablePoolClear),
             "queue_push" => Some(Self::QueuePush),
             "queue_pop" => Some(Self::QueuePop),
             "queue_peek" => Some(Self::QueuePeek),
@@ -751,6 +761,9 @@ impl TypedCollectionOperation {
             Self::PoolPush
             | Self::PoolCount
             | Self::PoolCapacity
+            | Self::StablePoolInsert
+            | Self::StablePoolCount
+            | Self::StablePoolCapacity
             | Self::QueuePeek
             | Self::QueuePhysicalIndex
             | Self::QueueCount
@@ -760,11 +773,14 @@ impl TypedCollectionOperation {
             | Self::RingBufferCount
             | Self::RingBufferCapacity => TYPE_ID_I32,
             Self::PoolRemove
+            | Self::StablePoolRemove
             | Self::QueuePush
             | Self::QueuePop
             | Self::RingBufferPush
             | Self::RingBufferPop => TYPE_ID_BOOL,
-            Self::PoolClear | Self::QueueClear | Self::RingBufferClear => TYPE_ID_VOID,
+            Self::PoolClear | Self::StablePoolClear | Self::QueueClear | Self::RingBufferClear => {
+                TYPE_ID_VOID
+            }
         }
     }
 
@@ -775,6 +791,11 @@ impl TypedCollectionOperation {
             | Self::PoolCount
             | Self::PoolCapacity
             | Self::PoolClear => TypedCollectionKind::Pool,
+            Self::StablePoolInsert
+            | Self::StablePoolRemove
+            | Self::StablePoolCount
+            | Self::StablePoolCapacity
+            | Self::StablePoolClear => TypedCollectionKind::StablePool,
             Self::QueuePush
             | Self::QueuePop
             | Self::QueuePeek
@@ -796,6 +817,8 @@ impl TypedCollectionOperation {
         match self {
             Self::PoolPush
             | Self::PoolRemove
+            | Self::StablePoolInsert
+            | Self::StablePoolRemove
             | Self::QueuePush
             | Self::RingBufferPush
             | Self::RingBufferPeek
@@ -803,6 +826,9 @@ impl TypedCollectionOperation {
             Self::PoolCount
             | Self::PoolCapacity
             | Self::PoolClear
+            | Self::StablePoolCount
+            | Self::StablePoolCapacity
+            | Self::StablePoolClear
             | Self::QueuePop
             | Self::QueueCount
             | Self::QueueCapacity
@@ -819,6 +845,8 @@ impl TypedCollectionOperation {
         match self {
             Self::PoolPush => Some((1, "value")),
             Self::PoolRemove => Some((1, "index")),
+            Self::StablePoolInsert => Some((1, "value")),
+            Self::StablePoolRemove => Some((1, "index")),
             Self::QueuePush => Some((1, "value")),
             Self::QueuePeek => Some((1, "logical_index")),
             Self::QueuePhysicalIndex => Some((1, "logical_index")),
@@ -828,6 +856,9 @@ impl TypedCollectionOperation {
             Self::PoolCount
             | Self::PoolCapacity
             | Self::PoolClear
+            | Self::StablePoolCount
+            | Self::StablePoolCapacity
+            | Self::StablePoolClear
             | Self::QueuePop
             | Self::QueueCount
             | Self::QueueCapacity
@@ -2466,6 +2497,29 @@ fn analyze_typed_collection_operation(
                 effects.insert_read(format!("{path}.count"));
             }
             TypedCollectionOperation::PoolCapacity => {}
+            TypedCollectionOperation::StablePoolInsert => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.occupied[*]"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.occupied[*]"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::StablePoolRemove => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.occupied[*]"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.occupied[*]"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::StablePoolClear => {
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.occupied[*]"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::StablePoolCount => {
+                effects.insert_read(format!("{path}.count"));
+            }
+            TypedCollectionOperation::StablePoolCapacity => {}
             TypedCollectionOperation::QueuePush => {
                 effects.insert_read(format!("{path}.count"));
                 effects.insert_read(format!("{path}.head"));
@@ -3458,6 +3512,36 @@ mod tests {
         build_context(files, &[], types).expect("typed collection analysis context")
     }
 
+    fn typed_stable_pool_fixture(extra: &str) -> (TypeTable, Vec<SourceFile>) {
+        let source = format!(
+            "global actors: stable_pool<i32, 2, error>;\nglobal drop_actors: stable_pool<i32, 2, drop_newest>;\nglobal empty_actors: stable_pool<i32, 0, error>;\nglobal floats: stable_pool<f32, 2, error>;\nglobal queue: queue<i32, 2, overwrite_oldest>;\n{extra}"
+        );
+        let mut types = TypeTable::new();
+        for type_name in [
+            "stable_pool<i32, 2, error>",
+            "stable_pool<i32, 2, drop_newest>",
+            "stable_pool<i32, 0, error>",
+            "stable_pool<f32, 2, error>",
+            "queue<i32, 2, overwrite_oldest>",
+        ] {
+            types
+                .resolve_or_intern(type_name)
+                .expect("typed stable pool fixture type");
+        }
+        let file = SourceFile {
+            path: "stable_pool_semantics.stasis".to_string(),
+            content: source.clone(),
+            original_content: source,
+            hash: 0,
+            functions: Vec::new(),
+        };
+        (types, vec![file])
+    }
+
+    fn stable_pool_context<'a>(types: &'a TypeTable, files: &[SourceFile]) -> AnalysisContext<'a> {
+        build_context(files, &[], types).expect("typed stable pool analysis context")
+    }
+
     fn typed_queue_fixture(extra: &str) -> (TypeTable, Vec<SourceFile>) {
         let source = format!(
             "global events: queue<i32, 2, overwrite_oldest>;\nglobal empty_events: queue<i32, 0, overwrite_oldest>;\nglobal actors: pool<i32, 2, error>;\n{extra}"
@@ -3646,6 +3730,123 @@ mod tests {
                 effects.host_effects.is_empty(),
                 "{target} leaked a host capability"
             );
+        }
+    }
+
+    #[test]
+    fn typed_stable_pool_operations_have_fixed_return_types_and_explicit_effects() {
+        let (types, files) = typed_stable_pool_fixture("");
+        let context = stable_pool_context(&types, &files);
+        assert_eq!(
+            context.typed_collection_descriptors["actors"].kind.as_str(),
+            "stable_pool"
+        );
+        assert_eq!(
+            context.typed_collection_descriptors["drop_actors"].policy_name(),
+            "drop_newest"
+        );
+        assert_eq!(
+            context.typed_collection_descriptors["empty_actors"].capacity,
+            0
+        );
+        let local_types = BTreeMap::new();
+        let locals = BTreeSet::new();
+        let aliases = BTreeMap::new();
+        let operations = [
+            (
+                "stable_pool_insert",
+                vec![
+                    SimpleExpr::Identifier("actors".to_string()),
+                    SimpleExpr::Int(7),
+                ],
+                TYPE_ID_I32,
+                vec!["actors.count", "actors.occupied[*]"],
+                vec!["actors.count", "actors.occupied[*]", "actors.values[*]"],
+            ),
+            (
+                "stable_pool_remove",
+                vec![
+                    SimpleExpr::Identifier("actors".to_string()),
+                    SimpleExpr::Int(1),
+                ],
+                TYPE_ID_BOOL,
+                vec!["actors.count", "actors.occupied[*]"],
+                vec!["actors.count", "actors.occupied[*]", "actors.values[*]"],
+            ),
+            (
+                "stable_pool_count",
+                vec![SimpleExpr::Identifier("actors".to_string())],
+                TYPE_ID_I32,
+                vec!["actors.count"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "stable_pool_capacity",
+                vec![SimpleExpr::Identifier("actors".to_string())],
+                TYPE_ID_I32,
+                Vec::<&str>::new(),
+                Vec::<&str>::new(),
+            ),
+            (
+                "stable_pool_clear",
+                vec![SimpleExpr::Identifier("actors".to_string())],
+                TYPE_ID_VOID,
+                Vec::<&str>::new(),
+                vec!["actors.count", "actors.occupied[*]", "actors.values[*]"],
+            ),
+        ];
+
+        for (target, args, expected_type, expected_reads, expected_writes) in operations {
+            let expression = pool_call(target, args);
+            assert_eq!(
+                expression_type(&expression, &context, &local_types, &aliases),
+                Some(expected_type),
+                "{target} return type"
+            );
+            validate_expression_access(&expression, &context, &local_types)
+                .expect("valid typed stable pool operation");
+            let mut effects = EffectSets::default();
+            analyze_expression(
+                &expression,
+                &context,
+                &locals,
+                &local_types,
+                &aliases,
+                &mut effects,
+            );
+            let reads: Vec<_> = effects.reads.iter().map(String::as_str).collect();
+            let writes: Vec<_> = effects.writes.iter().map(String::as_str).collect();
+            assert_eq!(reads, expected_reads, "{target} reads");
+            assert_eq!(writes, expected_writes, "{target} writes");
+            assert!(effects.calls.is_empty(), "{target} became an internal call");
+            assert!(effects.host_calls.is_empty(), "{target} leaked a host call");
+            assert!(
+                effects.host_effects.is_empty(),
+                "{target} leaked a host capability"
+            );
+        }
+
+        for target in [
+            "stable_pool_insert",
+            "stable_pool_remove",
+            "stable_pool_count",
+            "stable_pool_capacity",
+            "stable_pool_clear",
+        ] {
+            let args = match target {
+                "stable_pool_insert" => vec![
+                    SimpleExpr::Identifier("empty_actors".to_string()),
+                    SimpleExpr::Int(7),
+                ],
+                "stable_pool_remove" => vec![
+                    SimpleExpr::Identifier("empty_actors".to_string()),
+                    SimpleExpr::Int(0),
+                ],
+                _ => vec![SimpleExpr::Identifier("empty_actors".to_string())],
+            };
+            typed_collection_operation(target, &args, &context, &local_types)
+                .expect("zero-capacity stable pool operation must be valid")
+                .expect("stable-pool operation should be compiler-owned");
         }
     }
 
@@ -4185,6 +4386,111 @@ mod tests {
     }
 
     #[test]
+    fn typed_stable_pool_operations_require_exact_persistent_paths_and_i32_arguments() {
+        let (types, files) = typed_stable_pool_fixture("");
+        let context = stable_pool_context(&types, &files);
+        let mut local_types = BTreeMap::new();
+        local_types.insert(
+            "actors".to_string(),
+            types
+                .resolve("stable_pool<i32, 2, error>")
+                .expect("stable pool type id"),
+        );
+
+        let local_error = typed_collection_operation(
+            "stable_pool_count",
+            &[SimpleExpr::Identifier("actors".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("local stable pool value must not be a persistent path");
+        assert!(local_error.contains("exact persistent typed collection path"));
+
+        local_types.clear();
+        let field_error = typed_collection_operation(
+            "stable_pool_count",
+            &[SimpleExpr::Identifier("actors.occupied".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("stable pool lane must not be accepted as the descriptor path");
+        assert!(field_error.contains("exact persistent typed collection path"));
+
+        let wrong_kind = typed_collection_operation(
+            "stable_pool_count",
+            &[SimpleExpr::Identifier("queue".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("queue descriptor must be rejected by stable pool operation");
+        assert!(wrong_kind.contains("requires persistent stable_pool path"));
+
+        let wrong_payload = typed_collection_operation(
+            "stable_pool_count",
+            &[SimpleExpr::Identifier("floats".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("non-i32 stable pool must be rejected");
+        assert!(wrong_payload.contains("with i32 payload"));
+
+        let insert_arity = typed_collection_operation(
+            "stable_pool_insert",
+            &[SimpleExpr::Identifier("actors".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("stable_pool_insert arity must be checked");
+        assert!(insert_arity.contains("stable_pool_insert expects 2 arguments"));
+
+        let remove_arity = typed_collection_operation(
+            "stable_pool_remove",
+            &[
+                SimpleExpr::Identifier("actors".to_string()),
+                SimpleExpr::Int(0),
+                SimpleExpr::Int(1),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect_err("stable_pool_remove arity must be checked");
+        assert!(remove_arity.contains("stable_pool_remove expects 2 arguments"));
+
+        let remove_index = typed_collection_operation(
+            "stable_pool_remove",
+            &[
+                SimpleExpr::Identifier("actors".to_string()),
+                SimpleExpr::Float(0.0),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect_err("stable_pool_remove index must be i32");
+        assert!(remove_index.contains("stable_pool_remove index argument"));
+
+        let insert_value = typed_collection_operation(
+            "stable_pool_insert",
+            &[
+                SimpleExpr::Identifier("actors".to_string()),
+                SimpleExpr::Bool(true),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect_err("stable_pool_insert value must be i32");
+        assert!(insert_value.contains("stable_pool_insert value argument"));
+
+        assert!(typed_collection_operation(
+            "module.stable_pool_count",
+            &[SimpleExpr::Identifier("actors".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect("qualified name should be treated as an ordinary target")
+        .is_none());
+    }
+
+    #[test]
     fn typed_collection_values_are_not_ordinary_expression_values() {
         let (types, files) = typed_pool_fixture("");
         let context = pool_context(&types, &files);
@@ -4350,6 +4656,14 @@ mod tests {
             ),
             (
                 "extern function ring_buffer_pop(): bool;\nfunction main(): i32 { return 0; }",
+                "compiler-owned typed collection operation name",
+            ),
+            (
+                "function stable_pool_count(value: i32): i32 { return value; }\nfunction main(): i32 { return stable_pool_count(1); }",
+                "compiler-owned typed collection operation name",
+            ),
+            (
+                "extern function stable_pool_insert(): i32;\nfunction main(): i32 { return 0; }",
                 "compiler-owned typed collection operation name",
             ),
         ] {

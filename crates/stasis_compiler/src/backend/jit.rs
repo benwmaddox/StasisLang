@@ -5087,6 +5087,75 @@ function main(): i32 {
     }
 
     #[test]
+    fn typed_stable_pool_jit_storage_plan_provisions_count_occupancy_and_values_lanes() {
+        for policy in ["error", "drop_newest"] {
+            for capacity in [2_u32, 0_u32] {
+                let mut process = JitProcess::new();
+                process.upsert_file(
+                    "typed_stable_pool_storage.stasis",
+                    format!(
+                        "global actors: stable_pool<i32, {capacity}, {policy}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed stable-pool JIT compile");
+
+                let snapshot = process
+                    .program_snapshot()
+                    .expect("typed stable-pool snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed stable-pool descriptor");
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("stable_pool<i32, {capacity}, {policy}>")
+                );
+                let bindings = build_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                    false,
+                )
+                .expect("typed stable-pool JIT direct storage plan");
+                assert!(bindings.scalars.contains_key("actors.count"));
+                assert_eq!(bindings.scalars.len(), 1);
+                let occupied = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("occupied")))
+                    .expect("typed stable-pool occupied array binding");
+                assert_eq!(occupied.static_len, Some(capacity as usize));
+                assert_eq!(occupied.storage_bytes, 1);
+                let values = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("values")))
+                    .expect("typed stable-pool values array binding");
+                assert_eq!(values.static_len, Some(capacity as usize));
+                assert_eq!(values.storage_bytes, 4);
+                assert_eq!(bindings.arrays.len(), 2);
+                assert_eq!(
+                    stasis_dynload::direct_array_storage_slot_len_for_test(
+                        stasis_dynload::JitStorageKind::U8,
+                        hash_global_path("actors"),
+                        crate::backend::emit::hash_foreach_field_suffix("occupied"),
+                    ),
+                    Some(capacity as usize),
+                    "JIT provisioned stable-pool occupied lane must retain descriptor capacity"
+                );
+                assert_eq!(
+                    stasis_dynload::direct_array_storage_slot_len_for_test(
+                        stasis_dynload::JitStorageKind::I32,
+                        hash_global_path("actors"),
+                        crate::backend::emit::hash_foreach_field_suffix("values"),
+                    ),
+                    Some(capacity as usize),
+                    "JIT provisioned stable-pool values lane must retain descriptor capacity"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn typed_queue_jit_storage_plan_provisions_metadata_and_values_lanes() {
         for policy in ["error", "drop_newest", "overwrite_oldest"] {
             for capacity in [2_u32, 0_u32] {
@@ -5311,6 +5380,327 @@ function main(): i32 {
                 JitScalarValue::I32(0)
             );
         }
+    }
+
+    #[test]
+    fn typed_stable_pool_operations_execute_with_tombstones_and_clear_semantics() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&[
+            "stable_error_seed".to_string(),
+            "stable_error_observe".to_string(),
+            "stable_error_remove".to_string(),
+            "stable_error_invalid".to_string(),
+            "stable_error_reinsert".to_string(),
+            "stable_error_clear".to_string(),
+            "stable_drop_run".to_string(),
+            "stable_drop_clear".to_string(),
+            "stable_zero_run".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_stable_pool_execution.stasis",
+            r#"global typed_stable_error_exec_147: stable_pool<i32, 3, error>;
+global typed_stable_drop_exec_147: stable_pool<i32, 2, drop_newest>;
+global typed_stable_zero_exec_147: stable_pool<i32, 0, drop_newest>;
+function stable_error_seed(): i32 {
+    stable_pool_clear(typed_stable_error_exec_147);
+    let first: i32 = stable_pool_insert(typed_stable_error_exec_147, 10);
+    let second: i32 = stable_pool_insert(typed_stable_error_exec_147, 20);
+    let third: i32 = stable_pool_insert(typed_stable_error_exec_147, 30);
+    let full: i32 = stable_pool_insert(typed_stable_error_exec_147, 40);
+    return first * 1000 + second * 100 + third * 10 + full;
+}
+function stable_error_observe(): i32 {
+    return stable_pool_count(typed_stable_error_exec_147) * 100
+        + stable_pool_capacity(typed_stable_error_exec_147);
+}
+function stable_error_remove(): i32 {
+    if (stable_pool_remove(typed_stable_error_exec_147, 1)) { return 1; }
+    return 0;
+}
+function stable_error_invalid(): i32 {
+    let result: i32 = 0;
+    if (stable_pool_remove(typed_stable_error_exec_147, 1)) { result += 100; }
+    if (stable_pool_remove(typed_stable_error_exec_147, -1)) { result += 10; }
+    if (stable_pool_remove(typed_stable_error_exec_147, 9)) { result += 1; }
+    return result;
+}
+function stable_error_reinsert(): i32 {
+    return stable_pool_insert(typed_stable_error_exec_147, 40);
+}
+function stable_error_clear(): i32 {
+    stable_pool_clear(typed_stable_error_exec_147);
+    return stable_pool_count(typed_stable_error_exec_147);
+}
+function stable_drop_run(): i32 {
+    stable_pool_clear(typed_stable_drop_exec_147);
+    let first: i32 = stable_pool_insert(typed_stable_drop_exec_147, 1);
+    let second: i32 = stable_pool_insert(typed_stable_drop_exec_147, 2);
+    let rejected: i32 = stable_pool_insert(typed_stable_drop_exec_147, 3);
+    return first * 1000 + second * 100 + rejected;
+}
+function stable_drop_clear(): i32 {
+    stable_pool_clear(typed_stable_drop_exec_147);
+    return stable_pool_count(typed_stable_drop_exec_147);
+}
+function stable_zero_run(): i32 {
+    stable_pool_clear(typed_stable_zero_exec_147);
+    let inserted: i32 = stable_pool_insert(typed_stable_zero_exec_147, 7);
+    let removed: i32 = 0;
+    if (stable_pool_remove(typed_stable_zero_exec_147, 0)) { removed = 1; }
+    return inserted + removed * 10
+        + stable_pool_count(typed_stable_zero_exec_147) * 100
+        + stable_pool_capacity(typed_stable_zero_exec_147);
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("typed stable-pool operation JIT compile");
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_error_seed")
+                .unwrap(),
+            119
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_stable_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_error_observe")
+                .unwrap(),
+            303
+        );
+        assert_eq!(
+            process.global_collection_capacity("typed_stable_error_exec_147"),
+            Some(3)
+        );
+        assert_eq!(
+            process.global_collection_field_type("typed_stable_error_exec_147", "values"),
+            Some("i32")
+        );
+        for (index, expected) in [1_u8, 1, 1].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_stable_error_exec_147",
+                        "occupied",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::U8(expected)
+            );
+        }
+        for (index, expected) in [10, 20, 30].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_stable_error_exec_147",
+                        "values",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(expected)
+            );
+        }
+        let memory = process
+            .state_memory_report(&BTreeMap::new(), u64::MAX)
+            .expect("typed stable-pool memory report");
+        assert_eq!(
+            memory
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_stable_error_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(3)
+        );
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_error_remove")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_stable_error_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "occupied", 0)
+                .unwrap(),
+            JitScalarValue::U8(1)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "occupied", 1)
+                .unwrap(),
+            JitScalarValue::U8(0)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "occupied", 2)
+                .unwrap(),
+            JitScalarValue::U8(1)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "values", 0)
+                .unwrap(),
+            JitScalarValue::I32(10)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "values", 2)
+                .unwrap(),
+            JitScalarValue::I32(30)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_error_invalid")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_error_reinsert")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_stable_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "occupied", 1)
+                .unwrap(),
+            JitScalarValue::U8(1)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_stable_error_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(40)
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_error_clear")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_stable_error_exec_147.count"),
+            0
+        );
+        for index in 0..3 {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_stable_error_exec_147",
+                        "occupied",
+                        index,
+                    )
+                    .unwrap(),
+                JitScalarValue::U8(0)
+            );
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_stable_error_exec_147", "values", index)
+                    .unwrap(),
+                JitScalarValue::I32(0)
+            );
+        }
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_drop_run")
+                .unwrap(),
+            99
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_stable_drop_exec_147.count"),
+            2
+        );
+        for (index, expected) in [1_u8, 1].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_stable_drop_exec_147",
+                        "occupied",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::U8(expected)
+            );
+        }
+        for (index, expected) in [1, 2].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_stable_drop_exec_147",
+                        "values",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(expected)
+            );
+        }
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_drop_clear")
+                .unwrap(),
+            0
+        );
+        for index in 0..2 {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_stable_drop_exec_147", "occupied", index,)
+                    .unwrap(),
+                JitScalarValue::U8(0)
+            );
+            assert_eq!(
+                process
+                    .read_global_collection_scalar("typed_stable_drop_exec_147", "values", index)
+                    .unwrap(),
+                JitScalarValue::I32(0)
+            );
+        }
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("stable_zero_run")
+                .unwrap(),
+            -1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_stable_zero_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::U8,
+                hash_global_path("typed_stable_zero_exec_147"),
+                crate::backend::emit::hash_foreach_field_suffix("occupied"),
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::I32,
+                hash_global_path("typed_stable_zero_exec_147"),
+                crate::backend::emit::hash_foreach_field_suffix("values"),
+            ),
+            Some(0)
+        );
     }
 
     #[test]
