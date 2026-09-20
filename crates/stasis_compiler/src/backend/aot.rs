@@ -1223,50 +1223,53 @@ fn build_aot_direct_storage_bindings(
         }
     }
     for (path, descriptor) in typed_collection_descriptors {
-        if descriptor.kind != crate::frontend::types::TypedCollectionKind::Pool {
-            continue;
+        for lane in &descriptor.lanes {
+            let lane_path = format!("{path}.{}", lane.name);
+            let semantic_lane = format!("typed collection lane '{lane_path}'");
+            if matches!(lane.name.as_str(), "count" | "head" | "next_order") {
+                let symbol = aot_storage_symbol(AotStorageSymbolKind::Scalar, &lane_path, "");
+                claim_aot_storage_symbol(&mut claimed_symbols, &symbol, &semantic_lane)?;
+                if bindings.scalars.contains_key(&lane_path) {
+                    return Err(format!(
+                        "AOT direct storage scalar binding collision for '{lane_path}'"
+                    ));
+                }
+                bindings
+                    .scalars
+                    .insert(lane_path, DirectStorageBinding::Symbol(symbol));
+            } else {
+                let lane_name = aot_array_lane(path, lane.type_id, global_path_types, type_table)
+                    .ok_or_else(|| {
+                    format!(
+                        "unsupported AOT direct storage lane type {} for '{lane_path}'",
+                        lane.type_id
+                    )
+                })?;
+                let length = usize::try_from(lane.element_count).map_err(|_| {
+                    format!(
+                        "typed collection '{path}' lane '{}' element count {} does not fit usize",
+                        lane.name, lane.element_count
+                    )
+                })?;
+                let symbol = aot_storage_symbol(AotStorageSymbolKind::Array, path, &lane.name);
+                claim_aot_storage_symbol(&mut claimed_symbols, &symbol, &semantic_lane)?;
+                let key = (path.clone(), lane.name.clone());
+                if bindings.arrays.contains_key(&key) {
+                    return Err(format!(
+                        "AOT direct storage array binding collision for '{}.{}'",
+                        key.0, key.1
+                    ));
+                }
+                bindings.arrays.insert(
+                    key,
+                    crate::backend::emit::DirectArrayStorageBinding {
+                        slot: DirectStorageBinding::Symbol(symbol),
+                        storage_bytes: aot_lane_bytes(lane_name),
+                        static_len: Some(length),
+                    },
+                );
+            }
         }
-        let count_path = format!("{path}.count");
-        let count_symbol = aot_storage_symbol(AotStorageSymbolKind::Scalar, &count_path, "");
-        claim_aot_storage_symbol(
-            &mut claimed_symbols,
-            &count_symbol,
-            &format!("scalar path '{count_path}'"),
-        )?;
-        bindings.scalars.insert(
-            count_path.clone(),
-            DirectStorageBinding::Symbol(count_symbol),
-        );
-
-        let element_type = descriptor.element_type.ok_or_else(|| {
-            format!("typed pool '{path}' is missing its element type in storage metadata")
-        })?;
-        let lane =
-            aot_array_lane(path, element_type, global_path_types, type_table).ok_or_else(|| {
-                format!(
-                "unsupported AOT direct storage element type {element_type} for typed pool '{path}'"
-            )
-            })?;
-        let length = usize::try_from(descriptor.capacity).map_err(|_| {
-            format!(
-                "typed pool '{path}' capacity {} does not fit usize",
-                descriptor.capacity
-            )
-        })?;
-        let values_symbol = aot_storage_symbol(AotStorageSymbolKind::Array, path, "values");
-        claim_aot_storage_symbol(
-            &mut claimed_symbols,
-            &values_symbol,
-            &format!("array lane '{path}.values'"),
-        )?;
-        bindings.arrays.insert(
-            (path.clone(), "values".to_string()),
-            crate::backend::emit::DirectArrayStorageBinding {
-                slot: DirectStorageBinding::Symbol(values_symbol),
-                storage_bytes: aot_lane_bytes(lane),
-                static_len: Some(length),
-            },
-        );
     }
     Ok(bindings)
 }
@@ -3277,6 +3280,127 @@ mod tests {
     }
 
     #[test]
+    fn typed_queue_aot_storage_plan_and_symbols_match_jit_lanes() {
+        for policy in ["error", "drop_newest", "overwrite_oldest"] {
+            for capacity in [2_u32, 0_u32] {
+                let mut process = AotProcess::new();
+                process.upsert_file(
+                    "typed_queue_storage.stasis",
+                    format!(
+                        "global actors: queue<i32, {capacity}, {policy}>;\nfunction main(): i32 {{ return 0; }}\n"
+                    ),
+                );
+                process.compile().expect("typed queue AOT compile");
+
+                let snapshot = process.program_snapshot().expect("typed queue snapshot");
+                let descriptor = snapshot
+                    .typed_collection_descriptors()
+                    .get("actors")
+                    .expect("typed queue descriptor");
+                assert_eq!(descriptor.capacity, capacity);
+                assert_eq!(
+                    descriptor.canonical_type_name(snapshot.types()),
+                    format!("queue<i32, {capacity}, {policy}>")
+                );
+                let bindings = build_aot_direct_storage_bindings(
+                    &snapshot.analysis.global_path_types,
+                    &snapshot.analysis.collection_infos,
+                    snapshot.typed_collection_descriptors(),
+                    snapshot.types(),
+                )
+                .expect("typed queue AOT direct storage plan");
+                for metadata in ["count", "head"] {
+                    let path = format!("actors.{metadata}");
+                    assert!(matches!(
+                        bindings.scalars.get(&path),
+                        Some(DirectStorageBinding::Symbol(symbol))
+                            if symbol == &aot_storage_symbol(
+                                AotStorageSymbolKind::Scalar,
+                                &path,
+                                "",
+                            )
+                    ));
+                }
+                assert!(!bindings.scalars.contains_key("actors"));
+                assert_eq!(bindings.scalars.len(), 2);
+                let values = bindings
+                    .arrays
+                    .get(&(String::from("actors"), String::from("values")))
+                    .expect("typed queue values array binding");
+                assert!(matches!(
+                    &values.slot,
+                    DirectStorageBinding::Symbol(symbol)
+                        if symbol == &aot_storage_symbol(
+                            AotStorageSymbolKind::Array,
+                            "actors",
+                            "values",
+                        )
+                ));
+                assert_eq!(values.static_len, Some(capacity as usize));
+                assert_eq!(values.storage_bytes, 4);
+                assert_eq!(bindings.arrays.len(), 1);
+
+                let (bytes, _) = process
+                    .compile_standalone_storage_object("aot_fn_0")
+                    .expect("standalone typed queue storage object")
+                    .expect("typed queue storage required");
+                let object =
+                    File::parse(bytes.as_slice()).expect("parse typed queue storage object");
+                let symbols: BTreeSet<String> = object
+                    .symbols()
+                    .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                    .collect();
+                for expected in [
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.count", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Scalar, "actors.head", ""),
+                    aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "values"),
+                ] {
+                    assert!(
+                        symbols.contains(&expected),
+                        "typed queue storage object missing '{expected}' for {policy}, capacity {capacity}: {symbols:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_queue_aot_head_storage_symbol_collision_is_rejected() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "typed_queue_head_collision.stasis",
+            "global actors: queue<i32, 2, overwrite_oldest>;\n\
+             global actors__head: i32;\n\
+             function main(): i32 { return 0; }\n",
+        );
+
+        let error = process
+            .compile()
+            .expect_err("queue head storage symbol collision must fail");
+        match error {
+            crate::compiler::CompileError::Backend(message) => {
+                assert!(
+                    message.contains("AOT direct storage symbol collision"),
+                    "unexpected collision diagnostic: {message}"
+                );
+                assert!(
+                    message.contains("stasis_state_scalar__actors__head"),
+                    "collision diagnostic omitted head symbol: {message}"
+                );
+                assert!(
+                    message.contains("actors.head"),
+                    "missing queue lane: {message}"
+                );
+                assert!(
+                    message.contains("actors__head"),
+                    "missing colliding path: {message}"
+                );
+            }
+            other => panic!("expected backend collision error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn typed_pool_aot_storage_symbol_collisions_are_rejected() {
         for (fixture_name, extra_global, expected_symbol, expected_lanes) in [
             (
@@ -3493,6 +3617,152 @@ function zero_capacity(): i32 {
                 linked_zero, EXPECTED_ZERO,
                 "linked AOT/JIT zero-capacity typed pool parity"
             );
+        }
+    }
+
+    #[test]
+    fn typed_queue_linked_aot_matches_jit_operation_sequence() {
+        const SOURCE: &str = r#"global typed_queue_error_parity_147: queue<i32, 3, error>;
+global typed_queue_drop_parity_147: queue<i32, 2, drop_newest>;
+global typed_queue_overwrite_parity_147: queue<i32, 2, overwrite_oldest>;
+global typed_queue_zero_parity_147: queue<i32, 0, drop_newest>;
+function error_wraparound(): i32 {
+    queue_clear(typed_queue_error_parity_147);
+    let accepted: i32 = 0;
+    if (queue_push(typed_queue_error_parity_147, 10)) { accepted += 1; }
+    if (queue_push(typed_queue_error_parity_147, 20)) { accepted += 1; }
+    if (queue_push(typed_queue_error_parity_147, 30)) { accepted += 1; }
+    let rejected: i32 = 0;
+    if (queue_push(typed_queue_error_parity_147, 40)) { rejected = 1; }
+    let before: i32 = queue_count(typed_queue_error_parity_147) * 100000
+        + queue_capacity(typed_queue_error_parity_147) * 10000
+        + queue_peek(typed_queue_error_parity_147, 0) * 1000
+        + queue_peek(typed_queue_error_parity_147, 2) * 100
+        + queue_physical_index(typed_queue_error_parity_147, 0) * 10
+        + queue_physical_index(typed_queue_error_parity_147, 2);
+    let invalid_peek: i32 = queue_peek(typed_queue_error_parity_147, 9);
+    let invalid_physical: i32 = queue_physical_index(typed_queue_error_parity_147, -1);
+    let popped: i32 = 0;
+    if (queue_pop(typed_queue_error_parity_147)) { popped = 1; }
+    let wrapped: i32 = 0;
+    if (queue_push(typed_queue_error_parity_147, 40)) { wrapped = 1; }
+    let after_wrap: i32 = queue_count(typed_queue_error_parity_147) * 100000
+        + queue_capacity(typed_queue_error_parity_147) * 10000
+        + queue_peek(typed_queue_error_parity_147, 0) * 1000
+        + queue_peek(typed_queue_error_parity_147, 2) * 100
+        + queue_physical_index(typed_queue_error_parity_147, 0) * 10
+        + queue_physical_index(typed_queue_error_parity_147, 2);
+    let popped_again: i32 = 0;
+    if (queue_pop(typed_queue_error_parity_147)) { popped_again = 1; }
+    let wrapped_again: i32 = 0;
+    if (queue_push(typed_queue_error_parity_147, 50)) { wrapped_again = 1; }
+    let after_second_wrap: i32 = queue_count(typed_queue_error_parity_147) * 100000
+        + queue_capacity(typed_queue_error_parity_147) * 10000
+        + queue_peek(typed_queue_error_parity_147, 0) * 1000
+        + queue_peek(typed_queue_error_parity_147, 2) * 100
+        + queue_physical_index(typed_queue_error_parity_147, 0) * 10
+        + queue_physical_index(typed_queue_error_parity_147, 2);
+    queue_clear(typed_queue_error_parity_147);
+    return accepted * 1000000 + rejected * 100000 + before
+        + invalid_peek * 10000 + invalid_physical * 1000
+        + popped * 100 + wrapped * 10 + after_wrap
+        + popped_again * 1000000 + wrapped_again * 100000
+        + after_second_wrap + queue_count(typed_queue_error_parity_147);
+}
+function drop_rejection(): i32 {
+    queue_clear(typed_queue_drop_parity_147);
+    let first: i32 = 0;
+    if (queue_push(typed_queue_drop_parity_147, 1)) { first = 1; }
+    let second: i32 = 0;
+    if (queue_push(typed_queue_drop_parity_147, 2)) { second = 1; }
+    let rejected: i32 = 0;
+    if (queue_push(typed_queue_drop_parity_147, 3)) { rejected = 1; }
+    let observed: i32 = queue_count(typed_queue_drop_parity_147) * 100
+        + queue_capacity(typed_queue_drop_parity_147) * 10
+        + queue_peek(typed_queue_drop_parity_147, 0)
+        + queue_peek(typed_queue_drop_parity_147, 1);
+    queue_clear(typed_queue_drop_parity_147);
+    return first * 1000000 + second * 100000 + rejected * 10000
+        + observed * 100 + queue_count(typed_queue_drop_parity_147);
+}
+function overwrite_replace(): i32 {
+    queue_clear(typed_queue_overwrite_parity_147);
+    let accepted: i32 = 0;
+    if (queue_push(typed_queue_overwrite_parity_147, 1)) { accepted += 1; }
+    if (queue_push(typed_queue_overwrite_parity_147, 2)) { accepted += 1; }
+    if (queue_push(typed_queue_overwrite_parity_147, 3)) { accepted += 1; }
+    let before_pop: i32 = queue_count(typed_queue_overwrite_parity_147) * 100000
+        + queue_capacity(typed_queue_overwrite_parity_147) * 10000
+        + queue_peek(typed_queue_overwrite_parity_147, 0) * 1000
+        + queue_peek(typed_queue_overwrite_parity_147, 1) * 100
+        + queue_physical_index(typed_queue_overwrite_parity_147, 0) * 10
+        + queue_physical_index(typed_queue_overwrite_parity_147, 1);
+    let popped: i32 = 0;
+    if (queue_pop(typed_queue_overwrite_parity_147)) { popped = 1; }
+    let after_pop: i32 = queue_count(typed_queue_overwrite_parity_147) * 100
+        + queue_physical_index(typed_queue_overwrite_parity_147, 0) * 10
+        + queue_peek(typed_queue_overwrite_parity_147, 0);
+    queue_clear(typed_queue_overwrite_parity_147);
+    return accepted * 1000000 + before_pop + popped * 1000 + after_pop
+        + queue_count(typed_queue_overwrite_parity_147);
+}
+function zero_capacity(): i32 {
+    queue_clear(typed_queue_zero_parity_147);
+    let pushed: i32 = 0;
+    if (queue_push(typed_queue_zero_parity_147, 7)) { pushed = 1; }
+    let popped: i32 = 0;
+    if (queue_pop(typed_queue_zero_parity_147)) { popped = 1; }
+    return pushed * 100000 + popped * 10000
+        + queue_count(typed_queue_zero_parity_147) * 1000
+        + queue_capacity(typed_queue_zero_parity_147) * 100
+        + queue_peek(typed_queue_zero_parity_147, 0) * 10
+        + queue_physical_index(typed_queue_zero_parity_147, 0);
+}
+"#;
+        const ROOTS: [&str; 4] = [
+            "error_wraparound",
+            "drop_rejection",
+            "overwrite_replace",
+            "zero_capacity",
+        ];
+        const EXPECTED: [i32; 4] = [5_161_143, 1_122_300, 3_223_413, -1];
+
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&ROOTS.map(str::to_string));
+        jit.upsert_file("typed_queue_parity_147.stasis", SOURCE);
+        jit.compile().expect("typed queue JIT parity compile");
+        for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+            assert_eq!(
+                jit.execute_i32_noarg_by_name(root)
+                    .unwrap_or_else(|_| panic!("typed queue JIT root {root}")),
+                expected,
+                "typed queue JIT operation oracle for {root}"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let mut aot = AotProcess::new();
+            aot.set_required_emit_roots(&ROOTS.map(str::to_string));
+            aot.upsert_file("typed_queue_parity_147.stasis", SOURCE);
+            aot.compile().expect("typed queue AOT parity compile");
+
+            for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+                let linked = run_linked_i32_noarg_fixture(
+                    &aot,
+                    root,
+                    &format!("typed_queue_{root}_parity"),
+                    &link_config,
+                )
+                .unwrap_or_else(|| panic!("linked typed queue root {root}"));
+                assert_eq!(
+                    linked, expected,
+                    "linked AOT/JIT typed queue operation parity for {root}"
+                );
+            }
         }
     }
 

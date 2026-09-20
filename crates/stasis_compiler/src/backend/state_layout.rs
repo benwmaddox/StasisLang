@@ -753,15 +753,26 @@ fn validate_typed_collection_placement(
             descriptor.capacity
         ));
     }
-    if descriptor.kind != TypedCollectionKind::Pool
-        || descriptor.element_type != Some(TYPE_ID_I32)
-        || !matches!(
+    let supported_kind = matches!(
+        descriptor.kind,
+        TypedCollectionKind::Pool | TypedCollectionKind::Queue
+    );
+    let supported_policy = match descriptor.kind {
+        TypedCollectionKind::Pool => matches!(
             descriptor.policy,
             TypedCollectionOverflowPolicy::Error | TypedCollectionOverflowPolicy::DropNewest
-        )
-    {
+        ),
+        TypedCollectionKind::Queue => matches!(
+            descriptor.policy,
+            TypedCollectionOverflowPolicy::Error
+                | TypedCollectionOverflowPolicy::DropNewest
+                | TypedCollectionOverflowPolicy::OverwriteOldest
+        ),
+        _ => false,
+    };
+    if !supported_kind || descriptor.element_type != Some(TYPE_ID_I32) || !supported_policy {
         return Err(format!(
-            "typed collection state path '{path}' is not yet supported for production layout: only pool<i32,N,error|drop_newest> has a descriptor-defined state contract; got {}",
+            "typed collection state path '{path}' is not yet supported for production layout: only pool<i32,N,error|drop_newest> and queue<i32,N,error|drop_newest|overwrite_oldest> have a descriptor-defined state contract; got {}",
             descriptor.canonical_type_name(type_table)
         ));
     }
@@ -1090,6 +1101,72 @@ mod tests {
         assert!(pool
             .element_shape
             .contains("lanes=[count:i32:1:0:4:4,values:i32:0:4:0:4]"));
+    }
+
+    #[test]
+    fn typed_queue_layout_keeps_count_and_head_metadata_for_every_policy() {
+        for policy in ["error", "drop_newest", "overwrite_oldest"] {
+            let layout = typed_layout(&format!("queue<i32, 2, {policy}>"));
+            let queue = layout
+                .collections
+                .iter()
+                .find(|collection| collection.path == "actors")
+                .expect("typed queue collection layout");
+            assert_eq!(queue.capacity, 2);
+            assert_eq!(
+                queue
+                    .fields
+                    .iter()
+                    .map(|field| field.field.as_str())
+                    .collect::<Vec<_>>(),
+                ["values"]
+            );
+            assert!(queue
+                .element_shape
+                .contains(&format!("typed_collection{{type=queue<i32, 2, {policy}>")));
+            assert!(queue
+                .element_shape
+                .contains("lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:2:8:8:4]"));
+            for lane in ["count", "head"] {
+                let scalar = layout
+                    .scalars
+                    .iter()
+                    .find(|scalar| scalar.path == format!("actors.{lane}"))
+                    .unwrap_or_else(|| panic!("typed queue {lane} scalar"));
+                assert_eq!(scalar.storage_type_name(), "i32");
+            }
+        }
+    }
+
+    #[test]
+    fn typed_queue_zero_capacity_retains_count_head_and_empty_values_lane() {
+        let layout = typed_layout("queue<i32, 0, overwrite_oldest>");
+        for lane in ["count", "head"] {
+            assert!(layout
+                .scalars
+                .iter()
+                .any(|scalar| scalar.path == format!("actors.{lane}")));
+        }
+        let queue = layout
+            .collections
+            .iter()
+            .find(|collection| collection.path == "actors")
+            .expect("zero-capacity typed queue layout");
+        assert_eq!(queue.capacity, 0);
+        assert_eq!(
+            queue
+                .fields
+                .iter()
+                .map(|field| field.field.as_str())
+                .collect::<Vec<_>>(),
+            ["values"]
+        );
+        assert!(queue
+            .element_shape
+            .contains("type=queue<i32, 0, overwrite_oldest"));
+        assert!(queue
+            .element_shape
+            .contains("lanes=[count:i32:1:0:4:4,head:i32:1:4:4:4,values:i32:0:8:0:4]"));
     }
 
     #[test]

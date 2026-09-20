@@ -8,17 +8,19 @@ struct with an array and a count, and it never allocates or resizes at runtime.
 Implementation status: the compiler parses, validates, interns, fingerprints,
 and reports descriptor layouts for all nine collection kinds. The production
 state layout and executable operation surface currently support persistent
-global `pool<i32, N, error|drop_newest>` values. Other collection kinds and
-payload types are rejected at the production layout boundary instead of
-falling back to nominal scalar storage. Pool operations lower through the same
-direct-storage emitter for JIT and native AOT, and pool metadata/payload lanes
-are exposed through program snapshots and state inspection.
+global `pool<i32, N, error|drop_newest>` and
+`queue<i32, N, error|drop_newest|overwrite_oldest>` values. Other collection
+kinds and payload types are rejected at the production layout boundary instead
+of falling back to nominal scalar storage. Pool and queue operations lower
+through the same direct-storage emitter for JIT and native AOT, and their
+metadata/payload lanes are exposed through program snapshots and state
+inspection.
 
 The remaining operation descriptions in this document are the normative target
-contract for task #147. Queue, ring-buffer, stable-pool, map, set,
-priority-queue, grid, and bitset operations are not executable yet. Structured
-overflow telemetry and migration between changed descriptors also remain
-pending. The current executable slice is:
+contract for task #147. Ring-buffer, stable-pool, map, set, priority-queue,
+grid, and bitset operations are not executable yet. Structured overflow
+telemetry and migration between changed descriptors also remain pending. The
+current executable slice includes:
 
 ```stasis
 global actors: pool<i32, 2, error>;
@@ -27,11 +29,17 @@ function tick(): i32 {
     let actor_slot: i32 = pool_push(actors, 10);
     return actor_slot + pool_count(actors);
 }
+
+global events: queue<i32, 4, overwrite_oldest>;
+
+function enqueue_event(value: i32): bool {
+    return queue_push(events, value);
+}
 ```
 
-The parser retains the ordinary call and indexed-path syntax. Current pool
-lowering and later collection slices resolve compiler-owned operations by the
-collection descriptor. `src/stdlib` may expose thin declarations for future
+The parser retains the ordinary call and indexed-path syntax. Current pool and
+queue lowering and later collection slices resolve compiler-owned operations
+by the collection descriptor. `src/stdlib` may expose thin declarations for future
 operations, but it does not define another backing container, generic push
 helper, aggregate return type, or implicit `foreach` implementation.
 

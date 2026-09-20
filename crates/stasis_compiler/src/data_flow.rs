@@ -569,7 +569,7 @@ fn validate_statements(
             } => {
                 if is_typed_collection_path_or_descendant(collection_path, context, local_types) {
                     return Err(
-                        "typed collection paths may only be used as the first argument of a pool operation"
+                        "typed collection paths may only be used as the first argument of a compiler-owned typed collection operation"
                             .to_string(),
                     );
                 }
@@ -698,43 +698,99 @@ fn semantic_expression_type_with_expected(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TypedPoolOperation {
-    Push,
-    Remove,
-    Count,
-    Capacity,
-    Clear,
+enum TypedCollectionOperation {
+    PoolPush,
+    PoolRemove,
+    PoolCount,
+    PoolCapacity,
+    PoolClear,
+    QueuePush,
+    QueuePop,
+    QueuePeek,
+    QueuePhysicalIndex,
+    QueueCount,
+    QueueCapacity,
+    QueueClear,
 }
 
-impl TypedPoolOperation {
+impl TypedCollectionOperation {
     fn from_target(target: &str) -> Option<Self> {
         match target {
-            "pool_push" => Some(Self::Push),
-            "pool_remove" => Some(Self::Remove),
-            "pool_count" => Some(Self::Count),
-            "pool_capacity" => Some(Self::Capacity),
-            "pool_clear" => Some(Self::Clear),
+            "pool_push" => Some(Self::PoolPush),
+            "pool_remove" => Some(Self::PoolRemove),
+            "pool_count" => Some(Self::PoolCount),
+            "pool_capacity" => Some(Self::PoolCapacity),
+            "pool_clear" => Some(Self::PoolClear),
+            "queue_push" => Some(Self::QueuePush),
+            "queue_pop" => Some(Self::QueuePop),
+            "queue_peek" => Some(Self::QueuePeek),
+            "queue_physical_index" => Some(Self::QueuePhysicalIndex),
+            "queue_count" => Some(Self::QueueCount),
+            "queue_capacity" => Some(Self::QueueCapacity),
+            "queue_clear" => Some(Self::QueueClear),
             _ => None,
         }
     }
 
     fn return_type(self) -> TypeId {
         match self {
-            Self::Push | Self::Count | Self::Capacity => TYPE_ID_I32,
-            Self::Remove => TYPE_ID_BOOL,
-            Self::Clear => TYPE_ID_VOID,
+            Self::PoolPush
+            | Self::PoolCount
+            | Self::PoolCapacity
+            | Self::QueuePeek
+            | Self::QueuePhysicalIndex
+            | Self::QueueCount
+            | Self::QueueCapacity => TYPE_ID_I32,
+            Self::PoolRemove | Self::QueuePush | Self::QueuePop => TYPE_ID_BOOL,
+            Self::PoolClear | Self::QueueClear => TYPE_ID_VOID,
         }
     }
 
-    fn requires_value(self) -> bool {
-        matches!(self, Self::Push | Self::Remove)
+    fn collection_kind(self) -> TypedCollectionKind {
+        match self {
+            Self::PoolPush
+            | Self::PoolRemove
+            | Self::PoolCount
+            | Self::PoolCapacity
+            | Self::PoolClear => TypedCollectionKind::Pool,
+            Self::QueuePush
+            | Self::QueuePop
+            | Self::QueuePeek
+            | Self::QueuePhysicalIndex
+            | Self::QueueCount
+            | Self::QueueCapacity
+            | Self::QueueClear => TypedCollectionKind::Queue,
+        }
     }
 
-    fn value_argument_name(self) -> &'static str {
+    fn expected_arity(self) -> usize {
         match self {
-            Self::Push => "value",
-            Self::Remove => "index",
-            Self::Count | Self::Capacity | Self::Clear => "argument",
+            Self::PoolPush | Self::PoolRemove | Self::QueuePush => 2,
+            Self::PoolCount
+            | Self::PoolCapacity
+            | Self::PoolClear
+            | Self::QueuePop
+            | Self::QueueCount
+            | Self::QueueCapacity
+            | Self::QueueClear => 1,
+            Self::QueuePeek | Self::QueuePhysicalIndex => 2,
+        }
+    }
+
+    fn payload_argument(self) -> Option<(usize, &'static str)> {
+        match self {
+            Self::PoolPush => Some((1, "value")),
+            Self::PoolRemove => Some((1, "index")),
+            Self::QueuePush => Some((1, "value")),
+            Self::QueuePeek => Some((1, "logical_index")),
+            Self::QueuePhysicalIndex => Some((1, "logical_index")),
+            Self::PoolCount
+            | Self::PoolCapacity
+            | Self::PoolClear
+            | Self::QueuePop
+            | Self::QueueCount
+            | Self::QueueCapacity
+            | Self::QueueClear => None,
         }
     }
 }
@@ -772,17 +828,27 @@ fn exact_typed_collection_path<'a>(
         .map(|(path, descriptor)| (path.as_str(), descriptor))
 }
 
+#[cfg(test)]
 fn typed_pool_operation(
     target: &str,
     args: &[SimpleExpr],
     context: &AnalysisContext<'_>,
     local_types: &BTreeMap<String, TypeId>,
-) -> Result<Option<TypedPoolOperation>, String> {
-    let Some(operation) = TypedPoolOperation::from_target(target) else {
+) -> Result<Option<TypedCollectionOperation>, String> {
+    typed_collection_operation(target, args, context, local_types)
+}
+
+fn typed_collection_operation(
+    target: &str,
+    args: &[SimpleExpr],
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Result<Option<TypedCollectionOperation>, String> {
+    let Some(operation) = TypedCollectionOperation::from_target(target) else {
         return Ok(None);
     };
 
-    let expected_arity = if operation.requires_value() { 2 } else { 1 };
+    let expected_arity = operation.expected_arity();
     if args.len() != expected_arity {
         return Err(format!(
             "{target} expects {expected_arity} arguments, got {}",
@@ -796,29 +862,30 @@ fn typed_pool_operation(
             "{target} first argument must be an exact persistent typed collection path"
         ));
     };
-    if descriptor.kind != TypedCollectionKind::Pool {
+    if descriptor.kind != operation.collection_kind() {
         return Err(format!(
-            "{target} requires persistent pool path '{path}', found {}",
-            descriptor.kind_name()
+            "{target} requires persistent {} path '{path}', found {}",
+            operation.collection_kind().as_str(),
+            descriptor.kind_name(),
         ));
     }
     if descriptor.element_type != Some(TYPE_ID_I32) {
         return Err(format!(
-            "{target} requires pool path '{path}' with i32 payload"
+            "{target} requires {} path '{path}' with i32 payload",
+            operation.collection_kind().as_str(),
         ));
     }
 
-    if operation.requires_value() {
-        let value_type =
-            semantic_expression_type(&args[1], context, local_types).ok_or_else(|| {
+    if let Some((argument_index, argument_name)) = operation.payload_argument() {
+        let value_type = semantic_expression_type(&args[argument_index], context, local_types)
+            .ok_or_else(|| {
                 format!(
-                    "{target} {} argument must have type i32; its type could not be inferred",
-                    operation.value_argument_name()
+                    "{target} {argument_name} argument must have type i32; its type could not be inferred"
                 )
             })?;
         if value_type != TYPE_ID_I32 {
             return Err(type_mismatch(
-                &format!("{target} {} argument", operation.value_argument_name()),
+                &format!("{target} {argument_name} argument"),
                 TYPE_ID_I32,
                 value_type,
                 context.types,
@@ -922,7 +989,7 @@ fn validate_assignment_target_access(
     };
     if typed_collection_target {
         return Err(
-            "typed collection paths may only be used as the first argument of a pool operation"
+            "typed collection paths may only be used as the first argument of a compiler-owned typed collection operation"
                 .to_string(),
         );
     }
@@ -985,7 +1052,7 @@ fn validate_expression_access(
                 )
             {
                 return Err(
-                    "typed collection paths may only be used as the first argument of a pool operation"
+                        "typed collection paths may only be used as the first argument of a compiler-owned typed collection operation"
                         .to_string(),
                 );
             }
@@ -997,21 +1064,21 @@ fn validate_expression_access(
                     .is_some_and(|type_id| context.types.is_typed_collection_type(type_id))
             {
                 return Err(
-                    "typed collection paths may only be used as the first argument of a pool operation"
+                        "typed collection paths may only be used as the first argument of a compiler-owned typed collection operation"
                         .to_string(),
                 );
             }
             validate_property_access(path, context, local_types)
         }
         SimpleExpr::Call { target, args } => {
-            if TypedPoolOperation::from_target(target).is_some() {
+            if TypedCollectionOperation::from_target(target).is_some() {
                 for (index, argument) in args.iter().enumerate() {
                     if index == 0 && matches!(argument, SimpleExpr::Identifier(_)) {
                         continue;
                     }
                     validate_expression_access(argument, context, local_types)?;
                 }
-                typed_pool_operation(target, args, context, local_types)?;
+                typed_collection_operation(target, args, context, local_types)?;
                 return Ok(());
             }
             for argument in args {
@@ -1659,10 +1726,10 @@ fn build_context<'a>(
     types: &'a TypeTable,
 ) -> Result<AnalysisContext<'a>, String> {
     if let Some(name) = functions.iter().find_map(|function| {
-        TypedPoolOperation::from_target(&function.name).map(|_| &function.name)
+        TypedCollectionOperation::from_target(&function.name).map(|_| &function.name)
     }) {
         return Err(format!(
-            "compiler-owned typed pool operation name '{name}' cannot be declared as a user function"
+            "compiler-owned typed collection operation name '{name}' cannot be declared as a user function"
         ));
     }
     let mut descriptor_types = types.clone();
@@ -1704,9 +1771,9 @@ fn build_context<'a>(
         }
         if file.content.contains("extern") {
             for external in parse_top_level_extern_functions(&file.content)? {
-                if TypedPoolOperation::from_target(&external.name).is_some() {
+                if TypedCollectionOperation::from_target(&external.name).is_some() {
                     return Err(format!(
-                        "compiler-owned typed pool operation name '{}' cannot be declared as an extern function",
+                        "compiler-owned typed collection operation name '{}' cannot be declared as an extern function",
                         external.name
                     ));
                 }
@@ -2309,7 +2376,7 @@ fn analyze_assignment_target(
     }
 }
 
-fn analyze_typed_pool_operation(
+fn analyze_typed_collection_operation(
     target: &str,
     args: &[SimpleExpr],
     context: &AnalysisContext<'_>,
@@ -2318,16 +2385,16 @@ fn analyze_typed_pool_operation(
     aliases: &BTreeMap<String, String>,
     effects: &mut EffectSets,
 ) -> bool {
-    let Some(operation) = TypedPoolOperation::from_target(target) else {
+    let Some(operation) = TypedCollectionOperation::from_target(target) else {
         return false;
     };
-    let expected_arity = if operation.requires_value() { 2 } else { 1 };
+    let expected_arity = operation.expected_arity();
     let valid_descriptor = if args.len() == expected_arity {
         args.first()
             .and_then(|first| exact_typed_collection_path(first, context, local_types))
             .filter(|(path, descriptor)| {
                 !locals.contains(root_name(path))
-                    && descriptor.kind == TypedCollectionKind::Pool
+                    && descriptor.kind == operation.collection_kind()
                     && descriptor.element_type == Some(TYPE_ID_I32)
             })
     } else {
@@ -2335,23 +2402,58 @@ fn analyze_typed_pool_operation(
     };
     if let Some((path, _)) = valid_descriptor {
         match operation {
-            TypedPoolOperation::Push => {
+            TypedCollectionOperation::PoolPush => {
                 effects.insert_read(format!("{path}.count"));
                 effects.insert_write(format!("{path}.count"));
                 effects.insert_write(format!("{path}.values[*]"));
             }
-            TypedPoolOperation::Remove => {
+            TypedCollectionOperation::PoolRemove => {
                 effects.insert_read(format!("{path}.count"));
                 effects.insert_read(format!("{path}.values[*]"));
                 effects.insert_write(format!("{path}.count"));
                 effects.insert_write(format!("{path}.values[*]"));
             }
-            TypedPoolOperation::Clear => {
+            TypedCollectionOperation::PoolClear => {
                 effects.insert_write(format!("{path}.count"));
                 effects.insert_write(format!("{path}.values[*]"));
             }
-            TypedPoolOperation::Count => effects.insert_read(format!("{path}.count")),
-            TypedPoolOperation::Capacity => {}
+            TypedCollectionOperation::PoolCount => {
+                effects.insert_read(format!("{path}.count"));
+            }
+            TypedCollectionOperation::PoolCapacity => {}
+            TypedCollectionOperation::QueuePush => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.head"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.head"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::QueuePop => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.head"));
+                effects.insert_read(format!("{path}.values[*]"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.head"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::QueuePeek => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.head"));
+                effects.insert_read(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::QueuePhysicalIndex => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.head"));
+            }
+            TypedCollectionOperation::QueueCount => {
+                effects.insert_read(format!("{path}.count"));
+            }
+            TypedCollectionOperation::QueueCapacity => {}
+            TypedCollectionOperation::QueueClear => {
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.head"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
         }
         for argument in args.iter().skip(1) {
             analyze_expression(argument, context, locals, local_types, aliases, effects);
@@ -2397,7 +2499,7 @@ fn analyze_expression(
             }
         }
         SimpleExpr::Call { target, args } => {
-            if analyze_typed_pool_operation(
+            if analyze_typed_collection_operation(
                 target,
                 args,
                 context,
@@ -2637,7 +2739,7 @@ fn expression_type(
             field_suffix_type(element, suffix, &context.field_types)
         }
         SimpleExpr::Call { target, args } => {
-            if let Some(operation) = TypedPoolOperation::from_target(target) {
+            if let Some(operation) = TypedCollectionOperation::from_target(target) {
                 return Some(operation.return_type());
             }
             match target.as_str() {
@@ -3278,6 +3380,34 @@ mod tests {
         build_context(files, &[], types).expect("typed collection analysis context")
     }
 
+    fn typed_queue_fixture(extra: &str) -> (TypeTable, Vec<SourceFile>) {
+        let source = format!(
+            "global events: queue<i32, 2, overwrite_oldest>;\nglobal empty_events: queue<i32, 0, overwrite_oldest>;\nglobal actors: pool<i32, 2, error>;\n{extra}"
+        );
+        let mut types = TypeTable::new();
+        for type_name in [
+            "queue<i32, 2, overwrite_oldest>",
+            "queue<i32, 0, overwrite_oldest>",
+            "pool<i32, 2, error>",
+        ] {
+            types
+                .resolve_or_intern(type_name)
+                .expect("typed queue fixture type");
+        }
+        let file = SourceFile {
+            path: "queue_semantics.stasis".to_string(),
+            content: source.clone(),
+            original_content: source,
+            hash: 0,
+            functions: Vec::new(),
+        };
+        (types, vec![file])
+    }
+
+    fn queue_context<'a>(types: &'a TypeTable, files: &[SourceFile]) -> AnalysisContext<'a> {
+        build_context(files, &[], types).expect("typed queue analysis context")
+    }
+
     fn pool_call(target: &str, args: Vec<SimpleExpr>) -> SimpleExpr {
         SimpleExpr::Call {
             target: target.to_string(),
@@ -3410,6 +3540,204 @@ mod tests {
                 "{target} leaked a host capability"
             );
         }
+    }
+
+    #[test]
+    fn typed_queue_operations_have_fixed_return_types_and_explicit_effects() {
+        let (types, files) = typed_queue_fixture("");
+        let context = queue_context(&types, &files);
+        assert!(context
+            .typed_collection_descriptors
+            .contains_key("empty_events"));
+        assert_eq!(
+            context.typed_collection_descriptors["empty_events"].capacity,
+            0
+        );
+        let local_types = BTreeMap::new();
+        let locals = BTreeSet::new();
+        let aliases = BTreeMap::new();
+        let operations = [
+            (
+                "queue_push",
+                vec![
+                    SimpleExpr::Identifier("events".to_string()),
+                    SimpleExpr::Int(7),
+                ],
+                TYPE_ID_BOOL,
+                vec!["events.count", "events.head"],
+                vec!["events.count", "events.head", "events.values[*]"],
+            ),
+            (
+                "queue_pop",
+                vec![SimpleExpr::Identifier("events".to_string())],
+                TYPE_ID_BOOL,
+                vec!["events.count", "events.head", "events.values[*]"],
+                vec!["events.count", "events.head", "events.values[*]"],
+            ),
+            (
+                "queue_peek",
+                vec![
+                    SimpleExpr::Identifier("events".to_string()),
+                    SimpleExpr::Int(0),
+                ],
+                TYPE_ID_I32,
+                vec!["events.count", "events.head", "events.values[*]"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "queue_physical_index",
+                vec![
+                    SimpleExpr::Identifier("events".to_string()),
+                    SimpleExpr::Int(0),
+                ],
+                TYPE_ID_I32,
+                vec!["events.count", "events.head"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "queue_count",
+                vec![SimpleExpr::Identifier("events".to_string())],
+                TYPE_ID_I32,
+                vec!["events.count"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "queue_capacity",
+                vec![SimpleExpr::Identifier("events".to_string())],
+                TYPE_ID_I32,
+                Vec::<&str>::new(),
+                Vec::<&str>::new(),
+            ),
+            (
+                "queue_clear",
+                vec![SimpleExpr::Identifier("events".to_string())],
+                TYPE_ID_VOID,
+                Vec::<&str>::new(),
+                vec!["events.count", "events.head", "events.values[*]"],
+            ),
+        ];
+
+        for (target, args, expected_type, expected_reads, expected_writes) in operations {
+            let expression = pool_call(target, args);
+            assert_eq!(
+                expression_type(&expression, &context, &local_types, &aliases),
+                Some(expected_type),
+                "{target} return type"
+            );
+            validate_expression_access(&expression, &context, &local_types)
+                .expect("valid typed queue operation");
+            let mut effects = EffectSets::default();
+            analyze_expression(
+                &expression,
+                &context,
+                &locals,
+                &local_types,
+                &aliases,
+                &mut effects,
+            );
+            let reads: Vec<_> = effects.reads.iter().map(String::as_str).collect();
+            let writes: Vec<_> = effects.writes.iter().map(String::as_str).collect();
+            assert_eq!(reads, expected_reads, "{target} reads");
+            assert_eq!(writes, expected_writes, "{target} writes");
+            assert!(effects.calls.is_empty(), "{target} became an internal call");
+            assert!(effects.host_calls.is_empty(), "{target} leaked a host call");
+            assert!(
+                effects.host_effects.is_empty(),
+                "{target} leaked a host capability"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_queue_operations_require_exact_persistent_queue_paths_and_i32_indices() {
+        let (types, files) = typed_queue_fixture("");
+        let context = queue_context(&types, &files);
+        let mut local_types = BTreeMap::new();
+        local_types.insert(
+            "events".to_string(),
+            types
+                .resolve("queue<i32, 2, overwrite_oldest>")
+                .expect("queue type id"),
+        );
+
+        let local_error = typed_collection_operation(
+            "queue_count",
+            &[SimpleExpr::Identifier("events".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("local queue value must not be a persistent path");
+        assert!(local_error.contains("exact persistent typed collection path"));
+
+        local_types.clear();
+        let field_error = typed_collection_operation(
+            "queue_count",
+            &[SimpleExpr::Identifier("events.values".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("queue field must not be accepted as the descriptor path");
+        assert!(field_error.contains("exact persistent typed collection path"));
+
+        let non_queue_error = typed_collection_operation(
+            "queue_count",
+            &[SimpleExpr::Identifier("actors".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect_err("pool descriptor must be rejected by queue operation");
+        assert!(non_queue_error.contains("requires persistent queue path"));
+
+        let peek_index = typed_collection_operation(
+            "queue_peek",
+            &[
+                SimpleExpr::Identifier("events".to_string()),
+                SimpleExpr::Float(0.0),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect_err("queue_peek logical index must be i32");
+        assert!(peek_index.contains("queue_peek logical_index argument"));
+
+        let physical_index = typed_collection_operation(
+            "queue_physical_index",
+            &[
+                SimpleExpr::Identifier("events".to_string()),
+                SimpleExpr::Bool(true),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect_err("queue_physical_index logical index must be i32");
+        assert!(physical_index.contains("queue_physical_index logical_index argument"));
+
+        let pop_arity = typed_collection_operation(
+            "queue_pop",
+            &[
+                SimpleExpr::Identifier("events".to_string()),
+                SimpleExpr::Int(0),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect_err("queue_pop must not accept an output argument");
+        assert!(pop_arity.contains("queue_pop expects 1 arguments"));
+    }
+
+    #[test]
+    fn qualified_collection_operation_names_are_not_hijacked() {
+        let (types, files) = typed_queue_fixture("");
+        let context = queue_context(&types, &files);
+        let local_types = BTreeMap::new();
+        assert!(typed_collection_operation(
+            "module.queue_count",
+            &[SimpleExpr::Identifier("events".to_string())],
+            &context,
+            &local_types,
+        )
+        .expect("qualified name should be treated as an ordinary target")
+        .is_none());
     }
 
     #[test]
@@ -3650,7 +3978,15 @@ mod tests {
             ),
             (
                 "function pool_count(value: i32): i32 { return value; }\nfunction main(): i32 { return pool_count(1); }",
-                "compiler-owned typed pool operation name",
+                "compiler-owned typed collection operation name",
+            ),
+            (
+                "function queue_count(value: i32): i32 { return value; }\nfunction main(): i32 { return queue_count(1); }",
+                "compiler-owned typed collection operation name",
+            ),
+            (
+                "extern function queue_pop(): bool;\nfunction main(): i32 { return 0; }",
+                "compiler-owned typed collection operation name",
             ),
         ] {
             compiler_rejects(source, expected);

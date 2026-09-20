@@ -7,8 +7,9 @@ use crate::backend::compile_analysis::{
 use crate::compiler::{FunctionId, FunctionMeta};
 use crate::data_flow::{FunctionDataFlowSummary, ParameterStorageKind};
 use crate::frontend::types::{
-    TypeCategory, TypeId, TypeTable, TypedCollectionKind, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64,
-    TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
+    TypeCategory, TypeId, TypeTable, TypedCollectionKind, TypedCollectionOverflowPolicy,
+    TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8,
+    TYPE_ID_VOID,
 };
 use crate::ir::hir::{
     eval_const_i64, AssignOp, AssignTarget, ComparisonOp, ConversionKind, DebugStatement,
@@ -3079,6 +3080,25 @@ pub(crate) fn emit_simple_statements(
                     {
                         continue;
                     }
+                    if try_emit_typed_queue_call(
+                        builder,
+                        target,
+                        args,
+                        values_by_name,
+                        runtime_call_refs,
+                        internal_calls,
+                        call_signatures,
+                        type_table,
+                        global_path_types,
+                        constant_values,
+                        collection_infos,
+                        named_struct_field_types,
+                        foreach_bindings,
+                    )?
+                    .is_some()
+                    {
+                        continue;
+                    }
                     let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
                     let mut arg_types: Vec<TypeId> = Vec::with_capacity(args.len());
                     let expected_params =
@@ -4595,6 +4615,797 @@ fn emit_typed_pool_clear(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum TypedQueueCallResult {
+    Value(ValueBinding),
+    Void,
+}
+
+#[derive(Clone, Copy)]
+enum TypedQueueCallKind {
+    Push,
+    Pop,
+    Peek,
+    PhysicalIndex,
+    Count,
+    Capacity,
+    Clear,
+}
+
+impl TypedQueueCallKind {
+    fn from_target(target: &str) -> Option<Self> {
+        match target {
+            "queue_push" => Some(Self::Push),
+            "queue_pop" => Some(Self::Pop),
+            "queue_peek" => Some(Self::Peek),
+            "queue_physical_index" => Some(Self::PhysicalIndex),
+            "queue_count" => Some(Self::Count),
+            "queue_capacity" => Some(Self::Capacity),
+            "queue_clear" => Some(Self::Clear),
+            _ => None,
+        }
+    }
+
+    fn expects_two_args(self) -> bool {
+        matches!(self, Self::Push | Self::Peek | Self::PhysicalIndex)
+    }
+}
+
+fn typed_queue_storage_bindings(
+    target: &str,
+    args: &[SimpleExpr],
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+) -> Result<
+    (
+        String,
+        usize,
+        TypedCollectionOverflowPolicy,
+        DirectStorageRef,
+        DirectStorageRef,
+        DirectArrayStorageRef,
+    ),
+    String,
+> {
+    let Some(SimpleExpr::Identifier(path)) = args.first() else {
+        return Err(format!(
+            "{target} first argument must be an exact persistent typed collection path"
+        ));
+    };
+    let root = path.split('.').next().unwrap_or(path);
+    if values_by_name.contains_key(root) {
+        return Err(format!(
+            "{target} first argument must be an exact persistent typed collection path"
+        ));
+    }
+    let type_id = global_path_types.get(path).copied().ok_or_else(|| {
+        format!(
+            "{target} first argument '{}' is not a persistent typed collection path",
+            path
+        )
+    })?;
+    if !type_table.is_typed_collection_type(type_id) {
+        return Err(format!(
+            "{target} requires persistent queue path '{}', found non-typed state type {}",
+            path, type_id
+        ));
+    }
+    let type_name = type_table
+        .type_info(type_id)
+        .map(|info| info.name.as_str())
+        .ok_or_else(|| format!("{target} path '{}' has unknown type {}", path, type_id))?;
+    let descriptor = type_table
+        .parse_typed_collection_descriptor(type_name)?
+        .ok_or_else(|| {
+            format!(
+                "{target} path '{}' has no compiler-owned typed collection descriptor",
+                path
+            )
+        })?;
+    if descriptor.kind != TypedCollectionKind::Queue {
+        return Err(format!(
+            "{target} requires persistent queue path '{}', found {}",
+            path,
+            descriptor.kind_name()
+        ));
+    }
+    if descriptor.element_type != Some(TYPE_ID_I32) {
+        return Err(format!(
+            "{target} requires queue path '{}' with i32 payload",
+            path
+        ));
+    }
+    let capacity = usize::try_from(descriptor.capacity).map_err(|_| {
+        format!(
+            "{target} queue path '{}' capacity {} does not fit the target index type",
+            path, descriptor.capacity
+        )
+    })?;
+    let direct_storage = runtime_call_refs.direct_storage.as_ref().ok_or_else(|| {
+        format!(
+            "{target} for typed queue '{}' requires direct storage bindings",
+            path
+        )
+    })?;
+    let count_path = format!("{path}.count");
+    let count = direct_storage
+        .scalars
+        .get(&count_path)
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "{target} for typed queue '{}' is missing direct scalar binding '{}.count'",
+                path, path
+            )
+        })?;
+    let head_path = format!("{path}.head");
+    let head = direct_storage
+        .scalars
+        .get(&head_path)
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "{target} for typed queue '{}' is missing direct scalar binding '{}.head'",
+                path, path
+            )
+        })?;
+    let values = direct_storage
+        .arrays
+        .get(&(path.to_string(), String::from("values")))
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "{target} for typed queue '{}' is missing direct array binding '{}.values'",
+                path, path
+            )
+        })?;
+    if values.storage_bytes != 4 || values.static_len != Some(capacity) {
+        return Err(format!(
+            "{target} for typed queue '{}' requires an i32 values binding with static length {}, found {} bytes and length {:?}",
+            path, capacity, values.storage_bytes, values.static_len
+        ));
+    }
+    Ok((
+        path.clone(),
+        capacity,
+        descriptor.policy,
+        count,
+        head,
+        values,
+    ))
+}
+
+fn emit_typed_queue_metadata_valid(
+    builder: &mut FunctionBuilder<'_>,
+    count: Value,
+    head: Value,
+    capacity: i32,
+) -> Value {
+    let count_non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, count, 0);
+    let count_within_capacity =
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedLessThanOrEqual, count, i64::from(capacity));
+    let head_non_negative = builder
+        .ins()
+        .icmp_imm(IntCC::SignedGreaterThanOrEqual, head, 0);
+    let head_below_capacity =
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedLessThan, head, i64::from(capacity));
+    let count_valid = builder
+        .ins()
+        .band(count_non_negative, count_within_capacity);
+    let head_valid = builder.ins().band(head_non_negative, head_below_capacity);
+    builder.ins().band(count_valid, head_valid)
+}
+
+fn emit_typed_queue_physical_index(
+    builder: &mut FunctionBuilder<'_>,
+    head: Value,
+    logical_index: Value,
+    capacity: i32,
+) -> Value {
+    // Keep the addition and modulo in i64 even though the public ABI is i32.
+    // Metadata and logical-index validation happens before this value is used
+    // for a bounds-proven storage access.
+    let head_i64 = builder.ins().sextend(types::I64, head);
+    let logical_i64 = builder.ins().sextend(types::I64, logical_index);
+    let offset = builder.ins().iadd(head_i64, logical_i64);
+    let capacity_i64 = builder.ins().iconst(types::I64, i64::from(capacity));
+    let remainder = builder.ins().urem(offset, capacity_i64);
+    builder.ins().ireduce(types::I32, remainder)
+}
+
+fn emit_typed_queue_index_state(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    head_ref: DirectStorageRef,
+    capacity: i32,
+    logical_index: Value,
+    type_table: &TypeTable,
+) -> Result<(Value, Value), String> {
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
+    let metadata_valid = emit_typed_queue_metadata_valid(builder, count, head, capacity);
+    let logical_non_negative =
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, logical_index, 0);
+    let logical_below_count = builder
+        .ins()
+        .icmp(IntCC::SignedLessThan, logical_index, count);
+    let logical_below_capacity =
+        builder
+            .ins()
+            .icmp_imm(IntCC::SignedLessThan, logical_index, i64::from(capacity));
+    let logical_valid = builder
+        .ins()
+        .band(logical_non_negative, logical_below_count);
+    let logical_valid = builder.ins().band(logical_valid, logical_below_capacity);
+    let valid = builder.ins().band(metadata_valid, logical_valid);
+    let physical = emit_typed_queue_physical_index(builder, head, logical_index, capacity);
+    Ok((physical, valid))
+}
+
+fn emit_typed_queue_push(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    head_ref: DirectStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+    policy: TypedCollectionOverflowPolicy,
+    value: Value,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let capacity_i32 = i32::try_from(capacity)
+        .map_err(|_| format!("typed queue capacity {capacity} exceeds i32 operation range"))?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_BOOL,
+        });
+    }
+
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
+    let metadata_valid = emit_typed_queue_metadata_valid(builder, count, head, capacity_i32);
+    let valid_block = builder.create_block();
+    let invalid_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(metadata_valid, valid_block, &[], invalid_block, &[]);
+
+    builder.seal_block(invalid_block);
+    builder.switch_to_block(invalid_block);
+    let rejected = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(merge_block, &[rejected]);
+
+    builder.seal_block(valid_block);
+    builder.switch_to_block(valid_block);
+    let full = builder
+        .ins()
+        .icmp_imm(IntCC::Equal, count, i64::from(capacity_i32));
+    let full_block = builder.create_block();
+    let nonfull_block = builder.create_block();
+    builder
+        .ins()
+        .brif(full, full_block, &[], nonfull_block, &[]);
+
+    builder.seal_block(nonfull_block);
+    builder.switch_to_block(nonfull_block);
+    let physical = emit_typed_queue_physical_index(builder, head, count, capacity_i32);
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        physical,
+        value,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let next_count = builder.ins().iadd_imm(count, 1);
+    emit_direct_i32_store(builder, count_ref, next_count);
+    let accepted = builder.ins().iconst(types::I32, 1);
+    builder.ins().jump(merge_block, &[accepted]);
+
+    builder.seal_block(full_block);
+    builder.switch_to_block(full_block);
+    if policy == TypedCollectionOverflowPolicy::OverwriteOldest {
+        emit_direct_array_store(
+            builder,
+            values_ref.slot,
+            head,
+            value,
+            TYPE_ID_I32,
+            values_ref.storage_bytes,
+            values_ref.static_len,
+            true,
+        )?;
+        let one = builder.ins().iconst(types::I32, 1);
+        let next_head = emit_typed_queue_physical_index(builder, head, one, capacity_i32);
+        emit_direct_i32_store(builder, head_ref, next_head);
+        let accepted = builder.ins().iconst(types::I32, 1);
+        builder.ins().jump(merge_block, &[accepted]);
+    } else {
+        let rejected = builder.ins().iconst(types::I32, 0);
+        builder.ins().jump(merge_block, &[rejected]);
+    }
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "typed queue push merge block missing result".to_string())?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_BOOL,
+    })
+}
+
+fn emit_typed_queue_pop(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    head_ref: DirectStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let capacity_i32 = i32::try_from(capacity)
+        .map_err(|_| format!("typed queue capacity {capacity} exceeds i32 operation range"))?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_BOOL,
+        });
+    }
+
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
+    let metadata_valid = emit_typed_queue_metadata_valid(builder, count, head, capacity_i32);
+    let nonempty = builder.ins().icmp_imm(IntCC::SignedGreaterThan, count, 0);
+    let can_pop = builder.ins().band(metadata_valid, nonempty);
+    let pop_block = builder.create_block();
+    let reject_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(can_pop, pop_block, &[], reject_block, &[]);
+
+    builder.seal_block(reject_block);
+    builder.switch_to_block(reject_block);
+    let rejected = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(merge_block, &[rejected]);
+
+    builder.seal_block(pop_block);
+    builder.switch_to_block(pop_block);
+    let zero = builder.ins().iconst(types::I32, 0);
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        head,
+        zero,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let next_count = builder.ins().iadd_imm(count, -1);
+    emit_direct_i32_store(builder, count_ref, next_count);
+    let now_empty = builder.ins().icmp_imm(IntCC::Equal, next_count, 0);
+    let reset_head_block = builder.create_block();
+    let advance_head_block = builder.create_block();
+    builder
+        .ins()
+        .brif(now_empty, reset_head_block, &[], advance_head_block, &[]);
+
+    builder.seal_block(reset_head_block);
+    builder.switch_to_block(reset_head_block);
+    emit_direct_i32_store(builder, head_ref, zero);
+    let accepted = builder.ins().iconst(types::I32, 1);
+    builder.ins().jump(merge_block, &[accepted]);
+
+    builder.seal_block(advance_head_block);
+    builder.switch_to_block(advance_head_block);
+    let one = builder.ins().iconst(types::I32, 1);
+    let next_head = emit_typed_queue_physical_index(builder, head, one, capacity_i32);
+    emit_direct_i32_store(builder, head_ref, next_head);
+    let accepted = builder.ins().iconst(types::I32, 1);
+    builder.ins().jump(merge_block, &[accepted]);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "typed queue pop merge block missing result".to_string())?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_BOOL,
+    })
+}
+
+fn emit_typed_queue_clear(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    head_ref: DirectStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+) -> Result<(), String> {
+    let zero = builder.ins().iconst(types::I32, 0);
+    emit_direct_i32_store(builder, count_ref, zero);
+    emit_direct_i32_store(builder, head_ref, zero);
+    if capacity == 0 {
+        return Ok(());
+    }
+    let capacity_i32 = i32::try_from(capacity)
+        .map_err(|_| format!("typed queue capacity {capacity} exceeds i32 operation range"))?;
+    let condition_block = builder.create_block();
+    let body_block = builder.create_block();
+    let exit_block = builder.create_block();
+    builder.append_block_param(condition_block, types::I32);
+    builder.ins().jump(condition_block, &[zero]);
+
+    builder.switch_to_block(condition_block);
+    let index = builder.block_params(condition_block)[0];
+    let more = builder
+        .ins()
+        .icmp_imm(IntCC::SignedLessThan, index, i64::from(capacity_i32));
+    builder.ins().brif(more, body_block, &[], exit_block, &[]);
+
+    builder.seal_block(body_block);
+    builder.switch_to_block(body_block);
+    emit_direct_array_store(
+        builder,
+        values_ref.slot,
+        index,
+        zero,
+        TYPE_ID_I32,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    let next = builder.ins().iadd_imm(index, 1);
+    builder.ins().jump(condition_block, &[next]);
+    builder.seal_block(condition_block);
+
+    builder.seal_block(exit_block);
+    builder.switch_to_block(exit_block);
+    Ok(())
+}
+
+fn emit_typed_queue_count(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    head_ref: DirectStorageRef,
+    capacity: usize,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let capacity_i32 = i32::try_from(capacity)
+        .map_err(|_| format!("typed queue capacity {capacity} exceeds i32 operation range"))?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_I32,
+        });
+    }
+    let count = emit_direct_scalar_load(builder, count_ref, TYPE_ID_I32, type_table)?;
+    let head = emit_direct_scalar_load(builder, head_ref, TYPE_ID_I32, type_table)?;
+    let valid = emit_typed_queue_metadata_valid(builder, count, head, capacity_i32);
+    let valid_block = builder.create_block();
+    let invalid_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(valid, valid_block, &[], invalid_block, &[]);
+
+    builder.seal_block(valid_block);
+    builder.switch_to_block(valid_block);
+    builder.ins().jump(merge_block, &[count]);
+
+    builder.seal_block(invalid_block);
+    builder.switch_to_block(invalid_block);
+    let zero = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(merge_block, &[zero]);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "typed queue count merge block missing result".to_string())?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_I32,
+    })
+}
+
+fn emit_typed_queue_logical_index(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    head_ref: DirectStorageRef,
+    capacity: usize,
+    logical_index: Value,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let capacity_i32 = i32::try_from(capacity)
+        .map_err(|_| format!("typed queue capacity {capacity} exceeds i32 operation range"))?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, -1),
+            type_id: TYPE_ID_I32,
+        });
+    }
+    let (physical, valid) = emit_typed_queue_index_state(
+        builder,
+        count_ref,
+        head_ref,
+        capacity_i32,
+        logical_index,
+        type_table,
+    )?;
+    let valid_block = builder.create_block();
+    let invalid_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(valid, valid_block, &[], invalid_block, &[]);
+
+    builder.seal_block(valid_block);
+    builder.switch_to_block(valid_block);
+    builder.ins().jump(merge_block, &[physical]);
+
+    builder.seal_block(invalid_block);
+    builder.switch_to_block(invalid_block);
+    let invalid = builder.ins().iconst(types::I32, -1);
+    builder.ins().jump(merge_block, &[invalid]);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "typed queue physical-index merge block missing result".to_string())?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_I32,
+    })
+}
+
+fn emit_typed_queue_peek(
+    builder: &mut FunctionBuilder<'_>,
+    count_ref: DirectStorageRef,
+    head_ref: DirectStorageRef,
+    values_ref: DirectArrayStorageRef,
+    capacity: usize,
+    logical_index: Value,
+    type_table: &TypeTable,
+) -> Result<ValueBinding, String> {
+    let capacity_i32 = i32::try_from(capacity)
+        .map_err(|_| format!("typed queue capacity {capacity} exceeds i32 operation range"))?;
+    if capacity_i32 == 0 {
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, 0),
+            type_id: TYPE_ID_I32,
+        });
+    }
+    let (physical, valid) = emit_typed_queue_index_state(
+        builder,
+        count_ref,
+        head_ref,
+        capacity_i32,
+        logical_index,
+        type_table,
+    )?;
+    let valid_block = builder.create_block();
+    let invalid_block = builder.create_block();
+    let merge_block = builder.create_block();
+    builder.append_block_param(merge_block, types::I32);
+    builder
+        .ins()
+        .brif(valid, valid_block, &[], invalid_block, &[]);
+
+    builder.seal_block(valid_block);
+    builder.switch_to_block(valid_block);
+    let value = emit_direct_array_load(
+        builder,
+        values_ref.slot,
+        physical,
+        TYPE_ID_I32,
+        type_table,
+        values_ref.storage_bytes,
+        values_ref.static_len,
+        true,
+    )?;
+    builder.ins().jump(merge_block, &[value]);
+
+    builder.seal_block(invalid_block);
+    builder.switch_to_block(invalid_block);
+    let zero = builder.ins().iconst(types::I32, 0);
+    builder.ins().jump(merge_block, &[zero]);
+
+    builder.seal_block(merge_block);
+    builder.switch_to_block(merge_block);
+    let result = builder
+        .block_params(merge_block)
+        .first()
+        .copied()
+        .ok_or_else(|| "typed queue peek merge block missing result".to_string())?;
+    Ok(ValueBinding {
+        value: result,
+        type_id: TYPE_ID_I32,
+    })
+}
+
+fn try_emit_typed_queue_call(
+    builder: &mut FunctionBuilder<'_>,
+    target: &str,
+    args: &[SimpleExpr],
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<Option<TypedQueueCallResult>, String> {
+    let Some(kind) = TypedQueueCallKind::from_target(target) else {
+        return Ok(None);
+    };
+    let expected_arity = if kind.expects_two_args() { 2 } else { 1 };
+    if args.len() != expected_arity {
+        return Err(format!(
+            "{target} expects {expected_arity} argument(s), found {}",
+            args.len()
+        ));
+    }
+    let (path, capacity, policy, count_ref, head_ref, values_ref) = typed_queue_storage_bindings(
+        target,
+        args,
+        values_by_name,
+        runtime_call_refs,
+        global_path_types,
+        type_table,
+    )?;
+    match kind {
+        TypedQueueCallKind::Push => {
+            let value = emit_simple_expression(
+                builder,
+                &args[1],
+                Some(TYPE_ID_I32),
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )?;
+            if value.type_id != TYPE_ID_I32 {
+                return Err(format!(
+                    "{target} value argument must have exact i32 type, found {}",
+                    value.type_id
+                ));
+            }
+            Ok(Some(TypedQueueCallResult::Value(emit_typed_queue_push(
+                builder,
+                count_ref,
+                head_ref,
+                values_ref,
+                capacity,
+                policy,
+                value.value,
+                type_table,
+            )?)))
+        }
+        TypedQueueCallKind::Pop => Ok(Some(TypedQueueCallResult::Value(emit_typed_queue_pop(
+            builder, count_ref, head_ref, values_ref, capacity, type_table,
+        )?))),
+        TypedQueueCallKind::Peek => {
+            let logical_index = emit_simple_expression(
+                builder,
+                &args[1],
+                Some(TYPE_ID_I32),
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )?;
+            if logical_index.type_id != TYPE_ID_I32 {
+                return Err(format!(
+                    "{target} logical index argument must have exact i32 type, found {}",
+                    logical_index.type_id
+                ));
+            }
+            Ok(Some(TypedQueueCallResult::Value(emit_typed_queue_peek(
+                builder,
+                count_ref,
+                head_ref,
+                values_ref,
+                capacity,
+                logical_index.value,
+                type_table,
+            )?)))
+        }
+        TypedQueueCallKind::PhysicalIndex => {
+            let logical_index = emit_simple_expression(
+                builder,
+                &args[1],
+                Some(TYPE_ID_I32),
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )?;
+            if logical_index.type_id != TYPE_ID_I32 {
+                return Err(format!(
+                    "{target} logical index argument must have exact i32 type, found {}",
+                    logical_index.type_id
+                ));
+            }
+            Ok(Some(TypedQueueCallResult::Value(
+                emit_typed_queue_logical_index(
+                    builder,
+                    count_ref,
+                    head_ref,
+                    capacity,
+                    logical_index.value,
+                    type_table,
+                )?,
+            )))
+        }
+        TypedQueueCallKind::Count => Ok(Some(TypedQueueCallResult::Value(emit_typed_queue_count(
+            builder, count_ref, head_ref, capacity, type_table,
+        )?))),
+        TypedQueueCallKind::Capacity => {
+            let capacity = i32::try_from(capacity).map_err(|_| {
+                format!("{target} queue path '{path}' capacity exceeds i32 operation range")
+            })?;
+            Ok(Some(TypedQueueCallResult::Value(ValueBinding {
+                value: builder.ins().iconst(types::I32, i64::from(capacity)),
+                type_id: TYPE_ID_I32,
+            })))
+        }
+        TypedQueueCallKind::Clear => {
+            emit_typed_queue_clear(builder, count_ref, head_ref, values_ref, capacity)?;
+            Ok(Some(TypedQueueCallResult::Void))
+        }
+    }
+}
+
 fn try_emit_typed_pool_call(
     builder: &mut FunctionBuilder<'_>,
     target: &str,
@@ -5077,6 +5888,29 @@ pub(crate) fn emit_simple_expression(
                 return match result {
                     TypedPoolCallResult::Value(value) => Ok(value),
                     TypedPoolCallResult::Void => Err(format!(
+                        "void call target '{}' cannot be used in value expression",
+                        target
+                    )),
+                };
+            }
+            if let Some(result) = try_emit_typed_queue_call(
+                builder,
+                target,
+                args,
+                values_by_name,
+                runtime_call_refs,
+                internal_calls,
+                call_signatures,
+                type_table,
+                global_path_types,
+                constant_values,
+                collection_infos,
+                named_struct_field_types,
+                foreach_bindings,
+            )? {
+                return match result {
+                    TypedQueueCallResult::Value(value) => Ok(value),
+                    TypedQueueCallResult::Void => Err(format!(
                         "void call target '{}' cannot be used in value expression",
                         target
                     )),
