@@ -3378,6 +3378,122 @@ mod tests {
     }
 
     #[test]
+    fn typed_map_and_set_aot_storage_plan_and_symbols_match_jit_lanes() {
+        for kind in ["map", "set"] {
+            for policy in ["error", "drop_newest"] {
+                for capacity in [3_u32, 0_u32] {
+                    let mut process = AotProcess::new();
+                    let declaration = match kind {
+                        "map" => format!("global collection: map<i32, i32, {capacity}, {policy}>;"),
+                        "set" => format!("global collection: set<i32, {capacity}, {policy}>;"),
+                        _ => unreachable!(),
+                    };
+                    process.upsert_file(
+                        "typed_map_set_storage.stasis",
+                        format!("{declaration}\nfunction main(): i32 {{ return 0; }}\n"),
+                    );
+                    process.compile().expect("typed map/set AOT compile");
+
+                    let snapshot = process
+                        .program_snapshot()
+                        .expect("typed map/set AOT snapshot");
+                    let descriptor = snapshot
+                        .typed_collection_descriptors()
+                        .get("collection")
+                        .expect("typed map/set descriptor");
+                    assert_eq!(
+                        descriptor.canonical_type_name(snapshot.types()),
+                        match kind {
+                            "map" => format!("map<i32, i32, {capacity}, {policy}>"),
+                            "set" => format!("set<i32, {capacity}, {policy}>"),
+                            _ => unreachable!(),
+                        }
+                    );
+
+                    let bindings = build_aot_direct_storage_bindings(
+                        &snapshot.analysis.global_path_types,
+                        &snapshot.analysis.collection_infos,
+                        snapshot.typed_collection_descriptors(),
+                        snapshot.types(),
+                    )
+                    .expect("typed map/set AOT direct storage plan");
+                    assert!(matches!(
+                        bindings.scalars.get("collection.count"),
+                        Some(DirectStorageBinding::Symbol(symbol))
+                            if symbol == &aot_storage_symbol(
+                                AotStorageSymbolKind::Scalar,
+                                "collection.count",
+                                "",
+                            )
+                    ));
+                    assert_eq!(bindings.scalars.len(), 1);
+
+                    let expected_arrays: &[(&str, u8)] = match kind {
+                        "map" => &[("occupied", 1), ("keys", 4), ("values", 4)],
+                        "set" => &[("occupied", 1), ("keys", 4)],
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(bindings.arrays.len(), expected_arrays.len());
+                    for (field, storage_bytes) in expected_arrays {
+                        let lane = bindings
+                            .arrays
+                            .get(&(String::from("collection"), String::from(*field)))
+                            .unwrap_or_else(|| panic!("missing {kind} {field} lane"));
+                        assert!(matches!(
+                            &lane.slot,
+                            DirectStorageBinding::Symbol(symbol)
+                                if symbol == &aot_storage_symbol(
+                                    AotStorageSymbolKind::Array,
+                                    "collection",
+                                    field,
+                                )
+                        ));
+                        assert_eq!(lane.static_len, Some(capacity as usize));
+                        assert_eq!(lane.storage_bytes, *storage_bytes);
+                    }
+
+                    let (bytes, _) = process
+                        .compile_standalone_storage_object("aot_fn_0")
+                        .expect("standalone typed map/set storage object")
+                        .expect("typed map/set storage required");
+                    let object =
+                        File::parse(bytes.as_slice()).expect("parse typed map/set storage object");
+                    let symbols: BTreeSet<String> = object
+                        .symbols()
+                        .filter_map(|symbol| symbol.name().ok().map(str::to_string))
+                        .collect();
+                    assert!(
+                        symbols.contains(&aot_storage_symbol(
+                            AotStorageSymbolKind::Scalar,
+                            "collection.count",
+                            "",
+                        )),
+                        "typed {kind} count symbol missing for {policy}, capacity {capacity}: {symbols:?}"
+                    );
+                    for (field, _) in expected_arrays {
+                        assert!(
+                            symbols.contains(&aot_storage_symbol(
+                                AotStorageSymbolKind::Array,
+                                "collection",
+                                field,
+                            )),
+                            "typed {kind} {field} symbol missing for {policy}, capacity {capacity}: {symbols:?}"
+                        );
+                    }
+                    assert!(
+                        symbols.contains("stasis_jit_register_global_u8_array"),
+                        "typed {kind} occupancy registration symbol missing: {symbols:?}"
+                    );
+                    assert!(
+                        symbols.contains("stasis_jit_register_global_i32_array"),
+                        "typed {kind} i32 array registration symbol missing: {symbols:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn typed_queue_aot_storage_plan_and_symbols_match_jit_lanes() {
         for policy in ["error", "drop_newest", "overwrite_oldest"] {
             for capacity in [2_u32, 0_u32] {
@@ -3893,6 +4009,132 @@ function stable_zero_capacity(): i32 {
                 assert_eq!(
                     linked, expected,
                     "linked AOT/JIT typed stable-pool operation parity for {root}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_map_and_set_linked_aot_matches_jit_operation_sequence() {
+        const SOURCE: &str = r#"global typed_map_error_parity_147: map<i32, i32, 3, error>;
+global typed_map_drop_parity_147: map<i32, i32, 3, drop_newest>;
+global typed_map_zero_parity_147: map<i32, i32, 0, drop_newest>;
+global typed_set_error_parity_147: set<i32, 3, error>;
+global typed_set_drop_parity_147: set<i32, 3, drop_newest>;
+global typed_set_zero_parity_147: set<i32, 0, drop_newest>;
+function map_sequence(): i32 {
+    map_put(typed_map_error_parity_147, 1, 10);
+    map_put(typed_map_error_parity_147, 2, 20);
+    map_put(typed_map_error_parity_147, 3, 30);
+    let before_update: i32 = map_get(typed_map_error_parity_147, 2);
+    map_put(typed_map_error_parity_147, 2, 25);
+    let after_update: i32 = map_get(typed_map_error_parity_147, 2);
+    map_put(typed_map_error_parity_147, 4, 40);
+    let full_contains: i32 = 0;
+    if (map_contains(typed_map_error_parity_147, 4)) { full_contains = 1; }
+    let removed: i32 = 0;
+    if (map_remove(typed_map_error_parity_147, 2)) { removed = 1; }
+    let missing_after_remove: i32 = map_get(typed_map_error_parity_147, 2);
+    map_put(typed_map_error_parity_147, 4, 40);
+    let reused: i32 = map_get(typed_map_error_parity_147, 4);
+    return before_update * 1000000 + after_update * 10000
+        + full_contains * 1000 + removed * 100
+        + missing_after_remove * 10 + reused;
+}
+function map_drop_sequence(): i32 {
+    map_put(typed_map_drop_parity_147, 1, 10);
+    map_put(typed_map_drop_parity_147, 2, 20);
+    map_put(typed_map_drop_parity_147, 3, 30);
+    map_put(typed_map_drop_parity_147, 2, 25);
+    map_put(typed_map_drop_parity_147, 4, 40);
+    return map_get(typed_map_drop_parity_147, 2) * 100
+        + map_get(typed_map_drop_parity_147, 4);
+}
+function map_zero_capacity(): i32 {
+    map_put(typed_map_zero_parity_147, 1, 7);
+    let result: i32 = map_get(typed_map_zero_parity_147, 1);
+    if (map_contains(typed_map_zero_parity_147, 1)) { result += 100; }
+    if (map_remove(typed_map_zero_parity_147, 1)) { result += 10; }
+    return result;
+}
+function set_sequence(): i32 {
+    set_add(typed_set_error_parity_147, 1);
+    set_add(typed_set_error_parity_147, 2);
+    set_add(typed_set_error_parity_147, 3);
+    set_add(typed_set_error_parity_147, 2);
+    let duplicate_present: i32 = 0;
+    if (set_contains(typed_set_error_parity_147, 2)) { duplicate_present = 1; }
+    set_add(typed_set_error_parity_147, 4);
+    let full_present: i32 = 0;
+    if (set_contains(typed_set_error_parity_147, 4)) { full_present = 1; }
+    set_remove(typed_set_error_parity_147, 2);
+    let removed_present: i32 = 0;
+    if (set_contains(typed_set_error_parity_147, 2)) { removed_present = 1; }
+    set_add(typed_set_error_parity_147, 4);
+    let reused_present: i32 = 0;
+    if (set_contains(typed_set_error_parity_147, 4)) { reused_present = 1; }
+    return duplicate_present * 1000 + full_present * 100
+        + removed_present * 10 + reused_present;
+}
+function set_drop_sequence(): i32 {
+    set_add(typed_set_drop_parity_147, 1);
+    set_add(typed_set_drop_parity_147, 2);
+    set_add(typed_set_drop_parity_147, 3);
+    set_add(typed_set_drop_parity_147, 4);
+    if (set_contains(typed_set_drop_parity_147, 4)) { return 1; }
+    return 0;
+}
+function set_zero_capacity(): i32 {
+    set_add(typed_set_zero_parity_147, 1);
+    set_remove(typed_set_zero_parity_147, 1);
+    if (set_contains(typed_set_zero_parity_147, 1)) { return 100; }
+    return 0;
+}
+"#;
+        const ROOTS: [&str; 6] = [
+            "map_sequence",
+            "map_drop_sequence",
+            "map_zero_capacity",
+            "set_sequence",
+            "set_drop_sequence",
+            "set_zero_capacity",
+        ];
+        const EXPECTED: [i32; 6] = [20_250_140, 2_500, 0, 1_001, 0, 0];
+
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&ROOTS.map(str::to_string));
+        jit.upsert_file("typed_map_set_parity_147.stasis", SOURCE);
+        jit.compile().expect("typed map/set JIT parity compile");
+        for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+            assert_eq!(
+                jit.execute_i32_noarg_by_name(root)
+                    .unwrap_or_else(|_| panic!("typed map/set JIT root {root}")),
+                expected,
+                "typed map/set JIT operation oracle for {root}"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let Some(link_config) = resolve_link_config_for_smoke() else {
+                return;
+            };
+            let mut aot = AotProcess::new();
+            aot.set_required_emit_roots(&ROOTS.map(str::to_string));
+            aot.upsert_file("typed_map_set_parity_147.stasis", SOURCE);
+            aot.compile().expect("typed map/set AOT parity compile");
+
+            for (root, expected) in ROOTS.into_iter().zip(EXPECTED) {
+                let linked = run_linked_i32_noarg_fixture(
+                    &aot,
+                    root,
+                    &format!("typed_map_set_{root}_parity"),
+                    &link_config,
+                )
+                .unwrap_or_else(|| panic!("linked typed map/set root {root}"));
+                assert_eq!(
+                    linked, expected,
+                    "linked AOT/JIT typed map/set operation parity for {root}"
                 );
             }
         }

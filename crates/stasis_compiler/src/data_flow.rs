@@ -8,8 +8,9 @@ use crate::backend::compile_analysis::{
 use crate::compiler::{FunctionMeta, SourceFile};
 use crate::frontend::parser::{parse_top_level_extern_functions, parse_top_level_type_layout};
 use crate::frontend::types::{
-    TypeCategory, TypeId, TypeTable, TypedCollectionDescriptor, TypedCollectionKind, TYPE_ID_BOOL,
-    TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_VOID,
+    TypeCategory, TypeId, TypeTable, TypedCollectionDescriptor, TypedCollectionKind,
+    TypedCollectionOverflowPolicy, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
+    TYPE_ID_VOID,
 };
 use crate::ir::hir::{
     eval_const_i64, AssignOp, AssignTarget, ComparisonOp, SimpleCondition, SimpleExpr, SimpleStmt,
@@ -709,6 +710,13 @@ enum TypedCollectionOperation {
     StablePoolCount,
     StablePoolCapacity,
     StablePoolClear,
+    MapPut,
+    MapGet,
+    MapContains,
+    MapRemove,
+    SetAdd,
+    SetContains,
+    SetRemove,
     QueuePush,
     QueuePop,
     QueuePeek,
@@ -738,6 +746,13 @@ impl TypedCollectionOperation {
             "stable_pool_count" => Some(Self::StablePoolCount),
             "stable_pool_capacity" => Some(Self::StablePoolCapacity),
             "stable_pool_clear" => Some(Self::StablePoolClear),
+            "map_put" => Some(Self::MapPut),
+            "map_get" => Some(Self::MapGet),
+            "map_contains" => Some(Self::MapContains),
+            "map_remove" => Some(Self::MapRemove),
+            "set_add" => Some(Self::SetAdd),
+            "set_contains" => Some(Self::SetContains),
+            "set_remove" => Some(Self::SetRemove),
             "queue_push" => Some(Self::QueuePush),
             "queue_pop" => Some(Self::QueuePop),
             "queue_peek" => Some(Self::QueuePeek),
@@ -772,8 +787,15 @@ impl TypedCollectionOperation {
             | Self::RingBufferPhysicalIndex
             | Self::RingBufferCount
             | Self::RingBufferCapacity => TYPE_ID_I32,
+            Self::MapGet => TYPE_ID_I32,
             Self::PoolRemove
             | Self::StablePoolRemove
+            | Self::MapPut
+            | Self::MapContains
+            | Self::MapRemove
+            | Self::SetAdd
+            | Self::SetContains
+            | Self::SetRemove
             | Self::QueuePush
             | Self::QueuePop
             | Self::RingBufferPush
@@ -796,6 +818,10 @@ impl TypedCollectionOperation {
             | Self::StablePoolCount
             | Self::StablePoolCapacity
             | Self::StablePoolClear => TypedCollectionKind::StablePool,
+            Self::MapPut | Self::MapGet | Self::MapContains | Self::MapRemove => {
+                TypedCollectionKind::Map
+            }
+            Self::SetAdd | Self::SetContains | Self::SetRemove => TypedCollectionKind::Set,
             Self::QueuePush
             | Self::QueuePop
             | Self::QueuePeek
@@ -822,7 +848,14 @@ impl TypedCollectionOperation {
             | Self::QueuePush
             | Self::RingBufferPush
             | Self::RingBufferPeek
-            | Self::RingBufferPhysicalIndex => 2,
+            | Self::RingBufferPhysicalIndex
+            | Self::MapGet
+            | Self::MapContains
+            | Self::MapRemove
+            | Self::SetAdd
+            | Self::SetContains
+            | Self::SetRemove => 2,
+            Self::MapPut => 3,
             Self::PoolCount
             | Self::PoolCapacity
             | Self::PoolClear
@@ -859,6 +892,13 @@ impl TypedCollectionOperation {
             | Self::StablePoolCount
             | Self::StablePoolCapacity
             | Self::StablePoolClear
+            | Self::MapPut
+            | Self::MapGet
+            | Self::MapContains
+            | Self::MapRemove
+            | Self::SetAdd
+            | Self::SetContains
+            | Self::SetRemove
             | Self::QueuePop
             | Self::QueueCount
             | Self::QueueCapacity
@@ -867,6 +907,19 @@ impl TypedCollectionOperation {
             | Self::RingBufferCount
             | Self::RingBufferCapacity
             | Self::RingBufferClear => None,
+        }
+    }
+
+    fn argument_specs(self) -> Vec<(usize, &'static str)> {
+        match self {
+            Self::MapPut => vec![(1, "key"), (2, "value")],
+            Self::MapGet
+            | Self::MapContains
+            | Self::MapRemove
+            | Self::SetAdd
+            | Self::SetContains
+            | Self::SetRemove => vec![(1, "key")],
+            _ => self.payload_argument().into_iter().collect(),
         }
     }
 }
@@ -902,6 +955,35 @@ fn exact_typed_collection_path<'a>(
         .typed_collection_descriptors
         .get_key_value(path)
         .map(|(path, descriptor)| (path.as_str(), descriptor))
+}
+
+fn typed_collection_descriptor_supports_operation(
+    operation: TypedCollectionOperation,
+    descriptor: &TypedCollectionDescriptor,
+) -> bool {
+    if descriptor.kind != operation.collection_kind() {
+        return false;
+    }
+    match operation.collection_kind() {
+        TypedCollectionKind::Map => {
+            descriptor.key_type == Some(TYPE_ID_I32)
+                && descriptor.value_type == Some(TYPE_ID_I32)
+                && matches!(
+                    descriptor.policy,
+                    TypedCollectionOverflowPolicy::Error
+                        | TypedCollectionOverflowPolicy::DropNewest
+                )
+        }
+        TypedCollectionKind::Set => {
+            descriptor.key_type == Some(TYPE_ID_I32)
+                && matches!(
+                    descriptor.policy,
+                    TypedCollectionOverflowPolicy::Error
+                        | TypedCollectionOverflowPolicy::DropNewest
+                )
+        }
+        _ => descriptor.element_type == Some(TYPE_ID_I32),
+    }
 }
 
 #[cfg(test)]
@@ -945,14 +1027,39 @@ fn typed_collection_operation(
             descriptor.kind_name(),
         ));
     }
-    if descriptor.element_type != Some(TYPE_ID_I32) {
-        return Err(format!(
-            "{target} requires {} path '{path}' with i32 payload",
-            operation.collection_kind().as_str(),
-        ));
+    if !typed_collection_descriptor_supports_operation(operation, descriptor) {
+        match operation.collection_kind() {
+            TypedCollectionKind::Map => {
+                if descriptor.key_type != Some(TYPE_ID_I32) {
+                    return Err(format!("{target} requires map path '{path}' with i32 key"));
+                }
+                if descriptor.value_type != Some(TYPE_ID_I32) {
+                    return Err(format!(
+                        "{target} requires map path '{path}' with i32 value"
+                    ));
+                }
+                return Err(format!(
+                    "{target} requires map path '{path}' with error or drop_newest policy"
+                ));
+            }
+            TypedCollectionKind::Set => {
+                if descriptor.key_type != Some(TYPE_ID_I32) {
+                    return Err(format!("{target} requires set path '{path}' with i32 key"));
+                }
+                return Err(format!(
+                    "{target} requires set path '{path}' with error or drop_newest policy"
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "{target} requires {} path '{path}' with i32 payload",
+                    operation.collection_kind().as_str(),
+                ));
+            }
+        }
     }
 
-    if let Some((argument_index, argument_name)) = operation.payload_argument() {
+    for (argument_index, argument_name) in operation.argument_specs() {
         let value_type = semantic_expression_type(&args[argument_index], context, local_types)
             .ok_or_else(|| {
                 format!(
@@ -2470,8 +2577,7 @@ fn analyze_typed_collection_operation(
             .and_then(|first| exact_typed_collection_path(first, context, local_types))
             .filter(|(path, descriptor)| {
                 !locals.contains(root_name(path))
-                    && descriptor.kind == operation.collection_kind()
-                    && descriptor.element_type == Some(TYPE_ID_I32)
+                    && typed_collection_descriptor_supports_operation(operation, descriptor)
             })
     } else {
         None
@@ -2520,6 +2626,56 @@ fn analyze_typed_collection_operation(
                 effects.insert_read(format!("{path}.count"));
             }
             TypedCollectionOperation::StablePoolCapacity => {}
+            TypedCollectionOperation::MapPut => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.occupied[*]"));
+                effects.insert_read(format!("{path}.keys[*]"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.occupied[*]"));
+                effects.insert_write(format!("{path}.keys[*]"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::MapGet => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.occupied[*]"));
+                effects.insert_read(format!("{path}.keys[*]"));
+                effects.insert_read(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::MapContains => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.occupied[*]"));
+                effects.insert_read(format!("{path}.keys[*]"));
+            }
+            TypedCollectionOperation::MapRemove => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.occupied[*]"));
+                effects.insert_read(format!("{path}.keys[*]"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.occupied[*]"));
+                effects.insert_write(format!("{path}.keys[*]"));
+                effects.insert_write(format!("{path}.values[*]"));
+            }
+            TypedCollectionOperation::SetAdd => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.occupied[*]"));
+                effects.insert_read(format!("{path}.keys[*]"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.occupied[*]"));
+                effects.insert_write(format!("{path}.keys[*]"));
+            }
+            TypedCollectionOperation::SetContains => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.occupied[*]"));
+                effects.insert_read(format!("{path}.keys[*]"));
+            }
+            TypedCollectionOperation::SetRemove => {
+                effects.insert_read(format!("{path}.count"));
+                effects.insert_read(format!("{path}.occupied[*]"));
+                effects.insert_read(format!("{path}.keys[*]"));
+                effects.insert_write(format!("{path}.count"));
+                effects.insert_write(format!("{path}.occupied[*]"));
+                effects.insert_write(format!("{path}.keys[*]"));
+            }
             TypedCollectionOperation::QueuePush => {
                 effects.insert_read(format!("{path}.count"));
                 effects.insert_read(format!("{path}.head"));
@@ -3599,6 +3755,41 @@ mod tests {
         build_context(files, &[], types).expect("typed ring buffer analysis context")
     }
 
+    fn typed_map_set_fixture(extra: &str) -> (TypeTable, Vec<SourceFile>) {
+        let source = format!(
+            "global entries: map<i32, i32, 2, error>;\nglobal dropped_entries: map<i32, i32, 2, drop_newest>;\nglobal empty_entries: map<i32, i32, 0, error>;\nglobal value_floats: map<i32, f32, 2, error>;\nglobal wide_keys: map<u32, i32, 2, error>;\nglobal members: set<i32, 2, error>;\nglobal dropped_members: set<i32, 2, drop_newest>;\nglobal empty_members: set<i32, 0, drop_newest>;\nglobal wide_member_keys: set<u32, 2, error>;\nglobal actors: pool<i32, 2, error>;\n{extra}"
+        );
+        let mut types = TypeTable::new();
+        for type_name in [
+            "map<i32, i32, 2, error>",
+            "map<i32, i32, 2, drop_newest>",
+            "map<i32, i32, 0, error>",
+            "map<i32, f32, 2, error>",
+            "map<u32, i32, 2, error>",
+            "set<i32, 2, error>",
+            "set<i32, 2, drop_newest>",
+            "set<i32, 0, drop_newest>",
+            "set<u32, 2, error>",
+            "pool<i32, 2, error>",
+        ] {
+            types
+                .resolve_or_intern(type_name)
+                .expect("typed map/set fixture type");
+        }
+        let file = SourceFile {
+            path: "map_set_semantics.stasis".to_string(),
+            content: source.clone(),
+            original_content: source,
+            hash: 0,
+            functions: Vec::new(),
+        };
+        (types, vec![file])
+    }
+
+    fn map_set_context<'a>(types: &'a TypeTable, files: &[SourceFile]) -> AnalysisContext<'a> {
+        build_context(files, &[], types).expect("typed map/set analysis context")
+    }
+
     fn pool_call(target: &str, args: Vec<SimpleExpr>) -> SimpleExpr {
         SimpleExpr::Call {
             target: target.to_string(),
@@ -3649,6 +3840,262 @@ mod tests {
             message.contains(expected),
             "expected diagnostic containing {expected:?}, got {message}"
         );
+    }
+
+    #[test]
+    fn typed_map_and_set_operations_have_fixed_return_types_and_explicit_effects() {
+        let (types, files) = typed_map_set_fixture("");
+        let context = map_set_context(&types, &files);
+        let local_types = BTreeMap::new();
+        let locals = BTreeSet::new();
+        let aliases = BTreeMap::new();
+        let operations = [
+            (
+                "map_put",
+                vec![
+                    SimpleExpr::Identifier("entries".to_string()),
+                    SimpleExpr::Int(1),
+                    SimpleExpr::Int(7),
+                ],
+                TYPE_ID_BOOL,
+                vec!["entries.count", "entries.keys[*]", "entries.occupied[*]"],
+                vec![
+                    "entries.count",
+                    "entries.keys[*]",
+                    "entries.occupied[*]",
+                    "entries.values[*]",
+                ],
+            ),
+            (
+                "map_get",
+                vec![
+                    SimpleExpr::Identifier("entries".to_string()),
+                    SimpleExpr::Int(1),
+                ],
+                TYPE_ID_I32,
+                vec![
+                    "entries.count",
+                    "entries.keys[*]",
+                    "entries.occupied[*]",
+                    "entries.values[*]",
+                ],
+                Vec::<&str>::new(),
+            ),
+            (
+                "map_contains",
+                vec![
+                    SimpleExpr::Identifier("entries".to_string()),
+                    SimpleExpr::Int(1),
+                ],
+                TYPE_ID_BOOL,
+                vec!["entries.count", "entries.keys[*]", "entries.occupied[*]"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "map_remove",
+                vec![
+                    SimpleExpr::Identifier("entries".to_string()),
+                    SimpleExpr::Int(1),
+                ],
+                TYPE_ID_BOOL,
+                vec!["entries.count", "entries.keys[*]", "entries.occupied[*]"],
+                vec![
+                    "entries.count",
+                    "entries.keys[*]",
+                    "entries.occupied[*]",
+                    "entries.values[*]",
+                ],
+            ),
+            (
+                "set_add",
+                vec![
+                    SimpleExpr::Identifier("members".to_string()),
+                    SimpleExpr::Int(1),
+                ],
+                TYPE_ID_BOOL,
+                vec!["members.count", "members.keys[*]", "members.occupied[*]"],
+                vec!["members.count", "members.keys[*]", "members.occupied[*]"],
+            ),
+            (
+                "set_contains",
+                vec![
+                    SimpleExpr::Identifier("members".to_string()),
+                    SimpleExpr::Int(1),
+                ],
+                TYPE_ID_BOOL,
+                vec!["members.count", "members.keys[*]", "members.occupied[*]"],
+                Vec::<&str>::new(),
+            ),
+            (
+                "set_remove",
+                vec![
+                    SimpleExpr::Identifier("members".to_string()),
+                    SimpleExpr::Int(1),
+                ],
+                TYPE_ID_BOOL,
+                vec!["members.count", "members.keys[*]", "members.occupied[*]"],
+                vec!["members.count", "members.keys[*]", "members.occupied[*]"],
+            ),
+        ];
+
+        for (target, args, expected_type, expected_reads, expected_writes) in operations {
+            let expression = pool_call(target, args);
+            assert_eq!(
+                expression_type(&expression, &context, &local_types, &aliases),
+                Some(expected_type),
+                "{target} return type"
+            );
+            validate_expression_access(&expression, &context, &local_types)
+                .expect("valid typed map/set operation");
+            let mut effects = EffectSets::default();
+            analyze_expression(
+                &expression,
+                &context,
+                &locals,
+                &local_types,
+                &aliases,
+                &mut effects,
+            );
+            assert_eq!(
+                effects.reads.iter().map(String::as_str).collect::<Vec<_>>(),
+                expected_reads,
+                "{target} reads"
+            );
+            assert_eq!(
+                effects
+                    .writes
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                expected_writes,
+                "{target} writes"
+            );
+            assert!(effects.calls.is_empty(), "{target} became an internal call");
+            assert!(effects.host_calls.is_empty(), "{target} leaked a host call");
+            assert!(
+                effects.host_effects.is_empty(),
+                "{target} leaked a host capability"
+            );
+        }
+
+        for (target, path, arity) in [
+            ("map_put", "empty_entries", 3),
+            ("map_get", "empty_entries", 2),
+            ("map_contains", "empty_entries", 2),
+            ("map_remove", "empty_entries", 2),
+            ("set_add", "empty_members", 2),
+            ("set_contains", "empty_members", 2),
+            ("set_remove", "empty_members", 2),
+        ] {
+            let mut args = vec![SimpleExpr::Identifier(path.to_string())];
+            while args.len() < arity {
+                args.push(SimpleExpr::Int(1));
+            }
+            typed_collection_operation(target, &args, &context, &local_types)
+                .expect("zero-capacity map/set operation must be valid")
+                .expect("map/set operation should be compiler-owned");
+        }
+    }
+
+    #[test]
+    fn typed_map_and_set_operations_require_exact_i32_persistent_paths() {
+        let (types, files) = typed_map_set_fixture("");
+        let context = map_set_context(&types, &files);
+        let mut local_types = BTreeMap::new();
+        local_types.insert(
+            "entries".to_string(),
+            types
+                .resolve("map<i32, i32, 2, error>")
+                .expect("map type id"),
+        );
+
+        let local_error = typed_collection_operation(
+            "map_get",
+            &[
+                SimpleExpr::Identifier("entries".to_string()),
+                SimpleExpr::Int(1),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect_err("local map must not be a persistent path");
+        assert!(local_error.contains("exact persistent typed collection path"));
+
+        local_types.clear();
+        for (target, path, expected) in [
+            (
+                "map_get",
+                "entries.keys",
+                "exact persistent typed collection path",
+            ),
+            ("map_get", "actors", "requires persistent map path"),
+            ("map_get", "wide_keys", "with i32 key"),
+            ("map_get", "value_floats", "with i32 value"),
+            ("set_contains", "wide_member_keys", "with i32 key"),
+            ("set_contains", "entries", "requires persistent set path"),
+        ] {
+            let error = typed_collection_operation(
+                target,
+                &[SimpleExpr::Identifier(path.to_string()), SimpleExpr::Int(1)],
+                &context,
+                &local_types,
+            )
+            .expect_err("invalid map/set path must be rejected");
+            assert!(error.contains(expected), "{target} {path}: {error}");
+        }
+
+        for (target, args, expected) in [
+            (
+                "map_put",
+                vec![
+                    SimpleExpr::Identifier("entries".to_string()),
+                    SimpleExpr::Int(1),
+                ],
+                "map_put expects 3 arguments",
+            ),
+            (
+                "map_put",
+                vec![
+                    SimpleExpr::Identifier("entries".to_string()),
+                    SimpleExpr::Bool(true),
+                    SimpleExpr::Int(1),
+                ],
+                "map_put key argument",
+            ),
+            (
+                "map_put",
+                vec![
+                    SimpleExpr::Identifier("entries".to_string()),
+                    SimpleExpr::Int(1),
+                    SimpleExpr::Bool(true),
+                ],
+                "map_put value argument",
+            ),
+            (
+                "set_add",
+                vec![
+                    SimpleExpr::Identifier("members".to_string()),
+                    SimpleExpr::Bool(true),
+                ],
+                "set_add key argument",
+            ),
+        ] {
+            let error = typed_collection_operation(target, &args, &context, &local_types)
+                .expect_err("invalid map/set operation must be rejected");
+            assert!(error.contains(expected), "{target}: {error}");
+        }
+
+        assert!(typed_collection_operation(
+            "module.map_get",
+            &[
+                SimpleExpr::Identifier("entries".to_string()),
+                SimpleExpr::Int(1),
+            ],
+            &context,
+            &local_types,
+        )
+        .expect("qualified name should be treated as an ordinary target")
+        .is_none());
     }
 
     #[test]

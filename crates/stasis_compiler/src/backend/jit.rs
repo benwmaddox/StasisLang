@@ -5156,6 +5156,81 @@ function main(): i32 {
     }
 
     #[test]
+    fn typed_map_and_set_jit_storage_plan_provisions_exact_lanes() {
+        for kind in ["map", "set"] {
+            for policy in ["error", "drop_newest"] {
+                for capacity in [3_u32, 0_u32] {
+                    let mut process = JitProcess::new();
+                    let declaration = match kind {
+                        "map" => format!("global collection: map<i32, i32, {capacity}, {policy}>;"),
+                        "set" => format!("global collection: set<i32, {capacity}, {policy}>;"),
+                        _ => unreachable!(),
+                    };
+                    process.upsert_file(
+                        "typed_map_set_storage.stasis",
+                        format!("{declaration}\nfunction main(): i32 {{ return 0; }}\n"),
+                    );
+                    process.compile().expect("typed map/set JIT compile");
+
+                    let snapshot = process.program_snapshot().expect("typed map/set snapshot");
+                    let descriptor = snapshot
+                        .typed_collection_descriptors()
+                        .get("collection")
+                        .expect("typed map/set descriptor");
+                    assert_eq!(
+                        descriptor.canonical_type_name(snapshot.types()),
+                        match kind {
+                            "map" => format!("map<i32, i32, {capacity}, {policy}>"),
+                            "set" => format!("set<i32, {capacity}, {policy}>"),
+                            _ => unreachable!(),
+                        }
+                    );
+
+                    let bindings = build_direct_storage_bindings(
+                        &snapshot.analysis.global_path_types,
+                        &snapshot.analysis.collection_infos,
+                        snapshot.typed_collection_descriptors(),
+                        snapshot.types(),
+                        false,
+                    )
+                    .expect("typed map/set JIT direct storage plan");
+                    assert!(bindings.scalars.contains_key("collection.count"));
+                    assert_eq!(bindings.scalars.len(), 1);
+
+                    let expected_arrays: &[(&str, u8)] = match kind {
+                        "map" => &[("occupied", 1), ("keys", 4), ("values", 4)],
+                        "set" => &[("occupied", 1), ("keys", 4)],
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(bindings.arrays.len(), expected_arrays.len());
+                    for (field, storage_bytes) in expected_arrays {
+                        let lane = bindings
+                            .arrays
+                            .get(&(String::from("collection"), String::from(*field)))
+                            .unwrap_or_else(|| panic!("missing {kind} {field} lane"));
+                        assert_eq!(lane.static_len, Some(capacity as usize));
+                        assert_eq!(lane.storage_bytes, *storage_bytes);
+                        let storage_kind = if *storage_bytes == 1 {
+                            stasis_dynload::JitStorageKind::U8
+                        } else {
+                            stasis_dynload::JitStorageKind::I32
+                        };
+                        assert_eq!(
+                            stasis_dynload::direct_array_storage_slot_len_for_test(
+                                storage_kind,
+                                hash_global_path("collection"),
+                                crate::backend::emit::hash_foreach_field_suffix(field),
+                            ),
+                            Some(capacity as usize),
+                            "JIT provisioned {kind} {field} lane must retain descriptor capacity"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn typed_queue_jit_storage_plan_provisions_metadata_and_values_lanes() {
         for policy in ["error", "drop_newest", "overwrite_oldest"] {
             for capacity in [2_u32, 0_u32] {
@@ -5698,6 +5773,382 @@ function stable_zero_run(): i32 {
                 stasis_dynload::JitStorageKind::I32,
                 hash_global_path("typed_stable_zero_exec_147"),
                 crate::backend::emit::hash_foreach_field_suffix("values"),
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn typed_map_and_set_operations_execute_with_holes_duplicates_and_zero_capacity() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&[
+            "map_seed".to_string(),
+            "map_update_full".to_string(),
+            "map_missing".to_string(),
+            "map_remove_run".to_string(),
+            "map_reuse".to_string(),
+            "map_drop_run".to_string(),
+            "map_zero_run".to_string(),
+            "set_seed".to_string(),
+            "set_full".to_string(),
+            "set_remove_run".to_string(),
+            "set_reuse".to_string(),
+            "set_drop_run".to_string(),
+            "set_zero_run".to_string(),
+        ]);
+        process.upsert_file(
+            "typed_map_set_execution.stasis",
+            r#"global typed_map_error_exec_147: map<i32, i32, 3, error>;
+global typed_map_drop_exec_147: map<i32, i32, 3, drop_newest>;
+global typed_map_zero_exec_147: map<i32, i32, 0, drop_newest>;
+global typed_set_error_exec_147: set<i32, 3, error>;
+global typed_set_drop_exec_147: set<i32, 3, drop_newest>;
+global typed_set_zero_exec_147: set<i32, 0, drop_newest>;
+function map_seed(): i32 {
+    map_put(typed_map_error_exec_147, 1, 10);
+    map_put(typed_map_error_exec_147, 2, 20);
+    map_put(typed_map_error_exec_147, 3, 30);
+    return map_get(typed_map_error_exec_147, 2);
+}
+function map_update_full(): i32 {
+    map_put(typed_map_error_exec_147, 2, 25);
+    map_put(typed_map_error_exec_147, 4, 40);
+    return map_get(typed_map_error_exec_147, 2) * 1000
+        + map_get(typed_map_error_exec_147, 4);
+}
+function map_missing(): i32 {
+    let result: i32 = map_get(typed_map_error_exec_147, 99);
+    if (map_contains(typed_map_error_exec_147, 99)) { result += 100; }
+    if (map_contains(typed_map_error_exec_147, 2)) { result += 10; }
+    return result;
+}
+function map_remove_run(): i32 {
+    if (map_remove(typed_map_error_exec_147, 2)) { return 1; }
+    return 0;
+}
+function map_reuse(): i32 {
+    map_put(typed_map_error_exec_147, 4, 40);
+    return map_get(typed_map_error_exec_147, 4);
+}
+function map_drop_run(): i32 {
+    map_put(typed_map_drop_exec_147, 1, 10);
+    map_put(typed_map_drop_exec_147, 2, 20);
+    map_put(typed_map_drop_exec_147, 3, 30);
+    map_put(typed_map_drop_exec_147, 2, 25);
+    map_put(typed_map_drop_exec_147, 4, 40);
+    return map_get(typed_map_drop_exec_147, 2) * 100 + map_get(typed_map_drop_exec_147, 4);
+}
+function map_zero_run(): i32 {
+    map_put(typed_map_zero_exec_147, 1, 7);
+    map_remove(typed_map_zero_exec_147, 1);
+    let result: i32 = map_get(typed_map_zero_exec_147, 1);
+    if (map_contains(typed_map_zero_exec_147, 1)) { result += 100; }
+    return result;
+}
+function set_seed(): i32 {
+    set_add(typed_set_error_exec_147, 1);
+    set_add(typed_set_error_exec_147, 2);
+    set_add(typed_set_error_exec_147, 3);
+    set_add(typed_set_error_exec_147, 2);
+    if (set_contains(typed_set_error_exec_147, 2)) { return 1; }
+    return 0;
+}
+function set_full(): i32 {
+    set_add(typed_set_error_exec_147, 4);
+    if (set_contains(typed_set_error_exec_147, 4)) { return 1; }
+    return 0;
+}
+function set_remove_run(): i32 {
+    if (set_remove(typed_set_error_exec_147, 2)) { return 1; }
+    return 0;
+}
+function set_reuse(): i32 {
+    set_add(typed_set_error_exec_147, 4);
+    if (set_contains(typed_set_error_exec_147, 4)) { return 1; }
+    return 0;
+}
+function set_drop_run(): i32 {
+    set_add(typed_set_drop_exec_147, 1);
+    set_add(typed_set_drop_exec_147, 2);
+    set_add(typed_set_drop_exec_147, 3);
+    set_add(typed_set_drop_exec_147, 4);
+    if (set_contains(typed_set_drop_exec_147, 4)) { return 1; }
+    return 0;
+}
+function set_zero_run(): i32 {
+    set_add(typed_set_zero_exec_147, 1);
+    set_remove(typed_set_zero_exec_147, 1);
+    if (set_contains(typed_set_zero_exec_147, 1)) { return 100; }
+    return 0;
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("typed map/set operation JIT compile");
+
+        assert_eq!(
+            process.read_i32_global_path("typed_map_error_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_set_error_exec_147.count"),
+            0
+        );
+        for path in ["typed_map_error_exec_147", "typed_set_error_exec_147"] {
+            assert_eq!(
+                process
+                    .state_memory_report(&BTreeMap::new(), u64::MAX)
+                    .expect("typed map/set initial memory report")
+                    .largest_pools
+                    .iter()
+                    .find(|pool| pool.path == path)
+                    .and_then(|pool| pool.active_count),
+                Some(0),
+                "initial active count for {path}"
+            );
+        }
+
+        assert_eq!(process.execute_i32_noarg_by_name("map_seed").unwrap(), 20);
+        assert_eq!(
+            process.read_i32_global_path("typed_map_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process.global_collection_capacity("typed_map_error_exec_147"),
+            Some(3)
+        );
+        assert_eq!(
+            process.global_collection_field_type("typed_map_error_exec_147", "keys"),
+            Some("i32")
+        );
+        assert_eq!(
+            process.global_collection_field_type("typed_map_error_exec_147", "values"),
+            Some("i32")
+        );
+        assert_eq!(
+            process
+                .state_memory_report(&BTreeMap::new(), u64::MAX)
+                .expect("full map memory report")
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_map_error_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(3)
+        );
+        for (index, (key, value)) in [(1, 10), (2, 20), (3, 30)].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_map_error_exec_147",
+                        "occupied",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::U8(1)
+            );
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_map_error_exec_147",
+                        "keys",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(key)
+            );
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_map_error_exec_147",
+                        "values",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(value)
+            );
+        }
+
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("map_update_full")
+                .unwrap(),
+            25_000,
+            "existing key updates even when map is full; new key is rejected"
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_map_error_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(25)
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("map_missing").unwrap(),
+            10,
+            "missing map get is zero and contains distinguishes a present key"
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("map_remove_run").unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_map_error_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process
+                .state_memory_report(&BTreeMap::new(), u64::MAX)
+                .expect("reduced map memory report")
+                .largest_pools
+                .iter()
+                .find(|pool| pool.path == "typed_map_error_exec_147")
+                .and_then(|pool| pool.active_count),
+            Some(2)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_map_error_exec_147", "occupied", 1)
+                .unwrap(),
+            JitScalarValue::U8(0)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_map_error_exec_147", "keys", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_map_error_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(process.execute_i32_noarg_by_name("map_reuse").unwrap(), 40);
+        assert_eq!(
+            process.read_i32_global_path("typed_map_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_map_error_exec_147", "keys", 1)
+                .unwrap(),
+            JitScalarValue::I32(4)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_map_error_exec_147", "values", 1)
+                .unwrap(),
+            JitScalarValue::I32(40)
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("map_drop_run").unwrap(),
+            2_500
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_map_drop_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("map_zero_run").unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_map_zero_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::U8,
+                hash_global_path("typed_map_zero_exec_147"),
+                crate::backend::emit::hash_foreach_field_suffix("occupied"),
+            ),
+            Some(0)
+        );
+
+        assert_eq!(process.execute_i32_noarg_by_name("set_seed").unwrap(), 1);
+        assert_eq!(
+            process.read_i32_global_path("typed_set_error_exec_147.count"),
+            3
+        );
+        for (index, key) in [1, 2, 3].into_iter().enumerate() {
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_set_error_exec_147",
+                        "occupied",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::U8(1)
+            );
+            assert_eq!(
+                process
+                    .read_global_collection_scalar(
+                        "typed_set_error_exec_147",
+                        "keys",
+                        index as i32,
+                    )
+                    .unwrap(),
+                JitScalarValue::I32(key)
+            );
+        }
+        assert_eq!(process.execute_i32_noarg_by_name("set_full").unwrap(), 0);
+        assert_eq!(
+            process.read_i32_global_path("typed_set_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("set_remove_run").unwrap(),
+            1
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_set_error_exec_147.count"),
+            2
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_set_error_exec_147", "occupied", 1)
+                .unwrap(),
+            JitScalarValue::U8(0)
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_set_error_exec_147", "keys", 1)
+                .unwrap(),
+            JitScalarValue::I32(0)
+        );
+        assert_eq!(process.execute_i32_noarg_by_name("set_reuse").unwrap(), 1);
+        assert_eq!(
+            process.read_i32_global_path("typed_set_error_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process
+                .read_global_collection_scalar("typed_set_error_exec_147", "keys", 1)
+                .unwrap(),
+            JitScalarValue::I32(4)
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("set_drop_run").unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_set_drop_exec_147.count"),
+            3
+        );
+        assert_eq!(
+            process.execute_i32_noarg_by_name("set_zero_run").unwrap(),
+            0
+        );
+        assert_eq!(
+            process.read_i32_global_path("typed_set_zero_exec_147.count"),
+            0
+        );
+        assert_eq!(
+            stasis_dynload::direct_array_storage_slot_len_for_test(
+                stasis_dynload::JitStorageKind::U8,
+                hash_global_path("typed_set_zero_exec_147"),
+                crate::backend::emit::hash_foreach_field_suffix("occupied"),
             ),
             Some(0)
         );

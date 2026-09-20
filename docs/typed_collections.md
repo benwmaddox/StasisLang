@@ -11,16 +11,18 @@ state layout and executable operation surface currently support persistent
 global `pool<i32, N, error|drop_newest>`,
 `stable_pool<i32, N, error|drop_newest>`, and
 `queue<i32, N, error|drop_newest|overwrite_oldest>`, and
-`ring_buffer<i32, N, error|drop_newest|overwrite_oldest>` values. Other
+`ring_buffer<i32, N, error|drop_newest|overwrite_oldest>`,
+`map<i32, i32, N, error|drop_newest>`, and
+`set<i32, N, error|drop_newest>` values. Other
 collection kinds and payload types are rejected at the production layout
 boundary instead of falling back to nominal scalar storage. Pool, stable-pool,
-queue, and ring-buffer operations lower through the same direct-storage emitter
-for JIT and native AOT, and their metadata/payload lanes are exposed through
-program snapshots and state inspection.
+queue, ring-buffer, map, and set operations lower through the same direct-storage
+emitter for JIT and native AOT, and their metadata/payload lanes are exposed
+through program snapshots and state inspection.
 
 The remaining operation descriptions in this document are the normative target
-contract for task #147. Map, set, priority-queue, grid, and bitset operations
-are not executable yet. Structured overflow telemetry and migration between
+contract for task #147. Priority-queue, grid, and bitset operations are not
+executable yet. Structured overflow telemetry and migration between
 changed descriptors also remain pending. The current executable slice includes:
 
 ```stasis
@@ -39,7 +41,7 @@ function enqueue_event(value: i32): bool {
 ```
 
 The parser retains the ordinary call and indexed-path syntax. Current pool,
-stable-pool, queue, and ring-buffer lowering and later collection slices
+stable-pool, queue, ring-buffer, map, and set lowering and later collection slices
 resolve compiler-owned operations by the collection descriptor. `src/stdlib`
 may expose thin declarations for future operations, but it does not define
 another backing container, generic push helper, aggregate return type, or
@@ -119,10 +121,19 @@ index helper returns `-1` when empty or out of range. An empty scalar peek
 returns the scalar zero value and records a bounded empty-read diagnostic; it
 does not read payload storage.
 
-Map operations are `map_put`, `map_get`, `map_contains`, and `map_remove`.
-Set operations are `set_add`, `set_contains`, and `set_remove`. Both scan
-integer keys linearly, iterate occupied slots in ascending physical order, and
-reuse the lowest free slot. Grid access is `grid_get(x, y)`, `grid_set(x, y,
+The executable i32 map operations are
+`map_put(collection, key, value) -> bool`, `map_get(collection, key) -> i32`,
+`map_contains(collection, key) -> bool`, and
+`map_remove(collection, key) -> bool`. Updating an existing key succeeds even
+when the map is full. A missing `map_get` returns zero; `map_contains`
+distinguishes that result from a stored zero. The executable i32 set operations
+are `set_add(collection, key) -> bool`,
+`set_contains(collection, key) -> bool`, and
+`set_remove(collection, key) -> bool`. Adding an existing key is an idempotent
+success. Both scan keys linearly, reject corrupt count/occupancy or duplicate-key
+metadata without writing, iterate occupied slots in ascending physical order,
+and reuse the lowest free slot. Removal zeros the released key and map value.
+Grid access is `grid_get(x, y)`, `grid_set(x, y,
 value)`, or `grid_at(x, y)` in row-major `y*W+x` order. Out-of-range grid
 access is write-free. Bit index zero is the least-significant bit of word zero;
 unused tail bits are always masked to zero.
