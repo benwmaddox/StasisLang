@@ -295,6 +295,7 @@ pub(crate) fn analyze_host_frame_input_usage_with_functions(
         .copied()
         .map(|function_id| (function_id, FunctionInputState::default()))
         .collect::<BTreeMap<_, _>>();
+    let mut return_collections = BTreeMap::<FunctionId, BTreeSet<CollectionOrigin>>::new();
     let mut pending = reachable_function_ids.iter().copied().collect::<Vec<_>>();
 
     while let Some(function_id) = pending.pop() {
@@ -305,15 +306,25 @@ pub(crate) fn analyze_host_frame_input_usage_with_functions(
             continue;
         };
         let state = states.get(&function_id).cloned().unwrap_or_default();
-        let mut environment = LocalInputEnvironment::from_function(function, &state);
+        let mut environment =
+            LocalInputEnvironment::from_function(function, &state, &return_collections, functions);
         let mut calls = Vec::new();
+        let mut returned_collections = BTreeSet::new();
         visit_statements_with_environment(
             &hir.statements,
             constants,
             &mut environment,
             &mut usage,
             &mut calls,
+            &mut returned_collections,
         );
+
+        let function_returns = return_collections.entry(function_id).or_default();
+        let previous_return_count = function_returns.len();
+        function_returns.extend(returned_collections);
+        if function_returns.len() != previous_return_count {
+            pending.extend(reachable_function_ids.iter().copied());
+        }
 
         for call in calls {
             for callee in matching_callees(&call.target, call.args.len(), functions) {
@@ -375,6 +386,7 @@ struct FunctionInputState {
 #[derive(Debug, Clone, Default)]
 struct LocalInputEnvironment {
     collections: BTreeMap<String, BTreeSet<CollectionOrigin>>,
+    call_returns: BTreeMap<(String, usize), BTreeSet<CollectionOrigin>>,
     integer_values: BTreeMap<String, Option<BTreeSet<i64>>>,
     integer_intervals: BTreeMap<String, Option<IntegerInterval>>,
 }
@@ -395,7 +407,12 @@ impl IntegerInterval {
 }
 
 impl LocalInputEnvironment {
-    fn from_function(function: &FunctionMeta, state: &FunctionInputState) -> Self {
+    fn from_function(
+        function: &FunctionMeta,
+        state: &FunctionInputState,
+        return_collections: &BTreeMap<FunctionId, BTreeSet<CollectionOrigin>>,
+        functions: &[FunctionMeta],
+    ) -> Self {
         let mut environment = Self::default();
         for parameter in &function.param_names {
             if let Some(origins) = state.collections.get(parameter) {
@@ -407,6 +424,29 @@ impl LocalInputEnvironment {
                 environment
                     .integer_values
                     .insert(parameter.clone(), values.clone());
+            }
+        }
+        for callee in functions {
+            let Some(origins) = return_collections
+                .get(&callee.id)
+                .filter(|origins| !origins.is_empty())
+            else {
+                continue;
+            };
+            environment
+                .call_returns
+                .entry((callee.name.clone(), callee.params.len()))
+                .or_default()
+                .extend(origins.iter().copied());
+            if !callee.module_alias.is_empty() {
+                environment
+                    .call_returns
+                    .entry((
+                        format!("{}.{}", callee.module_alias, callee.name),
+                        callee.params.len(),
+                    ))
+                    .or_default()
+                    .extend(origins.iter().copied());
             }
         }
         environment
@@ -447,6 +487,7 @@ fn visit_statements_with_environment(
     environment: &mut LocalInputEnvironment,
     usage: &mut HostFrameInputUsage,
     calls: &mut Vec<PendingCall>,
+    returned_collections: &mut BTreeSet<CollectionOrigin>,
 ) {
     for statement in statements {
         match statement {
@@ -507,6 +548,7 @@ fn visit_statements_with_environment(
                     &mut then_environment,
                     usage,
                     calls,
+                    returned_collections,
                 );
                 let mut else_environment = before.clone();
                 if let Some(else_statements) = else_statements {
@@ -516,6 +558,7 @@ fn visit_statements_with_environment(
                         &mut else_environment,
                         usage,
                         calls,
+                        returned_collections,
                     );
                 }
                 merge_environments(environment, &before, &then_environment, &else_environment);
@@ -532,6 +575,7 @@ fn visit_statements_with_environment(
                     environment,
                     usage,
                     calls,
+                    returned_collections,
                 );
                 let before = environment.clone();
                 let mut loop_environment = before.clone();
@@ -557,6 +601,7 @@ fn visit_statements_with_environment(
                     &mut loop_environment,
                     usage,
                     calls,
+                    returned_collections,
                 );
                 visit_statements_with_environment(
                     std::slice::from_ref(step),
@@ -564,6 +609,7 @@ fn visit_statements_with_environment(
                     &mut loop_environment,
                     usage,
                     calls,
+                    returned_collections,
                 );
                 merge_environments(environment, &before, &loop_environment, &before);
             }
@@ -597,11 +643,16 @@ fn visit_statements_with_environment(
                     &mut body_environment,
                     usage,
                     calls,
+                    returned_collections,
                 );
                 merge_environments(environment, &before, &body_environment, &before);
             }
-            SimpleStmt::Expr(expression) | SimpleStmt::Return(expression) => {
+            SimpleStmt::Expr(expression) => {
                 visit_expr_with_environment(expression, constants, environment, usage, calls)
+            }
+            SimpleStmt::Return(expression) => {
+                visit_expr_with_environment(expression, constants, environment, usage, calls);
+                returned_collections.extend(collection_origins(expression, environment));
             }
         }
     }
@@ -1027,17 +1078,22 @@ fn collection_origins(
     expression: &SimpleExpr,
     environment: &LocalInputEnvironment,
 ) -> BTreeSet<CollectionOrigin> {
-    let SimpleExpr::Identifier(path) = expression else {
-        return BTreeSet::new();
-    };
-    match path.as_str() {
-        "host_i32" => [CollectionOrigin::HostI32].into_iter().collect(),
-        "host_f32" => [CollectionOrigin::HostF32].into_iter().collect(),
-        _ => environment
-            .collections
-            .get(path)
+    match expression {
+        SimpleExpr::Identifier(path) => match path.as_str() {
+            "host_i32" => [CollectionOrigin::HostI32].into_iter().collect(),
+            "host_f32" => [CollectionOrigin::HostF32].into_iter().collect(),
+            _ => environment
+                .collections
+                .get(path)
+                .cloned()
+                .unwrap_or_default(),
+        },
+        SimpleExpr::Call { target, args } => environment
+            .call_returns
+            .get(&(target.clone(), args.len()))
             .cloned()
             .unwrap_or_default(),
+        _ => BTreeSet::new(),
     }
 }
 
@@ -1434,6 +1490,27 @@ mod tests {
             "global host_i32: i32[768]; global host_f32: f32[64];\n\\
              function read_at(values: i32[], index: i32): i32 { return values[index]; }\n\\
              function tick(): i32 { return read_at(host_i32, 32); }\n\\
+             function render(): void { return; }\n",
+        );
+        assert_eq!(
+            usage
+                .i32_fields()
+                .iter()
+                .map(|field| field.index)
+                .collect::<Vec<_>>(),
+            [32]
+        );
+        assert!(usage.f32_fields().is_empty());
+    }
+
+    #[test]
+    fn collection_returned_from_helper_preserves_host_origin() {
+        let usage = usage_for(
+            "global host_i32: i32[768]; global host_f32: f32[64];\n\\
+             function input(): i32[] { return host_i32; }\n\\
+             function forward(values: i32[]): i32[] { return values; }\n\\
+             function read_at(values: i32[], index: i32): i32 { return values[index]; }\n\\
+             function tick(): i32 { return read_at(forward(input()), 32); }\n\\
              function render(): void { return; }\n",
         );
         assert_eq!(

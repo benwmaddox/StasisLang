@@ -250,10 +250,7 @@ fn compact_effect_is_unsupported(
         "memory" | "graphics" | "audio" => {
             !compact_effect_has_safe_import(snapshot, function, capability)
         }
-        "platform" => !matches!(
-            function,
-            "print_i32" | "print_int" | "print_char" | "print_string"
-        ),
+        "platform" => !compact_platform_effect_has_safe_import(snapshot, function),
         "storage" | "network" | "nondeterministic" | "unknown" | "code_swap" => true,
         _ => true,
     }
@@ -344,10 +341,47 @@ fn compact_import_is_safe(import: &ProgramExternImport, capability: &str) -> boo
                         | "stasis_jit_audio_voice_set_volume_pan"
                         | "audio_release"
                         | "stasis_audio_release"
+                        | "stasis_jit_audio_release"
                 )
         }
         _ => false,
     }
+}
+
+fn compact_platform_effect_has_safe_import(snapshot: &ProgramSnapshot, function: &str) -> bool {
+    let unqualified = function.rsplit('.').next().unwrap_or(function);
+    let imports = snapshot
+        .extern_imports()
+        .iter()
+        .filter(|import| import.name == function || import.name == unqualified)
+        .collect::<Vec<_>>();
+    if imports.is_empty() {
+        return matches!(
+            unqualified,
+            "print_i32" | "print_int" | "print_char" | "print_string"
+        );
+    }
+    imports
+        .into_iter()
+        .all(|import| compact_print_import_is_safe(snapshot, import))
+}
+
+fn compact_print_import_is_safe(snapshot: &ProgramSnapshot, import: &ProgramExternImport) -> bool {
+    let parameter_type = import
+        .params
+        .first()
+        .and_then(|type_id| snapshot.type_info(*type_id))
+        .map(|type_info| type_info.name.as_str());
+    import.returns_void
+        && import.params.len() == 1
+        && matches!(
+            (import.name.as_str(), import.symbol.as_str(), parameter_type),
+            (
+                "print_i32" | "print_int" | "print_char",
+                "stasis_jit_print_i32",
+                Some("i32")
+            ) | ("print_string", "stasis_jit_print_string", Some("string"))
+        )
 }
 
 /// Metadata supplied by the host/compiler integration for a compact replay.
@@ -2618,6 +2652,7 @@ fn hash_value(hasher: &mut Sha256, path: &str, value: JitScalarValue) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stasis_compiler::frontend::types::TYPE_ID_F32;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -3359,6 +3394,55 @@ mod tests {
     }
 
     #[test]
+    fn compact_contract_requires_canonical_print_import_for_platform_effects() {
+        let _global_guard = crate::jit_test_support::lock();
+        let compile = |declaration: &str, tick: &str| {
+            let mut jit = JitProcess::new();
+            jit.upsert_file(
+                "main.stasis",
+                format!(
+                    "{declaration} function main(): i32 {{ return 0; }} \
+                     function tick(): i32 {{ {tick} }} \
+                     function render(): i32 {{ return 0; }}"
+                ),
+            );
+            jit.compile().expect("compile print effect fixture");
+            jit
+        };
+
+        let safe = compile(
+            "function @effects(platform)@extern(\"stasis_jit_print_i32\") print_i32(value: i32): void;",
+            "print_i32(1); return 0;",
+        );
+        validate_compact_replay_contract(&safe)
+            .expect("canonical print import must remain replay compatible");
+
+        let builtin = compile("", "print_int(1); return 0;");
+        validate_compact_replay_contract(&builtin)
+            .expect("ordinary builtin print aliases must remain replay compatible");
+
+        let wrong_parameter = ProgramExternImport {
+            name: "print_i32".to_string(),
+            symbol: "stasis_jit_print_i32".to_string(),
+            params: vec![TYPE_ID_F32],
+            return_type: 0,
+            returns_void: true,
+        };
+        assert!(!compact_print_import_is_safe(
+            safe.program_snapshot().expect("canonical print snapshot"),
+            &wrong_parameter
+        ));
+
+        let aliased_time = compile(
+            "function @effects(platform)@extern(\"stasis_get_time_ms\") print_i32(): i32;",
+            "return print_i32();",
+        );
+        let error = validate_compact_replay_contract(&aliased_time)
+            .expect_err("a print-named time import must reject compact replay");
+        assert!(error.contains("print_i32 (platform)"), "{error}");
+    }
+
+    #[test]
     fn compact_contract_defaults_to_rejecting_async_and_host_returning_effects() {
         let import = |name: &str,
                       symbol: &str,
@@ -3395,6 +3479,10 @@ mod tests {
         ));
         assert!(compact_import_is_safe(
             &import("fixture", "stasis_jit_audio_stop", 1, true),
+            "audio"
+        ));
+        assert!(compact_import_is_safe(
+            &import("audio_release", "stasis_jit_audio_release", 1, true),
             "audio"
         ));
         assert!(compact_import_is_safe(
