@@ -133,13 +133,19 @@ pub struct ProgramReplayStateSnapshot {
     pub unsupported_paths: Vec<String>,
     pub size_operation: String,
     pub write_operation: String,
+    pub restore_operation: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProgramReplayStateEntry {
+    /// `scalar` for one global value or `collection` for a field lane. This is
+    /// explicit because primitive collection lanes legitimately have an empty
+    /// `field`, so field emptiness cannot identify a scalar.
+    pub kind: String,
     /// The global scalar path, or the owning collection path for a field lane.
     pub path: String,
-    /// Empty for a scalar; otherwise the collection field/lane name.
+    /// Empty for a scalar and for primitive collection lanes; otherwise the
+    /// collection field/lane name.
     pub field: String,
     pub storage_type: String,
     pub offset: u64,
@@ -147,10 +153,11 @@ pub struct ProgramReplayStateEntry {
     pub element_bytes: u8,
 }
 
-pub const REPLAY_STATE_SNAPSHOT_ABI_VERSION: u32 = 1;
-pub const REPLAY_STATE_SNAPSHOT_SCHEMA: &str = "stasis.replay_state_snapshot.v1";
+pub const REPLAY_STATE_SNAPSHOT_ABI_VERSION: u32 = 2;
+pub const REPLAY_STATE_SNAPSHOT_SCHEMA: &str = "stasis.replay_state_snapshot.v2";
 pub const REPLAY_STATE_SNAPSHOT_SIZE_OPERATION: &str = "stasis_replay_state_snapshot_size";
 pub const REPLAY_STATE_SNAPSHOT_WRITE_OPERATION: &str = "stasis_replay_state_snapshot_write";
+pub const REPLAY_STATE_SNAPSHOT_RESTORE_OPERATION: &str = "stasis_replay_state_snapshot_restore";
 
 impl ProgramReplayStateSnapshot {
     pub fn supported(&self) -> bool {
@@ -179,6 +186,7 @@ fn build_replay_state_snapshot(layout: &StateLayout) -> Result<ProgramReplayStat
             continue;
         };
         entries.push(ProgramReplayStateEntry {
+            kind: "scalar".to_string(),
             path: scalar.path.clone(),
             field: String::new(),
             storage_type: scalar.storage_type_name().to_string(),
@@ -211,6 +219,7 @@ fn build_replay_state_snapshot(layout: &StateLayout) -> Result<ProgramReplayStat
                 u64::try_from(collection.capacity).unwrap_or(0),
             );
             entries.push(ProgramReplayStateEntry {
+                kind: "collection".to_string(),
                 path: collection.path.clone(),
                 field: field.field.clone(),
                 storage_type: field.storage_type_name().to_string(),
@@ -233,8 +242,9 @@ fn build_replay_state_snapshot(layout: &StateLayout) -> Result<ProgramReplayStat
     Ok(ProgramReplayStateSnapshot {
         schema: REPLAY_STATE_SNAPSHOT_SCHEMA.to_string(),
         abi_version: REPLAY_STATE_SNAPSHOT_ABI_VERSION,
-        // Generated native/Wasm operations have not landed yet. Keep this
-        // truthful until both backends expose the descriptor's byte stream.
+        // Keep target-neutral metadata conservative until each packaged target
+        // confirms that all three canonical operations are exported for this
+        // exact layout.
         support: "descriptor_only".to_string(),
         byte_order: "little_endian".to_string(),
         hash_scope: "simulation_after_tick".to_string(),
@@ -243,6 +253,7 @@ fn build_replay_state_snapshot(layout: &StateLayout) -> Result<ProgramReplayStat
         unsupported_paths,
         size_operation: REPLAY_STATE_SNAPSHOT_SIZE_OPERATION.to_string(),
         write_operation: REPLAY_STATE_SNAPSHOT_WRITE_OPERATION.to_string(),
+        restore_operation: REPLAY_STATE_SNAPSHOT_RESTORE_OPERATION.to_string(),
     })
 }
 
@@ -1588,6 +1599,38 @@ function render(): void {
         assert_eq!(jit.collections(), aot.collections());
         assert_eq!(jit.struct_field_type_ids(), aot.struct_field_type_ids());
         assert_eq!(jit.string_literals(), aot.string_literals());
+    }
+
+    #[test]
+    fn replay_snapshot_distinguishes_primitive_collections_from_scalars() {
+        let mut jit = JitProcess::new();
+        jit.upsert_file(
+            "main.stasis",
+            "global score: i32; global values: i32[2]; function main(): i32 { return score + values[0]; }",
+        );
+        jit.compile().expect("compile replay descriptor fixture");
+        let replay = jit
+            .program_snapshot()
+            .expect("snapshot")
+            .replay_compatibility();
+        let score = replay
+            .state_snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.path == "score")
+            .expect("score descriptor");
+        assert_eq!(score.kind, "scalar");
+        assert_eq!(score.field, "");
+        assert_eq!(score.element_count, 1);
+        let values = replay
+            .state_snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.path == "values")
+            .expect("values descriptor");
+        assert_eq!(values.kind, "collection");
+        assert_eq!(values.field, "");
+        assert_eq!(values.element_count, 2);
     }
 
     #[test]

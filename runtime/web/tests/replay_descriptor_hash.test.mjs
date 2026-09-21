@@ -13,13 +13,18 @@ const width = Object.freeze({ i32: 4, f32: 4, f64: 8, bool: 1, u8: 1, u16: 2, u3
 function descriptor(entries) {
   let offset = 0;
   const normalized = entries.map(entry => {
-    const result = { ...entry, offset, element_bytes: width[entry.storage_type] };
+    const result = {
+      kind: entry.kind ?? (entry.field === "" ? "scalar" : "collection"),
+      ...entry,
+      offset,
+      element_bytes: width[entry.storage_type],
+    };
     offset += result.element_count * result.element_bytes;
     return result;
   });
   return {
-    schema: "stasis.replay_state_snapshot.v1",
-    abi_version: 1,
+    schema: "stasis.replay_state_snapshot.v2",
+    abi_version: 2,
     support: "canonical_bytes",
     byte_order: "little_endian",
     hash_scope: "simulation_after_tick",
@@ -28,6 +33,7 @@ function descriptor(entries) {
     unsupported_paths: [],
     size_operation: "stasis_replay_state_snapshot_size",
     write_operation: "stasis_replay_state_snapshot_write",
+    restore_operation: "stasis_replay_state_snapshot_restore",
   };
 }
 
@@ -37,7 +43,7 @@ function oracle(entries, bytesByEntry) {
   for (const entry of entries) {
     const bytes = bytesByEntry.get(`${entry.path}\0${entry.field}`);
     for (let index = 0; index < entry.element_count; index += 1) {
-      const label = entry.field === "" ? entry.path : `${entry.path}[${index}].${entry.field}`;
+      const label = entry.kind === "scalar" ? entry.path : `${entry.path}[${index}].${entry.field}`;
       const labelBytes = Buffer.from(label, "utf8");
       const length = Buffer.alloc(8);
       length.writeBigUInt64LE(BigInt(labelBytes.length));
@@ -137,6 +143,31 @@ test("zero-capacity collection lanes are valid and contribute no labeled values"
     readEntryBytes: entry => bytesByEntry.get(`${entry.path}\0${entry.field}`),
   });
   assert.equal(adapter.hashState(), oracle(snapshot.entries, bytesByEntry));
+});
+
+test("primitive collection lanes remain distinct from scalars when their field name is empty", () => {
+  const snapshot = descriptor([
+    { path: "score", field: "", storage_type: "i32", element_count: 1 },
+    { kind: "collection", path: "values", field: "", storage_type: "i32", element_count: 2 },
+  ]);
+  const bytesByEntry = new Map([
+    ["score\0", Uint8Array.from([1, 0, 0, 0])],
+    ["values\0", Uint8Array.from([2, 0, 0, 0, 3, 0, 0, 0])],
+  ]);
+  const adapter = createDescriptorStateHashAdapter({
+    descriptor: snapshot,
+    readSnapshotBytes: () => Uint8Array.from([...bytesByEntry.get("score\0"), ...bytesByEntry.get("values\0")]),
+  });
+  assert.equal(adapter.hashState(), oracle(snapshot.entries, bytesByEntry));
+  let restored = null;
+  const restorer = createDescriptorInitialStateRestorer({
+    descriptor: snapshot,
+    writeSnapshotBytes: bytes => { restored = Uint8Array.from(bytes); return bytes.byteLength; },
+  });
+  restorer.restoreInitialState({ values: [
+    { location: { kind: "collection", path: "values", field: "", index: 1 }, value: { type_name: "i32", bits: "00000007" } },
+  ] });
+  assert.deepEqual([...restored], [0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0]);
 });
 
 test("descriptor reader must synchronously return exactly the advertised bytes", () => {

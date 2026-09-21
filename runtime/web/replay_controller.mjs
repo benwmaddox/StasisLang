@@ -75,9 +75,9 @@ const textBytes = value => {
   return value.length;
 };
 
-const text = (value, label, { hash = false, optional = false } = {}) => {
+const text = (value, label, { hash = false, optional = false, allowEmpty = false } = {}) => {
   if (optional && value === null) return null;
-  if (typeof value !== "string" || value.length === 0) fail(`${label} must be non-empty text`, "invalid_text");
+  if (typeof value !== "string" || (!allowEmpty && value.length === 0)) fail(`${label} must be non-empty text`, "invalid_text");
   if (textBytes(value) > WEB_REPLAY_LIMITS.maxTextBytes) fail(`${label} exceeds ${WEB_REPLAY_LIMITS.maxTextBytes} bytes`, "text_too_large");
   if (hash && !HASH_RE.test(value)) fail(`${label} must be lowercase 64-hex`, "invalid_hash");
   return value;
@@ -194,7 +194,7 @@ function decodeInitialState(value) {
       location = {
         kind: "collection",
         path: text(entry.location.path, `initial state entry ${index} collection path`),
-        field: text(entry.location.field, `initial state entry ${index} collection field`),
+        field: text(entry.location.field, `initial state entry ${index} collection field`, { allowEmpty: true }),
         index: integer(entry.location.index, `initial state entry ${index} collection index`, 0, 0x7fffffff),
       };
     } else fail(`initial state entry ${index} has unknown location kind`, "invalid_location");
@@ -449,9 +449,9 @@ const MAX_STATE_SNAPSHOT_BYTES = WEB_REPLAY_LIMITS.maxFileBytes;
 const MAX_STATE_ENTRIES = WEB_REPLAY_LIMITS.maxTicks;
 
 function decodeStateDescriptor(descriptor) {
-  checkKeys(descriptor, ["schema", "abi_version", "support", "byte_order", "hash_scope", "required_bytes", "entries", "unsupported_paths", "size_operation", "write_operation"]);
-  if (descriptor.schema !== "stasis.replay_state_snapshot.v1") fail("replay state descriptor schema is unsupported", "invalid_state_descriptor");
-  if (descriptor.abi_version !== 1) fail("replay state descriptor ABI version is unsupported", "invalid_state_descriptor");
+  checkKeys(descriptor, ["schema", "abi_version", "support", "byte_order", "hash_scope", "required_bytes", "entries", "unsupported_paths", "size_operation", "write_operation", "restore_operation"]);
+  if (descriptor.schema !== "stasis.replay_state_snapshot.v2") fail("replay state descriptor schema is unsupported", "invalid_state_descriptor");
+  if (descriptor.abi_version !== 2) fail("replay state descriptor ABI version is unsupported", "invalid_state_descriptor");
   if (descriptor.support !== "canonical_bytes") fail("replay state descriptor does not advertise canonical_bytes support", "unsupported_state_descriptor");
   if (descriptor.byte_order !== "little_endian") fail("replay state descriptor byte_order must be little_endian", "invalid_state_descriptor");
   if (descriptor.hash_scope !== HASH_SCOPE) fail(`replay state descriptor hash_scope must be ${HASH_SCOPE}`, "invalid_state_descriptor");
@@ -459,7 +459,7 @@ function decodeStateDescriptor(descriptor) {
   const entries = array(descriptor.entries, "replay state descriptor entries", MAX_STATE_ENTRIES);
   const unsupported = array(descriptor.unsupported_paths, "replay state descriptor unsupported_paths", MAX_STATE_ENTRIES);
   if (unsupported.length !== 0) fail("replay state descriptor contains unsupported paths", "unsupported_state_descriptor");
-  if (descriptor.size_operation !== "stasis_replay_state_snapshot_size" || descriptor.write_operation !== "stasis_replay_state_snapshot_write") {
+  if (descriptor.size_operation !== "stasis_replay_state_snapshot_size" || descriptor.write_operation !== "stasis_replay_state_snapshot_write" || descriptor.restore_operation !== "stasis_replay_state_snapshot_restore") {
     fail("replay state descriptor operation names are not canonical", "invalid_state_descriptor");
   }
   let expectedOffset = 0;
@@ -468,18 +468,20 @@ function decodeStateDescriptor(descriptor) {
   let previousCollectionField = null;
   let sawCollection = false;
   const normalized = entries.map((entry, index) => {
-    checkKeys(entry, ["path", "field", "storage_type", "offset", "element_count", "element_bytes"]);
+    checkKeys(entry, ["kind", "path", "field", "storage_type", "offset", "element_count", "element_bytes"]);
+    const kind = entry.kind;
+    if (kind !== "scalar" && kind !== "collection") fail(`state descriptor entry ${index} has invalid kind`, "invalid_state_descriptor");
     const path = text(entry.path, `state descriptor entry ${index} path`);
     const field = entry.field === "" ? "" : text(entry.field, `state descriptor entry ${index} field`);
     const storageType = text(entry.storage_type, `state descriptor entry ${index} storage_type`);
     const width = STATE_TYPE_BYTES[storageType];
     if (!width || STATE_TYPE_TAG[storageType] === undefined) fail(`state descriptor entry ${index} has unsupported type ${storageType}`, "unsupported_state_type");
     const offset = integer(entry.offset, `state descriptor entry ${index} offset`, 0, MAX_STATE_SNAPSHOT_BYTES);
-    const count = integer(entry.element_count, `state descriptor entry ${index} element_count`, field === "" ? 1 : 0, MAX_STATE_ENTRIES);
+    const count = integer(entry.element_count, `state descriptor entry ${index} element_count`, kind === "scalar" ? 1 : 0, MAX_STATE_ENTRIES);
     const elementBytes = integer(entry.element_bytes, `state descriptor entry ${index} element_bytes`, 1, 8);
     if (elementBytes !== width) fail(`state descriptor entry ${index} element_bytes does not match ${storageType}`, "state_width_mismatch");
-    if (field === "" && count !== 1) fail(`state descriptor scalar entry ${index} must have element_count=1`, "state_count_mismatch");
-    if (field === "") {
+    if (kind === "scalar" && (field !== "" || count !== 1)) fail(`state descriptor scalar entry ${index} must have an empty field and element_count=1`, "state_count_mismatch");
+    if (kind === "scalar") {
       if (sawCollection || (previousScalarPath !== null && path <= previousScalarPath)) {
         fail("state descriptor scalar entries must precede collections and have sorted unique paths", "state_order_mismatch");
       }
@@ -498,7 +500,7 @@ function decodeStateDescriptor(descriptor) {
     const end = offset + byteLength;
     if (!Number.isSafeInteger(end) || end > requiredBytes) fail(`state descriptor entry ${index} exceeds required_bytes`, "state_offset_mismatch");
     expectedOffset = end;
-    return Object.freeze({ path, field, storage_type: storageType, offset, element_count: count, element_bytes: width });
+    return Object.freeze({ kind, path, field, storage_type: storageType, offset, element_count: count, element_bytes: width });
   });
   if (expectedOffset !== requiredBytes) fail(`state descriptor required_bytes ${requiredBytes} does not equal contiguous entries ${expectedOffset}`, "state_offset_mismatch");
   return Object.freeze({ ...descriptor, required_bytes: requiredBytes, entries: Object.freeze(normalized), unsupported_paths: [] });
@@ -540,7 +542,7 @@ export function createDescriptorStateHashAdapter({ descriptor, readSnapshotBytes
           ? snapshot.subarray(entry.offset, entry.offset + byteLength)
           : exactStateBytes(readEntryBytes(entry), byteLength, `state descriptor entry ${entry.path}${entry.field ? `.${entry.field}` : ""}`);
         for (let index = 0; index < entry.element_count; index += 1) {
-          const label = entry.field === "" ? entry.path : `${entry.path}[${index}].${entry.field}`;
+          const label = entry.kind === "scalar" ? entry.path : `${entry.path}[${index}].${entry.field}`;
           const value = bytes.subarray(index * width, (index + 1) * width);
           validateStateValue(entry.storage_type, value, label);
           hasher.update(u64Le(utf8(label).byteLength));
@@ -579,7 +581,7 @@ export function createDescriptorInitialStateRestorer({ descriptor, writeSnapshot
   if (typeof writeSnapshotBytes !== "function") throw new TypeError("descriptor initial-state restorer requires writeSnapshotBytes(bytes)");
   const normalized = decodeStateDescriptor(descriptor);
   const locations = new Map(normalized.entries.map(entry => [
-    entry.field === "" ? `scalar\u0000${entry.path}` : `collection\u0000${entry.path}\u0000${entry.field}`,
+    entry.kind === "scalar" ? `scalar\u0000${entry.path}` : `collection\u0000${entry.path}\u0000${entry.field}`,
     entry,
   ]));
   return Object.freeze({

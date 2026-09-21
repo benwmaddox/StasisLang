@@ -5967,9 +5967,14 @@ fn web_runtime_config(
         };
         has("gfx_cmd_construction_reset") && has("gfx_cmd_construction_finish")
     }) as u8;
-    let replay_compatibility = process
+    let mut replay_compatibility = process
         .program_snapshot()
         .map(|snapshot| snapshot.replay_compatibility());
+    if process.replay_state_snapshot_supported() {
+        if let Some(compatibility) = replay_compatibility.as_mut() {
+            compatibility.state_snapshot.support = "canonical_bytes".to_string();
+        }
+    }
     let mut config = json!({
         "name": workspace.manifest.name,
         "strings": strings,
@@ -10848,7 +10853,7 @@ mod tests {
         assert_eq!(release["replayCompatibility"]["support"], "metadata_only");
         assert_eq!(
             release["replayCompatibility"]["state_snapshot"]["support"],
-            "descriptor_only"
+            "canonical_bytes"
         );
         let release_views = release["views"].as_object().expect("release views");
         assert!(!release_views.is_empty());

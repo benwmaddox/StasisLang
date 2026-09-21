@@ -18,10 +18,11 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 #[cfg(test)]
 use stasis::escape_mobile_c_string_literal;
 use stasis::{
-    mobile_aot_function_for, run_jit_tests_in_directory_with_session,
+    mobile_aot_function_for, replay_snapshot_bridge_can_emit,
+    run_jit_tests_in_directory_with_session,
     run_play_in_process_with_input_script_window_title_and_profile,
     run_play_in_process_with_replay, run_self_host_aot_cli_with_options, run_with_default_backend,
-    run_with_real_backend, write_mobile_aot_bindings_source_with_profile_and_assets,
+    run_with_real_backend, write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot,
     PlayProfileConfig, PlayReplayConfig, RunnerConfig, StasisTestRunSession,
 };
 use stasis_assets::{prepare_asset_bundle, DEFAULT_ASSET_MANIFEST_PATH};
@@ -1902,6 +1903,9 @@ fn write_mobile_aot_engine_bundle(
     let snapshot = process
         .program_snapshot()
         .ok_or_else(|| "mobile AOT compile produced no ProgramSnapshot".to_string())?;
+    let replay_state_snapshot = snapshot.replay_compatibility().state_snapshot;
+    let replay_state_snapshot =
+        replay_snapshot_bridge_can_emit(&replay_state_snapshot).then_some(replay_state_snapshot);
     let resolved = release_assets::resolve_snapshot_assets(project_dir, snapshot)?;
     let bundle = process.write_engine_bundle(&mobile_engine_entrypoints(), output_dir)?;
     let manifest = fs::read_to_string(&bundle.manifest_path).map_err(|error| {
@@ -1913,9 +1917,13 @@ fn write_mobile_aot_engine_bundle(
     let manifest_json: serde_json::Value = serde_json::from_str(&manifest)
         .map_err(|error| format!("failed to parse mobile AOT manifest: {error}"))?;
     let symbols_header = output_dir.join("published_aot_symbols.h");
-    write_mobile_aot_symbols_header(&manifest_json, &symbols_header)?;
+    write_mobile_aot_symbols_header(
+        &manifest_json,
+        &symbols_header,
+        replay_state_snapshot.is_some(),
+    )?;
     let bindings_source = output_dir.join("published_aot_bindings.c");
-    write_mobile_aot_bindings_source_with_profile_and_assets(
+    write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot(
         &manifest_json,
         &process.state_layout(),
         &resolved,
@@ -1923,6 +1931,7 @@ fn write_mobile_aot_engine_bundle(
         profile_functions,
         profile_warmup_frames,
         profile_sample_frames,
+        replay_state_snapshot.as_ref(),
     )?;
     let cmake_file = if matches!(
         target,
@@ -1944,6 +1953,7 @@ fn write_mobile_aot_engine_bundle(
         &symbols_header,
         &bindings_source,
         cmake_file.as_deref(),
+        replay_state_snapshot.is_some(),
         output_dir,
     )?;
     Ok(MobileAotBundleSummary {
@@ -2107,6 +2117,7 @@ fn collect_mobile_aot_sources_inner(
 fn write_mobile_aot_symbols_header(
     manifest: &serde_json::Value,
     output_path: &Path,
+    replay_state_snapshot_supported: bool,
 ) -> Result<(), String> {
     mobile_aot_function_for(manifest, "main")?;
     mobile_aot_function_for(manifest, "tick")?;
@@ -2118,6 +2129,15 @@ fn write_mobile_aot_symbols_header(
     out.push_str("extern int32_t stasis_mobile_main_entry(void);\n");
     out.push_str("extern int32_t stasis_mobile_tick_entry(void);\n");
     out.push_str("extern int32_t stasis_mobile_render_entry(void);\n");
+    if replay_state_snapshot_supported {
+        out.push_str("extern int32_t stasis_replay_state_snapshot_size(void);\n");
+        out.push_str(
+            "extern int32_t stasis_replay_state_snapshot_write(uint8_t *out, int32_t capacity);\n",
+        );
+        out.push_str(
+            "extern int32_t stasis_replay_state_snapshot_restore(const uint8_t *input, int32_t bytes);\n",
+        );
+    }
     if let Some(symbol) = on_code_swap.as_ref() {
         out.push_str(&format!("extern void {symbol}(void);\n"));
     }
@@ -2170,6 +2190,7 @@ fn write_mobile_aot_package_manifest(
     symbols_header: &Path,
     bindings_source: &Path,
     cmake_file: Option<&Path>,
+    replay_state_snapshot_supported: bool,
     output_dir: &Path,
 ) -> Result<PathBuf, String> {
     let manifest_functions = engine_manifest["functions"]
@@ -2195,6 +2216,11 @@ fn write_mobile_aot_package_manifest(
     let asset_manifest = asset_dir
         .join("stasis_game")
         .join(DEFAULT_ASSET_MANIFEST_PATH);
+    let mut replay_compatibility = engine_manifest["replay_compatibility"].clone();
+    if replay_state_snapshot_supported {
+        replay_compatibility["state_snapshot"]["support"] =
+            serde_json::Value::String("canonical_bytes".to_string());
+    }
     let mut manifest = serde_json::json!({
         "schema": "stasis.mobile_aot_bundle.v1",
         "render_contract_version": 8,
@@ -2203,6 +2229,7 @@ fn write_mobile_aot_package_manifest(
         "engine_manifest": mobile_aot_relative_path(output_dir, engine_manifest_path)?,
         "symbols_header": mobile_aot_relative_path(output_dir, symbols_header)?,
         "bindings_source": mobile_aot_relative_path(output_dir, bindings_source)?,
+        "replay_compatibility": replay_compatibility,
         "asset_root": mobile_aot_relative_path(output_dir, asset_dir)?,
         "asset_manifest": mobile_aot_relative_path(output_dir, &asset_manifest)?,
         "objects": objects,
@@ -3139,10 +3166,16 @@ mod tests {
             fs::read_to_string(&summary.bindings_source).expect("read mobile AOT bindings source");
         assert!(bindings.contains("int32_t stasis_mobile_main_entry(void)"));
         assert!(bindings.contains("void stasis_aot_bind_runtime_globals(void)"));
+        assert!(bindings.contains("stasis_replay_state_snapshot_size(void)"));
+        assert!(bindings.contains("stasis_replay_state_snapshot_write(uint8_t *out"));
+        assert!(bindings.contains("stasis_replay_state_snapshot_restore(const uint8_t *input"));
         assert!(!bindings.contains("stasis_jit_register_code_ptr"));
         assert!(bindings.contains("stasis_published_sprite_handle_for_path"));
         assert!(bindings.contains("{\"assets/ball.svg\","));
         assert!(header.contains("#define STASIS_AOT_BIND_RUNTIME_GLOBALS"));
+        assert!(header.contains("stasis_replay_state_snapshot_size(void)"));
+        assert!(header.contains("stasis_replay_state_snapshot_write(uint8_t *out"));
+        assert!(header.contains("stasis_replay_state_snapshot_restore(const uint8_t *input"));
         let engine_manifest: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(output_dir.join("engine_bundle_manifest.json"))
                 .expect("read engine manifest"),
@@ -3194,6 +3227,10 @@ mod tests {
         assert_eq!(
             package_manifest["android_cmake_file"],
             "published_aot_objects.cmake"
+        );
+        assert_eq!(
+            package_manifest["replay_compatibility"]["state_snapshot"]["support"],
+            "canonical_bytes"
         );
         assert!(package_manifest["objects"]
             .as_array()

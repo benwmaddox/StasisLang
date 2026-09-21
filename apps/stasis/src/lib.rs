@@ -19,6 +19,8 @@ pub mod windows_signing;
 
 pub use compiler_backend::build_aot_direct_storage_source;
 #[doc(hidden)]
+pub use compiler_backend::replay_snapshot_bridge_can_emit;
+#[doc(hidden)]
 pub use compiler_backend::rewrite_packaged_json_asset_paths;
 pub use compiler_backend::run_self_host_aot_cli;
 pub use compiler_backend::run_self_host_aot_cli_with_desktop_network;
@@ -36,6 +38,7 @@ pub use mobile_aot_bindings::{
     audit_mobile_aot_bindings, escape_mobile_c_string_literal, mobile_aot_function_for,
     write_mobile_aot_bindings_source, write_mobile_aot_bindings_source_with_profile,
     write_mobile_aot_bindings_source_with_profile_and_assets,
+    write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot,
 };
 pub use record_replay::{simulation_state_hash, PlayReplayConfig};
 pub use stasis_test_runner::{

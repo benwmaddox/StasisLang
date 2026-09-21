@@ -57,6 +57,18 @@ test("schema-v2 decoder accepts object and JSON input while enforcing strict nes
   assert.deepEqual(decodeReplay(JSON.stringify(source)), { ...source, identity: { ...source.identity, asset_manifest_sha256: null, controller_schema_version: null } });
   assert.throws(() => decodeReplay({ ...source, unexpected: true }), ReplayDecodeError);
   assert.throws(() => decodeReplay(JSON.stringify({ ...source, identity: { ...source.identity, observed_i32: source.identity.observed_i32.map(field => ({ ...field, extra: 1 })) } })), ReplayDecodeError);
+
+  const primitiveCollection = {
+    ...source,
+    initial_state: {
+      ...source.initial_state,
+      values: [{
+        location: { kind: "collection", path: "values", field: "", index: 0 },
+        value: { type_name: "i32", bits: "01000000" },
+      }],
+    },
+  };
+  assert.equal(decodeReplay(primitiveCollection).initial_state.values[0].location.field, "");
 });
 
 test("compact RLE applies changes at run starts and preserves values through tick gaps", () => {

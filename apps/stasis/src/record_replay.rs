@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use stasis_compiler::backend::jit::{JitProcess, JitScalarValue};
 use stasis_compiler::backend::program_snapshot::{ProgramExternImport, ProgramSnapshot};
-use stasis_compiler::backend::state_layout::state_layout_version;
+use stasis_compiler::backend::state_layout::{state_layout_version, StateCollectionFieldLayout};
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::fs;
@@ -925,7 +925,11 @@ fn validate_compact_initial_state(state: &InitialState) -> Result<(), String> {
             }
             StateLocation::Collection { path, field, index } => {
                 validate_compact_field_text("initial state collection path", path)?;
-                validate_compact_field_text("initial state collection field", field)?;
+                if field.len() > MAX_COMPACT_FIELD_TEXT_BYTES {
+                    return Err(format!(
+                        "compact replay initial state collection field exceeds the {MAX_COMPACT_FIELD_TEXT_BYTES}-byte limit"
+                    ));
+                }
                 if *index < 0 {
                     return Err(format!(
                         "compact replay initial state entry {entry_index} has a negative collection index"
@@ -2368,7 +2372,9 @@ fn capture_initial_state(jit: &JitProcess) -> Result<InitialState, String> {
         let mut fields = collection.fields;
         fields.sort_by(|left, right| left.field.cmp(&right.field));
         for field in fields {
-            for index in 0..collection.capacity {
+            let element_count =
+                replay_field_element_count(&collection.path, collection.capacity, &field)?;
+            for index in 0..element_count {
                 let value =
                     jit.read_global_collection_scalar(&collection.path, &field.field, index)?;
                 if !is_default(value) {
@@ -2393,6 +2399,56 @@ fn capture_initial_state(jit: &JitProcess) -> Result<InitialState, String> {
 fn restore_initial_state(jit: &JitProcess, state: &InitialState) -> Result<(), String> {
     validate_supported_state(jit)?;
     let layout = jit.state_layout();
+    // Validate and decode the complete sparse payload before clearing any live
+    // state. A malformed location or scalar type must leave the game untouched.
+    let mut decoded_values = Vec::with_capacity(state.values.len());
+    for entry in &state.values {
+        let target = match &entry.location {
+            StateLocation::Scalar { path } => {
+                if !layout
+                    .scalars
+                    .iter()
+                    .any(|scalar| scalar.path == *path && !is_host_or_presentation_path(path))
+                {
+                    return Err(format!(
+                        "replay initial state has unknown scalar path '{path}'"
+                    ));
+                }
+                jit.read_global_scalar(path)?
+            }
+            StateLocation::Collection { path, field, index } => {
+                let collection = layout
+                    .collections
+                    .iter()
+                    .find(|collection| {
+                        collection.path == *path && !is_host_or_presentation_path(path)
+                    })
+                    .ok_or_else(|| {
+                        format!("replay initial state has unknown collection path '{path}'")
+                    })?;
+                let lane = collection
+                    .fields
+                    .iter()
+                    .find(|lane| lane.field == *field)
+                    .ok_or_else(|| {
+                        format!(
+                            "replay initial state has unknown collection lane '{}.{}'",
+                            path, field
+                        )
+                    })?;
+                let element_count =
+                    replay_field_element_count(&collection.path, collection.capacity, lane)?;
+                if *index < 0 || *index >= element_count {
+                    return Err(format!(
+                        "replay initial state collection index {} is outside '{}.{}' count {}",
+                        index, path, field, element_count
+                    ));
+                }
+                jit.read_global_collection_scalar(path, field, *index)?
+            }
+        };
+        decoded_values.push((entry.location.clone(), decode_scalar(&entry.value, target)?));
+    }
     for scalar in layout.scalars {
         if is_host_or_presentation_path(&scalar.path) {
             continue;
@@ -2405,7 +2461,9 @@ fn restore_initial_state(jit: &JitProcess, state: &InitialState) -> Result<(), S
             continue;
         }
         for field in collection.fields {
-            for index in 0..collection.capacity {
+            let element_count =
+                replay_field_element_count(&collection.path, collection.capacity, &field)?;
+            for index in 0..element_count {
                 let current =
                     jit.read_global_collection_scalar(&collection.path, &field.field, index)?;
                 jit.write_global_collection_scalar(
@@ -2417,20 +2475,13 @@ fn restore_initial_state(jit: &JitProcess, state: &InitialState) -> Result<(), S
             }
         }
     }
-    for entry in &state.values {
-        match &entry.location {
+    for (location, value) in decoded_values {
+        match location {
             StateLocation::Scalar { path } => {
-                let target = jit.read_global_scalar(path)?;
-                jit.write_global_scalar(path, decode_scalar(&entry.value, target)?)?;
+                jit.write_global_scalar(&path, value)?;
             }
             StateLocation::Collection { path, field, index } => {
-                let target = jit.read_global_collection_scalar(path, field, *index)?;
-                jit.write_global_collection_scalar(
-                    path,
-                    field,
-                    *index,
-                    decode_scalar(&entry.value, target)?,
-                )?;
+                jit.write_global_collection_scalar(&path, &field, index, value)?;
             }
         }
     }
@@ -2462,7 +2513,9 @@ pub fn simulation_state_hash(jit: &JitProcess) -> Result<String, String> {
         let mut fields = collection.fields;
         fields.sort_by(|left, right| left.field.cmp(&right.field));
         for field in fields {
-            for index in 0..collection.capacity {
+            let element_count =
+                replay_field_element_count(&collection.path, collection.capacity, &field)?;
+            for index in 0..element_count {
                 let label = format!("{}[{index}].{}", collection.path, field.field);
                 hash_value(
                     &mut hasher,
@@ -2473,6 +2526,25 @@ pub fn simulation_state_hash(jit: &JitProcess) -> Result<String, String> {
         }
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn replay_field_element_count(
+    collection_path: &str,
+    collection_capacity: i32,
+    field: &StateCollectionFieldLayout,
+) -> Result<i32, String> {
+    let logical_capacity = u64::try_from(collection_capacity).map_err(|_| {
+        format!(
+            "replay collection '{}' has negative capacity {}",
+            collection_path, collection_capacity
+        )
+    })?;
+    i32::try_from(field.element_count.unwrap_or(logical_capacity)).map_err(|_| {
+        format!(
+            "replay collection lane '{}.{}' exceeds the supported element count",
+            collection_path, field.field
+        )
+    })
 }
 
 fn validate_supported_state(jit: &JitProcess) -> Result<(), String> {
@@ -3022,6 +3094,20 @@ mod tests {
         }];
         let valid = compact_test_document(baseline, segments, 2);
         validate_compact_document(&valid).expect("valid compact document");
+        let mut primitive_collection = valid.clone();
+        primitive_collection.initial_state.values.push(StateEntry {
+            location: StateLocation::Collection {
+                path: "values".to_string(),
+                field: String::new(),
+                index: 0,
+            },
+            value: EncodedScalar {
+                type_name: "i32".to_string(),
+                bits: "01000000".to_string(),
+            },
+        });
+        validate_compact_document(&primitive_collection)
+            .expect("primitive collection initial state with an empty lane name is valid");
         assert!(compact_input_at_tick(&valid, 0)
             .expect_err("zero selected tick must be rejected")
             .contains("outside"));
@@ -3301,6 +3387,39 @@ mod tests {
         assert_eq!(
             jit.read_global_collection_scalar("prompt_audio_assets", "state", 0),
             Ok(JitScalarValue::I32(3))
+        );
+        assert_eq!(
+            simulation_state_hash(&jit),
+            Ok(captured.state_sha256.clone())
+        );
+    }
+
+    #[test]
+    fn packed_typed_collection_replay_uses_physical_lane_count() {
+        let _global_guard = crate::jit_test_support::lock();
+        let mut jit = JitProcess::new();
+        jit.upsert_file(
+            "main.stasis",
+            "global flags: bitset<33>; function main(): i32 { return 0; }",
+        );
+        jit.compile().expect("compile packed replay state fixture");
+        jit.write_global_collection_scalar("flags", "words", 1, JitScalarValue::U32(1))
+            .expect("write second packed word");
+
+        let captured = capture_initial_state(&jit).expect("capture packed replay state");
+        assert!(captured.values.iter().any(|entry| {
+            matches!(
+                &entry.location,
+                StateLocation::Collection { path, field, index }
+                    if path == "flags" && field == "words" && *index == 1
+            ) && entry.value == encode_scalar(JitScalarValue::U32(1))
+        }));
+        jit.write_global_collection_scalar("flags", "words", 1, JitScalarValue::U32(0))
+            .expect("clear second packed word");
+        restore_initial_state(&jit, &captured).expect("restore packed replay state");
+        assert_eq!(
+            jit.read_global_collection_scalar("flags", "words", 1),
+            Ok(JitScalarValue::U32(1))
         );
         assert_eq!(
             simulation_state_hash(&jit),
