@@ -13,9 +13,11 @@ use crate::compiler::{FunctionId, FunctionMeta};
 use crate::ir::hir::{
     AssignOp, AssignTarget, ComparisonOp, FunctionHIR, SimpleCondition, SimpleExpr, SimpleStmt,
 };
+use sha2::{Digest, Sha256};
 
 pub const HOST_I32_COUNT: usize = 768;
 pub const HOST_F32_COUNT: usize = 64;
+pub const HOST_FRAME_SCHEMA_VERSION: u32 = 4;
 
 const HOST_I_KEY_BASE: usize = 32;
 const HOST_I_KEY_COUNT: usize = 512;
@@ -106,6 +108,14 @@ impl HostFrameInputUsage {
         self.i32_fields.is_empty() && self.f32_fields.is_empty()
     }
 
+    pub fn identity_sha256(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"stasis.replay.input-usage.v1\0");
+        hash_input_fields(&mut hasher, b'i', &self.i32_fields);
+        hash_input_fields(&mut hasher, b'f', &self.f32_fields);
+        format!("{:x}", hasher.finalize())
+    }
+
     fn add_i32_range(&mut self, start: usize, end: usize, family: HostFrameInputFamily) {
         for index in start..end {
             self.add_i32(index, family);
@@ -159,6 +169,20 @@ impl HostFrameInputUsage {
         for (slot, field) in self.f32_fields.iter_mut().enumerate() {
             field.slot = slot;
         }
+    }
+}
+
+fn hash_input_fields(hasher: &mut Sha256, lane: u8, fields: &[HostFrameInputField]) {
+    hasher.update([lane]);
+    hasher.update((fields.len() as u64).to_le_bytes());
+    for field in fields {
+        hasher.update((field.slot as u64).to_le_bytes());
+        hasher.update((field.index as u64).to_le_bytes());
+        hasher.update((field.path.len() as u64).to_le_bytes());
+        hasher.update(field.path.as_bytes());
+        let family = field.family.as_str();
+        hasher.update((family.len() as u64).to_le_bytes());
+        hasher.update(family.as_bytes());
     }
 }
 

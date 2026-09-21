@@ -6,7 +6,9 @@ use crate::backend::compile_analysis::{
 };
 use crate::backend::emit::*;
 use crate::backend::hot_render::HotRenderImageMetadata;
-use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
+use crate::backend::program_snapshot::{
+    ProgramArtifactMapping, ProgramFunction, ProgramReplayCompatibility, ProgramSnapshot,
+};
 use crate::backend::reachability::matches_root;
 use crate::backend::state_layout::{
     aot_storage_symbol, collection_field_element_count, is_named_scalar_state_path,
@@ -941,12 +943,17 @@ impl AotProcess {
         }
 
         let manifest_path = output_dir.join("engine_bundle_manifest.json");
+        let replay_compatibility = self
+            .program_snapshot
+            .as_ref()
+            .map(ProgramSnapshot::replay_compatibility);
         let manifest = build_engine_bundle_manifest(
             self.optimization_profile,
             entrypoints,
             &manifest_rows,
             &self.string_literals,
             &self.collection_max_lengths,
+            replay_compatibility.as_ref(),
             self.program_snapshot
                 .as_ref()
                 .map_or(&[], |snapshot| snapshot.hot_render_images()),
@@ -1642,6 +1649,7 @@ fn build_engine_bundle_manifest(
     rows: &[(FunctionId, String, String, String, String, u16, usize)],
     string_literals: &BTreeMap<i32, String>,
     collection_max_lengths: &BTreeMap<String, i32>,
+    replay_compatibility: Option<&ProgramReplayCompatibility>,
     hot_render_images: &[HotRenderImageMetadata],
 ) -> Result<String, String> {
     let mut out = String::new();
@@ -1745,6 +1753,12 @@ fn build_engine_bundle_manifest(
         ));
     }
     out.push_str("  ],\n");
+    out.push_str("  \"replay_compatibility\": ");
+    out.push_str(
+        &serde_json::to_string(&replay_compatibility)
+            .expect("replay compatibility contains only serializable compiler values"),
+    );
+    out.push_str(",\n");
     out.push_str(&format!(
         "  \"hot_render_metadata_version\": {},\n",
         crate::backend::hot_render::HOT_RENDER_METADATA_VERSION
@@ -1772,6 +1786,7 @@ mod tests {
             rows,
             &BTreeMap::new(),
             &BTreeMap::new(),
+            None,
             &[],
         )
     }
@@ -5648,7 +5663,11 @@ function clear(r: f32, g: f32, b: f32, a: f32): void { return; }
         let mut process = AotProcess::new();
         process.upsert_file(
             "sample.stasis",
-            "function tick(): void { return; }\nfunction render(): void { return; }\nfunction on_code_swap(): void { return; }\n",
+            "global host_i32: i32[768];\n\
+             global observed_key: i32;\n\
+             function tick(): void { observed_key = host_i32[32]; return; }\n\
+             function render(): void { return; }\n\
+             function on_code_swap(): void { return; }\n",
         );
         process.compile().expect("compile");
 
@@ -5689,6 +5708,22 @@ function clear(r: f32, g: f32, b: f32, a: f32): void { return; }
             manifest.contains("\"tick\": \"tick\"") && manifest.contains("\"render\": \"render\""),
             "manifest should include required entrypoints"
         );
+        let manifest_json: serde_json::Value =
+            serde_json::from_str(&manifest).expect("valid manifest JSON");
+        let replay = &manifest_json["replay_compatibility"];
+        assert_eq!(replay["schema"], "stasis.replay_compatibility.v1");
+        assert_eq!(replay["support"], "metadata_only");
+        assert_eq!(replay["host_frame_schema_version"], 4);
+        assert_eq!(replay["host_i32_count"], 768);
+        assert_eq!(replay["host_f32_count"], 64);
+        assert_eq!(replay["observed_i32"][0]["slot"], 0);
+        assert_eq!(replay["observed_i32"][0]["index"], 32);
+        assert_eq!(replay["observed_i32"][0]["path"], "keys[0]");
+        assert_eq!(replay["observed_i32"][0]["family"], "keyboard");
+        assert_eq!(replay["observed_f32"], serde_json::json!([]));
+        assert_eq!(replay["input_usage_sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(replay["state_layout_sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(replay["compiler_layout_sha256"].as_str().unwrap().len(), 64);
 
         let _ = fs::remove_dir_all(&bundle_dir);
     }

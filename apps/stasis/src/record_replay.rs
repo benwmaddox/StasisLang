@@ -282,19 +282,26 @@ fn compact_import_is_safe(import: &ProgramExternImport, capability: &str) -> boo
             import.returns_void
                 && import.params.len() == 5
                 && matches!(
-                    import.symbol.as_str(),
-                    "sys_memcpy_u8"
-                        | "stasis_jit_sys_memcpy_u8"
-                        | "sys_memcpy_i32"
-                        | "stasis_jit_sys_memcpy_i32"
-                        | "sys_memcpy_f32"
-                        | "stasis_jit_sys_memcpy_f32"
-                        | "sys_memmove_u8"
-                        | "stasis_jit_sys_memmove_u8"
-                        | "sys_memmove_i32"
-                        | "stasis_jit_sys_memmove_i32"
-                        | "sys_memmove_f32"
-                        | "stasis_jit_sys_memmove_f32"
+                    (import.name.as_str(), import.symbol.as_str()),
+                    (
+                        "sys_memcpy_u8",
+                        "sys_memcpy_u8" | "stasis_jit_sys_memcpy_u8"
+                    ) | (
+                        "sys_memcpy_i32",
+                        "sys_memcpy_i32" | "stasis_jit_sys_memcpy_i32"
+                    ) | (
+                        "sys_memcpy_f32",
+                        "sys_memcpy_f32" | "stasis_jit_sys_memcpy_f32"
+                    ) | (
+                        "sys_memmove_u8",
+                        "sys_memmove_u8" | "stasis_jit_sys_memmove_u8"
+                    ) | (
+                        "sys_memmove_i32",
+                        "sys_memmove_i32" | "stasis_jit_sys_memmove_i32"
+                    ) | (
+                        "sys_memmove_f32",
+                        "sys_memmove_f32" | "stasis_jit_sys_memmove_f32"
+                    )
                 )
         }
         // Synchronous asset construction/measurement is reproducible under the
@@ -3353,48 +3360,57 @@ mod tests {
 
     #[test]
     fn compact_contract_defaults_to_rejecting_async_and_host_returning_effects() {
-        let import =
-            |symbol: &str, parameter_count: usize, returns_void: bool| ProgramExternImport {
-                name: "fixture".to_string(),
+        let import = |name: &str,
+                      symbol: &str,
+                      parameter_count: usize,
+                      returns_void: bool|
+         -> ProgramExternImport {
+            ProgramExternImport {
+                name: name.to_string(),
                 symbol: symbol.to_string(),
                 params: vec![0; parameter_count],
                 return_type: 0,
                 returns_void,
-            };
+            }
+        };
         assert!(!compact_import_is_safe(
-            &import("stasis_jit_asset_request_sprite", 3, false),
+            &import("fixture", "stasis_jit_asset_request_sprite", 3, false),
             "graphics"
         ));
         assert!(!compact_import_is_safe(
-            &import("stasis_jit_asset_request_audio", 1, false),
+            &import("fixture", "stasis_jit_asset_request_audio", 1, false),
             "audio"
         ));
         assert!(!compact_import_is_safe(
-            &import("stasis_jit_audio_init", 3, false),
+            &import("fixture", "stasis_jit_audio_init", 3, false),
             "audio"
         ));
         assert!(compact_import_is_safe(
-            &import("stasis_jit_measure_text", 2, false),
+            &import("fixture", "stasis_jit_measure_text", 2, false),
             "graphics"
         ));
         assert!(compact_import_is_safe(
-            &import("stasis_jit_gfx_release_sprite", 1, true),
+            &import("fixture", "stasis_jit_gfx_release_sprite", 1, true),
             "graphics"
         ));
         assert!(compact_import_is_safe(
-            &import("stasis_jit_audio_stop", 1, true),
+            &import("fixture", "stasis_jit_audio_stop", 1, true),
             "audio"
         ));
         assert!(compact_import_is_safe(
-            &import("stasis_jit_sys_memcpy_i32", 5, true),
+            &import("sys_memcpy_i32", "stasis_jit_sys_memcpy_i32", 5, true),
             "memory"
         ));
         assert!(!compact_import_is_safe(
-            &import("environment_value", 0, false),
+            &import("copy", "stasis_jit_sys_memcpy_i32", 5, true),
             "memory"
         ));
         assert!(!compact_import_is_safe(
-            &import("stasis_jit_audio_stop", 1, false),
+            &import("fixture", "environment_value", 0, false),
+            "memory"
+        ));
+        assert!(!compact_import_is_safe(
+            &import("fixture", "stasis_jit_audio_stop", 1, false),
             "audio"
         ));
 
@@ -3479,6 +3495,14 @@ mod tests {
             [32]
         );
         assert!(observed_f32.is_empty());
+        assert_eq!(
+            compact_input_usage_hash(&observed_i32, &observed_f32),
+            jit.program_snapshot()
+                .expect("compiled program snapshot")
+                .host_frame_input_usage()
+                .identity_sha256(),
+            "desktop replay and packaged metadata must share one input identity"
+        );
 
         let record = |path: &Path, jit: &JitProcess, mouse_bits: [u32; 3]| {
             assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(0));

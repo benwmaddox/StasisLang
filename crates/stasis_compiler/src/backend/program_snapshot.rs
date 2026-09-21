@@ -13,7 +13,8 @@ use crate::backend::compile_analysis::{
 };
 use crate::backend::hot_render::{analyze_hot_render_images, HotRenderImageMetadata};
 use crate::backend::input_usage::{
-    analyze_host_frame_input_usage_with_functions, HostFrameInputUsage,
+    analyze_host_frame_input_usage_with_functions, HostFrameInputField, HostFrameInputUsage,
+    HOST_F32_COUNT, HOST_FRAME_SCHEMA_VERSION, HOST_I32_COUNT,
 };
 use crate::backend::reachability::compute_reachable_function_ids;
 use crate::backend::state_layout::{
@@ -73,6 +74,41 @@ pub struct ProgramExternImport {
     pub params: Vec<TypeId>,
     pub return_type: TypeId,
     pub returns_void: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProgramReplayInputField {
+    pub slot: usize,
+    pub index: usize,
+    pub path: String,
+    pub family: String,
+}
+
+impl From<&HostFrameInputField> for ProgramReplayInputField {
+    fn from(field: &HostFrameInputField) -> Self {
+        Self {
+            slot: field.slot,
+            index: field.index,
+            path: field.path.clone(),
+            family: field.family.as_str().to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProgramReplayCompatibility {
+    pub schema: String,
+    pub support: String,
+    pub host_frame_schema_version: u32,
+    pub host_i32_count: usize,
+    pub host_f32_count: usize,
+    pub observed_i32: Vec<ProgramReplayInputField>,
+    pub observed_f32: Vec<ProgramReplayInputField>,
+    pub input_usage_sha256: String,
+    pub state_layout_sha256: String,
+    pub compiler_layout_sha256: String,
+    pub hash_scope: String,
+    pub determinism_profile: String,
 }
 
 impl From<&FunctionMeta> for ProgramFunction {
@@ -353,6 +389,32 @@ impl ProgramSnapshot {
     pub fn host_frame_input_usage(&self) -> &HostFrameInputUsage {
         &self.host_frame_input_usage
     }
+    pub fn replay_compatibility(&self) -> ProgramReplayCompatibility {
+        ProgramReplayCompatibility {
+            schema: "stasis.replay_compatibility.v1".to_string(),
+            support: "metadata_only".to_string(),
+            host_frame_schema_version: HOST_FRAME_SCHEMA_VERSION,
+            host_i32_count: HOST_I32_COUNT,
+            host_f32_count: HOST_F32_COUNT,
+            observed_i32: self
+                .host_frame_input_usage
+                .i32_fields()
+                .iter()
+                .map(ProgramReplayInputField::from)
+                .collect(),
+            observed_f32: self
+                .host_frame_input_usage
+                .f32_fields()
+                .iter()
+                .map(ProgramReplayInputField::from)
+                .collect(),
+            input_usage_sha256: self.host_frame_input_usage.identity_sha256(),
+            state_layout_sha256: hex_digest(self.layout_digest),
+            compiler_layout_sha256: hex_digest(self.compiler_layout_digest),
+            hash_scope: "simulation_after_tick".to_string(),
+            determinism_profile: "input_only_no_external_observations".to_string(),
+        }
+    }
     pub fn asset_references(&self) -> &[AssetReference] {
         &self.asset_references
     }
@@ -435,6 +497,10 @@ impl ProgramSnapshot {
             }
         }
     }
+}
+
+fn hex_digest(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn collect_program_literals(files: &[SourceFile]) -> Result<BTreeMap<i32, String>, String> {
