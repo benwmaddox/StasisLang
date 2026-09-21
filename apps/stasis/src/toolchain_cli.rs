@@ -853,6 +853,8 @@ struct ProjectCapabilities {
 struct WebProjectManifest {
     #[serde(default)]
     entry: String,
+    #[serde(default)]
+    replay: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     loading_font: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5511,42 +5513,52 @@ fn package_web_workspace(
         } else {
             minify_web_runtime(&linked_runtime)?
         };
-        let replay_controller_bytes = WEB_REPLAY_CONTROLLER_JS.as_bytes();
-        let replay_controller_url =
-            web_content_hash_url("replay_controller.mjs", replay_controller_bytes);
-        let snapshot = process
-            .program_snapshot()
-            .ok_or_else(|| "web compile produced no ProgramSnapshot".to_string())?;
-        let mut runtime_identity = Sha256::new();
-        runtime_identity.update(b"stasis.replay.web-runtime.v1\0");
-        runtime_identity.update((packaged_runtime.len() as u64).to_le_bytes());
-        runtime_identity.update(packaged_runtime.as_bytes());
-        runtime_identity.update((replay_controller_bytes.len() as u64).to_le_bytes());
-        runtime_identity.update(replay_controller_bytes);
-        let asset_manifest_sha256 = if asset_identity_path.is_file() {
-            let identity: stasis_assets::AssetPackageIdentity =
-                serde_json::from_slice(&fs::read(&asset_identity_path).map_err(|error| {
-                    format!(
-                        "failed to read Web asset package identity {}: {error}",
-                        asset_identity_path.display()
-                    )
-                })?)
-                .map_err(|error| format!("failed to decode Web asset package identity: {error}"))?;
-            identity.validate().map_err(|error| error.to_string())?;
-            Some(identity.manifest_sha256)
-        } else {
-            None
-        };
-        let consumer_runtime_sha256 = format!("{:x}", runtime_identity.finalize());
-        let compatibility = packaged_replay_compatibility(snapshot, asset_manifest_sha256.clone())?;
-        runtime_config["replayControllerUrl"] = json!(replay_controller_url);
-        runtime_config["replayIdentity"] = json!({
-            "compatibility": compatibility,
-            "consumer": {
-                "target": "wasm32-web",
-                "runtime_sha256": consumer_runtime_sha256,
-            },
-        });
+        let replay_controller_bytes = workspace
+            .manifest
+            .web
+            .as_ref()
+            .is_some_and(|web| web.replay)
+            .then_some(WEB_REPLAY_CONTROLLER_JS.as_bytes());
+        if let Some(replay_controller_bytes) = replay_controller_bytes {
+            let replay_controller_url =
+                web_content_hash_url("replay_controller.mjs", replay_controller_bytes);
+            let snapshot = process
+                .program_snapshot()
+                .ok_or_else(|| "web compile produced no ProgramSnapshot".to_string())?;
+            let mut runtime_identity = Sha256::new();
+            runtime_identity.update(b"stasis.replay.web-runtime.v1\0");
+            runtime_identity.update((packaged_runtime.len() as u64).to_le_bytes());
+            runtime_identity.update(packaged_runtime.as_bytes());
+            runtime_identity.update((replay_controller_bytes.len() as u64).to_le_bytes());
+            runtime_identity.update(replay_controller_bytes);
+            let asset_manifest_sha256 = if asset_identity_path.is_file() {
+                let identity: stasis_assets::AssetPackageIdentity =
+                    serde_json::from_slice(&fs::read(&asset_identity_path).map_err(|error| {
+                        format!(
+                            "failed to read Web asset package identity {}: {error}",
+                            asset_identity_path.display()
+                        )
+                    })?)
+                    .map_err(|error| {
+                        format!("failed to decode Web asset package identity: {error}")
+                    })?;
+                identity.validate().map_err(|error| error.to_string())?;
+                Some(identity.manifest_sha256)
+            } else {
+                None
+            };
+            let consumer_runtime_sha256 = format!("{:x}", runtime_identity.finalize());
+            let compatibility =
+                packaged_replay_compatibility(snapshot, asset_manifest_sha256.clone())?;
+            runtime_config["replayControllerUrl"] = json!(replay_controller_url);
+            runtime_config["replayIdentity"] = json!({
+                "compatibility": compatibility,
+                "consumer": {
+                    "target": "wasm32-web",
+                    "runtime_sha256": consumer_runtime_sha256,
+                },
+            });
+        }
         let runtime_json = serde_json::to_string(&runtime_config)
             .map_err(|error| format!("failed to encode static web runtime metadata: {error}"))?
             .replace("</", "<\\/");
@@ -5580,11 +5592,13 @@ fn package_web_workspace(
             .map_err(|error| format!("failed to write {}: {error}", wasm_path.display()))?;
         fs::write(staging_root.join("game.js"), &runtime_bundle)
             .map_err(|error| format!("failed to write web runtime: {error}"))?;
-        fs::write(
-            staging_root.join("replay_controller.mjs"),
-            replay_controller_bytes,
-        )
-        .map_err(|error| format!("failed to write Web replay controller: {error}"))?;
+        if let Some(replay_controller_bytes) = replay_controller_bytes {
+            fs::write(
+                staging_root.join("replay_controller.mjs"),
+                replay_controller_bytes,
+            )
+            .map_err(|error| format!("failed to write Web replay controller: {error}"))?;
+        }
         let game_url = web_content_hash_url("game.js", runtime_bundle.as_bytes());
         let loading_font_url = loading_font
             .as_deref()
@@ -5629,12 +5643,14 @@ fn package_web_workspace(
                     mime: "application/wasm".to_string(),
                     bytes: wasm.bytes.clone(),
                 },
-                stasis_network::BundleFile {
+            ];
+            if let Some(replay_controller_bytes) = replay_controller_bytes {
+                bundle_files.push(stasis_network::BundleFile {
                     path: "replay_controller.mjs".to_string(),
                     mime: "text/javascript".to_string(),
                     bytes: replay_controller_bytes.to_vec(),
-                },
-            ];
+                });
+            }
             for path in &asset_paths {
                 let staged_path = staging_root.join(path);
                 let bytes = fs::read(&staged_path).map_err(|error| {
@@ -10450,6 +10466,7 @@ mod tests {
         });
         manifest.web = Some(WebProjectManifest {
             entry: "src/guest.stasis".to_string(),
+            replay: false,
             loading_font: None,
             viewport: None,
             atlas_budget_bytes: None,
@@ -10583,6 +10600,7 @@ mod tests {
         });
         manifest.web = Some(WebProjectManifest {
             entry: "src/guest.stasis".to_string(),
+            replay: false,
             loading_font: None,
             viewport: None,
             atlas_budget_bytes: None,
@@ -10733,6 +10751,7 @@ mod tests {
         let mut manifest = ProjectManifest::new("sheep_herder".to_string());
         manifest.web = Some(WebProjectManifest {
             entry: String::new(),
+            replay: false,
             loading_font: None,
             viewport: Some(WebViewportManifest {
                 width: 1600,
@@ -10780,6 +10799,7 @@ mod tests {
         });
         manifest.web = Some(WebProjectManifest {
             entry: "src/guest.stasis".to_string(),
+            replay: false,
             loading_font: None,
             viewport: None,
             atlas_budget_bytes: None,
@@ -13818,6 +13838,7 @@ mod tests {
         });
         network_workspace.manifest.web = Some(WebProjectManifest {
             entry: "src/main.stasis".to_string(),
+            replay: false,
             loading_font: None,
             viewport: None,
             atlas_budget_bytes: None,
@@ -14224,6 +14245,7 @@ mod tests {
         let mut manifest = ProjectManifest::new("sheep_herder".to_string());
         manifest.web = Some(WebProjectManifest {
             entry: String::new(),
+            replay: false,
             loading_font: None,
             viewport: Some(WebViewportManifest {
                 width: 1600,
@@ -14256,6 +14278,7 @@ mod tests {
         let mut manifest = ProjectManifest::new("atlas_budget".to_string());
         manifest.web = Some(WebProjectManifest {
             entry: String::new(),
+            replay: false,
             loading_font: None,
             viewport: None,
             atlas_budget_bytes: Some(json!(1)),
@@ -14431,6 +14454,7 @@ mod tests {
         assert!(validate_mobile_network_guest_contract(&manifest, PackageTarget::Web).is_ok());
         manifest.web = Some(WebProjectManifest {
             entry: "src/guest_main.stasis".to_string(),
+            replay: false,
             loading_font: None,
             viewport: None,
             atlas_budget_bytes: None,

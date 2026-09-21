@@ -4,5 +4,8 @@
   "entry": "main.stasis",
   "tests": "tests",
   "output": "build",
-  "stdlib": "toolchain"
+  "stdlib": "toolchain",
+  "web": {
+    "replay": true
+  }
 }

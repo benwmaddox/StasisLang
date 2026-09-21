@@ -802,6 +802,10 @@ fn network_web_package_embeds_retained_nested_assets_only() {
     assert!(index.contains(&loading_font_url));
     assert!(!runtime.contains("\"schema\":\"stasis.asset_package\""));
     assert!(!runtime.contains(&asset_identity.manifest_sha256));
+    let config = runtime_config(&runtime);
+    assert!(config.get("replayIdentity").is_none());
+    assert!(config.get("replayControllerUrl").is_none());
+    assert!(!output.join("replay_controller.mjs").exists());
     let bundle = StaticBundle::decode(
         &fs::read(output.join("network_guest.bundle")).expect("read network guest bundle"),
     )
@@ -812,6 +816,7 @@ fn network_web_package_embeds_retained_nested_assets_only() {
             "missing core bundle file {core}"
         );
     }
+    assert!(bundle.get("replay_controller.mjs").is_none());
     assert_eq!(
         bundle.get("game.js").expect("bundled game.js").bytes,
         fs::read(output.join("game.js")).expect("final game.js")
