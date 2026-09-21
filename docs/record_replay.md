@@ -28,32 +28,67 @@ stasis --workspace . record src/main.stasis `
 `stasis record` also accepts `--record-replay PATH` to publish a replay session alongside its PNG
 or MP4 output.
 
-## Runtime contract
+## Compact runtime contract
 
 Recording starts after `main()` and data binding, at the first between-frame boundary. The header
-contains exact source, state-layout, toolchain-release, target, and HostFrame-size identities. The
+contains exact source, persistent-state layout, compiler layout, toolchain release, target,
+CLI/runtime-binary, effective prepared-asset-manifest, HostFrame-v4, and input-usage identities. The
 initial simulation snapshot contains only canonical scalar or collection locations whose exact
 bits differ from their type default. Zero integers, `false`, positive floating-point zero, and
 zeroed collection lanes consume no entries; negative zero and NaN payloads remain bit-exact.
 
-Each completed tick contains:
+Schema v2 records a whole-game union of raw HostFrame fields read by reachable `main`, `tick`,
+`render`, and their called helpers. Reads forwarded through collection parameters and local aliases
+are included. A statically known index selects one exact slot; an unresolved dynamic index selects
+the conservative keyboard, pointer, display, or raw-lane family. Unreachable helpers and HostFrame
+fields the game never reads do not enter the file. Field selection is compile-time metadata, not
+conditional per-tick tracking.
 
-- the tick number;
-- only changed `host_i32` values since the prior reconstructed HostFrame;
-- only changed `host_f32` bit patterns since the prior reconstructed HostFrame; and
-- one post-`tick()`/post-`render()` simulation-state SHA-256 hash.
+The input stream contains:
 
-A change back to zero is an ordinary stored change. Playback begins with zeroed HostFrame arrays,
-applies each tick's sparse changes, publishes the complete reconstructed arrays, runs `tick()`,
-runs `render()`, and compares the resulting simulation hash. The first mismatch stops playback
-with its tick and expected/actual hashes. Graphics buffers, host request mailboxes, and HostFrame
-arrays are excluded from the simulation hash.
+- the initial observed-input baseline;
+- ordered segments with tick gaps/run lengths and only changed observed values;
+- exact i32 values and f32 bit patterns, including changes back to zero;
+- a post-simulation checkpoint hash every 256 ticks; and
+- the explicit final tick and final post-simulation hash.
 
-Replay requires consecutive ticks beginning at one and an exact match for the recorded source,
-state layout, Stasis version/release identity, target OS/architecture, and HostFrame dimensions.
-The schema is bounded to 1,000,000 completed ticks and 256 MiB. Files are staged, synced, and
-published without replacing an existing recording.
+Long unchanged runs use one segment rather than one frame/hash object per tick. Playback still
+executes every tick through the ordinary simulation path. It zeroes a complete HostFrame, projects
+the recorded observed slots, runs `tick()`, and then runs `render()` for visual playback. Sparse
+verification reports the bounded interval after the last successful checkpoint and stops at the
+first checkpoint that proves divergence. Graphics buffers, host request mailboxes, and HostFrame
+arrays are excluded from the simulation hash. Simulation-only verification does not invoke a
+separate renderer; normal visual replay uses the normal renderer.
+
+A synthetic 10,000-tick held-input run serializes to exactly 5,068 bytes in schema v2 versus 1,299,320 bytes in schema v1, making v1 about 256× larger. The v2 measurement includes all 39 required 256-tick checkpoints.
+
+Replay requires consecutive simulation ticks beginning at one and the exact recorded identity.
+The schema is bounded to 1,000,000 completed ticks, 4,096 checkpoints, and 256 MiB; recording
+enforces the encoded-size budget incrementally. Files are staged, synced, and published without
+replacing an existing recording. Schema-v1 files remain readable with their original per-tick hash
+behavior.
+
+For `record --replay`, `--frames N` is the number of replay simulation ticks and must equal the
+recording's total tick count. `--fps` controls the output presentation timestamps and audio/video
+container rate; it does not skip, duplicate, or interpolate simulation ticks. The existing PNG/MP4
+pipeline receives the normally rendered replay frames and performs the same final-state check.
+
+Compact input-only sessions reject reachable observations that are not captured: direct wall
+clock/sleep calls, storage, clipboard and other platform responses, network/random network seeds,
+code swap, unknown externs, asynchronous asset readiness, and host-dependent audio queries. Game-
+owned deterministic RNG state is ordinary simulation state. Rendering/audio output and deterministic
+asset measurements are permitted under the exact runtime/asset identity. Adding another host
+observation requires an explicit recorded/virtualized profile; a state-hash failure is not used as
+a substitute for declaring it reproducible.
 
 Live code swaps, data reloads, and asset reloads abort a record/replay session. Direct
-nondeterministic host operations outside the HostFrame snapshot are not virtualized in schema v1;
-their effects will either produce a state-hash divergence or require a later schema extension.
+nondeterministic host operations outside the HostFrame snapshot are not virtualized in schema v1.
+Schema v2 currently ships in the desktop JIT commands above. Generated native and Web metadata
+publish the compiler-owned observed-input identity plus a canonical simulation-state descriptor.
+The descriptor is explicitly marked `descriptor_only`, and the enclosing replay capability remains
+`metadata_only`, until a target exposes the bounded snapshot operations and runs the replay
+controller through its ordinary lifecycle. A standalone Web controller validates and projects the
+v2 stream for host integration tests, but generated `game.js` does not yet activate it. Packaged
+native desktop and Android likewise still require host loading, lifecycle orchestration, and file
+import/export before they can advertise replay support. No cross-target floating-point bit-identity
+guarantee is implied.

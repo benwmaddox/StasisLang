@@ -12,9 +12,14 @@ use crate::backend::compile_analysis::{
     resolve_preferred_extern_call_signatures, CompileAnalysisCache,
 };
 use crate::backend::hot_render::{analyze_hot_render_images, HotRenderImageMetadata};
+use crate::backend::input_usage::{
+    analyze_host_frame_input_usage_with_functions, HostFrameInputField, HostFrameInputUsage,
+    HOST_F32_COUNT, HOST_FRAME_SCHEMA_VERSION, HOST_I32_COUNT,
+};
 use crate::backend::reachability::compute_reachable_function_ids;
 use crate::backend::state_layout::{
-    build_state_layout, state_layout_digest, typed_collection_layout_metadata, StateLayout,
+    build_state_layout, collection_field_element_count, is_command_buffer_path,
+    state_layout_digest, typed_collection_layout_metadata, StateLayout,
 };
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::data_flow::FunctionDataFlowSummary;
@@ -61,6 +66,216 @@ pub struct ProgramFunction {
     pub dependents: Vec<FunctionId>,
 }
 
+/// Resolved host import retained for consumers that must audit an exact runtime
+/// contract rather than trusting a source-level effect label or function name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramExternImport {
+    pub name: String,
+    pub symbol: String,
+    pub params: Vec<TypeId>,
+    pub return_type: TypeId,
+    pub returns_void: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProgramReplayInputField {
+    pub slot: usize,
+    pub index: usize,
+    pub path: String,
+    pub family: String,
+}
+
+impl From<&HostFrameInputField> for ProgramReplayInputField {
+    fn from(field: &HostFrameInputField) -> Self {
+        Self {
+            slot: field.slot,
+            index: field.index,
+            path: field.path.clone(),
+            family: field.family.as_str().to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProgramReplayCompatibility {
+    pub schema: String,
+    pub support: String,
+    pub host_frame_schema_version: u32,
+    pub host_i32_count: usize,
+    pub host_f32_count: usize,
+    pub observed_i32: Vec<ProgramReplayInputField>,
+    pub observed_f32: Vec<ProgramReplayInputField>,
+    pub input_usage_sha256: String,
+    pub state_layout_sha256: String,
+    pub compiler_layout_sha256: String,
+    pub hash_scope: String,
+    pub determinism_profile: String,
+    pub state_snapshot: ProgramReplayStateSnapshot,
+}
+
+/// Stable compiler-owned description of the byte stream exposed by packaged replay hosts.
+///
+/// The stream contains only persistent simulation values. It is deliberately not a dump of
+/// the host process or a target's native storage layout: entries are sorted by their Stasis
+/// path/field identity and each value is encoded with the fixed little-endian width in this
+/// descriptor. Native and Wasm generators consume this same descriptor. A target may still
+/// produce different floating-point results; this contract does not promise cross-target float
+/// identity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProgramReplayStateSnapshot {
+    pub schema: String,
+    pub abi_version: u32,
+    pub support: String,
+    pub byte_order: String,
+    pub hash_scope: String,
+    pub required_bytes: u64,
+    pub entries: Vec<ProgramReplayStateEntry>,
+    pub unsupported_paths: Vec<String>,
+    pub size_operation: String,
+    pub write_operation: String,
+    pub restore_operation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProgramReplayStateEntry {
+    /// `scalar` for one global value or `collection` for a field lane. This is
+    /// explicit because primitive collection lanes legitimately have an empty
+    /// `field`, so field emptiness cannot identify a scalar.
+    pub kind: String,
+    /// The global scalar path, or the owning collection path for a field lane.
+    pub path: String,
+    /// Empty for a scalar and for primitive collection lanes; otherwise the
+    /// collection field/lane name.
+    pub field: String,
+    pub storage_type: String,
+    pub offset: u64,
+    pub element_count: u64,
+    pub element_bytes: u8,
+}
+
+pub const REPLAY_STATE_SNAPSHOT_ABI_VERSION: u32 = 2;
+pub const REPLAY_STATE_SNAPSHOT_SCHEMA: &str = "stasis.replay_state_snapshot.v2";
+pub const REPLAY_STATE_SNAPSHOT_SIZE_OPERATION: &str = "stasis_replay_state_snapshot_size";
+pub const REPLAY_STATE_SNAPSHOT_WRITE_OPERATION: &str = "stasis_replay_state_snapshot_write";
+pub const REPLAY_STATE_SNAPSHOT_RESTORE_OPERATION: &str = "stasis_replay_state_snapshot_restore";
+
+impl ProgramReplayStateSnapshot {
+    pub fn supported(&self) -> bool {
+        self.support == "canonical_bytes" && self.unsupported_paths.is_empty()
+    }
+}
+
+fn build_replay_state_snapshot(layout: &StateLayout) -> Result<ProgramReplayStateSnapshot, String> {
+    let mut entries = Vec::new();
+    let mut unsupported_paths = layout
+        .opaque
+        .iter()
+        .filter(|value| !is_replay_host_or_presentation_path(&value.path))
+        .map(|value| value.path.clone())
+        .collect::<Vec<_>>();
+    let mut offset = 0u64;
+
+    let mut scalars = layout.scalars.iter().collect::<Vec<_>>();
+    scalars.sort_by(|left, right| left.path.cmp(&right.path));
+    for scalar in scalars {
+        if is_replay_host_or_presentation_path(&scalar.path) {
+            continue;
+        }
+        let Some(element_bytes) = replay_storage_width(scalar.storage_type_name()) else {
+            unsupported_paths.push(scalar.path.clone());
+            continue;
+        };
+        entries.push(ProgramReplayStateEntry {
+            kind: "scalar".to_string(),
+            path: scalar.path.clone(),
+            field: String::new(),
+            storage_type: scalar.storage_type_name().to_string(),
+            offset,
+            element_count: 1,
+            element_bytes,
+        });
+        offset = offset
+            .checked_add(u64::from(element_bytes))
+            .ok_or_else(|| "replay state snapshot byte size overflow".to_string())?;
+    }
+
+    let mut collections = layout.collections.iter().collect::<Vec<_>>();
+    collections.sort_by(|left, right| left.path.cmp(&right.path));
+    for collection in collections {
+        if is_replay_host_or_presentation_path(&collection.path) {
+            continue;
+        }
+        let mut fields = collection.fields.iter().collect::<Vec<_>>();
+        fields.sort_by(|left, right| left.field.cmp(&right.field));
+        for field in fields {
+            let label = format!("{}.{}", collection.path, field.field);
+            let Some(element_bytes) = replay_storage_width(field.storage_type_name()) else {
+                unsupported_paths.push(label);
+                continue;
+            };
+            let element_count = collection_field_element_count(
+                collection,
+                field,
+                u64::try_from(collection.capacity).unwrap_or(0),
+            );
+            entries.push(ProgramReplayStateEntry {
+                kind: "collection".to_string(),
+                path: collection.path.clone(),
+                field: field.field.clone(),
+                storage_type: field.storage_type_name().to_string(),
+                offset,
+                element_count,
+                element_bytes,
+            });
+            offset = offset
+                .checked_add(
+                    element_count
+                        .checked_mul(u64::from(element_bytes))
+                        .ok_or_else(|| "replay state snapshot byte size overflow".to_string())?,
+                )
+                .ok_or_else(|| "replay state snapshot byte size overflow".to_string())?;
+        }
+    }
+
+    unsupported_paths.sort();
+    unsupported_paths.dedup();
+    Ok(ProgramReplayStateSnapshot {
+        schema: REPLAY_STATE_SNAPSHOT_SCHEMA.to_string(),
+        abi_version: REPLAY_STATE_SNAPSHOT_ABI_VERSION,
+        // Keep target-neutral metadata conservative until each packaged target
+        // confirms that all three canonical operations are exported for this
+        // exact layout.
+        support: "descriptor_only".to_string(),
+        byte_order: "little_endian".to_string(),
+        hash_scope: "simulation_after_tick".to_string(),
+        required_bytes: offset,
+        entries,
+        unsupported_paths,
+        size_operation: REPLAY_STATE_SNAPSHOT_SIZE_OPERATION.to_string(),
+        write_operation: REPLAY_STATE_SNAPSHOT_WRITE_OPERATION.to_string(),
+        restore_operation: REPLAY_STATE_SNAPSHOT_RESTORE_OPERATION.to_string(),
+    })
+}
+
+fn replay_storage_width(type_name: &str) -> Option<u8> {
+    match type_name {
+        "bool" | "u8" => Some(1),
+        "u16" => Some(2),
+        "i32" | "f32" | "u32" => Some(4),
+        "f64" => Some(8),
+        _ => None,
+    }
+}
+
+fn is_replay_host_or_presentation_path(path: &str) -> bool {
+    path == "host_i32"
+        || path == "host_f32"
+        || path.starts_with("host_i32.")
+        || path.starts_with("host_f32.")
+        || path.starts_with("host_req_")
+        || is_command_buffer_path(path)
+}
+
 impl From<&FunctionMeta> for ProgramFunction {
     fn from(function: &FunctionMeta) -> Self {
         Self {
@@ -100,9 +315,12 @@ pub struct ProgramSnapshot {
     module_graph: ModuleGraph,
     functions: Vec<ProgramFunction>,
     reachable_function_ids: BTreeSet<FunctionId>,
+    extern_imports: Vec<ProgramExternImport>,
+    host_frame_input_usage: HostFrameInputUsage,
     asset_references: Vec<AssetReference>,
     hot_render_images: Vec<HotRenderImageMetadata>,
     state_layout: StateLayout,
+    replay_state_snapshot: ProgramReplayStateSnapshot,
     layout_digest: [u8; 32],
     compiler_layout_digest: [u8; 32],
     data_flow_summaries: Arc<[FunctionDataFlowSummary]>,
@@ -194,6 +412,7 @@ impl ProgramSnapshot {
             &analysis.typed_collection_descriptors,
             types,
         )?;
+        let replay_state_snapshot = build_replay_state_snapshot(&state_layout)?;
         let layout_digest = state_layout_digest(&state_layout)?;
         let compiler_layout_digest = compiler_layout_digest(&analysis, functions, types);
         let mut collections: Vec<ProgramCollectionMetadata> = analysis
@@ -247,6 +466,23 @@ impl ProgramSnapshot {
         collections.sort_by(|left, right| left.path.cmp(&right.path));
         let literal_table = collect_program_literals(files)?;
         let reachable_function_ids = compute_reachable_function_ids(functions, required_emit_roots);
+        let extern_imports = analysis
+            .resolved_extern_signatures
+            .iter()
+            .map(|signature| ProgramExternImport {
+                name: signature.name.clone(),
+                symbol: signature.symbol.clone(),
+                params: signature.params.clone(),
+                return_type: signature.return_type,
+                returns_void: signature.return_type == crate::frontend::types::TYPE_ID_VOID,
+            })
+            .collect();
+        let host_frame_input_usage = analyze_host_frame_input_usage_with_functions(
+            function_hirs,
+            &reachable_function_ids,
+            &analysis.constant_values,
+            functions,
+        );
         let asset_references = discover_asset_references(
             files,
             functions,
@@ -270,9 +506,12 @@ impl ProgramSnapshot {
             module_graph: module_graph.clone(),
             functions: functions.iter().map(ProgramFunction::from).collect(),
             reachable_function_ids,
+            extern_imports,
+            host_frame_input_usage,
             asset_references,
             hot_render_images,
             state_layout,
+            replay_state_snapshot,
             layout_digest,
             compiler_layout_digest,
             data_flow_summaries,
@@ -293,6 +532,21 @@ impl ProgramSnapshot {
     pub fn files(&self) -> &[SourceFile] {
         &self.files
     }
+    /// Canonical identity of the exact source set accepted by this snapshot.
+    /// Hosts use this rather than rebuilding a target-specific approximation.
+    pub fn replay_source_sha256(&self) -> String {
+        let mut files = self.files.iter().collect::<Vec<_>>();
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let mut source = Sha256::new();
+        source.update(b"stasis.replay.source.v1\0");
+        for file in files {
+            source.update((file.path.len() as u64).to_le_bytes());
+            source.update(file.path.as_bytes());
+            source.update((file.content.len() as u64).to_le_bytes());
+            source.update(file.content.as_bytes());
+        }
+        format!("{:x}", source.finalize())
+    }
     pub fn module_graph(&self) -> &ModuleGraph {
         &self.module_graph
     }
@@ -310,6 +564,41 @@ impl ProgramSnapshot {
     pub fn reachable_function_ids(&self) -> &BTreeSet<FunctionId> {
         &self.reachable_function_ids
     }
+    pub fn extern_imports(&self) -> &[ProgramExternImport] {
+        &self.extern_imports
+    }
+    /// Raw HostFrame values read by the whole reachable game, including tick,
+    /// render, and called helper/wrapper bodies.
+    pub fn host_frame_input_usage(&self) -> &HostFrameInputUsage {
+        &self.host_frame_input_usage
+    }
+    pub fn replay_compatibility(&self) -> ProgramReplayCompatibility {
+        ProgramReplayCompatibility {
+            schema: "stasis.replay_compatibility.v1".to_string(),
+            support: "metadata_only".to_string(),
+            host_frame_schema_version: HOST_FRAME_SCHEMA_VERSION,
+            host_i32_count: HOST_I32_COUNT,
+            host_f32_count: HOST_F32_COUNT,
+            observed_i32: self
+                .host_frame_input_usage
+                .i32_fields()
+                .iter()
+                .map(ProgramReplayInputField::from)
+                .collect(),
+            observed_f32: self
+                .host_frame_input_usage
+                .f32_fields()
+                .iter()
+                .map(ProgramReplayInputField::from)
+                .collect(),
+            input_usage_sha256: self.host_frame_input_usage.identity_sha256(),
+            state_layout_sha256: hex_digest(self.layout_digest),
+            compiler_layout_sha256: hex_digest(self.compiler_layout_digest),
+            hash_scope: "simulation_after_tick".to_string(),
+            determinism_profile: "input_only_no_external_observations".to_string(),
+            state_snapshot: self.replay_state_snapshot.clone(),
+        }
+    }
     pub fn asset_references(&self) -> &[AssetReference] {
         &self.asset_references
     }
@@ -325,7 +614,7 @@ impl ProgramSnapshot {
     /// Digest of compiler-visible storage and type layouts that may be embedded in machine code.
     /// This is intentionally distinct from `layout_digest`, which versions persistent state and
     /// governs migration compatibility.
-    pub(crate) fn compiler_layout_digest(&self) -> [u8; 32] {
+    pub fn compiler_layout_digest(&self) -> [u8; 32] {
         self.compiler_layout_digest
     }
     pub fn data_flow_summaries(&self) -> &[FunctionDataFlowSummary] {
@@ -392,6 +681,10 @@ impl ProgramSnapshot {
             }
         }
     }
+}
+
+fn hex_digest(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn collect_program_literals(files: &[SourceFile]) -> Result<BTreeMap<i32, String>, String> {
@@ -1321,6 +1614,43 @@ function render(): void {
         assert_eq!(jit.collections(), aot.collections());
         assert_eq!(jit.struct_field_type_ids(), aot.struct_field_type_ids());
         assert_eq!(jit.string_literals(), aot.string_literals());
+        assert_eq!(
+            jit.replay_source_sha256(),
+            aot.replay_source_sha256(),
+            "portable replay source identity must be backend-independent"
+        );
+    }
+
+    #[test]
+    fn replay_snapshot_distinguishes_primitive_collections_from_scalars() {
+        let mut jit = JitProcess::new();
+        jit.upsert_file(
+            "main.stasis",
+            "global score: i32; global values: i32[2]; function main(): i32 { return score + values[0]; }",
+        );
+        jit.compile().expect("compile replay descriptor fixture");
+        let replay = jit
+            .program_snapshot()
+            .expect("snapshot")
+            .replay_compatibility();
+        let score = replay
+            .state_snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.path == "score")
+            .expect("score descriptor");
+        assert_eq!(score.kind, "scalar");
+        assert_eq!(score.field, "");
+        assert_eq!(score.element_count, 1);
+        let values = replay
+            .state_snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.path == "values")
+            .expect("values descriptor");
+        assert_eq!(values.kind, "collection");
+        assert_eq!(values.field, "");
+        assert_eq!(values.element_count, 2);
     }
 
     #[test]

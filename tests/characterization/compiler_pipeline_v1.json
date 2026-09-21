@@ -1170,6 +1170,16 @@
             "name": "main"
           },
           {
+            "index": 10,
+            "kind": 0,
+            "name": "stasis_replay_state_snapshot_write"
+          },
+          {
+            "index": 11,
+            "kind": 0,
+            "name": "stasis_replay_state_snapshot_restore"
+          },
+          {
             "index": 2,
             "kind": 0,
             "name": "tick"
@@ -1208,9 +1218,14 @@
             "index": 8,
             "kind": 0,
             "name": "__stasis_global_set_f32"
+          },
+          {
+            "index": 9,
+            "kind": 0,
+            "name": "stasis_replay_state_snapshot_size"
           }
         ],
-        "function_count": 9,
+        "function_count": 12,
         "imports": [],
         "memory_count": 1,
         "opcode_families": [
@@ -1219,6 +1234,7 @@
           "control",
           "else",
           "memory",
+          "memory_size_grow",
           "numeric",
           "structured_control",
           "variable"

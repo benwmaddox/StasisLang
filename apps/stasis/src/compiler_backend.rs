@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use stasis_compiler::backend::aot::{AotEngineBundle, AotProcess};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
-use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
+use stasis_compiler::backend::program_snapshot::{
+    ProgramReplayStateEntry, ProgramReplayStateSnapshot, ProgramSnapshot,
+};
 use stasis_compiler::backend::state_layout::{
     aot_storage_symbol, AotStorageSymbolKind, StateLayout,
 };
@@ -3233,6 +3235,398 @@ fn escape_c_string_literal(text: &str) -> String {
     out
 }
 
+fn replay_snapshot_c_storage_type(storage_type: &str) -> Option<&'static str> {
+    match storage_type {
+        "bool" | "i32" => Some("int32_t"),
+        "u8" => Some("uint8_t"),
+        "u16" => Some("uint16_t"),
+        "u32" => Some("uint32_t"),
+        "f32" => Some("float"),
+        "f64" => Some("double"),
+        _ => None,
+    }
+}
+
+fn replay_snapshot_element_width(storage_type: &str) -> Option<u8> {
+    match storage_type {
+        "bool" | "u8" => Some(1),
+        "u16" => Some(2),
+        "i32" | "u32" | "f32" => Some(4),
+        "f64" => Some(8),
+        _ => None,
+    }
+}
+
+fn replay_snapshot_storage_symbol(entry: &ProgramReplayStateEntry) -> String {
+    let kind = if entry.kind == "scalar" {
+        AotStorageSymbolKind::Scalar
+    } else if entry.kind == "collection" {
+        AotStorageSymbolKind::Array
+    } else {
+        // Validation reports the unsupported kind before symbol generation. Keep this
+        // fallback deterministic so malformed descriptors cannot influence symbol spelling.
+        AotStorageSymbolKind::Scalar
+    };
+    aot_storage_symbol(kind, &entry.path, &entry.field)
+}
+
+pub fn replay_snapshot_bridge_can_emit(snapshot: &ProgramReplayStateSnapshot) -> bool {
+    if snapshot.schema != "stasis.replay_state_snapshot.v2"
+        || snapshot.abi_version != 2
+        || !matches!(
+            snapshot.support.as_str(),
+            "descriptor_only" | "canonical_bytes"
+        )
+        || snapshot.byte_order != "little_endian"
+        || snapshot.hash_scope != "simulation_after_tick"
+        || snapshot.size_operation != "stasis_replay_state_snapshot_size"
+        || snapshot.write_operation != "stasis_replay_state_snapshot_write"
+        || snapshot.restore_operation != "stasis_replay_state_snapshot_restore"
+        || !snapshot.unsupported_paths.is_empty()
+        || snapshot.required_bytes > i64::from(i32::MAX) as u64
+    {
+        return false;
+    }
+    let mut expected_offset = 0u64;
+    let mut symbols = BTreeSet::new();
+    let mut saw_collection = false;
+    let mut previous_scalar_path: Option<&str> = None;
+    let mut previous_collection_key: Option<(&str, &str)> = None;
+    for entry in &snapshot.entries {
+        if !matches!(entry.kind.as_str(), "scalar" | "collection")
+            || (entry.kind == "scalar" && !entry.field.is_empty())
+            || (entry.kind == "scalar" && entry.element_count != 1)
+            || replay_snapshot_element_width(&entry.storage_type) != Some(entry.element_bytes)
+            || entry.offset != expected_offset
+        {
+            return false;
+        }
+        if entry.kind == "scalar" {
+            if saw_collection
+                || previous_scalar_path.is_some_and(|previous| previous >= entry.path.as_str())
+            {
+                return false;
+            }
+            previous_scalar_path = Some(&entry.path);
+        } else {
+            saw_collection = true;
+            let key = (entry.path.as_str(), entry.field.as_str());
+            if previous_collection_key.is_some_and(|previous| previous >= key) {
+                return false;
+            }
+            previous_collection_key = Some(key);
+        }
+        let Some(entry_bytes) = entry
+            .element_count
+            .checked_mul(u64::from(entry.element_bytes))
+        else {
+            return false;
+        };
+        let Some(next_offset) = expected_offset.checked_add(entry_bytes) else {
+            return false;
+        };
+        expected_offset = next_offset;
+        if entry_bytes > 0 && !symbols.insert(replay_snapshot_storage_symbol(entry)) {
+            return false;
+        }
+    }
+    expected_offset == snapshot.required_bytes
+}
+
+pub(crate) fn append_replay_state_snapshot_bridge_source(
+    source: &mut String,
+    snapshot: &ProgramReplayStateSnapshot,
+) -> Result<(), String> {
+    if !replay_snapshot_bridge_can_emit(snapshot) {
+        return Err(
+            "replay state snapshot descriptor is not canonical for the native bridge".to_string(),
+        );
+    }
+    if snapshot.schema != "stasis.replay_state_snapshot.v2" {
+        return Err(format!(
+            "unsupported replay state snapshot schema '{}'",
+            snapshot.schema
+        ));
+    }
+    if snapshot.abi_version != 2 {
+        return Err(format!(
+            "unsupported replay state snapshot ABI version {}",
+            snapshot.abi_version
+        ));
+    }
+    if snapshot.byte_order != "little_endian" {
+        return Err(format!(
+            "replay state snapshot requires little-endian bytes, found '{}'",
+            snapshot.byte_order
+        ));
+    }
+    if !snapshot.unsupported_paths.is_empty() {
+        return Err(format!(
+            "replay state snapshot has unsupported paths: {}",
+            snapshot.unsupported_paths.join(", ")
+        ));
+    }
+    let required_bytes = i32::try_from(snapshot.required_bytes).map_err(|_| {
+        format!(
+            "replay state snapshot requires {} bytes, exceeding the native ABI limit",
+            snapshot.required_bytes
+        )
+    })?;
+
+    let mut expected_offset = 0u64;
+    let mut declared_symbols = BTreeSet::new();
+    for entry in &snapshot.entries {
+        if !matches!(entry.kind.as_str(), "scalar" | "collection") {
+            return Err(format!(
+                "replay state snapshot entry '{}.{}' has unsupported kind '{}'",
+                entry.path, entry.field, entry.kind
+            ));
+        }
+        if entry.kind == "scalar" && !entry.field.is_empty() {
+            return Err(format!(
+                "scalar replay state snapshot entry '{}' must not have a field",
+                entry.path
+            ));
+        }
+        let Some(c_type) = replay_snapshot_c_storage_type(&entry.storage_type) else {
+            return Err(format!(
+                "replay state snapshot entry '{}.{}' has unsupported storage type '{}'",
+                entry.path, entry.field, entry.storage_type
+            ));
+        };
+        let Some(expected_width) = replay_snapshot_element_width(&entry.storage_type) else {
+            return Err(format!(
+                "replay state snapshot entry '{}.{}' has no canonical width",
+                entry.path, entry.field
+            ));
+        };
+        if entry.element_bytes != expected_width {
+            return Err(format!(
+                "replay state snapshot entry '{}.{}' declares {} bytes for type '{}', expected {}",
+                entry.path, entry.field, entry.element_bytes, entry.storage_type, expected_width
+            ));
+        }
+        if entry.offset != expected_offset {
+            return Err(format!(
+                "replay state snapshot entry '{}.{}' starts at {}, expected {}",
+                entry.path, entry.field, entry.offset, expected_offset
+            ));
+        }
+        let entry_bytes = entry
+            .element_count
+            .checked_mul(u64::from(entry.element_bytes))
+            .ok_or_else(|| {
+                format!(
+                    "replay state snapshot entry '{}.{}' byte count overflow",
+                    entry.path, entry.field
+                )
+            })?;
+        expected_offset = expected_offset
+            .checked_add(entry_bytes)
+            .ok_or_else(|| "replay state snapshot byte count overflow".to_string())?;
+        if entry_bytes == 0 {
+            continue;
+        }
+        let symbol = replay_snapshot_storage_symbol(entry);
+        if !declared_symbols.insert(symbol.clone()) {
+            return Err(format!(
+                "replay state snapshot contains duplicate storage symbol '{symbol}'"
+            ));
+        }
+        if entry.kind == "scalar" {
+            source.push_str(&format!("extern {c_type} {symbol};\n"));
+        } else {
+            source.push_str(&format!("extern {c_type} {symbol}[];\n"));
+        }
+    }
+    if expected_offset != snapshot.required_bytes {
+        return Err(format!(
+            "replay state snapshot requires {} bytes but entries cover {}",
+            snapshot.required_bytes, expected_offset
+        ));
+    }
+
+    source.push_str("STASIS_EXPORT int32_t stasis_replay_state_snapshot_size(void) {\n");
+    source.push_str(&format!("    return {required_bytes};\n"));
+    source.push_str("}\n");
+    source.push_str(
+        "STASIS_EXPORT int32_t stasis_replay_state_snapshot_write(uint8_t *out, int32_t capacity) {\n",
+    );
+    if required_bytes == 0 {
+        source.push_str("    (void)out;\n    (void)capacity;\n    return 0;\n}\n");
+    } else {
+        source.push_str(&format!(
+            "    const int32_t required = {required_bytes};\n    if (out == (uint8_t *)0 || capacity < required) return -required;\n    uint32_t bits32 = 0;\n    uint64_t bits64 = 0;\n    float f32_value = 0.0f;\n    double f64_value = 0.0;\n"
+        ));
+
+        for entry in &snapshot.entries {
+            if entry.element_count == 0 {
+                continue;
+            }
+            let symbol = replay_snapshot_storage_symbol(entry);
+            for index in 0..entry.element_count {
+                let element_offset = entry
+                    .offset
+                    .checked_add(index * u64::from(entry.element_bytes))
+                    .ok_or_else(|| "replay state snapshot element offset overflow".to_string())?;
+                let element_offset = i32::try_from(element_offset).map_err(|_| {
+                    "replay state snapshot element offset exceeds the native ABI limit".to_string()
+                })?;
+                let expression = if entry.kind == "scalar" {
+                    symbol.clone()
+                } else {
+                    format!("{symbol}[{index}]")
+                };
+                match entry.storage_type.as_str() {
+                    "bool" => source.push_str(&format!(
+                        "    out[{element_offset}] = (uint8_t)(((int32_t)({expression}) != 0) ? 1 : 0);\n"
+                    )),
+                    "u8" => source.push_str(&format!(
+                        "    out[{element_offset}] = (uint8_t)({expression});\n"
+                    )),
+                    "u16" => source.push_str(&format!(
+                        "    bits32 = (uint32_t)({expression});\n    out[{element_offset}] = (uint8_t)(bits32 & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 8) & 0xffu);\n",
+                        element_offset + 1
+                    )),
+                    "i32" | "u32" => source.push_str(&format!(
+                        "    bits32 = (uint32_t)({expression});\n    out[{element_offset}] = (uint8_t)(bits32 & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 8) & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 16) & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 24) & 0xffu);\n",
+                        element_offset + 1,
+                        element_offset + 2,
+                        element_offset + 3
+                    )),
+                    "f32" => source.push_str(&format!(
+                        "    f32_value = (float)({expression});\n    memcpy(&bits32, &f32_value, sizeof(bits32));\n    out[{element_offset}] = (uint8_t)(bits32 & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 8) & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 16) & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 24) & 0xffu);\n",
+                        element_offset + 1,
+                        element_offset + 2,
+                        element_offset + 3
+                    )),
+                    "f64" => source.push_str(&format!(
+                        "    f64_value = (double)({expression});\n    memcpy(&bits64, &f64_value, sizeof(bits64));\n    out[{element_offset}] = (uint8_t)(bits64 & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 8) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 16) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 24) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 32) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 40) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 48) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 56) & 0xffull);\n",
+                        element_offset + 1,
+                        element_offset + 2,
+                        element_offset + 3,
+                        element_offset + 4,
+                        element_offset + 5,
+                        element_offset + 6,
+                        element_offset + 7
+                    )),
+                    other => {
+                        return Err(format!(
+                            "replay state snapshot entry '{}.{}' has unsupported type '{other}'",
+                            entry.path, entry.field
+                        ));
+                    }
+                }
+            }
+        }
+        source.push_str("    return required;\n}\n");
+    }
+
+    source.push_str(
+        "STASIS_EXPORT int32_t stasis_replay_state_snapshot_restore(const uint8_t *input, int32_t bytes) {\n",
+    );
+    source.push_str(&format!(
+        "    const int32_t required = {required_bytes};\n    if (bytes != required) return required == 0 ? -1 : -required;\n"
+    ));
+    if required_bytes == 0 {
+        source.push_str("    (void)input;\n    return 0;\n}\n");
+        return Ok(());
+    }
+    source.push_str("    if (input == (const uint8_t *)0) return -required;\n");
+
+    // Clear every represented simulation value before decoding. The descriptor has already
+    // excluded host/presentation state and the generated statements are intentionally
+    // compile-time-unrolled (there is no runtime reflection or loop here).
+    for entry in &snapshot.entries {
+        if entry.element_count == 0 {
+            continue;
+        }
+        let symbol = replay_snapshot_storage_symbol(entry);
+        for index in 0..entry.element_count {
+            let expression = if entry.kind == "scalar" {
+                symbol.clone()
+            } else {
+                format!("{symbol}[{index}]")
+            };
+            source.push_str(&format!("    {expression} = 0;\n"));
+        }
+    }
+    source.push_str("    uint32_t bits32 = 0;\n    uint64_t bits64 = 0;\n");
+    for entry in &snapshot.entries {
+        if entry.element_count == 0 {
+            continue;
+        }
+        let symbol = replay_snapshot_storage_symbol(entry);
+        for index in 0..entry.element_count {
+            let element_offset = entry
+                .offset
+                .checked_add(index * u64::from(entry.element_bytes))
+                .ok_or_else(|| "replay state snapshot element offset overflow".to_string())?;
+            let element_offset = i32::try_from(element_offset).map_err(|_| {
+                "replay state snapshot element offset exceeds the native ABI limit".to_string()
+            })?;
+            let expression = if entry.kind == "scalar" {
+                symbol.clone()
+            } else {
+                format!("{symbol}[{index}]")
+            };
+            match entry.storage_type.as_str() {
+                "bool" => source.push_str(&format!(
+                    "    {expression} = (input[{element_offset}] != 0) ? 1 : 0;\n"
+                )),
+                "u8" => source.push_str(&format!(
+                    "    {expression} = input[{element_offset}];\n"
+                )),
+                "u16" => source.push_str(&format!(
+                    "    bits32 = ((uint32_t)input[{element_offset}]) | ((uint32_t)input[{}] << 8);\n    {expression} = (uint16_t)bits32;\n",
+                    element_offset + 1
+                )),
+                "i32" | "u32" | "f32" => source.push_str(&format!(
+                    "    bits32 = ((uint32_t)input[{element_offset}]) | ((uint32_t)input[{}] << 8) | ((uint32_t)input[{}] << 16) | ((uint32_t)input[{}] << 24);\n",
+                    element_offset + 1,
+                    element_offset + 2,
+                    element_offset + 3
+                )),
+                "f64" => source.push_str(&format!(
+                    "    bits64 = ((uint64_t)input[{element_offset}]) | ((uint64_t)input[{}] << 8) | ((uint64_t)input[{}] << 16) | ((uint64_t)input[{}] << 24) | ((uint64_t)input[{}] << 32) | ((uint64_t)input[{}] << 40) | ((uint64_t)input[{}] << 48) | ((uint64_t)input[{}] << 56);\n",
+                    element_offset + 1,
+                    element_offset + 2,
+                    element_offset + 3,
+                    element_offset + 4,
+                    element_offset + 5,
+                    element_offset + 6,
+                    element_offset + 7
+                )),
+                other => {
+                    return Err(format!(
+                        "replay state snapshot entry '{}.{}' has unsupported type '{other}'",
+                        entry.path, entry.field
+                    ));
+                }
+            }
+            match entry.storage_type.as_str() {
+                "i32" | "f32" => source.push_str(&format!(
+                    "    memcpy(&({expression}), &bits32, sizeof(bits32));\n"
+                )),
+                "u32" => source.push_str(&format!("    {expression} = bits32;\n")),
+                "f64" => source.push_str(&format!(
+                    "    memcpy(&({expression}), &bits64, sizeof(bits64));\n"
+                )),
+                "bool" | "u8" | "u16" => {}
+                other => {
+                    return Err(format!(
+                        "replay state snapshot entry '{}.{}' has unsupported type '{other}'",
+                        entry.path, entry.field
+                    ));
+                }
+            }
+        }
+    }
+    source.push_str("    return required;\n}\n");
+    Ok(())
+}
+
+#[cfg(test)]
 fn build_engine_bundle_runtime_bridge_source(
     target: &stasis_jit::AotTarget,
     runtime_fields: &[PackagedRuntimeField],
@@ -3240,6 +3634,26 @@ fn build_engine_bundle_runtime_bridge_source(
     function_aliases: &[PackagedFunctionAlias],
     render_alias: Option<&PackagedRenderAlias>,
     string_literals: &[EngineBundleManifestStringLiteralRow],
+) -> Result<String, String> {
+    build_engine_bundle_runtime_bridge_source_with_snapshot(
+        target,
+        runtime_fields,
+        function_symbols,
+        function_aliases,
+        render_alias,
+        string_literals,
+        None,
+    )
+}
+
+fn build_engine_bundle_runtime_bridge_source_with_snapshot(
+    target: &stasis_jit::AotTarget,
+    runtime_fields: &[PackagedRuntimeField],
+    function_symbols: &[String],
+    function_aliases: &[PackagedFunctionAlias],
+    render_alias: Option<&PackagedRenderAlias>,
+    string_literals: &[EngineBundleManifestStringLiteralRow],
+    replay_state_snapshot: Option<&ProgramReplayStateSnapshot>,
 ) -> Result<String, String> {
     let host_i32_hash = crate::hash_global_path("host_i32");
     let host_f32_hash = crate::hash_global_path("host_f32");
@@ -3259,6 +3673,7 @@ typedef signed long long int64_t;\n\
 typedef unsigned char uint8_t;\n\
 typedef unsigned short uint16_t;\n\
 typedef unsigned int uint32_t;\n\
+typedef unsigned long long uint64_t;\n\
 typedef unsigned long long uintptr_t;\n\
 #else\n\
 #include <stdint.h>\n\
@@ -3272,6 +3687,12 @@ typedef unsigned long long uintptr_t;\n\
 #define STASIS_EXPORT __attribute__((visibility(\"default\")))\n\
 #endif\n",
     );
+    source.push_str("#include <string.h>\n");
+    if let Some(snapshot) =
+        replay_state_snapshot.filter(|snapshot| replay_snapshot_bridge_can_emit(snapshot))
+    {
+        append_replay_state_snapshot_bridge_source(&mut source, snapshot)?;
+    }
     source.push_str(
         "void stasis_jit_register_global_i32_ptr(int32_t path_hash, int32_t* ptr);\n\
 void stasis_jit_register_global_f32_ptr(int32_t path_hash, float* ptr);\n\
@@ -3526,13 +3947,21 @@ fn emit_engine_bundle_runtime_bridge_object(
         "engine_bundle_runtime_bridge.{}",
         runtime_bridge_object_extension(&backend.aot_compile_config.target)
     ));
-    let source = build_engine_bundle_runtime_bridge_source(
+    let replay_compatibility = backend
+        .last_program_snapshot
+        .as_ref()
+        .map(ProgramSnapshot::replay_compatibility);
+    let source = build_engine_bundle_runtime_bridge_source_with_snapshot(
         &backend.aot_compile_config.target,
         runtime_fields,
         function_symbols,
         function_aliases,
         render_alias,
         string_literals,
+        replay_compatibility
+            .as_ref()
+            .map(|compatibility| &compatibility.state_snapshot)
+            .filter(|snapshot| replay_snapshot_bridge_can_emit(snapshot)),
     )?;
     std::fs::write(&source_path, source).map_err(|error| {
         format!(
@@ -3858,14 +4287,31 @@ fn package_engine_bundle_monolithic_desktop(
         .as_ref()
         .map(ProgramSnapshot::state_layout)
         .ok_or_else(|| "AOT program snapshot missing during monolithic packaging".to_string())?;
+    let replay_state_snapshot = backend
+        .last_program_snapshot
+        .as_ref()
+        .map(ProgramSnapshot::replay_compatibility)
+        .map(|compatibility| compatibility.state_snapshot)
+        .filter(|snapshot| replay_snapshot_bridge_can_emit(snapshot));
     let bindings_source = aot_root.join("published_aot_bindings.c");
-    crate::write_mobile_aot_bindings_source(
+    crate::mobile_aot_bindings::write_mobile_aot_bindings_source_with_profile_and_snapshot(
         &manifest_json,
         state_layout,
         project_dir,
         &bindings_source,
+        &[],
+        0,
+        0,
+        replay_state_snapshot.as_ref(),
     )?;
     let symbols_header = aot_root.join("published_aot_symbols.h");
+    let replay_state_declarations = if replay_state_snapshot.is_some() {
+        "int32_t stasis_replay_state_snapshot_size(void);\n\
+         int32_t stasis_replay_state_snapshot_write(uint8_t *out, int32_t capacity);\n\
+         int32_t stasis_replay_state_snapshot_restore(const uint8_t *input, int32_t bytes);\n"
+    } else {
+        ""
+    };
     std::fs::write(
         &symbols_header,
         "#ifndef STASIS_PUBLISHED_AOT_SYMBOLS_H\n#define STASIS_PUBLISHED_AOT_SYMBOLS_H\n"
@@ -3874,6 +4320,7 @@ fn package_engine_bundle_monolithic_desktop(
             + "int32_t stasis_mobile_main_entry(void);\n"
             + "int32_t stasis_mobile_tick_entry(void);\n"
             + "int32_t stasis_mobile_render_entry(void);\n"
+            + replay_state_declarations
             + "void stasis_aot_bind_runtime_globals(void);\n"
             + "#define STASIS_AOT_MAIN stasis_mobile_main_entry\n"
             + "#define STASIS_AOT_TICK stasis_mobile_tick_entry\n"
@@ -4179,6 +4626,12 @@ fn package_engine_bundle_release(
         .map(ProgramSnapshot::state_layout)
         .ok_or_else(|| "AOT program snapshot missing during packaging".to_string())?;
     let runtime_fields = merge_runtime_fields(state_layout, &support.runtime_fields)?;
+    let replay_state_snapshot_supported = backend
+        .last_program_snapshot
+        .as_ref()
+        .map(ProgramSnapshot::replay_compatibility)
+        .map(|compatibility| replay_snapshot_bridge_can_emit(&compatibility.state_snapshot))
+        .unwrap_or(false);
     if monolithic_desktop {
         return package_engine_bundle_monolithic_desktop(
             backend,
@@ -4212,6 +4665,11 @@ fn package_engine_bundle_release(
     export_symbols.insert(entry_symbol.clone());
     export_symbols.insert("main".to_string());
     export_symbols.insert("stasis_aot_bind_runtime_globals".to_string());
+    if replay_state_snapshot_supported {
+        export_symbols.insert("stasis_replay_state_snapshot_size".to_string());
+        export_symbols.insert("stasis_replay_state_snapshot_write".to_string());
+        export_symbols.insert("stasis_replay_state_snapshot_restore".to_string());
+    }
     if let Some(symbol) = tick_symbol.as_ref() {
         export_symbols.insert(symbol.clone());
         export_symbols.insert("tick".to_string());
@@ -5524,6 +5982,167 @@ mod tests {
         assert!(source.contains("stasis_jit_register_global_u8_array"));
         assert!(source.contains("stasis_jit_register_global_u16_array"));
         assert!(source.contains("(int32_t*)&wide_value"));
+    }
+
+    #[test]
+    fn replay_snapshot_bridge_uses_explicit_kinds_and_canonical_little_endian_writes() {
+        let snapshot = ProgramReplayStateSnapshot {
+            schema: "stasis.replay_state_snapshot.v2".to_string(),
+            abi_version: 2,
+            support: "descriptor_only".to_string(),
+            byte_order: "little_endian".to_string(),
+            hash_scope: "simulation_after_tick".to_string(),
+            required_bytes: 25,
+            entries: vec![
+                ProgramReplayStateEntry {
+                    kind: "scalar".to_string(),
+                    path: "flag".to_string(),
+                    field: String::new(),
+                    storage_type: "bool".to_string(),
+                    offset: 0,
+                    element_count: 1,
+                    element_bytes: 1,
+                },
+                ProgramReplayStateEntry {
+                    kind: "scalar".to_string(),
+                    path: "scalar".to_string(),
+                    field: String::new(),
+                    storage_type: "i32".to_string(),
+                    offset: 1,
+                    element_count: 1,
+                    element_bytes: 4,
+                },
+                ProgramReplayStateEntry {
+                    kind: "scalar".to_string(),
+                    path: "wide".to_string(),
+                    field: String::new(),
+                    storage_type: "f64".to_string(),
+                    offset: 5,
+                    element_count: 1,
+                    element_bytes: 8,
+                },
+                ProgramReplayStateEntry {
+                    kind: "collection".to_string(),
+                    path: "named".to_string(),
+                    field: "lane".to_string(),
+                    storage_type: "f32".to_string(),
+                    offset: 13,
+                    element_count: 1,
+                    element_bytes: 4,
+                },
+                ProgramReplayStateEntry {
+                    kind: "collection".to_string(),
+                    path: "primitive".to_string(),
+                    field: String::new(),
+                    storage_type: "i32".to_string(),
+                    offset: 17,
+                    element_count: 2,
+                    element_bytes: 4,
+                },
+            ],
+            unsupported_paths: Vec::new(),
+            size_operation: "stasis_replay_state_snapshot_size".to_string(),
+            write_operation: "stasis_replay_state_snapshot_write".to_string(),
+            restore_operation: "stasis_replay_state_snapshot_restore".to_string(),
+        };
+        let source = build_engine_bundle_runtime_bridge_source_with_snapshot(
+            &stasis_jit::AotTarget::Native,
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+            Some(&snapshot),
+        )
+        .expect("build replay snapshot bridge");
+
+        assert!(source.contains("extern int32_t stasis_state_scalar__scalar;"));
+        assert!(source.contains("extern int32_t stasis_state_array__primitive[];"));
+        assert!(source.contains("stasis_state_array__primitive[0]"));
+        assert!(source.contains("stasis_state_array__primitive[1]"));
+        assert!(source.contains("extern float stasis_state_array__named__lane[];"));
+        assert!(source.contains("extern int32_t stasis_state_scalar__flag;"));
+        assert!(source.contains("extern double stasis_state_scalar__wide;"));
+        assert!(source.contains("return 25;"));
+        assert!(source.contains("return -required;"));
+        assert!(source.contains("out[1] = (uint8_t)(bits32 & 0xffu);"));
+        assert!(source.contains("out[4] = (uint8_t)((bits32 >> 24) & 0xffu);"));
+        assert!(source
+            .contains("out[0] = (uint8_t)(((int32_t)(stasis_state_scalar__flag) != 0) ? 1 : 0);"));
+        assert!(source.contains("out[12] = (uint8_t)((bits64 >> 56) & 0xffull);"));
+        assert!(source.contains("memcpy(&bits32, &f32_value, sizeof(bits32));"));
+        assert!(source.contains("memcpy(&bits64, &f64_value, sizeof(bits64));"));
+        assert!(source.contains(
+            "STASIS_EXPORT int32_t stasis_replay_state_snapshot_restore(const uint8_t *input, int32_t bytes)"
+        ));
+        assert!(source.contains("if (bytes != required) return required == 0 ? -1 : -required;"));
+        assert!(source
+            .contains("memcpy(&(stasis_state_array__named__lane[0]), &bits32, sizeof(bits32));"));
+        assert!(source.contains("memcpy(&(stasis_state_scalar__wide), &bits64, sizeof(bits64));"));
+        let guard = source
+            .find("if (out == (uint8_t *)0 || capacity < required) return -required;")
+            .expect("capacity guard");
+        let first_write = source.find("out[0] =").expect("first canonical write");
+        assert!(
+            guard < first_write,
+            "short/null checks must precede all writes"
+        );
+        #[cfg(windows)]
+        {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let temp_root = std::env::temp_dir().join(format!(
+                "stasis-native-replay-bridge-syntax-{}-{stamp}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&temp_root).expect("create native replay bridge temp root");
+            let source_path = temp_root.join("replay_bridge.c");
+            let object_path = temp_root.join("replay_bridge.obj");
+            fs::write(&source_path, &source).expect("write generated replay bridge C");
+            let compiler = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bin/clang-cl.exe");
+            let status = Command::new(&compiler)
+                .arg("/nologo")
+                .arg("/c")
+                .arg("/TC")
+                .arg(&source_path)
+                .arg(format!("/Fo{}", object_path.display()))
+                .status()
+                .expect("run clang-cl for generated replay bridge");
+            fs::remove_dir_all(&temp_root).ok();
+            assert!(
+                status.success(),
+                "generated native replay bridge must compile as C with {}",
+                compiler.display()
+            );
+        }
+
+        let empty_snapshot = ProgramReplayStateSnapshot {
+            schema: "stasis.replay_state_snapshot.v2".to_string(),
+            abi_version: 2,
+            support: "descriptor_only".to_string(),
+            byte_order: "little_endian".to_string(),
+            hash_scope: "simulation_after_tick".to_string(),
+            required_bytes: 0,
+            entries: Vec::new(),
+            unsupported_paths: Vec::new(),
+            size_operation: "stasis_replay_state_snapshot_size".to_string(),
+            write_operation: "stasis_replay_state_snapshot_write".to_string(),
+            restore_operation: "stasis_replay_state_snapshot_restore".to_string(),
+        };
+        let empty_source = build_engine_bundle_runtime_bridge_source_with_snapshot(
+            &stasis_jit::AotTarget::Native,
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+            Some(&empty_snapshot),
+        )
+        .expect("build empty replay snapshot bridge");
+        assert!(empty_source.contains("return 0;\n}\n"));
+        assert!(empty_source.contains("(void)out;"));
     }
 
     #[test]

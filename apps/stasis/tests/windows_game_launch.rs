@@ -619,9 +619,14 @@ fn recording_matches_visible_play_letterbox_and_input_timeline() {
     let replay_json: serde_json::Value =
         serde_json::from_slice(&fs::read(&replay_session).expect("read replay session"))
             .expect("parse replay session");
-    assert_eq!(replay_json["schema_version"], 1);
-    assert_eq!(replay_json["frames"].as_array().map(Vec::len), Some(3));
-    assert!(replay_json["identity"].get("host_i32").is_none());
+    assert_eq!(replay_json["schema_version"], 2);
+    assert_eq!(replay_json["total_ticks"], 3);
+    assert_eq!(replay_json["final_state"]["tick"], 3);
+    assert!(replay_json["segments"]
+        .as_array()
+        .is_some_and(|segments| !segments.is_empty() && segments.len() <= 3));
+    assert!(replay_json["identity"]["observed_i32"].is_array());
+    assert!(replay_json["identity"]["observed_f32"].is_array());
 
     let replayed = test_tree.0.join("replayed");
     let replay_run = launch(
@@ -792,6 +797,8 @@ fn recording_matches_visible_play_letterbox_and_input_timeline() {
                     "60",
                     "--frames",
                     "3",
+                    "--replay",
+                    replay_session.to_str().unwrap(),
                 ]);
                 command
             },
@@ -861,6 +868,237 @@ fn recording_matches_visible_play_letterbox_and_input_timeline() {
         }
     } else {
         eprintln!("ffmpeg unavailable; MP4 artifact validation skipped");
+    }
+}
+
+#[test]
+fn headless_compact_replay_round_trip_verifies_final_state_and_mp4() {
+    let root = repository_root();
+    let configured_runtime = std::env::var_os("STASIS_RUNTIME_DLL_PATH")
+        .as_deref()
+        .is_some_and(|path| Path::new(path).is_file());
+    if !configured_runtime
+        && !root
+            .join("runtime/build/bin/Release/stasis_graphics.dll")
+            .is_file()
+    {
+        eprintln!(
+            "compact replay integration skipped: runtime/build/bin/Release/stasis_graphics.dll is unavailable"
+        );
+        return;
+    }
+    if let Err(error) = Command::new(env!("CARGO_BIN_EXE_stasis"))
+        .arg("help")
+        .output()
+    {
+        if error.raw_os_error() == Some(4551) {
+            eprintln!(
+                "compact replay integration skipped: Windows Application Control blocked the test CLI"
+            );
+            return;
+        }
+        panic!("probe stasis CLI for compact replay recording: {error}");
+    }
+
+    let fixture = root.join("samples/windows_launch_smoke");
+    let test_tree = TestTree(temp_dir("compact_replay_mp4"));
+    let project = test_tree.0.join("windows_launch_smoke");
+    copy_tree(&fixture, &project);
+    materialize_toolchain_stdlib(&project);
+
+    let width = 320_u32;
+    let height = 180_u32;
+    let fps = 30_u32;
+    let frame_count = 4_u64;
+    let baseline = test_tree.0.join("baseline");
+    let replay_session = test_tree.0.join("compact.replay.json");
+    let baseline_run = launch(
+        {
+            let mut command = stasis_command(&project);
+            command.args([
+                "record",
+                "main.stasis",
+                "--output",
+                baseline.to_str().unwrap(),
+                "--width",
+                &width.to_string(),
+                "--height",
+                &height.to_string(),
+                "--fps",
+                &fps.to_string(),
+                "--frames",
+                &frame_count.to_string(),
+                "--record-replay",
+                replay_session.to_str().unwrap(),
+            ]);
+            command
+        },
+        "compact replay baseline recording",
+    );
+    assert!(
+        baseline_run.status.success(),
+        "compact replay baseline recording failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&baseline_run.stdout),
+        String::from_utf8_lossy(&baseline_run.stderr)
+    );
+    let baseline_files = recording_frames(&baseline);
+    assert_eq!(baseline_files.len(), frame_count as usize);
+    for frame in &baseline_files {
+        assert_eq!(
+            image::open(frame)
+                .expect("open compact baseline frame")
+                .dimensions(),
+            (width, height)
+        );
+    }
+
+    let replay_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&replay_session).expect("read compact replay session"))
+            .expect("parse compact replay session");
+    assert_eq!(replay_json["schema_version"], 2);
+    assert_eq!(replay_json["total_ticks"].as_u64(), Some(frame_count));
+    assert_eq!(
+        replay_json["final_state"]["tick"].as_u64(),
+        Some(frame_count)
+    );
+    assert_eq!(
+        replay_json["final_state"]["state_sha256"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+    assert!(replay_json["segments"]
+        .as_array()
+        .is_some_and(|segments| !segments.is_empty()));
+    assert!(replay_json["identity"]["observed_i32"].is_array());
+    assert!(replay_json["identity"]["observed_f32"].is_array());
+
+    let replayed = test_tree.0.join("replayed");
+    let replay_run = launch(
+        {
+            let mut command = stasis_command(&project);
+            command.args([
+                "record",
+                "main.stasis",
+                "--output",
+                replayed.to_str().unwrap(),
+                "--width",
+                &width.to_string(),
+                "--height",
+                &height.to_string(),
+                "--fps",
+                &fps.to_string(),
+                "--frames",
+                &frame_count.to_string(),
+                "--replay",
+                replay_session.to_str().unwrap(),
+            ]);
+            command
+        },
+        "compact replay playback",
+    );
+    let replay_log = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&replay_run.stdout),
+        String::from_utf8_lossy(&replay_run.stderr)
+    );
+    assert!(
+        replay_run.status.success(),
+        "compact replay playback failed: {replay_log}"
+    );
+    assert!(
+        !replay_log.contains("replay diverged"),
+        "compact replay playback reported divergence: {replay_log}"
+    );
+    let replayed_files = recording_frames(&replayed);
+    assert_eq!(replayed_files.len(), baseline_files.len());
+    for (baseline_frame, replayed_frame) in baseline_files.iter().zip(&replayed_files) {
+        assert_eq!(
+            fs::read(baseline_frame).expect("read compact baseline PNG"),
+            fs::read(replayed_frame).expect("read compact replay PNG"),
+            "compact replay final verification must preserve every rendered frame"
+        );
+    }
+
+    if let Some(ffmpeg_dir) = ffmpeg_directory(&root) {
+        let mp4 = test_tree.0.join("replayed.mp4");
+        let mp4_run = launch(
+            {
+                let mut command = stasis_command(&project);
+                add_ffmpeg_path(&mut command, &ffmpeg_dir);
+                command.args([
+                    "record",
+                    "main.stasis",
+                    "--output",
+                    mp4.to_str().unwrap(),
+                    "--width",
+                    &width.to_string(),
+                    "--height",
+                    &height.to_string(),
+                    "--fps",
+                    &fps.to_string(),
+                    "--frames",
+                    &frame_count.to_string(),
+                    "--replay",
+                    replay_session.to_str().unwrap(),
+                ]);
+                command
+            },
+            "compact replay MP4 playback",
+        );
+        assert!(
+            mp4_run.status.success(),
+            "compact replay MP4 playback failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&mp4_run.stdout),
+            String::from_utf8_lossy(&mp4_run.stderr)
+        );
+        assert!(
+            fs::metadata(&mp4)
+                .expect("compact replay MP4 artifact")
+                .len()
+                > 0
+        );
+
+        let ffprobe = if ffmpeg_dir.as_os_str().is_empty() {
+            PathBuf::from("ffprobe")
+        } else {
+            ffmpeg_dir.join("ffprobe.exe")
+        };
+        let probe = Command::new(&ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-count_frames",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height,r_frame_rate,nb_read_frames",
+                "-of",
+                "json",
+            ])
+            .arg(&mp4)
+            .output()
+            .expect("run compact replay MP4 ffprobe");
+        assert!(
+            probe.status.success(),
+            "compact replay MP4 ffprobe failed: {}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let probe_json: serde_json::Value =
+            serde_json::from_slice(&probe.stdout).expect("parse compact replay MP4 ffprobe");
+        let video = probe_json["streams"]
+            .as_array()
+            .and_then(|streams| streams.first())
+            .expect("compact replay MP4 video stream");
+        assert_eq!(video["width"].as_u64(), Some(u64::from(width)));
+        assert_eq!(video["height"].as_u64(), Some(u64::from(height)));
+        assert_eq!(video["r_frame_rate"].as_str(), Some("30/1"));
+        let frame_count_from_probe = video["nb_read_frames"]
+            .as_u64()
+            .or_else(|| video["nb_read_frames"].as_str()?.parse().ok());
+        assert_eq!(frame_count_from_probe, Some(frame_count));
+    } else {
+        eprintln!("ffmpeg unavailable; compact replay MP4 validation skipped");
     }
 }
 

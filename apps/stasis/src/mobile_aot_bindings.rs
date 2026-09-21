@@ -1,5 +1,9 @@
 use crate::build_aot_direct_storage_source;
+use crate::compiler_backend::{
+    append_replay_state_snapshot_bridge_source, replay_snapshot_bridge_can_emit,
+};
 use stasis_assets::{load_project_asset_manifest, AssetFormat, AssetLimits, ResolvedAssetManifest};
+use stasis_compiler::backend::program_snapshot::ProgramReplayStateSnapshot;
 use stasis_compiler::backend::state_layout::StateLayout;
 use std::fs;
 use std::path::Path;
@@ -30,9 +34,31 @@ pub fn write_mobile_aot_bindings_source_with_profile(
     profile_warmup_frames: u32,
     profile_sample_frames: u32,
 ) -> Result<(), String> {
+    write_mobile_aot_bindings_source_with_profile_and_snapshot(
+        manifest,
+        state_layout,
+        project_dir,
+        output_path,
+        profile_functions,
+        profile_warmup_frames,
+        profile_sample_frames,
+        None,
+    )
+}
+
+pub fn write_mobile_aot_bindings_source_with_profile_and_snapshot(
+    manifest: &serde_json::Value,
+    state_layout: &StateLayout,
+    project_dir: &Path,
+    output_path: &Path,
+    profile_functions: &[String],
+    profile_warmup_frames: u32,
+    profile_sample_frames: u32,
+    replay_state_snapshot: Option<&ProgramReplayStateSnapshot>,
+) -> Result<(), String> {
     let assets = load_project_asset_manifest(project_dir, AssetLimits::default())
         .map_err(|error| format!("failed to resolve mobile AOT assets: {error}"))?;
-    write_mobile_aot_bindings_source_with_profile_and_assets(
+    write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot(
         manifest,
         state_layout,
         &assets,
@@ -40,6 +66,7 @@ pub fn write_mobile_aot_bindings_source_with_profile(
         profile_functions,
         profile_warmup_frames,
         profile_sample_frames,
+        replay_state_snapshot,
     )
 }
 
@@ -52,6 +79,28 @@ pub fn write_mobile_aot_bindings_source_with_profile_and_assets(
     profile_warmup_frames: u32,
     profile_sample_frames: u32,
 ) -> Result<(), String> {
+    write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot(
+        manifest,
+        state_layout,
+        assets,
+        output_path,
+        profile_functions,
+        profile_warmup_frames,
+        profile_sample_frames,
+        None,
+    )
+}
+
+pub fn write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot(
+    manifest: &serde_json::Value,
+    state_layout: &StateLayout,
+    assets: &ResolvedAssetManifest,
+    output_path: &Path,
+    profile_functions: &[String],
+    profile_warmup_frames: u32,
+    profile_sample_frames: u32,
+    replay_state_snapshot: Option<&ProgramReplayStateSnapshot>,
+) -> Result<(), String> {
     let functions = manifest
         .get("functions")
         .and_then(serde_json::Value::as_array)
@@ -62,11 +111,17 @@ pub fn write_mobile_aot_bindings_source_with_profile_and_assets(
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| "mobile AOT manifest missing string_literals array".to_string())?;
     let mut out = String::from(
-        "#include <stdint.h>\n#include <string.h>\n#include \"stasis_mobile_aot_runtime.h\"\n\n",
+        "#include <stdint.h>\n#include <string.h>\n#include \"stasis_mobile_aot_runtime.h\"\n\n\
+#if defined(_WIN32)\n#define STASIS_EXPORT __declspec(dllexport)\n#else\n#define STASIS_EXPORT __attribute__((visibility(\"default\")))\n#endif\n\n",
     );
     let (direct_storage_source, direct_storage_register_lines) =
         build_aot_direct_storage_source(state_layout)?;
     out.push_str(&direct_storage_source);
+    if let Some(snapshot) =
+        replay_state_snapshot.filter(|snapshot| replay_snapshot_bridge_can_emit(snapshot))
+    {
+        append_replay_state_snapshot_bridge_source(&mut out, snapshot)?;
+    }
     for function in functions {
         let name = function
             .get("name")

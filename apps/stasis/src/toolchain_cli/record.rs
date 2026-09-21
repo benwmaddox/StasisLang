@@ -30,7 +30,7 @@ pub(super) struct RecordArgs {
     pub(super) height: u32,
     #[arg(long, value_name = "FPS")]
     pub(super) fps: u32,
-    /// Capture exactly this many committed rendered frames.
+    /// Capture exactly this many committed frames; with --replay this is also the exact simulation tick count.
     #[arg(
         long,
         visible_alias = "ticks",
@@ -47,7 +47,7 @@ pub(super) struct RecordArgs {
     /// Invoke this guest function once before each tick: function name(frame: i32): i32.
     #[arg(long, value_name = "FUNCTION")]
     pub(super) before_tick: Option<String>,
-    /// Replay a recorded HostFrame-diff session into the captured frames or MP4.
+    /// Replay a compact observed-input session through normal simulation into PNG, audio, or MP4 output.
     #[arg(long, value_name = "PATH", conflicts_with_all = ["input_script", "record_replay"])]
     pub(super) replay: Option<PathBuf>,
     /// Save this run as a replay session while also capturing frames or MP4.

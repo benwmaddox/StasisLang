@@ -12,6 +12,10 @@ use crate::backend::compile_analysis::{
 use crate::backend::emit::hash_global_path;
 use crate::backend::program_snapshot::ProgramSnapshot;
 use crate::backend::reachability::matches_root;
+use crate::backend::state_layout::{
+    build_state_layout, collection_field_element_count, is_command_buffer_path,
+    StateCollectionLayout, StateScalarLayout,
+};
 use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
 use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
@@ -45,6 +49,7 @@ pub struct WasmProcess {
     global_types: BTreeMap<String, TypeId>,
     imported_symbols: BTreeSet<String>,
     program_snapshot: Option<ProgramSnapshot>,
+    replay_state_snapshot_supported: bool,
 }
 
 impl WasmProcess {
@@ -95,6 +100,10 @@ impl WasmProcess {
 
     pub fn program_snapshot(&self) -> Option<&ProgramSnapshot> {
         self.program_snapshot.as_ref()
+    }
+
+    pub fn replay_state_snapshot_supported(&self) -> bool {
+        self.replay_state_snapshot_supported
     }
 
     pub fn last_source_diagnostic(&self) -> Option<&crate::SourceDiagnostic> {
@@ -197,7 +206,11 @@ impl WasmProcess {
                 );
             }
         }
-        (self.module, self.imported_symbols) = encode_module(
+        (
+            self.module,
+            self.imported_symbols,
+            self.replay_state_snapshot_supported,
+        ) = encode_module(
             &lowered,
             &analysis,
             &types,
@@ -419,6 +432,246 @@ struct StructScalarBinding {
     base: i32,
     type_id: TypeId,
     fields: BTreeMap<String, MemoryBinding>,
+}
+
+#[derive(Debug, Clone)]
+enum ReplayStateSource {
+    Global(u32),
+    Memory {
+        binding: MemoryBinding,
+        element_index: u64,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ReplayStateWrite {
+    offset: u32,
+    storage_type: String,
+    type_id: TypeId,
+    source: ReplayStateSource,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReplayStateWritePlan {
+    required_bytes: u32,
+    writes: Vec<ReplayStateWrite>,
+}
+
+fn replay_storage_width(storage_type: &str) -> Option<u32> {
+    match storage_type {
+        "bool" | "u8" => Some(1),
+        "u16" => Some(2),
+        "i32" | "u32" | "f32" => Some(4),
+        "f64" => Some(8),
+        _ => None,
+    }
+}
+
+fn is_replay_host_or_presentation_path(path: &str) -> bool {
+    path == "host_i32"
+        || path == "host_f32"
+        || path.starts_with("host_i32.")
+        || path.starts_with("host_f32.")
+        || path.starts_with("host_req_")
+        || is_command_buffer_path(path)
+}
+
+fn append_replay_state_write(
+    plan: &mut ReplayStateWritePlan,
+    offset: &mut u64,
+    storage_type: &str,
+    type_id: TypeId,
+    source: ReplayStateSource,
+) -> Result<(), String> {
+    let width = replay_storage_width(storage_type).ok_or_else(|| {
+        format!("web replay state snapshot does not support storage type '{storage_type}'")
+    })?;
+    let write_offset = u32::try_from(*offset).map_err(|_| {
+        "web replay state snapshot exceeds the 32-bit Wasm output address space".to_string()
+    })?;
+    plan.writes.push(ReplayStateWrite {
+        offset: write_offset,
+        storage_type: storage_type.to_string(),
+        type_id,
+        source,
+    });
+    *offset = offset
+        .checked_add(u64::from(width))
+        .ok_or_else(|| "web replay state snapshot byte size overflow".to_string())?;
+    Ok(())
+}
+
+fn append_replay_scalar_write(
+    plan: &mut ReplayStateWritePlan,
+    offset: &mut u64,
+    scalar: &StateScalarLayout,
+    global_types: &BTreeMap<String, TypeId>,
+    global_indices: &BTreeMap<String, u32>,
+    memory: &BTreeMap<String, MemoryBinding>,
+) -> Result<(), String> {
+    if is_replay_host_or_presentation_path(&scalar.path) {
+        return Ok(());
+    }
+    let type_id = global_types.get(&scalar.path).copied().ok_or_else(|| {
+        format!(
+            "web replay state snapshot scalar '{}' is missing its compiler type",
+            scalar.path
+        )
+    })?;
+    let source = if let Some(binding) = memory.get(&scalar.path) {
+        if !binding.scalar {
+            return Err(format!(
+                "web replay state snapshot scalar '{}' is backed by a collection lane",
+                scalar.path
+            ));
+        }
+        ReplayStateSource::Memory {
+            binding: binding.clone(),
+            element_index: 0,
+        }
+    } else if let Some(index) = global_indices.get(&scalar.path) {
+        ReplayStateSource::Global(*index)
+    } else {
+        return Err(format!(
+            "web replay state snapshot scalar '{}' has no Wasm storage binding",
+            scalar.path
+        ));
+    };
+    append_replay_state_write(plan, offset, scalar.storage_type_name(), type_id, source)
+}
+
+fn append_replay_collection_writes(
+    plan: &mut ReplayStateWritePlan,
+    offset: &mut u64,
+    collection: &StateCollectionLayout,
+    memory: &BTreeMap<String, MemoryBinding>,
+) -> Result<(), String> {
+    if is_replay_host_or_presentation_path(&collection.path) {
+        return Ok(());
+    }
+    let logical_capacity = u64::try_from(collection.capacity).map_err(|_| {
+        format!(
+            "web replay state snapshot collection '{}' has negative capacity {}",
+            collection.path, collection.capacity
+        )
+    })?;
+    let mut fields = collection.fields.iter().collect::<Vec<_>>();
+    fields.sort_by(|left, right| left.field.cmp(&right.field));
+    for field in fields {
+        let element_count = collection_field_element_count(collection, field, logical_capacity);
+        let binding_path = if field.field.is_empty() {
+            collection.path.clone()
+        } else {
+            format!("{}.{}", collection.path, field.field)
+        };
+        let binding = memory.get(&binding_path).ok_or_else(|| {
+            format!(
+                "web replay state snapshot collection lane '{}' has no Wasm storage binding",
+                binding_path
+            )
+        })?;
+        if binding.scalar {
+            return Err(format!(
+                "web replay state snapshot collection lane '{}' is backed by scalar storage",
+                binding_path
+            ));
+        }
+        let binding_length = u64::try_from(binding.len).map_err(|_| {
+            format!(
+                "web replay state snapshot collection lane '{}' has negative storage length {}",
+                binding_path, binding.len
+            )
+        })?;
+        if element_count > binding_length {
+            return Err(format!(
+                "web replay state snapshot collection lane '{}' has {} canonical elements but only {} Wasm elements",
+                binding_path, element_count, binding_length
+            ));
+        }
+        let stride = u64::from(binding.stride);
+        for element_index in 0..element_count {
+            let source_offset = element_index.checked_mul(stride).ok_or_else(|| {
+                format!(
+                    "web replay state snapshot collection lane '{}' address overflow",
+                    binding_path
+                )
+            })?;
+            let source_offset = u32::try_from(source_offset)
+                .ok()
+                .and_then(|value| binding.offset.checked_add(value))
+                .ok_or_else(|| {
+                    format!(
+                        "web replay state snapshot collection lane '{}' address overflow",
+                        binding_path
+                    )
+                })?;
+            let _ = source_offset;
+            append_replay_state_write(
+                plan,
+                offset,
+                field.storage_type_name(),
+                binding.type_id,
+                ReplayStateSource::Memory {
+                    binding: binding.clone(),
+                    element_index,
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn build_replay_state_write_plan(
+    analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
+    types: &TypeTable,
+    memory: &BTreeMap<String, MemoryBinding>,
+    globals: &[(String, TypeId, Option<i32>)],
+) -> Result<Option<ReplayStateWritePlan>, String> {
+    let layout = build_state_layout(
+        &analysis.global_path_types,
+        &analysis.collection_infos,
+        &analysis.typed_collection_descriptors,
+        types,
+    )?;
+    for opaque in &layout.opaque {
+        if !is_replay_host_or_presentation_path(&opaque.path) {
+            return Ok(None);
+        }
+    }
+    // Compiler-owned typed collections are not lowered into Web storage yet,
+    // including their metadata scalars. Omit only this optional ABI while the
+    // ordinary package remains valid.
+    if !analysis.typed_collection_descriptors.is_empty() {
+        return Ok(None);
+    }
+    let global_indices = globals
+        .iter()
+        .enumerate()
+        .map(|(index, (path, _, _))| (path.clone(), index as u32))
+        .collect::<BTreeMap<_, _>>();
+    let mut plan = ReplayStateWritePlan::default();
+    let mut offset = 0u64;
+    let mut scalars = layout.scalars.iter().collect::<Vec<_>>();
+    scalars.sort_by(|left, right| left.path.cmp(&right.path));
+    for scalar in scalars {
+        append_replay_scalar_write(
+            &mut plan,
+            &mut offset,
+            scalar,
+            &analysis.global_path_types,
+            &global_indices,
+            memory,
+        )?;
+    }
+    let mut collections = layout.collections.iter().collect::<Vec<_>>();
+    collections.sort_by(|left, right| left.path.cmp(&right.path));
+    for collection in collections {
+        append_replay_collection_writes(&mut plan, &mut offset, collection, memory)?;
+    }
+    plan.required_bytes = u32::try_from(offset).map_err(|_| {
+        "web replay state snapshot exceeds the 32-bit Wasm output address space".to_string()
+    })?;
+    Ok(Some(plan))
 }
 
 fn build_struct_scalars(
@@ -835,7 +1088,7 @@ fn encode_module(
     types: &TypeTable,
     string_literals: &BTreeMap<i32, String>,
     debug_symbols: bool,
-) -> Result<(Vec<u8>, BTreeSet<String>), String> {
+) -> Result<(Vec<u8>, BTreeSet<String>, bool), String> {
     let mut internal_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, (function, _)) in functions.iter().enumerate() {
         internal_by_name
@@ -902,7 +1155,6 @@ fn encode_module(
     let (memory_bindings, memory_bytes) = build_memory_bindings(analysis, types, string_literals)?;
     let (string_literal_memory, total_memory_bytes) =
         build_string_literal_memory(string_literals, memory_bytes)?;
-    let has_memory = memory_bytes > 0 || !string_literal_memory.is_empty();
     let struct_collections = build_struct_collections(analysis, types, &memory_bindings)?;
     let mut globals = Vec::new();
     for (name, type_id) in &analysis.global_path_types {
@@ -942,6 +1194,18 @@ fn encode_module(
         .enumerate()
         .map(|(index, (name, _, _))| (name.clone(), index as u32))
         .collect::<BTreeMap<_, _>>();
+    // The Web backend does not yet lower every compiler-owned state shape. Keep
+    // ordinary packages buildable and omit this optional ABI only for an
+    // explicitly unsupported shape; layout and binding inconsistencies remain
+    // compiler errors instead of being silently swallowed.
+    let replay_state_plan =
+        build_replay_state_write_plan(analysis, types, &memory_bindings, &globals)?;
+    let replay_state_snapshot_supported = replay_state_plan.is_some();
+    let has_memory = memory_bytes > 0
+        || !string_literal_memory.is_empty()
+        || replay_state_plan
+            .as_ref()
+            .is_some_and(|plan| plan.required_bytes > 0);
     let struct_scalars = build_struct_scalars(analysis, &memory_bindings);
 
     let accessor_signatures = [
@@ -981,6 +1245,27 @@ fn encode_module(
     let accessor_type_indices = accessor_signatures.map(|signature| {
         intern_wasm_signature(signature, &mut wasm_signature_indices, &mut wasm_signatures)
     });
+    let replay_state_type_indices = replay_state_plan.as_ref().map(|_| {
+        let size = intern_wasm_signature(
+            WasmSignature {
+                params: Vec::new(),
+                result: Some(I32),
+            },
+            &mut wasm_signature_indices,
+            &mut wasm_signatures,
+        );
+        let write = intern_wasm_signature(
+            WasmSignature {
+                params: vec![I32, I32],
+                result: Some(I32),
+            },
+            &mut wasm_signature_indices,
+            &mut wasm_signatures,
+        );
+        let restore = write;
+        (size, write, restore)
+    });
+    let replay_state_function_count = u32::from(replay_state_type_indices.is_some()) * 3;
 
     let import_indices = imports
         .iter()
@@ -1043,7 +1328,10 @@ fn encode_module(
         section(2, import_section, &mut module);
     }
     let mut function_section = Vec::new();
-    uleb(functions.len() as u32 + 4, &mut function_section);
+    uleb(
+        functions.len() as u32 + 4 + replay_state_function_count,
+        &mut function_section,
+    );
     for index in 0..functions.len() {
         uleb(
             signature_type_indices[imports.len() + index],
@@ -1052,6 +1340,11 @@ fn encode_module(
     }
     for index in accessor_type_indices {
         uleb(index, &mut function_section);
+    }
+    if let Some((size, write, restore)) = replay_state_type_indices.as_ref() {
+        uleb(*size, &mut function_section);
+        uleb(*write, &mut function_section);
+        uleb(*restore, &mut function_section);
     }
     section(3, function_section, &mut module);
 
@@ -1094,7 +1387,8 @@ fn encode_module(
             }
             + u32::from(has_memory)
             + 1
-            + 4,
+            + 4
+            + replay_state_function_count,
         &mut export_section,
     );
     for (index, (function, _)) in functions.iter().enumerate() {
@@ -1134,10 +1428,28 @@ fn encode_module(
         export_section.push(0);
         uleb(accessor_base + offset as u32, &mut export_section);
     }
+    if replay_state_type_indices.is_some() {
+        let replay_state_base = accessor_base + 4;
+        for (offset, name) in [
+            "stasis_replay_state_snapshot_size",
+            "stasis_replay_state_snapshot_write",
+            "stasis_replay_state_snapshot_restore",
+        ]
+        .iter()
+        .enumerate()
+        {
+            string(name, &mut export_section);
+            export_section.push(0);
+            uleb(replay_state_base + offset as u32, &mut export_section);
+        }
+    }
     section(7, export_section, &mut module);
 
     let mut code_section = Vec::new();
-    uleb(functions.len() as u32 + 4, &mut code_section);
+    uleb(
+        functions.len() as u32 + 4 + replay_state_function_count,
+        &mut code_section,
+    );
     for (function, hir) in functions {
         let body = encode_function(
             function,
@@ -1161,6 +1473,22 @@ fn encode_module(
     }
     for (lane, setter) in [(I32, false), (I32, true), (F32, false), (F32, true)] {
         let body = encode_global_accessor(&globals, &memory_bindings, lane, setter)?;
+        uleb(body.len() as u32, &mut code_section);
+        code_section.extend(body);
+    }
+    if let Some(replay_state_plan) = replay_state_plan {
+        let body = {
+            let mut body = vec![0, 0x41];
+            sleb(replay_state_plan.required_bytes as i32, &mut body);
+            body.push(0x0b);
+            body
+        };
+        uleb(body.len() as u32, &mut code_section);
+        code_section.extend(body);
+        let body = encode_replay_state_writer(&replay_state_plan)?;
+        uleb(body.len() as u32, &mut code_section);
+        code_section.extend(body);
+        let body = encode_replay_state_restore(&replay_state_plan)?;
         uleb(body.len() as u32, &mut code_section);
         code_section.extend(body);
     }
@@ -1241,7 +1569,7 @@ fn encode_module(
     };
     append_name_section(&function_names, &mut module);
     let imported_symbols = imports.into_iter().map(|(_, symbol, _)| symbol).collect();
-    Ok((module, imported_symbols))
+    Ok((module, imported_symbols, replay_state_snapshot_supported))
 }
 
 #[derive(Clone)]
@@ -1329,6 +1657,250 @@ fn encode_global_accessor(
     matching.sort_by(|left, right| left.name.cmp(&right.name));
     let mut body = vec![0];
     branch(&matching, lane, setter, &mut body)?;
+    body.push(0x0b);
+    Ok(body)
+}
+
+fn encode_replay_state_source_value(
+    write: &ReplayStateWrite,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    match &write.source {
+        ReplayStateSource::Global(index) => {
+            out.push(0x23);
+            uleb(*index, out);
+        }
+        ReplayStateSource::Memory {
+            binding,
+            element_index,
+        } => {
+            let source_offset = u64::from(binding.offset)
+                .checked_add(
+                    element_index
+                        .checked_mul(u64::from(binding.stride))
+                        .ok_or_else(|| {
+                            "web replay state snapshot source address overflow".to_string()
+                        })?,
+                )
+                .ok_or_else(|| "web replay state snapshot source address overflow".to_string())?;
+            let source_offset = i32::try_from(source_offset).map_err(|_| {
+                "web replay state snapshot source address exceeds the Wasm address space"
+                    .to_string()
+            })?;
+            out.push(0x41);
+            sleb(source_offset, out);
+            encode_memory_load(write.type_id, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_replay_state_store(storage_type: &str, out: &mut Vec<u8>) -> Result<(), String> {
+    let type_id = match storage_type {
+        "bool" => TYPE_ID_BOOL,
+        "u8" => TYPE_ID_U8,
+        "u16" => TYPE_ID_U16,
+        "i32" => TYPE_ID_I32,
+        "u32" => TYPE_ID_U32,
+        "f32" => TYPE_ID_F32,
+        "f64" => TYPE_ID_F64,
+        other => {
+            return Err(format!(
+                "web replay state snapshot does not support storage type '{other}'"
+            ))
+        }
+    };
+    encode_memory_store(type_id, out)
+}
+
+fn encode_replay_state_writer(plan: &ReplayStateWritePlan) -> Result<Vec<u8>, String> {
+    if plan.required_bytes == 0 {
+        return Ok(vec![0, 0x41, 0, 0x0b]);
+    }
+    let required = i32::try_from(plan.required_bytes).map_err(|_| {
+        "web replay state snapshot exceeds the 32-bit Wasm return-value range".to_string()
+    })?;
+    let failure = -required;
+    let mut body = vec![0];
+
+    // Check all preconditions before reading or writing any state.  This keeps a
+    // short output buffer and an out-of-bounds destination atomic from the host's
+    // point of view: the function returns -required without partial output.
+    body.extend([0x20, 1, 0x41]);
+    sleb(required, &mut body);
+    body.push(0x48); // i32.lt_s: capacity < required
+    body.extend([0x04, 0x40, 0x41]);
+    sleb(failure, &mut body);
+    body.extend([0x0f, 0x0b]);
+
+    body.extend([0x20, 0, 0x41, 0x00, 0x48]); // out_offset < 0
+    body.extend([0x04, 0x40, 0x41]);
+    sleb(failure, &mut body);
+    body.extend([0x0f, 0x0b]);
+
+    body.extend([0x20, 0, 0x41]);
+    sleb(required, &mut body);
+    body.extend([0x6a, 0x20, 0, 0x49]); // out + required wrapped below out
+    body.extend([0x04, 0x40, 0x41]);
+    sleb(failure, &mut body);
+    body.extend([0x0f, 0x0b]);
+
+    body.extend([0x20, 0, 0x41]);
+    sleb(required, &mut body);
+    body.extend([0x6a, 0xad, 0x3f, 0x00, 0xad, 0x42, 0x10, 0x86, 0x56]);
+    // u64(out + required) > (u64(memory.size()) << 16). Widening before
+    // shifting keeps the bound correct at Wasm's 65,536-page limit.
+    body.extend([0x04, 0x40, 0x41]);
+    sleb(failure, &mut body);
+    body.extend([0x0f, 0x0b]);
+
+    for write in &plan.writes {
+        body.extend([0x20, 0, 0x41]);
+        sleb(write.offset as i32, &mut body);
+        body.push(0x6a);
+        encode_replay_state_source_value(write, &mut body)?;
+        if write.storage_type == "bool" {
+            body.extend([0x41, 0x00, 0x47]); // normalize every non-zero bool to 1
+        }
+        encode_replay_state_store(&write.storage_type, &mut body)?;
+    }
+    body.push(0x41);
+    sleb(required, &mut body);
+    body.push(0x0b);
+    Ok(body)
+}
+
+fn encode_replay_state_restore_preflight(required: i32, failure: i32, body: &mut Vec<u8>) {
+    // A restore consumes an exact snapshot.  Keep every check before the first
+    // state store so malformed input is atomic from the host's point of view.
+    body.extend([0x20, 1, 0x41]);
+    sleb(required, body);
+    body.push(0x47); // bytes != required
+    body.extend([0x04, 0x40, 0x41]);
+    sleb(failure, body);
+    body.extend([0x0f, 0x0b]);
+
+    body.extend([0x20, 0, 0x41, 0x00, 0x48]); // input < 0
+    body.extend([0x04, 0x40, 0x41]);
+    sleb(failure, body);
+    body.extend([0x0f, 0x0b]);
+
+    body.extend([0x20, 0, 0x41]);
+    sleb(required, body);
+    body.extend([0x6a, 0x20, 0, 0x49]); // input + required wrapped below input
+    body.extend([0x04, 0x40, 0x41]);
+    sleb(failure, body);
+    body.extend([0x0f, 0x0b]);
+
+    body.extend([0x20, 0, 0x41]);
+    sleb(required, body);
+    body.extend([0x6a, 0xad, 0x3f, 0x00, 0xad, 0x42, 0x10, 0x86, 0x56]);
+    // u64(input + required) > (u64(memory.size()) << 16).
+    body.extend([0x04, 0x40, 0x41]);
+    sleb(failure, body);
+    body.extend([0x0f, 0x0b]);
+}
+
+fn replay_state_binding_offset(write: &ReplayStateWrite) -> Result<i32, String> {
+    match &write.source {
+        ReplayStateSource::Global(_) => Err("global replay state has no memory offset".to_string()),
+        ReplayStateSource::Memory {
+            binding,
+            element_index,
+        } => {
+            let source_offset = u64::from(binding.offset)
+                .checked_add(
+                    element_index
+                        .checked_mul(u64::from(binding.stride))
+                        .ok_or_else(|| {
+                            "web replay state snapshot target address overflow".to_string()
+                        })?,
+                )
+                .ok_or_else(|| "web replay state snapshot target address overflow".to_string())?;
+            i32::try_from(source_offset).map_err(|_| {
+                "web replay state snapshot target address exceeds the Wasm address space"
+                    .to_string()
+            })
+        }
+    }
+}
+
+fn encode_replay_state_zero_target(
+    write: &ReplayStateWrite,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    match &write.source {
+        ReplayStateSource::Global(index) => {
+            encode_zero(write.type_id, out)?;
+            out.push(0x24);
+            uleb(*index, out);
+        }
+        ReplayStateSource::Memory { .. } => {
+            out.push(0x41);
+            sleb(replay_state_binding_offset(write)?, out);
+            encode_zero(write.type_id, out)?;
+            encode_memory_store(write.type_id, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn encode_replay_state_input_value(
+    write: &ReplayStateWrite,
+    input_offset: i32,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    out.extend([0x20, 0, 0x41]);
+    sleb(input_offset, out);
+    out.push(0x6a);
+    encode_memory_load(write.type_id, out)?;
+    if write.storage_type == "bool" {
+        out.extend([0x41, 0x00, 0x47]); // normalize every non-zero bool to 1
+    }
+    Ok(())
+}
+
+fn encode_replay_state_restore(plan: &ReplayStateWritePlan) -> Result<Vec<u8>, String> {
+    // There is no memory section for a zero-byte state.  Preserve the exact
+    // byte-count contract without inspecting an otherwise irrelevant pointer.
+    if plan.required_bytes == 0 {
+        return Ok(vec![
+            0, 0x20, 1, 0x45, 0x04, 0x7f, 0x41, 0, 0x05, 0x41, 0x7f, 0x0b, 0x0b,
+        ]);
+    }
+    let required = i32::try_from(plan.required_bytes).map_err(|_| {
+        "web replay state snapshot exceeds the 32-bit Wasm return-value range".to_string()
+    })?;
+    let failure = -required;
+    let mut body = vec![0];
+    encode_replay_state_restore_preflight(required, failure, &mut body);
+
+    // Clear every represented simulation lane before decoding.  These are
+    // generated stores: there is no runtime loop or helper call.
+    for write in &plan.writes {
+        encode_replay_state_zero_target(write, &mut body)?;
+    }
+
+    // Decode the canonical fixed little-endian stream into the original
+    // global or memory lane.  The load/store pair preserves f32/f64 bit
+    // patterns; only bool is normalized to its canonical 0/1 representation.
+    for write in &plan.writes {
+        match &write.source {
+            ReplayStateSource::Global(index) => {
+                encode_replay_state_input_value(write, write.offset as i32, &mut body)?;
+                body.push(0x24);
+                uleb(*index, &mut body);
+            }
+            ReplayStateSource::Memory { .. } => {
+                body.push(0x41);
+                sleb(replay_state_binding_offset(write)?, &mut body);
+                encode_replay_state_input_value(write, write.offset as i32, &mut body)?;
+                encode_memory_store(write.type_id, &mut body)?;
+            }
+        }
+    }
+    body.push(0x41);
+    sleb(required, &mut body);
     body.push(0x0b);
     Ok(body)
 }
@@ -5531,6 +6103,209 @@ mod tests {
     }
 
     #[test]
+    fn emits_and_executes_canonical_replay_snapshot_writer() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "replay_snapshot_writer.stasis",
+            r#"
+global scalar_bool: bool;
+global scalar_u8: u8;
+global scalar_u16: u16;
+global scalar_i32: i32;
+global scalar_u32: u32;
+global scalar_f32: f32;
+global scalar_f64: f64;
+global primitive_values: i32[2];
+global host_i32: i32[1];
+
+struct Pair { value: i32; active: bool; }
+global pairs: Pair[2];
+
+function main(): i32 {
+    scalar_bool = true;
+    scalar_u8 = 251;
+    scalar_u16 = 60000;
+    scalar_i32 = -123456;
+    scalar_u32 = -1;
+    scalar_f32 = 1.5;
+    scalar_f64 = -2.5;
+    primitive_values[0] = -7;
+    primitive_values[1] = 8;
+    pairs[0].value = 42;
+    pairs[0].active = true;
+    host_i32[0] = 99;
+    return 0;
+}
+function tick(): i32 {
+    scalar_bool = false;
+    scalar_u8 = 7;
+    scalar_u16 = 8;
+    scalar_i32 = 9;
+    scalar_u32 = 10;
+    scalar_f32 = 11.5;
+    scalar_f64 = 12.5;
+    primitive_values[0] = 13;
+    primitive_values[1] = 14;
+    pairs[0].value = 15;
+    pairs[0].active = false;
+    return 0;
+}
+function render(): i32 { return 0; }
+"#,
+        );
+        process.compile().expect("compile replay snapshot writer");
+
+        let descriptor = process
+            .program_snapshot()
+            .expect("replay snapshot program metadata")
+            .replay_compatibility()
+            .state_snapshot;
+        assert!(descriptor.entries.iter().any(|entry| {
+            entry.kind == "collection" && entry.path == "primitive_values" && entry.field.is_empty()
+        }));
+        assert!(descriptor
+            .entries
+            .iter()
+            .any(|entry| entry.kind == "collection"
+                && entry.path == "pairs"
+                && entry.field == "active"));
+        assert!(descriptor
+            .entries
+            .iter()
+            .any(|entry| entry.kind == "scalar" && entry.path == "scalar_bool"));
+        assert!(!descriptor
+            .entries
+            .iter()
+            .any(|entry| entry.path == "host_i32" || entry.path.starts_with("host_i32.")));
+        assert!(exported_function_names(process.module_bytes())
+            .contains(&"stasis_replay_state_snapshot_size".to_string()));
+        assert!(exported_function_names(process.module_bytes())
+            .contains(&"stasis_replay_state_snapshot_write".to_string()));
+        assert!(exported_function_names(process.module_bytes())
+            .contains(&"stasis_replay_state_snapshot_restore".to_string()));
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let wasm_path = std::env::temp_dir().join(format!(
+            "stasis_wasm_replay_snapshot_writer_{}_{}.wasm",
+            std::process::id(),
+            stamp
+        ));
+        fs::write(&wasm_path, process.module_bytes()).expect("write replay snapshot wasm");
+        let script = r#"
+const fs = require('node:fs');
+const path = process.argv[1];
+WebAssembly.instantiate(fs.readFileSync(path), {}).then(({instance}) => {
+  const e = instance.exports;
+  const required = e.stasis_replay_state_snapshot_size();
+  e.main();
+  const oldBytes = e.memory.buffer.byteLength;
+  e.memory.grow(1);
+  const view = new Uint8Array(e.memory.buffer);
+  const originalPtr = oldBytes;
+  const mutatedPtr = originalPtr + required;
+  const checkPtr = mutatedPtr + required;
+  const same = (left, right) => left.length === right.length && left.every((value, index) => value === right[index]);
+  const write = ptr => {
+    const result = e.stasis_replay_state_snapshot_write(ptr, required);
+    return {result, bytes: Array.from(view.slice(ptr, ptr + required))};
+  };
+  const originalWrite = write(originalPtr);
+  e.tick();
+  const mutatedWrite = write(mutatedPtr);
+  const short = e.stasis_replay_state_snapshot_restore(originalPtr, required - 1);
+  const shortState = write(checkPtr).bytes;
+  const invalid = e.stasis_replay_state_snapshot_restore(-1, required);
+  const invalidState = write(checkPtr).bytes;
+  const outOfBounds = view.length - required + 1;
+  const outOfBoundsResult = e.stasis_replay_state_snapshot_restore(outOfBounds, required);
+  const outOfBoundsState = write(checkPtr).bytes;
+  const restored = e.stasis_replay_state_snapshot_restore(originalPtr, required);
+  const actual = write(checkPtr);
+  process.stdout.write(JSON.stringify({
+    required,
+    originalResult: originalWrite.result,
+    mutatedResult: mutatedWrite.result,
+    short,
+    shortUnchanged: same(shortState, mutatedWrite.bytes),
+    invalid,
+    invalidUnchanged: same(invalidState, mutatedWrite.bytes),
+    outOfBoundsResult,
+    outOfBoundsUnchanged: same(outOfBoundsState, mutatedWrite.bytes),
+    restored,
+    result: actual.result,
+    actual: actual.bytes,
+  }));
+}).catch((error) => { console.error(error); process.exit(1); });
+"#;
+        let output = Command::new("node")
+            .args(["-e", script])
+            .arg(&wasm_path)
+            .output()
+            .expect("run Node replay snapshot writer");
+        let _ = fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("parse replay snapshot result");
+        let expected = vec![
+            // Canonical scalars, sorted by path. Collection length metadata is
+            // simulation state and therefore precedes the authored scalars.
+            2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, // *.length/max_length
+            1, // scalar_bool
+            0, 0, 0xc0, 0x3f, // scalar_f32 = 1.5
+            0, 0, 0, 0, 0, 0, 4, 0xc0, // scalar_f64 = -2.5
+            0xc0, 0x1d, 0xfe, 0xff, // scalar_i32 = -123456
+            0x60, 0xea, // scalar_u16 = 60000
+            0xff, 0xff, 0xff, 0xff, // scalar_u32 = 0xffffffff
+            0xfb, // scalar_u8 = 251
+            // Canonical collection lanes, sorted by path then field.
+            1, 0, // pairs.active
+            42, 0, 0, 0, 0, 0, 0, 0, // pairs.value
+            0xf9, 0xff, 0xff, 0xff, 8, 0, 0, 0, // primitive_values
+        ];
+        assert_eq!(result["required"], descriptor.required_bytes);
+        assert_eq!(result["originalResult"], descriptor.required_bytes);
+        assert_eq!(result["mutatedResult"], descriptor.required_bytes);
+        assert_eq!(result["short"], -(descriptor.required_bytes as i64));
+        assert_eq!(result["invalid"], -(descriptor.required_bytes as i64));
+        assert_eq!(
+            result["outOfBoundsResult"],
+            -(descriptor.required_bytes as i64)
+        );
+        assert_eq!(result["shortUnchanged"], true);
+        assert_eq!(result["invalidUnchanged"], true);
+        assert_eq!(result["outOfBoundsUnchanged"], true);
+        assert_eq!(result["restored"], descriptor.required_bytes);
+        assert_eq!(result["result"], descriptor.required_bytes);
+        assert_eq!(result["actual"], serde_json::json!(expected));
+    }
+
+    #[test]
+    fn unsupported_typed_state_omits_replay_snapshot_exports_without_hiding_compile_errors() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into()]);
+        process.upsert_file(
+            "typed_replay_snapshot.stasis",
+            "global values: map<i32, i32, 2>; function main(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("ordinary Web package with currently unmapped typed state");
+
+        let exports = exported_function_names(process.module_bytes());
+        assert!(!exports.contains(&"stasis_replay_state_snapshot_size".to_string()));
+        assert!(!exports.contains(&"stasis_replay_state_snapshot_write".to_string()));
+        assert!(!exports.contains(&"stasis_replay_state_snapshot_restore".to_string()));
+    }
+
+    #[test]
     fn parameterized_tick_is_not_a_wasm_host_export() {
         let mut process = WasmProcess::new();
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
@@ -5708,7 +6483,7 @@ function render(): i32 { return 0; }
     }
 
     #[test]
-    fn zero_extent_only_module_keeps_handles_without_exporting_memory() {
+    fn zero_extent_only_module_keeps_handles_and_snapshot_memory() {
         let mut process = WasmProcess::new();
         process.set_required_emit_roots(&["main".into()]);
         process.upsert_file(
@@ -5719,7 +6494,11 @@ function render(): i32 { return 0; }
             .compile()
             .expect("compile memory-free zero-extent web views");
 
-        assert_eq!(section_entry_count(process.module_bytes(), 5), 0);
+        assert_eq!(
+            section_entry_count(process.module_bytes(), 5),
+            1,
+            "snapshot output requires an exported memory even when collection lanes are zero-sized"
+        );
         assert_ne!(
             process.memory_layout()["first"].handle,
             process.memory_layout()["second"].handle
