@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const REPLAY_SCHEMA_VERSION: u32 = 1;
 pub(crate) const COMPACT_REPLAY_SCHEMA_VERSION: u32 = 2;
+pub(crate) const COMPACT_REPLAY_SCHEMA_VERSION_V3: u32 = 3;
 const MAX_REPLAY_FRAMES: usize = 1_000_000;
 const MAX_REPLAY_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_HOST_FRAME_VALUES: usize = 4_096;
@@ -109,7 +110,7 @@ struct F32Change {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum CompactHashScope {
+pub(crate) enum CompactHashScope {
     SimulationAfterTick,
 }
 
@@ -399,6 +400,39 @@ pub(crate) struct CompactReplayMetadata {
     pub(crate) controller_schema_version: Option<u32>,
 }
 
+/// The fields that define the portable simulation contract. Producer and
+/// consumer runtime details deliberately do not appear here: they are audit
+/// provenance, not cross-target equality gates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CompactReplayCompatibility {
+    pub(crate) stasis_version: String,
+    pub(crate) release_id: String,
+    pub(crate) source_sha256: String,
+    pub(crate) state_layout_sha256: String,
+    pub(crate) compiler_layout_sha256: String,
+    #[serde(default)]
+    pub(crate) asset_manifest_sha256: Option<String>,
+    pub(crate) host_schema_version: u32,
+    pub(crate) host_i32_count: usize,
+    pub(crate) host_f32_count: usize,
+    pub(crate) input_usage_sha256: String,
+    pub(crate) tick_rate_hz: u32,
+    pub(crate) hash_scope: CompactHashScope,
+    pub(crate) determinism_profile: String,
+    #[serde(default)]
+    pub(crate) controller_schema_version: Option<u32>,
+    pub(crate) observed_i32: Vec<CompactI32Field>,
+    pub(crate) observed_f32: Vec<CompactF32Field>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CompactReplayProducer {
+    pub(crate) target: String,
+    pub(crate) runtime_sha256: String,
+}
+
 impl Default for CompactReplayMetadata {
     fn default() -> Self {
         Self {
@@ -435,6 +469,68 @@ fn compact_compiler_layout_identity(jit: &JitProcess) -> Result<String, String> 
         .collect())
 }
 
+/// Build the portable portion of the compact replay identity from the
+/// compiler-owned snapshot. Desktop recording and packaged Web metadata both
+/// call this helper so observed-input and layout semantics cannot drift.
+pub(crate) fn compact_replay_compatibility_from_snapshot(
+    snapshot: &ProgramSnapshot,
+    host_i32_count: usize,
+    host_f32_count: usize,
+    metadata: &CompactReplayMetadata,
+) -> Result<CompactReplayCompatibility, String> {
+    let compiler = snapshot.replay_compatibility();
+    let observed_i32 = compiler
+        .observed_i32
+        .iter()
+        .map(|field| CompactI32Field::new(field.slot, field.index, &field.path, &field.family))
+        .collect::<Vec<_>>();
+    let observed_f32 = compiler
+        .observed_f32
+        .iter()
+        .map(|field| CompactF32Field::new(field.slot, field.index, &field.path, &field.family))
+        .collect::<Vec<_>>();
+    Ok(CompactReplayCompatibility {
+        stasis_version: env!("CARGO_PKG_VERSION").to_string(),
+        release_id: option_env!("STASIS_RELEASE_ID")
+            .unwrap_or("development")
+            .to_string(),
+        source_sha256: snapshot.replay_source_sha256(),
+        state_layout_sha256: compiler.state_layout_sha256,
+        compiler_layout_sha256: compiler.compiler_layout_sha256,
+        asset_manifest_sha256: metadata.asset_manifest_sha256.clone(),
+        host_schema_version: metadata.host_schema_version,
+        host_i32_count,
+        host_f32_count,
+        input_usage_sha256: compiler.input_usage_sha256,
+        tick_rate_hz: metadata.tick_rate_hz,
+        hash_scope: CompactHashScope::SimulationAfterTick,
+        determinism_profile: metadata.determinism_profile.clone(),
+        controller_schema_version: metadata.controller_schema_version,
+        observed_i32,
+        observed_f32,
+    })
+}
+
+/// Serialize the same portable contract for a packaged target. The producer
+/// runtime hash is intentionally not part of this value.
+pub fn packaged_replay_compatibility(
+    snapshot: &ProgramSnapshot,
+    asset_manifest_sha256: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let metadata = CompactReplayMetadata {
+        runtime_sha256: compact_runtime_identity(),
+        asset_manifest_sha256,
+        ..CompactReplayMetadata::default()
+    };
+    serde_json::to_value(compact_replay_compatibility_from_snapshot(
+        snapshot,
+        snapshot.replay_compatibility().host_i32_count,
+        snapshot.replay_compatibility().host_f32_count,
+        &metadata,
+    )?)
+    .map_err(|error| format!("failed to encode replay compatibility: {error}"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct CompactReplayIdentity {
@@ -458,6 +554,13 @@ struct CompactReplayIdentity {
     controller_schema_version: Option<u32>,
     observed_i32: Vec<CompactI32Field>,
     observed_f32: Vec<CompactF32Field>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CompactReplayIdentityV3 {
+    compatibility: CompactReplayCompatibility,
+    producer: CompactReplayProducer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -517,10 +620,27 @@ struct CompactReplayDocument {
     final_state: CompactReplayFinal,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactReplayDocumentV3 {
+    schema_version: u32,
+    identity: CompactReplayIdentityV3,
+    initial_state: InitialState,
+    initial_input: CompactInputBaseline,
+    segments: Vec<CompactInputSegment>,
+    checkpoints: Vec<CompactReplayCheckpoint>,
+    total_ticks: u64,
+    final_state: CompactReplayFinal,
+}
+
 #[derive(Debug, Clone)]
 enum VersionedReplayDocument {
     LegacyV1(ReplayDocument),
     CompactV2(CompactReplayDocument),
+    CompactV3 {
+        document: CompactReplayDocument,
+        compatibility: CompactReplayCompatibility,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -529,9 +649,25 @@ struct CompactInputSnapshot {
     f32_bits: Vec<u32>,
 }
 
+#[cfg(test)]
 impl CompactReplayDocument {
     fn canonical_bytes(&self) -> Result<Vec<u8>, String> {
         validate_compact_document(self)?;
+        let bytes = serde_json::to_vec(self)
+            .map_err(|error| format!("failed to encode compact replay recording: {error}"))?;
+        if bytes.len() as u64 > MAX_REPLAY_FILE_BYTES {
+            return Err(format!(
+                "compact replay is too large ({} bytes; maximum {MAX_REPLAY_FILE_BYTES})",
+                bytes.len()
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+impl CompactReplayDocumentV3 {
+    fn canonical_bytes(&self) -> Result<Vec<u8>, String> {
+        validate_compact_document_v3(self)?;
         let bytes = serde_json::to_vec(self)
             .map_err(|error| format!("failed to encode compact replay recording: {error}"))?;
         if bytes.len() as u64 > MAX_REPLAY_FILE_BYTES {
@@ -564,6 +700,26 @@ fn decode_versioned_replay(source: &[u8]) -> Result<VersionedReplayDocument, Str
                 .map_err(|error| format!("failed to parse compact schema-2 replay: {error}"))?;
             validate_compact_document(&document)?;
             Ok(VersionedReplayDocument::CompactV2(document))
+        }
+        value if value == u64::from(COMPACT_REPLAY_SCHEMA_VERSION_V3) => {
+            let document: CompactReplayDocumentV3 = serde_json::from_slice(source)
+                .map_err(|error| format!("failed to parse compact schema-3 replay: {error}"))?;
+            validate_compact_document_v3(&document)?;
+            let compatibility = document.identity.compatibility.clone();
+            let normalized = CompactReplayDocument {
+                schema_version: COMPACT_REPLAY_SCHEMA_VERSION,
+                identity: compact_v2_identity_from_v3(&document.identity),
+                initial_state: document.initial_state,
+                initial_input: document.initial_input,
+                segments: document.segments,
+                checkpoints: document.checkpoints,
+                total_ticks: document.total_ticks,
+                final_state: document.final_state,
+            };
+            Ok(VersionedReplayDocument::CompactV3 {
+                document: normalized,
+                compatibility,
+            })
         }
         value => Err(format!("unsupported replay schema {value}")),
     }
@@ -909,6 +1065,55 @@ fn validate_compact_document(document: &CompactReplayDocument) -> Result<(), Str
         return Err("compact replay final checkpoint does not match final state".to_string());
     }
     Ok(())
+}
+
+fn compact_v2_identity_from_v3(identity: &CompactReplayIdentityV3) -> CompactReplayIdentity {
+    let compatibility = &identity.compatibility;
+    CompactReplayIdentity {
+        stasis_version: compatibility.stasis_version.clone(),
+        release_id: compatibility.release_id.clone(),
+        target: identity.producer.target.clone(),
+        source_sha256: compatibility.source_sha256.clone(),
+        state_layout_sha256: compatibility.state_layout_sha256.clone(),
+        compiler_layout_sha256: compatibility.compiler_layout_sha256.clone(),
+        runtime_sha256: identity.producer.runtime_sha256.clone(),
+        asset_manifest_sha256: compatibility.asset_manifest_sha256.clone(),
+        host_schema_version: compatibility.host_schema_version,
+        host_i32_count: compatibility.host_i32_count,
+        host_f32_count: compatibility.host_f32_count,
+        input_usage_sha256: compatibility.input_usage_sha256.clone(),
+        tick_rate_hz: compatibility.tick_rate_hz,
+        hash_scope: compatibility.hash_scope.clone(),
+        determinism_profile: compatibility.determinism_profile.clone(),
+        controller_schema_version: compatibility.controller_schema_version,
+        observed_i32: compatibility.observed_i32.clone(),
+        observed_f32: compatibility.observed_f32.clone(),
+    }
+}
+
+fn validate_compact_document_v3(document: &CompactReplayDocumentV3) -> Result<(), String> {
+    if document.schema_version != COMPACT_REPLAY_SCHEMA_VERSION_V3 {
+        return Err(format!(
+            "unsupported compact replay schema {} (expected {COMPACT_REPLAY_SCHEMA_VERSION_V3})",
+            document.schema_version
+        ));
+    }
+    validate_compact_field_text("producer target", &document.identity.producer.target)?;
+    validate_compact_hash(
+        "producer runtime_sha256",
+        &document.identity.producer.runtime_sha256,
+    )?;
+    let normalized = CompactReplayDocument {
+        schema_version: COMPACT_REPLAY_SCHEMA_VERSION,
+        identity: compact_v2_identity_from_v3(&document.identity),
+        initial_state: document.initial_state.clone(),
+        initial_input: document.initial_input.clone(),
+        segments: document.segments.clone(),
+        checkpoints: document.checkpoints.clone(),
+        total_ticks: document.total_ticks,
+        final_state: document.final_state.clone(),
+    };
+    validate_compact_document(&normalized)
 }
 
 fn validate_compact_initial_state(state: &InitialState) -> Result<(), String> {
@@ -1261,7 +1466,7 @@ struct CompactPendingTick {
 }
 
 struct CompactReplayRecorder {
-    document: CompactReplayDocument,
+    document: CompactReplayDocumentV3,
     encoded_bytes: usize,
     previous_input: Option<CompactInputSnapshot>,
     active_snapshot: Option<CompactInputSnapshot>,
@@ -1305,7 +1510,7 @@ impl ReplayRecorder {
         })
     }
 
-    /// Start bounded schema-v2 recording from caller-supplied observed input
+    /// Start bounded schema-v3 recording from caller-supplied observed input
     /// descriptors. The descriptors are the already-computed whole-game union;
     /// this module only validates, projects, and records their slots.
     pub(crate) fn start_compact(
@@ -1332,30 +1537,31 @@ impl ReplayRecorder {
         validate_compact_f32_fields(observed_f32, host_f32_count)?;
         validate_compact_metadata(&metadata)?;
         let base = replay_identity(jit, host_i32_count, host_f32_count)?;
-        let compiler_layout_sha256 = compact_compiler_layout_identity(jit)?;
-        let identity = CompactReplayIdentity {
-            stasis_version: base.stasis_version,
-            release_id: base.release_id,
-            target: base.target,
-            source_sha256: base.source_sha256,
-            state_layout_sha256: base.state_layout_sha256,
-            compiler_layout_sha256,
-            runtime_sha256: metadata.runtime_sha256,
-            asset_manifest_sha256: metadata.asset_manifest_sha256,
-            host_schema_version: metadata.host_schema_version,
+        let snapshot = jit
+            .program_snapshot()
+            .ok_or_else(|| "record/replay compile produced no ProgramSnapshot".to_string())?;
+        let compatibility = compact_replay_compatibility_from_snapshot(
+            snapshot,
             host_i32_count,
             host_f32_count,
-            input_usage_sha256: compact_input_usage_hash(observed_i32, observed_f32),
-            tick_rate_hz: metadata.tick_rate_hz,
-            hash_scope: CompactHashScope::SimulationAfterTick,
-            determinism_profile: metadata.determinism_profile,
-            controller_schema_version: metadata.controller_schema_version,
-            observed_i32: observed_i32.to_vec(),
-            observed_f32: observed_f32.to_vec(),
-        };
-        let document = CompactReplayDocument {
-            schema_version: COMPACT_REPLAY_SCHEMA_VERSION,
-            identity,
+            &metadata,
+        )?;
+        if compatibility.observed_i32 != observed_i32 || compatibility.observed_f32 != observed_f32
+        {
+            return Err(
+                "compact replay observed descriptors do not match the compiler-owned input usage"
+                    .to_string(),
+            );
+        }
+        let document = CompactReplayDocumentV3 {
+            schema_version: COMPACT_REPLAY_SCHEMA_VERSION_V3,
+            identity: CompactReplayIdentityV3 {
+                compatibility,
+                producer: CompactReplayProducer {
+                    target: base.target,
+                    runtime_sha256: metadata.runtime_sha256,
+                },
+            },
             initial_state: capture_initial_state(jit)?,
             initial_input: CompactInputBaseline {
                 i32_values: Vec::new(),
@@ -1477,7 +1683,11 @@ impl ReplayRecorder {
                 "compact replay tick sequence mismatch: expected {expected}, found {tick}"
             ));
         }
-        let input = compact_snapshot_from_host(&recorder.document.identity, host_i32, host_f32)?;
+        let input = compact_snapshot_from_host(
+            &recorder.document.identity.compatibility,
+            host_i32,
+            host_f32,
+        )?;
         recorder.pending = Some(CompactPendingTick { tick, input });
         Ok(())
     }
@@ -1722,7 +1932,7 @@ fn compact_input_usage_hash(
 }
 
 fn compact_snapshot_from_host(
-    identity: &CompactReplayIdentity,
+    identity: &CompactReplayCompatibility,
     host_i32: &[i32],
     host_f32: &[f32],
 ) -> Result<CompactInputSnapshot, String> {
@@ -1875,6 +2085,7 @@ pub(crate) struct ReplayPlayer {
     next_checkpoint: usize,
     last_verified_tick: u64,
     first_divergence: Option<String>,
+    compact_v3_compatibility: Option<CompactReplayCompatibility>,
 }
 
 impl ReplayPlayer {
@@ -1889,13 +2100,22 @@ impl ReplayPlayer {
         }
         let source = fs::read(path)
             .map_err(|error| format!("failed to read replay {}: {error}", path.display()))?;
-        let document = match decode_versioned_replay(&source)
+        let (document, compact_v3_compatibility) = match decode_versioned_replay(&source)
             .map_err(|error| format!("failed to parse replay {}: {error}", path.display()))?
         {
-            VersionedReplayDocument::LegacyV1(document) => ReplayPlaybackDocument::Legacy(document),
-            VersionedReplayDocument::CompactV2(document) => {
-                ReplayPlaybackDocument::Compact(document)
+            VersionedReplayDocument::LegacyV1(document) => {
+                (ReplayPlaybackDocument::Legacy(document), None)
             }
+            VersionedReplayDocument::CompactV2(document) => {
+                (ReplayPlaybackDocument::Compact(document), None)
+            }
+            VersionedReplayDocument::CompactV3 {
+                document,
+                compatibility,
+            } => (
+                ReplayPlaybackDocument::Compact(document),
+                Some(compatibility),
+            ),
         };
         let (i32_count, f32_count, compact_snapshot) = match &document {
             ReplayPlaybackDocument::Legacy(document) => (
@@ -1925,6 +2145,7 @@ impl ReplayPlayer {
             next_checkpoint: 0,
             last_verified_tick: 0,
             first_divergence: None,
+            compact_v3_compatibility,
         })
     }
 
@@ -1955,7 +2176,10 @@ impl ReplayPlayer {
                 &document.initial_state,
             ),
             ReplayPlaybackDocument::Compact(document) => (
-                ReplayIdentityView::Compact(&document.identity),
+                match self.compact_v3_compatibility.as_ref() {
+                    Some(compatibility) => ReplayIdentityView::CompactV3(compatibility),
+                    None => ReplayIdentityView::Compact(&document.identity),
+                },
                 &document.initial_state,
             ),
         };
@@ -2103,6 +2327,7 @@ impl ReplayPlayer {
 enum ReplayIdentityView<'a> {
     Legacy(&'a ReplayIdentity),
     Compact(&'a CompactReplayIdentity),
+    CompactV3(&'a CompactReplayCompatibility),
 }
 
 impl ReplayIdentityView<'_> {
@@ -2158,6 +2383,53 @@ impl ReplayIdentityView<'_> {
                     != compact_input_usage_hash(&observed_i32, &observed_f32)
                     || identity.observed_i32 != observed_i32
                     || identity.observed_f32 != observed_f32
+                {
+                    Some("compiler-observed input usage differs")
+                } else {
+                    None
+                };
+                Ok(reason.map(str::to_string))
+            }
+            Self::CompactV3(identity) => {
+                let compatibility = compact_replay_compatibility_from_snapshot(
+                    jit.program_snapshot().ok_or_else(|| {
+                        "record/replay compile produced no ProgramSnapshot".to_string()
+                    })?,
+                    actual.host_i32_count,
+                    actual.host_f32_count,
+                    metadata,
+                )?;
+                let reason = if identity.stasis_version != compatibility.stasis_version {
+                    Some("Stasis version differs")
+                } else if identity.release_id != compatibility.release_id {
+                    Some("release identity differs")
+                } else if identity.source_sha256 != compatibility.source_sha256 {
+                    Some("source hash differs")
+                } else if identity.state_layout_sha256 != compatibility.state_layout_sha256 {
+                    Some("state layout hash differs")
+                } else if identity.compiler_layout_sha256 != compatibility.compiler_layout_sha256 {
+                    Some("compiler layout identity differs")
+                } else if identity.asset_manifest_sha256 != compatibility.asset_manifest_sha256 {
+                    Some("asset manifest identity differs")
+                } else if identity.host_schema_version != compatibility.host_schema_version {
+                    Some("HostFrame schema differs")
+                } else if identity.host_i32_count != compatibility.host_i32_count
+                    || identity.host_f32_count != compatibility.host_f32_count
+                {
+                    Some("HostFrame dimensions differ")
+                } else if identity.tick_rate_hz != compatibility.tick_rate_hz {
+                    Some("tick rate differs")
+                } else if identity.hash_scope != compatibility.hash_scope {
+                    Some("verification hash scope differs")
+                } else if identity.determinism_profile != compatibility.determinism_profile {
+                    Some("determinism profile differs")
+                } else if identity.controller_schema_version
+                    != compatibility.controller_schema_version
+                {
+                    Some("controller schema differs")
+                } else if identity.input_usage_sha256 != compatibility.input_usage_sha256
+                    || identity.observed_i32 != compatibility.observed_i32
+                    || identity.observed_f32 != compatibility.observed_f32
                 {
                     Some("compiler-observed input usage differs")
                 } else {
@@ -2322,23 +2594,13 @@ fn replay_identity(
     let snapshot = jit
         .program_snapshot()
         .ok_or_else(|| "replay requires a compiled program snapshot".to_string())?;
-    let mut files = snapshot.files().to_vec();
-    files.sort_by(|left, right| left.path.cmp(&right.path));
-    let mut source = Sha256::new();
-    source.update(b"stasis.replay.source.v1\0");
-    for file in files {
-        source.update((file.path.len() as u64).to_le_bytes());
-        source.update(file.path.as_bytes());
-        source.update((file.content.len() as u64).to_le_bytes());
-        source.update(file.content.as_bytes());
-    }
     Ok(ReplayIdentity {
         stasis_version: env!("CARGO_PKG_VERSION").to_string(),
         release_id: option_env!("STASIS_RELEASE_ID")
             .unwrap_or("development")
             .to_string(),
         target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
-        source_sha256: format!("{:x}", source.finalize()),
+        source_sha256: snapshot.replay_source_sha256(),
         state_layout_sha256: state_layout_version(&jit.state_layout())?,
         host_i32_count,
         host_f32_count,
@@ -2883,7 +3145,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_replay_rejects_active_runtime_hash_mismatch_with_field_specific_diagnostic() {
+    fn compact_v3_replay_accepts_different_consumer_runtime_provenance() {
         let _global_guard = crate::jit_test_support::lock();
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2902,9 +3164,57 @@ mod tests {
         let mut active = recorded;
         active.runtime_sha256 = "2".repeat(64);
         let player = ReplayPlayer::load(&path).expect("load identity fixture");
+        player
+            .initialize_with_metadata(&jit, 1, 1, &active)
+            .expect("v3 producer runtime is provenance, not a compatibility gate");
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn compact_v2_replay_rejects_active_runtime_hash_mismatch() {
+        let _global_guard = crate::jit_test_support::lock();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "stasis-compact-v2-runtime-identity-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("temp directory");
+        let path = directory.join("runtime-v2.replay.json");
+        let mut recorded = CompactReplayMetadata::default();
+        recorded.runtime_sha256 = "1".repeat(64);
+        let jit = record_compact_identity_fixture(&path, recorded.clone());
+
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read v3 replay"))
+                .expect("decode v3 replay JSON");
+        let identity = value["identity"].take();
+        let producer = identity["producer"].as_object().expect("producer identity");
+        let mut flat = identity["compatibility"]
+            .as_object()
+            .expect("portable compatibility")
+            .clone();
+        flat.insert("target".to_string(), producer["target"].clone());
+        flat.insert(
+            "runtime_sha256".to_string(),
+            producer["runtime_sha256"].clone(),
+        );
+        value["schema_version"] = serde_json::json!(COMPACT_REPLAY_SCHEMA_VERSION);
+        value["identity"] = serde_json::Value::Object(flat);
+        fs::write(
+            &path,
+            serde_json::to_vec(&value).expect("encode v2 replay JSON"),
+        )
+        .expect("write v2 replay");
+
+        let mut active = recorded;
+        active.runtime_sha256 = "2".repeat(64);
+        let player = ReplayPlayer::load(&path).expect("load v2 identity fixture");
         let error = player
             .initialize_with_metadata(&jit, 1, 1, &active)
-            .expect_err("active runtime hash mismatch must be rejected");
+            .expect_err("v2 active runtime hash mismatch must be rejected");
         assert_eq!(error, "replay identity mismatch: runtime identity differs");
         fs::remove_dir_all(directory).ok();
     }
@@ -3754,12 +4064,12 @@ mod tests {
         );
         assert_eq!(first, second, "unused mouse activity must not affect bytes");
 
-        let mut tampered: CompactReplayDocument =
+        let mut tampered: CompactReplayDocumentV3 =
             serde_json::from_slice(&first).expect("parse compact replay");
-        tampered.identity.observed_i32[0].path = "keys[999]".to_string();
-        tampered.identity.input_usage_sha256 = compact_input_usage_hash(
-            &tampered.identity.observed_i32,
-            &tampered.identity.observed_f32,
+        tampered.identity.compatibility.observed_i32[0].path = "keys[999]".to_string();
+        tampered.identity.compatibility.input_usage_sha256 = compact_input_usage_hash(
+            &tampered.identity.compatibility.observed_i32,
+            &tampered.identity.compatibility.observed_f32,
         );
         let tampered_path = directory.join("tampered.replay.json");
         fs::write(

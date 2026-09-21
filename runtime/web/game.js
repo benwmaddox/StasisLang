@@ -33,6 +33,20 @@
   let pendingExternalActionGeneration = 0;
   const commands = [];
   const game = window.STASIS_GAME || { strings: {}, memory: {}, assets: {} };
+  const replaySource = (() => {
+    if (!globalThis.location || typeof URLSearchParams !== "function") return null;
+    return new URLSearchParams(globalThis.location.search).get("stasis-replay");
+  })();
+  const boundedReplayDiagnostic = error => String(error?.message || error || "replay failed").slice(0, 512);
+  const publishReplayFailure = error => {
+    const diagnostic = boundedReplayDiagnostic(error);
+    if (document.body?.dataset) {
+      document.body.dataset.replayState = "failed";
+      document.body.dataset.replayError = diagnostic;
+    }
+    if (errorBox) errorBox.textContent = diagnostic;
+    setLoading(`Replay stopped. ${diagnostic}`, "failed");
+  };
   class StasisGpuError extends Error {
     constructor(message, cause) {
       super(message);
@@ -161,6 +175,8 @@
   const MAX_SPRITE_CACHE_ENTRIES = 128;
   let nextHandle = 1;
   let instance;
+  let replayController = null;
+  let replayTick = 1;
   // @stasis-feature network begin
   const NETWORK_MAX_MESSAGE = 64 * 1024;
   const NETWORK_MAX_BUFFERED = 1024 * 1024;
@@ -3765,6 +3781,18 @@
     resizeGenerationPending = false;
   }
 
+  function hostFrameViews() {
+    const iLayout = game.memory.host_i32;
+    const fLayout = game.memory.host_f32;
+    if (!iLayout || !fLayout || !instance?.exports?.memory) {
+      throw new Error("replay requires canonical HostFrame memory metadata");
+    }
+    return {
+      i32: new Int32Array(instance.exports.memory.buffer, iLayout.offset, iLayout.length),
+      f32: new Float32Array(instance.exports.memory.buffer, fLayout.offset, fLayout.length),
+    };
+  }
+
   function finishHostFrame() {
     clearExternalActionGesture();
     pointer.wentDown = false;
@@ -3832,9 +3860,29 @@
       return;
     }
     applyWindowRequest();
-    writeHostFrame(timestamp);
+    if (replayController) {
+      try {
+        const host = hostFrameViews();
+        replayController.applyHostFrame(replayTick, host.i32, host.f32);
+        document.body.dataset.hostTick = String(replayTick);
+      } catch (error) {
+        publishReplayFailure(error);
+        return;
+      }
+    } else {
+      writeHostFrame(timestamp);
+    }
     const tickStart = performance.now();
-    instance.exports.tick();
+    try {
+      instance.exports.tick();
+      if (replayController) replayController.verifyTick(replayTick);
+    } catch (error) {
+      if (replayController) {
+        publishReplayFailure(error);
+        return;
+      }
+      throw error;
+    }
     const tickMs = performance.now() - tickStart;
     const wasmRenderStart = performance.now();
     const constructionReset = instance.exports.gfx_cmd_construction_reset;
@@ -3957,6 +4005,14 @@
     document.body.dataset.underBudget = String(underBudget);
     if (instance.exports.player_x) document.body.dataset.playerX = String(instance.exports.player_x.value);
     finishHostFrame();
+    if (replayController) {
+      if (replayController.completed) {
+        document.body.dataset.replayState = "complete";
+        document.body.dataset.replayTick = String(replayTick);
+        return;
+      }
+      replayTick += 1;
+    }
     requestAnimationFrame(frame);
   }
 
@@ -4046,9 +4102,41 @@
         || wasmCollectionViewAbiVersion !== COLLECTION_VIEW_ABI_VERSION) {
         throw new Error(`collection view ABI mismatch: package=${collectionViewAbiVersion} wasm=${wasmCollectionViewAbiVersion} runtime=${COLLECTION_VIEW_ABI_VERSION}`);
       }
-      writeHostFrame(performance.now());
+      let replayModule = null;
+      let replayBridge = null;
+      let replayBytes = null;
+      if (replaySource !== null) {
+        if (!replaySource) throw new Error("stasis-replay requires a same-origin replay URL");
+        if (!game.replayControllerUrl || !game.replayIdentity || !game.replayCompatibility?.state_snapshot) {
+          throw new Error("this Web package does not contain replay compatibility metadata");
+        }
+        replayModule = await import(game.replayControllerUrl);
+        replayBridge = replayModule.createWasmReplayBridge({
+          exports: instance.exports,
+          descriptor: game.replayCompatibility.state_snapshot,
+        });
+        replayBytes = await replayModule.fetchReplayBytes(replaySource);
+      }
+      if (replayModule) {
+        const host = hostFrameViews();
+        host.i32.fill(0);
+        host.f32.fill(0);
+      } else {
+        writeHostFrame(performance.now());
+      }
       const mainResult = instance.exports.main();
       finishHostFrame();
+      if (replayModule) {
+        replayController = replayModule.createReplayController(replayBytes, {
+          packageIdentity: game.replayIdentity,
+          hashAdapter: replayBridge.hashAdapter,
+        });
+        replayController.initialize({
+          restoreInitialState: initialState => replayBridge.initialStateRestorer.restoreInitialState(initialState),
+        });
+        document.body.dataset.replayState = "playing";
+        document.body.dataset.replayFrames = String(replayController.frameCount);
+      }
       applyWindowRequest();
       await Promise.all([
         ...Array.from(sprites.values(), resource => resource.readyPromise),
@@ -4063,6 +4151,7 @@
       requestAnimationFrame(frame);
     } catch (error) {
       document.body.dataset.ready = "false";
+      if (replaySource !== null) publishReplayFailure(error);
       if (isVisibleRuntimeError(error)) publishGpuError(error, "startup");
       setLoading(`Unable to start this game. ${String(error && error.message || error)}`, "failed");
       if (instance) {

@@ -956,6 +956,70 @@ fn existing_windows_game_packages_command_buffers_sprites_and_font_for_web() {
     assert!(!index.contains("Enable sound"));
     let config = runtime_config(&runtime);
     assert_eq!(config["assets"], serde_json::json!({}));
+    let replay_controller =
+        fs::read(output.join("replay_controller.mjs")).expect("packaged replay controller");
+    let replay_controller_url = format!(
+        "replay_controller.mjs?hash={:x}",
+        Sha256::digest(&replay_controller)
+    );
+    assert_eq!(config["replayControllerUrl"], replay_controller_url);
+    assert!(runtime.contains(&replay_controller_url));
+    let replay_identity = config["replayIdentity"]
+        .as_object()
+        .expect("complete packaged replay identity");
+    assert_eq!(replay_identity.len(), 2);
+    assert!(replay_identity.contains_key("compatibility"));
+    assert!(replay_identity.contains_key("consumer"));
+    let compatibility = replay_identity["compatibility"]
+        .as_object()
+        .expect("portable replay compatibility");
+    for field in [
+        "stasis_version",
+        "release_id",
+        "source_sha256",
+        "state_layout_sha256",
+        "compiler_layout_sha256",
+        "asset_manifest_sha256",
+        "host_schema_version",
+        "host_i32_count",
+        "host_f32_count",
+        "input_usage_sha256",
+        "tick_rate_hz",
+        "hash_scope",
+        "determinism_profile",
+        "controller_schema_version",
+        "observed_i32",
+        "observed_f32",
+    ] {
+        assert!(
+            compatibility.contains_key(field),
+            "missing replay compatibility {field}"
+        );
+    }
+    let consumer = replay_identity["consumer"]
+        .as_object()
+        .expect("Web replay consumer provenance");
+    assert_eq!(consumer["target"], "wasm32-web");
+    assert_eq!(consumer["runtime_sha256"].as_str().map(str::len), Some(64));
+    assert_eq!(compatibility["hash_scope"], "simulation_after_tick");
+    assert_eq!(
+        compatibility["asset_manifest_sha256"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
+    for hash in [
+        "source_sha256",
+        "state_layout_sha256",
+        "compiler_layout_sha256",
+        "input_usage_sha256",
+    ] {
+        assert_eq!(
+            compatibility[hash].as_str().map(str::len),
+            Some(64),
+            "invalid {hash}"
+        );
+    }
     let asset_urls = config["asset_urls"]
         .as_object()
         .expect("hashed release asset URLs");

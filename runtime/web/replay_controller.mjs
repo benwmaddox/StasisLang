@@ -3,12 +3,17 @@
 // This module deliberately contains no DOM or WebAssembly assumptions. The
 // Web template can use the controller as the single HostFrame source while
 // retaining its ordinary tick -> render loop, and tests can provide a tiny
-// fake hash adapter. The JSON shape is the schema-v2 shape emitted by the
-// desktop recorder in apps/stasis/src/record_replay.rs.
+// fake hash adapter. Schema-v2 remains supported for exact target/runtime
+// playback; schema-v3 adds a portable compatibility contract and keeps
+// producer/consumer details as audit provenance.
 
 export const WEB_REPLAY_LIMITS = Object.freeze({
-  schemaVersion: 2,
-  maxFileBytes: 256 * 1024 * 1024,
+  schemaVersion: 3,
+  legacySchemaVersion: 2,
+  // JSON text, UTF-16 decoding, and the parsed object graph coexist briefly.
+  // Keep the browser ceiling below the native 256 MiB file cap to avoid a
+  // several-hundred-megabyte transient allocation on constrained devices.
+  maxFileBytes: 64 * 1024 * 1024,
   maxTicks: 1_000_000,
   maxHostValues: 4_096,
   maxCheckpoints: 4_096,
@@ -50,6 +55,49 @@ export class ReplayDivergenceError extends Error {
     this.stasisReplayError = true;
     Object.assign(this, details);
   }
+}
+
+export async function fetchReplayBytes(source, { fetchImpl = globalThis.fetch, baseUrl = globalThis.location?.href } = {}) {
+  if (typeof fetchImpl !== "function") throw new TypeError("replay loading requires fetch()");
+  if (!baseUrl) throw new ReplayDecodeError("replay loading requires a document URL", "invalid_replay_url");
+  let url;
+  try { url = new URL(source, baseUrl); } catch {
+    throw new ReplayDecodeError("stasis-replay is not a valid URL", "invalid_replay_url");
+  }
+  const base = new URL(baseUrl);
+  if (url.origin !== base.origin) throw new ReplayDecodeError("stasis-replay must use the package origin", "cross_origin_replay");
+  const response = await fetchImpl(url.href, { credentials: "same-origin", cache: "no-store" });
+  if (!response?.ok) throw new ReplayDecodeError(`failed to load replay: HTTP ${response?.status ?? "unknown"}`, "replay_fetch_failed");
+  const declared = response.headers?.get?.("content-length");
+  if (declared !== null && declared !== undefined) {
+    const length = Number(declared);
+    if (!Number.isSafeInteger(length) || length < 0 || length > WEB_REPLAY_LIMITS.maxFileBytes) {
+      throw new ReplayDecodeError("replay response exceeds the 64 MiB Web limit", "file_too_large");
+    }
+  }
+  if (!response.body?.getReader) throw new ReplayDecodeError("replay response is not streamable", "replay_stream_required");
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) throw new ReplayDecodeError("replay response returned invalid bytes", "replay_fetch_failed");
+      total += value.byteLength;
+      if (total > WEB_REPLAY_LIMITS.maxFileBytes) {
+        await reader.cancel();
+        throw new ReplayDecodeError("replay response exceeds the 64 MiB Web limit", "file_too_large");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes;
 }
 
 const fail = (message, code) => { throw new ReplayDecodeError(message, code); };
@@ -98,29 +146,99 @@ const cloneArray = value => value.slice();
 
 function decodeBytes(source) {
   if (typeof source === "string") {
-    if (textBytes(source) > WEB_REPLAY_LIMITS.maxFileBytes) fail("replay JSON exceeds the 256 MiB limit", "file_too_large");
+    if (textBytes(source) > WEB_REPLAY_LIMITS.maxFileBytes) fail("replay JSON exceeds the 64 MiB Web limit", "file_too_large");
     return source;
   }
   if (source instanceof ArrayBuffer) {
-    if (source.byteLength > WEB_REPLAY_LIMITS.maxFileBytes) fail("replay bytes exceed the 256 MiB limit", "file_too_large");
+    if (source.byteLength > WEB_REPLAY_LIMITS.maxFileBytes) fail("replay bytes exceed the 64 MiB Web limit", "file_too_large");
     return new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(source));
   }
   if (ArrayBuffer.isView(source)) {
-    if (source.byteLength > WEB_REPLAY_LIMITS.maxFileBytes) fail("replay bytes exceed the 256 MiB limit", "file_too_large");
+    if (source.byteLength > WEB_REPLAY_LIMITS.maxFileBytes) fail("replay bytes exceed the 64 MiB Web limit", "file_too_large");
     return new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(source.buffer, source.byteOffset, source.byteLength));
   }
   return source;
 }
 
+// JSON.parse discards all but the last value for a duplicate object key. Scan
+// the bounded source first so the Web decoder keeps the same strict contract
+// as the native serde visitor instead of accepting an ambiguous replay.
+function rejectDuplicateJsonKeys(source) {
+  let offset = 0;
+  const skipSpace = () => { while (/\s/.test(source[offset] || "")) offset += 1; };
+  const parseString = () => {
+    const start = offset;
+    offset += 1;
+    while (offset < source.length) {
+      const char = source[offset++];
+      if (char === '"') {
+        try { return JSON.parse(source.slice(start, offset)); } catch { fail("replay JSON contains an invalid string", "invalid_json"); }
+      }
+      if (char === "\\") {
+        if (source[offset] === "u") offset += 5;
+        else offset += 1;
+      } else if (char.charCodeAt(0) < 0x20) fail("replay JSON contains an invalid string", "invalid_json");
+    }
+    fail("replay JSON contains an unterminated string", "invalid_json");
+  };
+  const parseValue = depth => {
+    if (depth > 64) fail("replay JSON nesting exceeds 64 levels", "json_too_deep");
+    skipSpace();
+    const char = source[offset];
+    if (char === "{") {
+      offset += 1;
+      const keys = new Set();
+      skipSpace();
+      if (source[offset] === "}") { offset += 1; return; }
+      while (true) {
+        skipSpace();
+        if (source[offset] !== '"') fail("replay JSON object key must be a string", "invalid_json");
+        const key = parseString();
+        if (keys.has(key)) fail(`replay JSON contains duplicate field ${JSON.stringify(key)}`, "duplicate_field");
+        keys.add(key);
+        skipSpace();
+        if (source[offset++] !== ":") fail("replay JSON object key is missing ':'", "invalid_json");
+        parseValue(depth + 1);
+        skipSpace();
+        const separator = source[offset++];
+        if (separator === "}") return;
+        if (separator !== ",") fail("replay JSON object is malformed", "invalid_json");
+      }
+    }
+    if (char === "[") {
+      offset += 1;
+      skipSpace();
+      if (source[offset] === "]") { offset += 1; return; }
+      while (true) {
+        parseValue(depth + 1);
+        skipSpace();
+        const separator = source[offset++];
+        if (separator === "]") return;
+        if (separator !== ",") fail("replay JSON array is malformed", "invalid_json");
+      }
+    }
+    if (char === '"') { parseString(); return; }
+    const tail = source.slice(offset);
+    const literal = /^(?:true|false|null)/.exec(tail)?.[0]
+      || /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(tail)?.[0];
+    if (!literal) fail("replay JSON contains an invalid value", "invalid_json");
+    offset += literal.length;
+  };
+  parseValue(0);
+  skipSpace();
+  if (offset !== source.length) fail("replay JSON contains trailing data", "invalid_json");
+}
+
 const parseRoot = source => {
   const bytes = decodeBytes(source);
   if (typeof bytes === "string") {
+    rejectDuplicateJsonKeys(bytes);
     try { return JSON.parse(bytes); } catch (error) { fail(`failed to parse replay JSON: ${error.message}`, "invalid_json"); }
   }
   return bytes;
 };
 
-function decodeIdentity(value) {
+function decodeIdentityV2(value) {
   checkKeys(value,
     ["stasis_version", "release_id", "target", "source_sha256", "state_layout_sha256",
       "compiler_layout_sha256", "runtime_sha256", "host_schema_version", "host_i32_count",
@@ -163,6 +281,65 @@ function decodeIdentity(value) {
     });
   }
   return identity;
+}
+
+function decodeCompatibility(value) {
+  checkKeys(value,
+    ["stasis_version", "release_id", "source_sha256", "state_layout_sha256",
+      "compiler_layout_sha256", "host_schema_version", "host_i32_count",
+      "host_f32_count", "input_usage_sha256", "tick_rate_hz", "hash_scope",
+      "determinism_profile", "observed_i32", "observed_f32"],
+    ["asset_manifest_sha256", "controller_schema_version"]);
+  const compatibility = {
+    stasis_version: text(value.stasis_version, "compatibility stasis_version"),
+    release_id: text(value.release_id, "compatibility release_id"),
+    source_sha256: text(value.source_sha256, "compatibility source_sha256", { hash: true }),
+    state_layout_sha256: text(value.state_layout_sha256, "compatibility state_layout_sha256", { hash: true }),
+    compiler_layout_sha256: text(value.compiler_layout_sha256, "compatibility compiler_layout_sha256", { hash: true }),
+    asset_manifest_sha256: value.asset_manifest_sha256 === undefined || value.asset_manifest_sha256 === null
+      ? null : text(value.asset_manifest_sha256, "compatibility asset_manifest_sha256", { hash: true }),
+    host_schema_version: integer(value.host_schema_version, "compatibility host_schema_version", 1, Number.MAX_SAFE_INTEGER),
+    host_i32_count: integer(value.host_i32_count, "compatibility host_i32_count", 1, WEB_REPLAY_LIMITS.maxHostValues),
+    host_f32_count: integer(value.host_f32_count, "compatibility host_f32_count", 1, WEB_REPLAY_LIMITS.maxHostValues),
+    input_usage_sha256: text(value.input_usage_sha256, "compatibility input_usage_sha256", { hash: true }),
+    tick_rate_hz: integer(value.tick_rate_hz, "compatibility tick_rate_hz", 1, Number.MAX_SAFE_INTEGER),
+    hash_scope: value.hash_scope,
+    determinism_profile: text(value.determinism_profile, "compatibility determinism_profile"),
+    controller_schema_version: value.controller_schema_version === undefined || value.controller_schema_version === null
+      ? null : integer(value.controller_schema_version, "compatibility controller_schema_version", 1, Number.MAX_SAFE_INTEGER),
+    observed_i32: [], observed_f32: [],
+  };
+  if (compatibility.hash_scope !== HASH_SCOPE) fail(`compatibility hash_scope must be ${HASH_SCOPE}`, "invalid_hash_scope");
+  for (const [key, output] of [["observed_i32", compatibility.observed_i32], ["observed_f32", compatibility.observed_f32]]) {
+    const fields = array(value[key], `compatibility ${key}`, WEB_REPLAY_LIMITS.maxHostValues);
+    let previousIndex = -1;
+    fields.forEach((field, index) => {
+      checkKeys(field, ["slot", "index", "path", "family"]);
+      const slot = integer(field.slot, `${key}[${index}].slot`, 0, WEB_REPLAY_LIMITS.maxHostValues - 1);
+      const fieldIndex = integer(field.index, `${key}[${index}].index`, 0, compatibility[key === "observed_i32" ? "host_i32_count" : "host_f32_count"] - 1);
+      if (slot !== index) fail(`${key}[${index}] slot is not canonical position ${index}`, "noncanonical_descriptor");
+      if (fieldIndex <= previousIndex) fail(`${key} descriptors must be sorted and unique`, "noncanonical_descriptor");
+      previousIndex = fieldIndex;
+      output.push({ slot, index: fieldIndex, path: text(field.path, `${key}[${index}].path`), family: text(field.family, `${key}[${index}].family`) });
+    });
+  }
+  return compatibility;
+}
+
+function decodeProducer(value, label) {
+  checkKeys(value, ["target", "runtime_sha256"]);
+  return {
+    target: text(value.target, `${label} target`),
+    runtime_sha256: text(value.runtime_sha256, `${label} runtime_sha256`, { hash: true }),
+  };
+}
+
+function decodeIdentityV3(value) {
+  checkKeys(value, ["compatibility", "producer"]);
+  return {
+    compatibility: decodeCompatibility(value.compatibility),
+    producer: decodeProducer(value.producer, "producer"),
+  };
 }
 
 function decodeScalar(value, entryIndex) {
@@ -214,13 +391,17 @@ const decodeF32Change = (change, label, count) => {
 
 function decodeCompactDocument(root) {
   checkKeys(root, ["schema_version", "identity", "initial_state", "initial_input", "segments", "checkpoints", "total_ticks", "final_state"]);
-  if (root.schema_version !== WEB_REPLAY_LIMITS.schemaVersion) fail(`unsupported compact replay schema ${root.schema_version} (expected 2)`, "unsupported_schema");
-  const identity = decodeIdentity(root.identity);
+  if (root.schema_version !== WEB_REPLAY_LIMITS.legacySchemaVersion && root.schema_version !== WEB_REPLAY_LIMITS.schemaVersion) {
+    fail(`unsupported compact replay schema ${root.schema_version} (expected 2 or ${WEB_REPLAY_LIMITS.schemaVersion})`, "unsupported_schema");
+  }
+  const v3 = root.schema_version === WEB_REPLAY_LIMITS.schemaVersion;
+  const identity = v3 ? decodeIdentityV3(root.identity) : decodeIdentityV2(root.identity);
+  const compatibility = v3 ? identity.compatibility : identity;
   const initial_state = decodeInitialState(root.initial_state);
   checkKeys(root.initial_input, ["i32_values", "f32_bits"]);
   const initialInputI32 = array(root.initial_input.i32_values, "initial_input.i32_values", WEB_REPLAY_LIMITS.maxHostValues);
   const initialInputF32 = array(root.initial_input.f32_bits, "initial_input.f32_bits", WEB_REPLAY_LIMITS.maxHostValues);
-  if (initialInputI32.length !== identity.observed_i32.length || initialInputF32.length !== identity.observed_f32.length) {
+  if (initialInputI32.length !== compatibility.observed_i32.length || initialInputF32.length !== compatibility.observed_f32.length) {
     fail("initial_input lengths must match observed field descriptors", "input_dimensions");
   }
   const initial_input = {
@@ -276,7 +457,10 @@ function decodeCompactDocument(root) {
   checkKeys(root.final_state, ["tick", "state_sha256"]);
   const final_state = { tick: integer(root.final_state.tick, "final_state.tick", total_ticks, total_ticks), state_sha256: text(root.final_state.state_sha256, "final_state.state_sha256", { hash: true }) };
   if (checkpoints.at(-1)?.tick === total_ticks && checkpoints.at(-1).state_sha256 !== final_state.state_sha256) fail("final checkpoint does not match final state", "checkpoint_final_mismatch");
-  return { schema_version: 2, identity, initial_state, initial_input, segments: decodedSegments, checkpoints, total_ticks, final_state };
+  const normalizedIdentity = v3
+    ? { ...compatibility, compatibility, producer: identity.producer }
+    : identity;
+  return { schema_version: root.schema_version, identity: normalizedIdentity, initial_state, initial_input, segments: decodedSegments, checkpoints, total_ticks, final_state };
 }
 
 export function decodeReplay(source) {
@@ -616,20 +800,85 @@ export function createDescriptorInitialStateRestorer({ descriptor, writeSnapshot
   });
 }
 
+export function createWasmReplayBridge({ exports, descriptor } = {}) {
+  const normalized = decodeStateDescriptor(descriptor);
+  const memory = exports?.memory;
+  const size = exports?.stasis_replay_state_snapshot_size;
+  const write = exports?.stasis_replay_state_snapshot_write;
+  const restore = exports?.stasis_replay_state_snapshot_restore;
+  if (!(memory instanceof WebAssembly.Memory) || typeof size !== "function" || typeof write !== "function" || typeof restore !== "function") {
+    throw new ReplayDecodeError("game Wasm does not expose the canonical replay snapshot ABI", "missing_snapshot_abi");
+  }
+  const required = size();
+  if (!Number.isSafeInteger(required) || required < 0 || required !== normalized.required_bytes) {
+    throw new ReplayDecodeError(`snapshot ABI size ${String(required)} does not match descriptor ${normalized.required_bytes}`, "state_bytes_mismatch");
+  }
+  let pointer = 0;
+  if (required > 0) {
+    // Stasis Wasm has a compiler-fixed linear-memory layout and no guest heap or
+    // guest memory.grow instruction. Pages appended before main are therefore
+    // outside every authored address and remain a stable host-owned scratch tail.
+    pointer = memory.buffer.byteLength;
+    if (!Number.isSafeInteger(pointer) || pointer + required > 0x7fff_ffff) {
+      throw new ReplayDecodeError("replay snapshot scratch memory exceeds Wasm32 bounds", "state_bytes_mismatch");
+    }
+    const pages = Math.ceil(required / 65_536);
+    try { memory.grow(pages); } catch {
+      throw new ReplayDecodeError("unable to allocate replay snapshot scratch memory", "state_allocation_failed");
+    }
+  }
+  const exactResult = (operation, result) => {
+    if (result !== required) throw new ReplayDecodeError(`${operation} returned ${String(result)}; expected ${required}`, "state_bytes_mismatch");
+  };
+  const readSnapshotBytes = () => {
+    exactResult("snapshot write", write(pointer, required));
+    return new Uint8Array(memory.buffer, pointer, required).slice();
+  };
+  const writeSnapshotBytes = bytes => {
+    const exact = exactStateBytes(bytes, required, "state snapshot restore");
+    if (required > 0) new Uint8Array(memory.buffer, pointer, required).set(exact);
+    exactResult("snapshot restore", restore(pointer, required));
+    return required;
+  };
+  return Object.freeze({
+    descriptor: normalized,
+    requiredBytes: required,
+    scratchPointer: pointer,
+    readSnapshotBytes,
+    writeSnapshotBytes,
+    hashAdapter: createDescriptorStateHashAdapter({ descriptor: normalized, readSnapshotBytes }),
+    initialStateRestorer: createDescriptorInitialStateRestorer({ descriptor: normalized, writeSnapshotBytes }),
+  });
+}
+
 export function createCanonicalStateHashAdapter(hashState) {
   const fn = typeof hashState === "function" ? hashState : hashState?.hashState;
   if (typeof fn !== "function") throw new TypeError("a canonical state hash adapter requires hashState()");
   return Object.freeze({ hashState: (...args) => normalizeHash(fn(...args)) });
 }
 
-const compareIdentity = (actual, expected) => {
+const compareIdentity = (actual, expected, schemaVersion) => {
   if (!expected) return;
+  if (schemaVersion === WEB_REPLAY_LIMITS.schemaVersion && expected.compatibility) {
+    const expectedCompatibility = expected.compatibility;
+    const actualCompatibility = actual.compatibility || actual;
+    const keys = ["stasis_version", "release_id", "source_sha256", "state_layout_sha256", "compiler_layout_sha256", "asset_manifest_sha256", "host_schema_version", "host_i32_count", "host_f32_count", "input_usage_sha256", "tick_rate_hz", "hash_scope", "determinism_profile", "controller_schema_version"];
+    for (const key of keys) {
+      if (expectedCompatibility[key] !== undefined && expectedCompatibility[key] !== actualCompatibility[key]) throw new ReplayIdentityError(`compatibility.${key}`, expectedCompatibility[key], actualCompatibility[key]);
+    }
+    if (expectedCompatibility.observed_i32 !== undefined && JSON.stringify(expectedCompatibility.observed_i32) !== JSON.stringify(actualCompatibility.observed_i32)) throw new ReplayIdentityError("compatibility.observed_i32", expectedCompatibility.observed_i32, actualCompatibility.observed_i32);
+    if (expectedCompatibility.observed_f32 !== undefined && JSON.stringify(expectedCompatibility.observed_f32) !== JSON.stringify(actualCompatibility.observed_f32)) throw new ReplayIdentityError("compatibility.observed_f32", expectedCompatibility.observed_f32, actualCompatibility.observed_f32);
+    return;
+  }
+  const exactExpected = expected.compatibility
+    ? { ...expected.compatibility, target: expected.consumer?.target, runtime_sha256: expected.consumer?.runtime_sha256 }
+    : expected;
   const keys = ["stasis_version", "release_id", "target", "source_sha256", "state_layout_sha256", "compiler_layout_sha256", "runtime_sha256", "asset_manifest_sha256", "host_schema_version", "host_i32_count", "host_f32_count", "input_usage_sha256", "tick_rate_hz", "hash_scope", "determinism_profile", "controller_schema_version"];
   for (const key of keys) {
-    if (expected[key] !== undefined && expected[key] !== actual[key]) throw new ReplayIdentityError(`identity.${key}`, expected[key], actual[key]);
+    if (exactExpected[key] !== undefined && exactExpected[key] !== actual[key]) throw new ReplayIdentityError(`identity.${key}`, exactExpected[key], actual[key]);
   }
-  if (expected.observed_i32 !== undefined && JSON.stringify(expected.observed_i32) !== JSON.stringify(actual.observed_i32)) throw new ReplayIdentityError("identity.observed_i32", expected.observed_i32, actual.observed_i32);
-  if (expected.observed_f32 !== undefined && JSON.stringify(expected.observed_f32) !== JSON.stringify(actual.observed_f32)) throw new ReplayIdentityError("identity.observed_f32", expected.observed_f32, actual.observed_f32);
+  if (exactExpected.observed_i32 !== undefined && JSON.stringify(exactExpected.observed_i32) !== JSON.stringify(actual.observed_i32)) throw new ReplayIdentityError("identity.observed_i32", exactExpected.observed_i32, actual.observed_i32);
+  if (exactExpected.observed_f32 !== undefined && JSON.stringify(exactExpected.observed_f32) !== JSON.stringify(actual.observed_f32)) throw new ReplayIdentityError("identity.observed_f32", exactExpected.observed_f32, actual.observed_f32);
 };
 
 const truncateDiagnostic = message => {
@@ -655,7 +904,7 @@ export function createReplayController(source, options = {}) {
   // Always normalize and validate caller input. A plain object that merely
   // resembles a decoded document must not bypass bounds or canonical checks.
   const document = decodeReplay(source);
-  compareIdentity(document.identity, options.identity ?? options.packageIdentity);
+  compareIdentity(document.identity, options.identity ?? options.packageIdentity, document.schema_version);
   const hashAdapter = options.hashAdapter ? createCanonicalStateHashAdapter(options.hashAdapter) : null;
   let cursor = resetCursor(document);
   const applyChangesForTick = tick => {

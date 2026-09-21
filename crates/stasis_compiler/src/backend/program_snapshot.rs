@@ -532,6 +532,21 @@ impl ProgramSnapshot {
     pub fn files(&self) -> &[SourceFile] {
         &self.files
     }
+    /// Canonical identity of the exact source set accepted by this snapshot.
+    /// Hosts use this rather than rebuilding a target-specific approximation.
+    pub fn replay_source_sha256(&self) -> String {
+        let mut files = self.files.iter().collect::<Vec<_>>();
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        let mut source = Sha256::new();
+        source.update(b"stasis.replay.source.v1\0");
+        for file in files {
+            source.update((file.path.len() as u64).to_le_bytes());
+            source.update(file.path.as_bytes());
+            source.update((file.content.len() as u64).to_le_bytes());
+            source.update(file.content.as_bytes());
+        }
+        format!("{:x}", source.finalize())
+    }
     pub fn module_graph(&self) -> &ModuleGraph {
         &self.module_graph
     }
@@ -1599,6 +1614,11 @@ function render(): void {
         assert_eq!(jit.collections(), aot.collections());
         assert_eq!(jit.struct_field_type_ids(), aot.struct_field_type_ids());
         assert_eq!(jit.string_literals(), aot.string_literals());
+        assert_eq!(
+            jit.replay_source_sha256(),
+            aot.replay_source_sha256(),
+            "portable replay source identity must be backend-independent"
+        );
     }
 
     #[test]

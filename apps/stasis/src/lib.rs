@@ -40,7 +40,7 @@ pub use mobile_aot_bindings::{
     write_mobile_aot_bindings_source_with_profile_and_assets,
     write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot,
 };
-pub use record_replay::{simulation_state_hash, PlayReplayConfig};
+pub use record_replay::{packaged_replay_compatibility, simulation_state_hash, PlayReplayConfig};
 pub use stasis_test_runner::{
     natural_path_cmp, run_jit_tests_in_directory,
     run_jit_tests_in_directory_with_project_root_and_session,

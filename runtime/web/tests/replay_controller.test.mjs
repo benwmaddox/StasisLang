@@ -4,9 +4,12 @@ import {
   ReplayDecodeError,
   ReplayDivergenceError,
   ReplayIdentityError,
+  WEB_REPLAY_LIMITS,
   createCanonicalStateHashAdapter,
   createHostFrameSource,
   createReplayController,
+  createWasmReplayBridge,
+  fetchReplayBytes,
   decodeReplay,
 } from "../replay_controller.mjs";
 
@@ -51,6 +54,26 @@ function document({ total_ticks = 5, segments, checkpoints = [], finalHash = HAS
   };
 }
 
+function v3Document(options = {}) {
+  const source = document(options);
+  const { target, runtime_sha256, ...compatibility } = source.identity;
+  return {
+    ...source,
+    schema_version: 3,
+    identity: {
+      compatibility,
+      producer: { target: "windows-x86_64", runtime_sha256 },
+    },
+  };
+}
+
+function packagedIdentity(source, { target = "wasm32-web", runtime = HASH_C } = {}) {
+  const compatibility = source.schema_version === 3
+    ? source.identity.compatibility
+    : Object.fromEntries(Object.entries(source.identity).filter(([key]) => !["target", "runtime_sha256"].includes(key)));
+  return { compatibility, consumer: { target, runtime_sha256: runtime } };
+}
+
 test("schema-v2 decoder accepts object and JSON input while enforcing strict nested fields", () => {
   const source = document();
   assert.deepEqual(decodeReplay(source), { ...source, identity: { ...source.identity, asset_manifest_sha256: null, controller_schema_version: null } });
@@ -69,6 +92,88 @@ test("schema-v2 decoder accepts object and JSON input while enforcing strict nes
     },
   };
   assert.equal(decodeReplay(primitiveCollection).initial_state.values[0].location.field, "");
+});
+
+test("schema-v3 decoder validates producer provenance and accepts a different Web consumer", () => {
+  const source = v3Document({ total_ticks: 1 });
+  const decoded = decodeReplay(source);
+  assert.equal(decoded.schema_version, 3);
+  assert.equal(decoded.identity.producer.target, "windows-x86_64");
+  assert.equal(decoded.identity.compatibility.runtime_sha256, undefined);
+  assert.doesNotThrow(() => createReplayController(source, {
+    packageIdentity: packagedIdentity(source, { target: "wasm32-web", runtime: HASH_B }),
+  }));
+  assert.throws(
+    () => decodeReplay({ ...source, identity: { ...source.identity, producer: { ...source.identity.producer, extra: true } } }),
+    ReplayDecodeError,
+  );
+});
+
+test("schema-v3 compares every portable compatibility field and descriptor", () => {
+  const source = v3Document({ total_ticks: 1 });
+  const expected = packagedIdentity(source);
+  const scalarMutations = {
+    stasis_version: "0.1.1",
+    release_id: "other-release",
+    source_sha256: HASH_B,
+    state_layout_sha256: HASH_C,
+    compiler_layout_sha256: HASH_A,
+    asset_manifest_sha256: HASH_A,
+    host_schema_version: 5,
+    host_i32_count: 3,
+    host_f32_count: 3,
+    input_usage_sha256: HASH_C,
+    tick_rate_hz: 30,
+    hash_scope: "other_scope",
+    determinism_profile: "other_profile",
+    controller_schema_version: 2,
+  };
+  for (const [field, value] of Object.entries(scalarMutations)) {
+    const mutated = { ...expected, compatibility: { ...expected.compatibility, [field]: value } };
+    assert.throws(() => createReplayController(source, { packageIdentity: mutated }), ReplayIdentityError, field);
+  }
+  for (const field of ["observed_i32", "observed_f32"]) {
+    const descriptors = expected.compatibility[field].map((entry, index) => index === 0 ? { ...entry, path: `${entry.path}.changed` } : entry);
+    const mutated = { ...expected, compatibility: { ...expected.compatibility, [field]: descriptors } };
+    assert.throws(() => createReplayController(source, { packageIdentity: mutated }), ReplayIdentityError, field);
+  }
+});
+
+test("schema-v2 retains exact target and runtime matching with packaged identity metadata", () => {
+  const source = document({ total_ticks: 1 });
+  const exact = packagedIdentity(source, { target: source.identity.target, runtime: source.identity.runtime_sha256 });
+  assert.doesNotThrow(() => createReplayController(source, { packageIdentity: exact }));
+  assert.throws(
+    () => createReplayController(source, { packageIdentity: packagedIdentity(source, { target: source.identity.target, runtime: HASH_B }) }),
+    error => error instanceof ReplayIdentityError && error.field === "identity.runtime_sha256",
+  );
+});
+
+test("JSON replay decoding rejects duplicate keys at every nested contract layer", () => {
+  const v2 = JSON.stringify(document({ total_ticks: 1 }));
+  const v3 = JSON.stringify(v3Document({ total_ticks: 1 }));
+  const withStateEntry = JSON.stringify({
+    ...document({ total_ticks: 1 }),
+    initial_state: {
+      values: [{
+        location: { kind: "collection", path: "values", field: "", index: 0 },
+        value: { type_name: "i32", bits: "01000000" },
+      }],
+      state_sha256: HASH_A,
+    },
+  });
+  for (const duplicate of [
+    v2.replace('"schema_version":2', '"schema_version":2,"schema_version":2'),
+    v3.replace('"release_id":"test-release"', '"release_id":"test-release","release_id":"test-release"'),
+    v2.replace('"tick_gap":0', '"tick_gap":0,"tick_gap":0'),
+    withStateEntry.replace('"kind":"collection"', '"kind":"collection","kind":"collection"'),
+    v2.replace('"target":"web"', '"target":"web","\\u0074arget":"web"'),
+  ]) {
+    assert.throws(
+      () => decodeReplay(duplicate),
+      error => error instanceof ReplayDecodeError && error.code === "duplicate_field",
+    );
+  }
 });
 
 test("compact RLE applies changes at run starts and preserves values through tick gaps", () => {
@@ -143,6 +248,138 @@ test("runTick uses one ordinary tick/render sequence and ignores physical input"
 test("identity mismatch is rejected before playback", () => {
   assert.throws(() => createReplayController(document(), { identity: { target: "android" } }), ReplayIdentityError);
   assert.throws(() => createReplayController(document({ total_ticks: 1 }), { identity: { host_i32_count: 3 } }), ReplayIdentityError);
+});
+
+test("replay fetch requires same-origin streaming and enforces the byte bound before reading", async () => {
+  await assert.rejects(
+    fetchReplayBytes("https://elsewhere.invalid/replay.json", { baseUrl: "https://game.test/index.html", fetchImpl: () => { throw new Error("must not fetch"); } }),
+    /package origin/,
+  );
+  let reads = 0;
+  const response = {
+    ok: true,
+    status: 200,
+    headers: { get: () => String(WEB_REPLAY_LIMITS.maxFileBytes + 1) },
+    body: { getReader: () => ({ read: async () => { reads += 1; return { done: true }; } }) },
+  };
+  await assert.rejects(
+    fetchReplayBytes("/large.json", { baseUrl: "https://game.test/index.html", fetchImpl: async () => response }),
+    error => error instanceof ReplayDecodeError && error.code === "file_too_large",
+  );
+  assert.equal(reads, 0);
+
+  const repeatedChunk = new Uint8Array(1024 * 1024);
+  let streamed = 0;
+  let cancelled = false;
+  const oversizedReader = {
+    read: async () => ({ done: false, value: (streamed += 1, repeatedChunk) }),
+    cancel: async () => { cancelled = true; },
+    releaseLock() {},
+  };
+  await assert.rejects(
+    fetchReplayBytes("/streamed-large.json", {
+      baseUrl: "https://game.test/index.html",
+      fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => null }, body: { getReader: () => oversizedReader } }),
+    }),
+    error => error instanceof ReplayDecodeError && error.code === "file_too_large",
+  );
+  assert.equal(streamed, WEB_REPLAY_LIMITS.maxFileBytes / repeatedChunk.byteLength + 1);
+  assert.equal(cancelled, true);
+
+  const chunks = [new Uint8Array([1, 2]), new Uint8Array([3])];
+  const reader = {
+    read: async () => chunks.length ? { done: false, value: chunks.shift() } : { done: true },
+    releaseLock() {},
+  };
+  const bytes = await fetchReplayBytes("replay.json", {
+    baseUrl: "https://game.test/play/index.html",
+    fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => null }, body: { getReader: () => reader } }),
+  });
+  assert.deepEqual([...bytes], [1, 2, 3]);
+});
+
+const wasmStateDescriptor = requiredBytes => ({
+  schema: "stasis.replay_state_snapshot.v2",
+  abi_version: 2,
+  support: "canonical_bytes",
+  byte_order: "little_endian",
+  hash_scope: "simulation_after_tick",
+  required_bytes: requiredBytes,
+  entries: requiredBytes === 0 ? [] : [{
+    kind: "scalar", path: "score", field: "", storage_type: "i32",
+    offset: 0, element_count: 1, element_bytes: 4,
+  }],
+  unsupported_paths: [],
+  size_operation: "stasis_replay_state_snapshot_size",
+  write_operation: "stasis_replay_state_snapshot_write",
+  restore_operation: "stasis_replay_state_snapshot_restore",
+});
+
+test("Wasm replay bridge rejects descriptor/ABI size drift before using memory", () => {
+  const memory = new WebAssembly.Memory({ initial: 1 });
+  assert.throws(() => createWasmReplayBridge({
+    descriptor: wasmStateDescriptor(4),
+    exports: {
+      memory,
+      stasis_replay_state_snapshot_size: () => 8,
+      stasis_replay_state_snapshot_write: () => 4,
+      stasis_replay_state_snapshot_restore: () => 4,
+    },
+  }), /does not match descriptor/);
+});
+
+test("Wasm replay bridge reserves a stable tail and roundtrips exact snapshot bytes", () => {
+  const memory = new WebAssembly.Memory({ initial: 1 });
+  let state = new Uint8Array([1, 0, 0, 0]);
+  const bridge = createWasmReplayBridge({
+    descriptor: wasmStateDescriptor(4),
+    exports: {
+      memory,
+      stasis_replay_state_snapshot_size: () => 4,
+      stasis_replay_state_snapshot_write: (pointer, bytes) => {
+        new Uint8Array(memory.buffer, pointer, bytes).set(state);
+        return bytes;
+      },
+      stasis_replay_state_snapshot_restore: (pointer, bytes) => {
+        state = new Uint8Array(memory.buffer, pointer, bytes).slice();
+        return bytes;
+      },
+    },
+  });
+  assert.equal(bridge.scratchPointer, 65_536);
+  assert.deepEqual([...bridge.readSnapshotBytes()], [1, 0, 0, 0]);
+  const firstHash = bridge.hashAdapter.hashState();
+  assert.equal(bridge.writeSnapshotBytes(new Uint8Array([2, 0, 0, 0])), 4);
+  assert.deepEqual([...state], [2, 0, 0, 0]);
+  assert.notEqual(bridge.hashAdapter.hashState(), firstHash);
+});
+
+test("Wasm replay bridge preserves zero-byte ABI calls and rejects bad return codes", () => {
+  const memory = new WebAssembly.Memory({ initial: 1 });
+  const calls = [];
+  const zero = createWasmReplayBridge({
+    descriptor: wasmStateDescriptor(0),
+    exports: {
+      memory,
+      stasis_replay_state_snapshot_size: () => 0,
+      stasis_replay_state_snapshot_write: (...args) => { calls.push(["write", ...args]); return 0; },
+      stasis_replay_state_snapshot_restore: (...args) => { calls.push(["restore", ...args]); return 0; },
+    },
+  });
+  assert.deepEqual([...zero.readSnapshotBytes()], []);
+  assert.equal(zero.writeSnapshotBytes(new Uint8Array()), 0);
+  assert.deepEqual(calls, [["write", 0, 0], ["restore", 0, 0]]);
+
+  const bad = createWasmReplayBridge({
+    descriptor: wasmStateDescriptor(4),
+    exports: {
+      memory: new WebAssembly.Memory({ initial: 1 }),
+      stasis_replay_state_snapshot_size: () => 4,
+      stasis_replay_state_snapshot_write: () => -1,
+      stasis_replay_state_snapshot_restore: () => 4,
+    },
+  });
+  assert.throws(() => bad.readSnapshotBytes(), /snapshot write returned -1/);
 });
 
 test("checkpoint and final verification report only the first bounded divergence", () => {
