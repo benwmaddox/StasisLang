@@ -307,6 +307,243 @@ const normalizeHash = value => {
   return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
 };
 
+// This is intentionally local instead of using SubtleCrypto: verification is
+// part of the synchronous tick boundary, and SubtleCrypto would make the
+// guest loop asynchronous. The implementation only accepts bounded input
+// from the descriptor below, so the incremental buffer never grows with the
+// state snapshot.
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+const shaRight = (value, bits) => value >>> bits;
+const shaRotate = (value, bits) => (value >>> bits) | (value << (32 - bits));
+
+class IncrementalSha256 {
+  constructor() {
+    this.state = new Uint32Array([0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]);
+    this.buffer = new Uint8Array(64);
+    this.bufferLength = 0;
+    this.bytesHashed = 0;
+    this.finished = false;
+    this.schedule = new Uint32Array(64);
+  }
+
+  update(source) {
+    if (this.finished) throw new Error("SHA-256 digest already finalized");
+    const bytes = source instanceof Uint8Array
+      ? source : new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
+    this.bytesHashed += bytes.byteLength;
+    let offset = 0;
+    if (this.bufferLength !== 0) {
+      const copied = Math.min(64 - this.bufferLength, bytes.length);
+      this.buffer.set(bytes.subarray(0, copied), this.bufferLength);
+      this.bufferLength += copied;
+      offset += copied;
+      if (this.bufferLength === 64) {
+        this.compress(this.buffer);
+        this.bufferLength = 0;
+      }
+    }
+    while (offset + 64 <= bytes.length) {
+      this.compress(bytes.subarray(offset, offset + 64));
+      offset += 64;
+    }
+    if (offset < bytes.length) {
+      this.buffer.set(bytes.subarray(offset), 0);
+      this.bufferLength = bytes.length - offset;
+    }
+    return this;
+  }
+
+  compress(block) {
+    const w = this.schedule;
+    for (let index = 0; index < 16; index += 1) {
+      const base = index * 4;
+      w[index] = ((block[base] << 24) | (block[base + 1] << 16) | (block[base + 2] << 8) | block[base + 3]) >>> 0;
+    }
+    for (let index = 16; index < 64; index += 1) {
+      const x = w[index - 15];
+      const y = w[index - 2];
+      const sigma0 = shaRotate(x, 7) ^ shaRotate(x, 18) ^ shaRight(x, 3);
+      const sigma1 = shaRotate(y, 17) ^ shaRotate(y, 19) ^ shaRight(y, 10);
+      w[index] = (w[index - 16] + sigma0 + w[index - 7] + sigma1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = this.state;
+    for (let index = 0; index < 64; index += 1) {
+      const sigma1 = shaRotate(e, 6) ^ shaRotate(e, 11) ^ shaRotate(e, 25);
+      const choose = (e & f) ^ (~e & g);
+      const temp1 = (h + sigma1 + choose + SHA256_K[index] + w[index]) >>> 0;
+      const sigma0 = shaRotate(a, 2) ^ shaRotate(a, 13) ^ shaRotate(a, 22);
+      const majority = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (sigma0 + majority) >>> 0;
+      h = g; g = f; f = e; e = (d + temp1) >>> 0;
+      d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+    }
+    this.state[0] = (this.state[0] + a) >>> 0;
+    this.state[1] = (this.state[1] + b) >>> 0;
+    this.state[2] = (this.state[2] + c) >>> 0;
+    this.state[3] = (this.state[3] + d) >>> 0;
+    this.state[4] = (this.state[4] + e) >>> 0;
+    this.state[5] = (this.state[5] + f) >>> 0;
+    this.state[6] = (this.state[6] + g) >>> 0;
+    this.state[7] = (this.state[7] + h) >>> 0;
+  }
+
+  digest() {
+    if (this.finished) throw new Error("SHA-256 digest already finalized");
+    const bitLength = this.bytesHashed * 8;
+    this.buffer[this.bufferLength] = 0x80;
+    this.buffer.fill(0, this.bufferLength + 1);
+    if (this.bufferLength >= 56) {
+      this.compress(this.buffer);
+      this.buffer.fill(0);
+    }
+    // The bounded descriptor size is far below 2^53 bits; split explicitly
+    // so the length encoding does not depend on BigInt support.
+    const high = Math.floor(bitLength / 0x100000000);
+    const low = bitLength >>> 0;
+    this.buffer[56] = (high >>> 24) & 0xff;
+    this.buffer[57] = (high >>> 16) & 0xff;
+    this.buffer[58] = (high >>> 8) & 0xff;
+    this.buffer[59] = high & 0xff;
+    this.buffer[60] = (low >>> 24) & 0xff;
+    this.buffer[61] = (low >>> 16) & 0xff;
+    this.buffer[62] = (low >>> 8) & 0xff;
+    this.buffer[63] = low & 0xff;
+    this.compress(this.buffer);
+    this.finished = true;
+    const result = new Uint8Array(32);
+    for (let index = 0; index < this.state.length; index += 1) {
+      const value = this.state[index];
+      result[index * 4] = value >>> 24;
+      result[index * 4 + 1] = value >>> 16;
+      result[index * 4 + 2] = value >>> 8;
+      result[index * 4 + 3] = value;
+    }
+    return result;
+  }
+}
+
+const utf8 = value => new TextEncoder().encode(value);
+const u64Le = value => {
+  const bytes = new Uint8Array(8);
+  let remaining = value;
+  for (let index = 0; index < 8; index += 1) {
+    bytes[index] = remaining % 256;
+    remaining = Math.floor(remaining / 256);
+  }
+  return bytes;
+};
+
+const STATE_TYPE_BYTES = Object.freeze({ bool: 1, u8: 1, u16: 2, i32: 4, f32: 4, u32: 4, f64: 8 });
+const STATE_TYPE_TAG = Object.freeze({ i32: 1, f32: 2, f64: 3, bool: 4, u8: 5, u16: 6, u32: 7 });
+const MAX_STATE_SNAPSHOT_BYTES = WEB_REPLAY_LIMITS.maxFileBytes;
+const MAX_STATE_ENTRIES = WEB_REPLAY_LIMITS.maxTicks;
+
+function decodeStateDescriptor(descriptor) {
+  checkKeys(descriptor, ["schema", "abi_version", "support", "byte_order", "hash_scope", "required_bytes", "entries", "unsupported_paths", "size_operation", "write_operation"]);
+  if (descriptor.schema !== "stasis.replay_state_snapshot.v1") fail("replay state descriptor schema is unsupported", "invalid_state_descriptor");
+  if (descriptor.abi_version !== 1) fail("replay state descriptor ABI version is unsupported", "invalid_state_descriptor");
+  if (descriptor.support !== "canonical_bytes") fail("replay state descriptor does not advertise canonical_bytes support", "unsupported_state_descriptor");
+  if (descriptor.byte_order !== "little_endian") fail("replay state descriptor byte_order must be little_endian", "invalid_state_descriptor");
+  if (descriptor.hash_scope !== HASH_SCOPE) fail(`replay state descriptor hash_scope must be ${HASH_SCOPE}`, "invalid_state_descriptor");
+  const requiredBytes = integer(descriptor.required_bytes, "replay state descriptor required_bytes", 0, MAX_STATE_SNAPSHOT_BYTES);
+  const entries = array(descriptor.entries, "replay state descriptor entries", MAX_STATE_ENTRIES);
+  const unsupported = array(descriptor.unsupported_paths, "replay state descriptor unsupported_paths", MAX_STATE_ENTRIES);
+  if (unsupported.length !== 0) fail("replay state descriptor contains unsupported paths", "unsupported_state_descriptor");
+  if (descriptor.size_operation !== "stasis_replay_state_snapshot_size" || descriptor.write_operation !== "stasis_replay_state_snapshot_write") {
+    fail("replay state descriptor operation names are not canonical", "invalid_state_descriptor");
+  }
+  let expectedOffset = 0;
+  let previousScalarPath = null;
+  let previousCollectionPath = null;
+  let previousCollectionField = null;
+  let sawCollection = false;
+  const normalized = entries.map((entry, index) => {
+    checkKeys(entry, ["path", "field", "storage_type", "offset", "element_count", "element_bytes"]);
+    const path = text(entry.path, `state descriptor entry ${index} path`);
+    const field = entry.field === "" ? "" : text(entry.field, `state descriptor entry ${index} field`);
+    const storageType = text(entry.storage_type, `state descriptor entry ${index} storage_type`);
+    const width = STATE_TYPE_BYTES[storageType];
+    if (!width || STATE_TYPE_TAG[storageType] === undefined) fail(`state descriptor entry ${index} has unsupported type ${storageType}`, "unsupported_state_type");
+    const offset = integer(entry.offset, `state descriptor entry ${index} offset`, 0, MAX_STATE_SNAPSHOT_BYTES);
+    const count = integer(entry.element_count, `state descriptor entry ${index} element_count`, field === "" ? 1 : 0, MAX_STATE_ENTRIES);
+    const elementBytes = integer(entry.element_bytes, `state descriptor entry ${index} element_bytes`, 1, 8);
+    if (elementBytes !== width) fail(`state descriptor entry ${index} element_bytes does not match ${storageType}`, "state_width_mismatch");
+    if (field === "" && count !== 1) fail(`state descriptor scalar entry ${index} must have element_count=1`, "state_count_mismatch");
+    if (field === "") {
+      if (sawCollection || (previousScalarPath !== null && path <= previousScalarPath)) {
+        fail("state descriptor scalar entries must precede collections and have sorted unique paths", "state_order_mismatch");
+      }
+      previousScalarPath = path;
+    } else {
+      sawCollection = true;
+      if (previousCollectionPath !== null
+          && (path < previousCollectionPath || (path === previousCollectionPath && field <= previousCollectionField))) {
+        fail("state descriptor collection entries must have sorted unique paths and fields", "state_order_mismatch");
+      }
+      previousCollectionPath = path;
+      previousCollectionField = field;
+    }
+    if (offset !== expectedOffset) fail(`state descriptor entry ${index} is not contiguous at offset ${expectedOffset}`, "state_offset_mismatch");
+    const byteLength = count * width;
+    const end = offset + byteLength;
+    if (!Number.isSafeInteger(end) || end > requiredBytes) fail(`state descriptor entry ${index} exceeds required_bytes`, "state_offset_mismatch");
+    expectedOffset = end;
+    return Object.freeze({ path, field, storage_type: storageType, offset, element_count: count, element_bytes: width });
+  });
+  if (expectedOffset !== requiredBytes) fail(`state descriptor required_bytes ${requiredBytes} does not equal contiguous entries ${expectedOffset}`, "state_offset_mismatch");
+  return Object.freeze({ ...descriptor, required_bytes: requiredBytes, entries: Object.freeze(normalized), unsupported_paths: [] });
+}
+
+const exactStateBytes = (value, expected, label) => {
+  if (value && typeof value.then === "function") throw new TypeError(`${label} reader must be synchronous`);
+  let bytes;
+  if (value instanceof ArrayBuffer) bytes = new Uint8Array(value);
+  else if (ArrayBuffer.isView(value)) bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  else throw new TypeError(`${label} reader must return an ArrayBuffer or typed byte view`);
+  if (bytes.byteLength !== expected) throw new ReplayDecodeError(`${label} reader returned ${bytes.byteLength} bytes; expected exactly ${expected}`, "state_bytes_mismatch");
+  return bytes;
+};
+
+const validateStateValue = (type, bytes, label) => {
+  if (type === "bool" && bytes[0] > 1) throw new ReplayDecodeError(`${label} bool value must be 0 or 1`, "invalid_state_value");
+};
+
+export function createDescriptorStateHashAdapter({ descriptor, readEntryBytes } = {}) {
+  if (typeof readEntryBytes !== "function") throw new TypeError("descriptor state hash adapter requires readEntryBytes(entry)");
+  const normalized = decodeStateDescriptor(descriptor);
+  return Object.freeze({
+    descriptor: normalized,
+    hashState: () => {
+      const hasher = new IncrementalSha256();
+      hasher.update(utf8("stasis.simulation-state.v1\0"));
+      for (const entry of normalized.entries) {
+        const width = entry.element_bytes;
+        const bytes = exactStateBytes(readEntryBytes(entry), entry.element_count * width, `state descriptor entry ${entry.path}${entry.field ? `.${entry.field}` : ""}`);
+        for (let index = 0; index < entry.element_count; index += 1) {
+          const label = entry.field === "" ? entry.path : `${entry.path}[${index}].${entry.field}`;
+          const value = bytes.subarray(index * width, (index + 1) * width);
+          validateStateValue(entry.storage_type, value, label);
+          hasher.update(u64Le(utf8(label).byteLength));
+          hasher.update(utf8(label));
+          hasher.update(Uint8Array.of(STATE_TYPE_TAG[entry.storage_type]));
+          hasher.update(value);
+        }
+      }
+      return normalizeHash(hasher.digest());
+    },
+  });
+}
+
 export function createCanonicalStateHashAdapter(hashState) {
   const fn = typeof hashState === "function" ? hashState : hashState?.hashState;
   if (typeof fn !== "function") throw new TypeError("a canonical state hash adapter requires hashState()");
