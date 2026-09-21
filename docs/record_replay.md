@@ -83,6 +83,12 @@ a substitute for declaring it reproducible.
 
 Live code swaps, data reloads, and asset reloads abort a record/replay session. Direct
 nondeterministic host operations outside the HostFrame snapshot are not virtualized in schema v1.
-Schema v2 currently ships in the desktop JIT commands above. Packaged native, Web, and Android
-hosts require the same frame-projection and identity contract before they can advertise replay
-support; no cross-target bit-identity guarantee is implied.
+Schema v2 currently ships in the desktop JIT commands above. Generated native and Web metadata
+publish the compiler-owned observed-input identity plus a canonical simulation-state descriptor.
+The descriptor is explicitly marked `descriptor_only`, and the enclosing replay capability remains
+`metadata_only`, until a target exposes the bounded snapshot operations and runs the replay
+controller through its ordinary lifecycle. A standalone Web controller validates and projects the
+v2 stream for host integration tests, but generated `game.js` does not yet activate it. Packaged
+native desktop and Android likewise still require host loading, lifecycle orchestration, and file
+import/export before they can advertise replay support. No cross-target floating-point bit-identity
+guarantee is implied.

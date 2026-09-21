@@ -18,7 +18,8 @@ use crate::backend::input_usage::{
 };
 use crate::backend::reachability::compute_reachable_function_ids;
 use crate::backend::state_layout::{
-    build_state_layout, state_layout_digest, typed_collection_layout_metadata, StateLayout,
+    build_state_layout, collection_field_element_count, is_command_buffer_path,
+    state_layout_digest, typed_collection_layout_metadata, StateLayout,
 };
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::data_flow::FunctionDataFlowSummary;
@@ -109,6 +110,159 @@ pub struct ProgramReplayCompatibility {
     pub compiler_layout_sha256: String,
     pub hash_scope: String,
     pub determinism_profile: String,
+    pub state_snapshot: ProgramReplayStateSnapshot,
+}
+
+/// Stable compiler-owned description of the byte stream exposed by packaged replay hosts.
+///
+/// The stream contains only persistent simulation values. It is deliberately not a dump of
+/// the host process or a target's native storage layout: entries are sorted by their Stasis
+/// path/field identity and each value is encoded with the fixed little-endian width in this
+/// descriptor. Native and Wasm generators consume this same descriptor. A target may still
+/// produce different floating-point results; this contract does not promise cross-target float
+/// identity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProgramReplayStateSnapshot {
+    pub schema: String,
+    pub abi_version: u32,
+    pub support: String,
+    pub byte_order: String,
+    pub hash_scope: String,
+    pub required_bytes: u64,
+    pub entries: Vec<ProgramReplayStateEntry>,
+    pub unsupported_paths: Vec<String>,
+    pub size_operation: String,
+    pub write_operation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProgramReplayStateEntry {
+    /// The global scalar path, or the owning collection path for a field lane.
+    pub path: String,
+    /// Empty for a scalar; otherwise the collection field/lane name.
+    pub field: String,
+    pub storage_type: String,
+    pub offset: u64,
+    pub element_count: u64,
+    pub element_bytes: u8,
+}
+
+pub const REPLAY_STATE_SNAPSHOT_ABI_VERSION: u32 = 1;
+pub const REPLAY_STATE_SNAPSHOT_SCHEMA: &str = "stasis.replay_state_snapshot.v1";
+pub const REPLAY_STATE_SNAPSHOT_SIZE_OPERATION: &str = "stasis_replay_state_snapshot_size";
+pub const REPLAY_STATE_SNAPSHOT_WRITE_OPERATION: &str = "stasis_replay_state_snapshot_write";
+
+impl ProgramReplayStateSnapshot {
+    pub fn supported(&self) -> bool {
+        self.support == "canonical_bytes" && self.unsupported_paths.is_empty()
+    }
+}
+
+fn build_replay_state_snapshot(layout: &StateLayout) -> Result<ProgramReplayStateSnapshot, String> {
+    let mut entries = Vec::new();
+    let mut unsupported_paths = layout
+        .opaque
+        .iter()
+        .filter(|value| !is_replay_host_or_presentation_path(&value.path))
+        .map(|value| value.path.clone())
+        .collect::<Vec<_>>();
+    let mut offset = 0u64;
+
+    let mut scalars = layout.scalars.iter().collect::<Vec<_>>();
+    scalars.sort_by(|left, right| left.path.cmp(&right.path));
+    for scalar in scalars {
+        if is_replay_host_or_presentation_path(&scalar.path) {
+            continue;
+        }
+        let Some(element_bytes) = replay_storage_width(scalar.storage_type_name()) else {
+            unsupported_paths.push(scalar.path.clone());
+            continue;
+        };
+        entries.push(ProgramReplayStateEntry {
+            path: scalar.path.clone(),
+            field: String::new(),
+            storage_type: scalar.storage_type_name().to_string(),
+            offset,
+            element_count: 1,
+            element_bytes,
+        });
+        offset = offset
+            .checked_add(u64::from(element_bytes))
+            .ok_or_else(|| "replay state snapshot byte size overflow".to_string())?;
+    }
+
+    let mut collections = layout.collections.iter().collect::<Vec<_>>();
+    collections.sort_by(|left, right| left.path.cmp(&right.path));
+    for collection in collections {
+        if is_replay_host_or_presentation_path(&collection.path) {
+            continue;
+        }
+        let mut fields = collection.fields.iter().collect::<Vec<_>>();
+        fields.sort_by(|left, right| left.field.cmp(&right.field));
+        for field in fields {
+            let label = format!("{}.{}", collection.path, field.field);
+            let Some(element_bytes) = replay_storage_width(field.storage_type_name()) else {
+                unsupported_paths.push(label);
+                continue;
+            };
+            let element_count = collection_field_element_count(
+                collection,
+                field,
+                u64::try_from(collection.capacity).unwrap_or(0),
+            );
+            entries.push(ProgramReplayStateEntry {
+                path: collection.path.clone(),
+                field: field.field.clone(),
+                storage_type: field.storage_type_name().to_string(),
+                offset,
+                element_count,
+                element_bytes,
+            });
+            offset = offset
+                .checked_add(
+                    element_count
+                        .checked_mul(u64::from(element_bytes))
+                        .ok_or_else(|| "replay state snapshot byte size overflow".to_string())?,
+                )
+                .ok_or_else(|| "replay state snapshot byte size overflow".to_string())?;
+        }
+    }
+
+    unsupported_paths.sort();
+    unsupported_paths.dedup();
+    Ok(ProgramReplayStateSnapshot {
+        schema: REPLAY_STATE_SNAPSHOT_SCHEMA.to_string(),
+        abi_version: REPLAY_STATE_SNAPSHOT_ABI_VERSION,
+        // Generated native/Wasm operations have not landed yet. Keep this
+        // truthful until both backends expose the descriptor's byte stream.
+        support: "descriptor_only".to_string(),
+        byte_order: "little_endian".to_string(),
+        hash_scope: "simulation_after_tick".to_string(),
+        required_bytes: offset,
+        entries,
+        unsupported_paths,
+        size_operation: REPLAY_STATE_SNAPSHOT_SIZE_OPERATION.to_string(),
+        write_operation: REPLAY_STATE_SNAPSHOT_WRITE_OPERATION.to_string(),
+    })
+}
+
+fn replay_storage_width(type_name: &str) -> Option<u8> {
+    match type_name {
+        "bool" | "u8" => Some(1),
+        "u16" => Some(2),
+        "i32" | "f32" | "u32" => Some(4),
+        "f64" => Some(8),
+        _ => None,
+    }
+}
+
+fn is_replay_host_or_presentation_path(path: &str) -> bool {
+    path == "host_i32"
+        || path == "host_f32"
+        || path.starts_with("host_i32.")
+        || path.starts_with("host_f32.")
+        || path.starts_with("host_req_")
+        || is_command_buffer_path(path)
 }
 
 impl From<&FunctionMeta> for ProgramFunction {
@@ -155,6 +309,7 @@ pub struct ProgramSnapshot {
     asset_references: Vec<AssetReference>,
     hot_render_images: Vec<HotRenderImageMetadata>,
     state_layout: StateLayout,
+    replay_state_snapshot: ProgramReplayStateSnapshot,
     layout_digest: [u8; 32],
     compiler_layout_digest: [u8; 32],
     data_flow_summaries: Arc<[FunctionDataFlowSummary]>,
@@ -246,6 +401,7 @@ impl ProgramSnapshot {
             &analysis.typed_collection_descriptors,
             types,
         )?;
+        let replay_state_snapshot = build_replay_state_snapshot(&state_layout)?;
         let layout_digest = state_layout_digest(&state_layout)?;
         let compiler_layout_digest = compiler_layout_digest(&analysis, functions, types);
         let mut collections: Vec<ProgramCollectionMetadata> = analysis
@@ -344,6 +500,7 @@ impl ProgramSnapshot {
             asset_references,
             hot_render_images,
             state_layout,
+            replay_state_snapshot,
             layout_digest,
             compiler_layout_digest,
             data_flow_summaries,
@@ -413,6 +570,7 @@ impl ProgramSnapshot {
             compiler_layout_sha256: hex_digest(self.compiler_layout_digest),
             hash_scope: "simulation_after_tick".to_string(),
             determinism_profile: "input_only_no_external_observations".to_string(),
+            state_snapshot: self.replay_state_snapshot.clone(),
         }
     }
     pub fn asset_references(&self) -> &[AssetReference] {

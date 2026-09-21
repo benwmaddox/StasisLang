@@ -5967,6 +5967,9 @@ fn web_runtime_config(
         };
         has("gfx_cmd_construction_reset") && has("gfx_cmd_construction_finish")
     }) as u8;
+    let replay_compatibility = process
+        .program_snapshot()
+        .map(|snapshot| snapshot.replay_compatibility());
     let mut config = json!({
         "name": workspace.manifest.name,
         "strings": strings,
@@ -5977,6 +5980,7 @@ fn web_runtime_config(
         "collectionViewAbiVersion": COLLECTION_VIEW_ABI_VERSION,
         "renderContractVersion": if render_construction_lifecycle_version == 1 { GFX_CMD_VERSION } else { GFX_CMD_LEGACY_VERSION },
         "renderConstructionLifecycleVersion": render_construction_lifecycle_version,
+        "replayCompatibility": replay_compatibility,
     });
     if let Some(web) = workspace.manifest.web.as_ref() {
         if let Some(budget) = validate_web_atlas_budget(web.atlas_budget_bytes.as_ref())
@@ -10837,6 +10841,15 @@ mod tests {
         process.compile().expect("compile web sample");
 
         let release = web_runtime_config(&workspace, &process, false);
+        assert_eq!(
+            release["replayCompatibility"]["schema"],
+            "stasis.replay_compatibility.v1"
+        );
+        assert_eq!(release["replayCompatibility"]["support"], "metadata_only");
+        assert_eq!(
+            release["replayCompatibility"]["state_snapshot"]["support"],
+            "descriptor_only"
+        );
         let release_views = release["views"].as_object().expect("release views");
         assert!(!release_views.is_empty());
         assert!(release_views.values().all(|fields| fields

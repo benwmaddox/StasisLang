@@ -290,24 +290,35 @@ pub(crate) fn analyze_host_frame_input_usage_with_functions(
     functions: &[FunctionMeta],
 ) -> HostFrameInputUsage {
     let mut usage = HostFrameInputUsage::default();
+    let function_by_id = functions
+        .iter()
+        .map(|function| (function.id, function))
+        .collect::<BTreeMap<_, _>>();
+    let mut callees_by_call = BTreeMap::<(String, usize), Vec<&FunctionMeta>>::new();
+    for function in functions {
+        for key in function_call_keys(function) {
+            callees_by_call.entry(key).or_default().push(function);
+        }
+    }
     let mut states = reachable_function_ids
         .iter()
         .copied()
         .map(|function_id| (function_id, FunctionInputState::default()))
         .collect::<BTreeMap<_, _>>();
     let mut return_collections = BTreeMap::<FunctionId, BTreeSet<CollectionOrigin>>::new();
+    let mut call_return_origins = BTreeMap::<(String, usize), BTreeSet<CollectionOrigin>>::new();
     let mut pending = reachable_function_ids.iter().copied().collect::<Vec<_>>();
 
     while let Some(function_id) = pending.pop() {
         let Some(hir) = function_hirs.get(&function_id) else {
             continue;
         };
-        let Some(function) = functions.iter().find(|function| function.id == function_id) else {
+        let Some(function) = function_by_id.get(&function_id).copied() else {
             continue;
         };
         let state = states.get(&function_id).cloned().unwrap_or_default();
         let mut environment =
-            LocalInputEnvironment::from_function(function, &state, &return_collections, functions);
+            LocalInputEnvironment::from_function(function, &state, &call_return_origins);
         let mut calls = Vec::new();
         let mut returned_collections = BTreeSet::new();
         visit_statements_with_environment(
@@ -323,11 +334,18 @@ pub(crate) fn analyze_host_frame_input_usage_with_functions(
         let previous_return_count = function_returns.len();
         function_returns.extend(returned_collections);
         if function_returns.len() != previous_return_count {
+            for key in function_call_keys(function) {
+                call_return_origins
+                    .entry(key)
+                    .or_default()
+                    .extend(function_returns.iter().copied());
+            }
             pending.extend(reachable_function_ids.iter().copied());
         }
 
         for call in calls {
-            for callee in matching_callees(&call.target, call.args.len(), functions) {
+            let key = (call.target, call.args.len());
+            for callee in callees_by_call.get(&key).into_iter().flatten().copied() {
                 if !reachable_function_ids.contains(&callee.id) {
                     continue;
                 }
@@ -410,10 +428,12 @@ impl LocalInputEnvironment {
     fn from_function(
         function: &FunctionMeta,
         state: &FunctionInputState,
-        return_collections: &BTreeMap<FunctionId, BTreeSet<CollectionOrigin>>,
-        functions: &[FunctionMeta],
+        call_return_origins: &BTreeMap<(String, usize), BTreeSet<CollectionOrigin>>,
     ) -> Self {
-        let mut environment = Self::default();
+        let mut environment = Self {
+            call_returns: call_return_origins.clone(),
+            ..Self::default()
+        };
         for parameter in &function.param_names {
             if let Some(origins) = state.collections.get(parameter) {
                 environment
@@ -424,29 +444,6 @@ impl LocalInputEnvironment {
                 environment
                     .integer_values
                     .insert(parameter.clone(), values.clone());
-            }
-        }
-        for callee in functions {
-            let Some(origins) = return_collections
-                .get(&callee.id)
-                .filter(|origins| !origins.is_empty())
-            else {
-                continue;
-            };
-            environment
-                .call_returns
-                .entry((callee.name.clone(), callee.params.len()))
-                .or_default()
-                .extend(origins.iter().copied());
-            if !callee.module_alias.is_empty() {
-                environment
-                    .call_returns
-                    .entry((
-                        format!("{}.{}", callee.module_alias, callee.name),
-                        callee.params.len(),
-                    ))
-                    .or_default()
-                    .extend(origins.iter().copied());
             }
         }
         environment
@@ -465,20 +462,15 @@ struct PendingCall {
     args: Vec<CallArgumentInput>,
 }
 
-fn matching_callees<'a>(
-    target: &str,
-    argument_count: usize,
-    functions: &'a [FunctionMeta],
-) -> Vec<&'a FunctionMeta> {
-    functions
-        .iter()
-        .filter(|function| {
-            function.params.len() == argument_count
-                && (function.name == target
-                    || (!function.module_alias.is_empty()
-                        && format!("{}.{}", function.module_alias, function.name) == target))
-        })
-        .collect()
+fn function_call_keys(function: &FunctionMeta) -> impl Iterator<Item = (String, usize)> {
+    let mut keys = vec![(function.name.clone(), function.params.len())];
+    if !function.module_alias.is_empty() {
+        keys.push((
+            format!("{}.{}", function.module_alias, function.name),
+            function.params.len(),
+        ));
+    }
+    keys.into_iter()
 }
 
 fn visit_statements_with_environment(

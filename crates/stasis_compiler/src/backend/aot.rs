@@ -5724,6 +5724,16 @@ function clear(r: f32, g: f32, b: f32, a: f32): void { return; }
         assert_eq!(replay["input_usage_sha256"].as_str().unwrap().len(), 64);
         assert_eq!(replay["state_layout_sha256"].as_str().unwrap().len(), 64);
         assert_eq!(replay["compiler_layout_sha256"].as_str().unwrap().len(), 64);
+        let state_snapshot = &replay["state_snapshot"];
+        assert_eq!(state_snapshot["schema"], "stasis.replay_state_snapshot.v1");
+        assert_eq!(state_snapshot["support"], "descriptor_only");
+        assert_eq!(state_snapshot["byte_order"], "little_endian");
+        assert_eq!(state_snapshot["required_bytes"], 4);
+        assert_eq!(state_snapshot["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(state_snapshot["entries"][0]["path"], "observed_key");
+        assert_eq!(state_snapshot["entries"][0]["storage_type"], "i32");
+        assert_eq!(state_snapshot["entries"][0]["offset"], 0);
+        assert_eq!(state_snapshot["unsupported_paths"], serde_json::json!([]));
 
         let _ = fs::remove_dir_all(&bundle_dir);
     }

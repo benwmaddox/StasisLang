@@ -2496,6 +2496,8 @@ fn validate_supported_state(jit: &JitProcess) -> Result<(), String> {
 fn is_host_or_presentation_path(path: &str) -> bool {
     path == "host_i32"
         || path == "host_f32"
+        || path.starts_with("host_i32.")
+        || path.starts_with("host_f32.")
         || path.starts_with("host_req_")
         || stasis_compiler::backend::state_layout::is_command_buffer_path(path)
 }
@@ -3351,6 +3353,10 @@ mod tests {
         for path in [
             "host_i32",
             "host_f32",
+            "host_i32.length",
+            "host_i32.max_length",
+            "host_f32.length",
+            "host_f32.max_length",
             "host_req_flags",
             "gfx_cmd_i32",
             "render_cmd_i32",
