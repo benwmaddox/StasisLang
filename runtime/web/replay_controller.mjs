@@ -518,17 +518,27 @@ const validateStateValue = (type, bytes, label) => {
   if (type === "bool" && bytes[0] > 1) throw new ReplayDecodeError(`${label} bool value must be 0 or 1`, "invalid_state_value");
 };
 
-export function createDescriptorStateHashAdapter({ descriptor, readEntryBytes } = {}) {
-  if (typeof readEntryBytes !== "function") throw new TypeError("descriptor state hash adapter requires readEntryBytes(entry)");
+export function createDescriptorStateHashAdapter({ descriptor, readSnapshotBytes, readEntryBytes } = {}) {
+  const hasSnapshotReader = typeof readSnapshotBytes === "function";
+  const hasEntryReader = typeof readEntryBytes === "function";
+  if (hasSnapshotReader === hasEntryReader) {
+    throw new TypeError("descriptor state hash adapter requires exactly one of readSnapshotBytes() or readEntryBytes(entry)");
+  }
   const normalized = decodeStateDescriptor(descriptor);
   return Object.freeze({
     descriptor: normalized,
     hashState: () => {
       const hasher = new IncrementalSha256();
       hasher.update(utf8("stasis.simulation-state.v1\0"));
+      const snapshot = hasSnapshotReader
+        ? exactStateBytes(readSnapshotBytes(), normalized.required_bytes, "state snapshot")
+        : null;
       for (const entry of normalized.entries) {
         const width = entry.element_bytes;
-        const bytes = exactStateBytes(readEntryBytes(entry), entry.element_count * width, `state descriptor entry ${entry.path}${entry.field ? `.${entry.field}` : ""}`);
+        const byteLength = entry.element_count * width;
+        const bytes = snapshot
+          ? snapshot.subarray(entry.offset, entry.offset + byteLength)
+          : exactStateBytes(readEntryBytes(entry), byteLength, `state descriptor entry ${entry.path}${entry.field ? `.${entry.field}` : ""}`);
         for (let index = 0; index < entry.element_count; index += 1) {
           const label = entry.field === "" ? entry.path : `${entry.path}[${index}].${entry.field}`;
           const value = bytes.subarray(index * width, (index + 1) * width);
@@ -540,6 +550,66 @@ export function createDescriptorStateHashAdapter({ descriptor, readEntryBytes } 
         }
       }
       return normalizeHash(hasher.digest());
+    },
+  });
+}
+
+const stateLocationKey = location => location.kind === "scalar"
+  ? `scalar\u0000${location.path}`
+  : `collection\u0000${location.path}\u0000${location.field}`;
+
+const scalarBitsLe = (value, expectedType, label) => {
+  if (!isPlainObject(value) || value.type_name !== expectedType || typeof value.bits !== "string") {
+    throw new ReplayDecodeError(`${label} type does not match descriptor type ${expectedType}`, "state_type_mismatch");
+  }
+  const width = STATE_TYPE_BYTES[expectedType];
+  if (value.bits.length !== width * 2 || !/^[0-9a-f]+$/.test(value.bits)) {
+    throw new ReplayDecodeError(`${label} bits do not match descriptor width ${width}`, "state_width_mismatch");
+  }
+  const bytes = new Uint8Array(width);
+  for (let index = 0; index < width; index += 1) {
+    const source = value.bits.length - (index + 1) * 2;
+    bytes[index] = Number.parseInt(value.bits.slice(source, source + 2), 16);
+  }
+  validateStateValue(expectedType, bytes, label);
+  return bytes;
+};
+
+export function createDescriptorInitialStateRestorer({ descriptor, writeSnapshotBytes } = {}) {
+  if (typeof writeSnapshotBytes !== "function") throw new TypeError("descriptor initial-state restorer requires writeSnapshotBytes(bytes)");
+  const normalized = decodeStateDescriptor(descriptor);
+  const locations = new Map(normalized.entries.map(entry => [
+    entry.field === "" ? `scalar\u0000${entry.path}` : `collection\u0000${entry.path}\u0000${entry.field}`,
+    entry,
+  ]));
+  return Object.freeze({
+    descriptor: normalized,
+    restoreInitialState: initialState => {
+      if (!isPlainObject(initialState) || !Array.isArray(initialState.values)) {
+        throw new ReplayDecodeError("initial state restorer requires decoded initial_state.values", "invalid_initial_state");
+      }
+      const snapshot = new Uint8Array(normalized.required_bytes);
+      initialState.values.forEach((stateEntry, index) => {
+        if (!isPlainObject(stateEntry) || !isPlainObject(stateEntry.location)) {
+          throw new ReplayDecodeError(`initial state entry ${index} is invalid`, "invalid_initial_state");
+        }
+        const descriptorEntry = locations.get(stateLocationKey(stateEntry.location));
+        if (!descriptorEntry) {
+          throw new ReplayDecodeError(`initial state entry ${index} is absent from the replay state descriptor`, "state_location_mismatch");
+        }
+        const elementIndex = stateEntry.location.kind === "scalar" ? 0 : stateEntry.location.index;
+        if (!Number.isSafeInteger(elementIndex) || elementIndex < 0 || elementIndex >= descriptorEntry.element_count) {
+          throw new ReplayDecodeError(`initial state entry ${index} index is outside descriptor bounds`, "state_location_mismatch");
+        }
+        const bytes = scalarBitsLe(stateEntry.value, descriptorEntry.storage_type, `initial state entry ${index}`);
+        snapshot.set(bytes, descriptorEntry.offset + elementIndex * descriptorEntry.element_bytes);
+      });
+      const written = writeSnapshotBytes(snapshot);
+      if (written && typeof written.then === "function") throw new TypeError("initial state snapshot writer must be synchronous");
+      if (written !== normalized.required_bytes) {
+        throw new ReplayDecodeError(`initial state snapshot writer wrote ${String(written)} bytes; expected ${normalized.required_bytes}`, "state_bytes_mismatch");
+      }
+      return { restored: true, bytes: written };
     },
   });
 }

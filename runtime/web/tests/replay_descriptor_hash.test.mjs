@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import test from "node:test";
-import { ReplayDecodeError, createDescriptorStateHashAdapter } from "../replay_controller.mjs";
+import {
+  ReplayDecodeError,
+  createDescriptorInitialStateRestorer,
+  createDescriptorStateHashAdapter,
+} from "../replay_controller.mjs";
 
 const typeTag = Object.freeze({ i32: 1, f32: 2, f64: 3, bool: 4, u8: 5, u16: 6, u32: 7 });
 const width = Object.freeze({ i32: 4, f32: 4, f64: 8, bool: 1, u8: 1, u16: 2, u32: 4 });
@@ -75,6 +79,30 @@ test("descriptor state hash matches an independent SHA-256 oracle for every scal
   assert.equal(adapter.hashState(), oracle(snapshot.entries, bytesByEntry));
 });
 
+test("bulk snapshot hashing performs one bounded read at each verification point", () => {
+  const snapshot = descriptor([
+    { path: "score", field: "", storage_type: "i32", element_count: 1 },
+    { path: "actors", field: "hp", storage_type: "i32", element_count: 2 },
+  ]);
+  const bytesByEntry = new Map([
+    ["score\0", Uint8Array.from([3, 0, 0, 0])],
+    ["actors\0hp", Uint8Array.from([5, 0, 0, 0, 7, 0, 0, 0])],
+  ]);
+  const bytes = Uint8Array.from([...bytesByEntry.get("score\0"), ...bytesByEntry.get("actors\0hp")]);
+  let reads = 0;
+  const adapter = createDescriptorStateHashAdapter({
+    descriptor: snapshot,
+    readSnapshotBytes: () => { reads += 1; return bytes; },
+  });
+  assert.equal(adapter.hashState(), oracle(snapshot.entries, bytesByEntry));
+  assert.equal(reads, 1);
+  assert.throws(() => createDescriptorStateHashAdapter({
+    descriptor: snapshot,
+    readSnapshotBytes: () => bytes,
+    readEntryBytes: () => bytes,
+  }), /exactly one/);
+});
+
 test("descriptor state hash rejects unsupported, non-contiguous, and incorrectly typed descriptors", () => {
   const valid = descriptor([{ path: "value", field: "", storage_type: "i32", element_count: 1 }]);
   assert.throws(() => createDescriptorStateHashAdapter({ descriptor: { ...valid, support: "descriptor_only" }, readEntryBytes: () => new Uint8Array(4) }), /canonical_bytes/);
@@ -117,9 +145,43 @@ test("descriptor reader must synchronously return exactly the advertised bytes",
   assert.throws(() => missing.hashState(), ReplayDecodeError);
   const extra = createDescriptorStateHashAdapter({ descriptor: valid, readEntryBytes: () => new Uint8Array(5) });
   assert.throws(() => extra.hashState(), ReplayDecodeError);
+  const shortSnapshot = createDescriptorStateHashAdapter({ descriptor: valid, readSnapshotBytes: () => new Uint8Array(3) });
+  assert.throws(() => shortSnapshot.hashState(), /expected exactly 4/);
   const asyncReader = createDescriptorStateHashAdapter({ descriptor: valid, readEntryBytes: () => Promise.resolve(new Uint8Array(4)) });
   assert.throws(() => asyncReader.hashState(), /synchronous/);
   const invalidBool = descriptor([{ path: "enabled", field: "", storage_type: "bool", element_count: 1 }]);
   const boolAdapter = createDescriptorStateHashAdapter({ descriptor: invalidBool, readEntryBytes: () => Uint8Array.from([2]) });
   assert.throws(() => boolAdapter.hashState(), /bool value/);
+});
+
+test("initial-state restore zeros the canonical snapshot then applies exact sparse scalar bits", () => {
+  const snapshot = descriptor([
+    { path: "enabled", field: "", storage_type: "bool", element_count: 1 },
+    { path: "score", field: "", storage_type: "i32", element_count: 1 },
+    { path: "actors", field: "ratio", storage_type: "f32", element_count: 2 },
+  ]);
+  let restored = null;
+  const restorer = createDescriptorInitialStateRestorer({
+    descriptor: snapshot,
+    writeSnapshotBytes: bytes => { restored = Uint8Array.from(bytes); return bytes.byteLength; },
+  });
+  assert.deepEqual(restorer.restoreInitialState({ values: [
+    { location: { kind: "scalar", path: "enabled" }, value: { type_name: "bool", bits: "01" } },
+    { location: { kind: "scalar", path: "score" }, value: { type_name: "i32", bits: "fffffffe" } },
+    { location: { kind: "collection", path: "actors", field: "ratio", index: 1 }, value: { type_name: "f32", bits: "7fc12345" } },
+  ] }), { restored: true, bytes: 13 });
+  assert.deepEqual([...restored], [1, 0xfe, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0x45, 0x23, 0xc1, 0x7f]);
+});
+
+test("initial-state restore rejects descriptor drift and incomplete writers", () => {
+  const snapshot = descriptor([{ path: "score", field: "", storage_type: "i32", element_count: 1 }]);
+  const restore = createDescriptorInitialStateRestorer({ descriptor: snapshot, writeSnapshotBytes: () => 3 });
+  assert.throws(() => restore.restoreInitialState({ values: [] }), /expected 4/);
+  const exact = createDescriptorInitialStateRestorer({ descriptor: snapshot, writeSnapshotBytes: bytes => bytes.byteLength });
+  assert.throws(() => exact.restoreInitialState({ values: [
+    { location: { kind: "scalar", path: "missing" }, value: { type_name: "i32", bits: "00000001" } },
+  ] }), /absent/);
+  assert.throws(() => exact.restoreInitialState({ values: [
+    { location: { kind: "scalar", path: "score" }, value: { type_name: "f32", bits: "3f800000" } },
+  ] }), /does not match/);
 });
