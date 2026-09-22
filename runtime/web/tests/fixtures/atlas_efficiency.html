@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Stasis Web atlas representative fixture</title>
+<style>
+  body { margin: 0; background: #111827; color: #f3f4f6; font: 14px system-ui; }
+  main { margin: 16px auto; width: 960px; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  canvas { display: block; width: 960px; height: 540px; }
+  #stasis-hud { white-space: pre-wrap; font: 12px monospace; margin: 8px 0; }
+  #stasis-error { color: #fca5a5; white-space: pre-wrap; }
+</style>
+<main>
+  <h1 id="fixture-title">Production WebGL2 atlas: arena background plus smoke sprites</h1>
+  <canvas id="stasis-canvas" width="960" height="540"></canvas>
+  <div id="stasis-loading"><span id="stasis-loading-status"></span></div>
+  <pre id="stasis-hud"></pre>
+  <pre id="stasis-error"></pre>
+</main>
+<script type="module">
+  import { installCollectionViewAbi } from "../collection_view_abi.mjs";
+
+  const actualFetch = window.fetch.bind(window);
+  const actualWasm = window.WebAssembly;
+  const mode = new URLSearchParams(location.search).get("case") || "representative";
+  const synthetic = mode === "separate" || mode === "sheet";
+  if (synthetic) document.getElementById("fixture-title").textContent =
+    `Production WebGL2 atlas: 18 tiles as ${mode === "sheet" ? "one authored sheet" : "separate images"}`;
+  const makeTile = (context, index, x, y) => {
+    const hue = (index * 43) % 360;
+    context.fillStyle = `hsl(${hue} 65% 60% / 0.82)`;
+    context.fillRect(x, y, 252, 252);
+    context.fillStyle = `hsl(${(hue + 160) % 360} 75% 35% / 0.85)`;
+    context.beginPath();
+    context.arc(x + 126, y + 126, 84, 0, Math.PI * 2);
+    context.fill();
+  };
+  const syntheticAssets = {};
+  if (synthetic && mode === "separate") {
+    for (let index = 0; index < 18; index += 1) {
+      const tile = document.createElement("canvas");
+      tile.width = 252; tile.height = 252;
+      makeTile(tile.getContext("2d"), index, 0, 0);
+      syntheticAssets[`assets/tile-${index}.png`] = tile.toDataURL("image/png");
+    }
+  } else if (synthetic) {
+    const sheet = document.createElement("canvas");
+    sheet.width = 1512; sheet.height = 756;
+    const context = sheet.getContext("2d");
+    for (let index = 0; index < 18; index += 1) {
+      makeTile(context, index, (index % 6) * 252, Math.floor(index / 6) * 252);
+    }
+    syntheticAssets["assets/tiles-sheet.png"] = sheet.toDataURL("image/png");
+  }
+  const syntheticOrder = [...Array.from({ length: 18 }, (_, index) => index),
+    ...Array.from({ length: 128 }, (_, index) => index % 2 ? 17 : 0)];
+  const memory = new actualWasm.Memory({ initial: 16 });
+  const i32 = new Int32Array(memory.buffer, 0, 67888);
+  const f32 = new Float32Array(memory.buffer, 300000, 146564);
+  let host;
+  let frame = 0;
+  const exports = {
+    memory,
+    main() {
+      if (synthetic) {
+        const count = mode === "sheet" ? 1 : 18;
+        for (let index = 0; index < count; index += 1) {
+          host.gfx_load_sprite(index + 1, mode === "sheet" ? 1512 : 252,
+            mode === "sheet" ? 756 : 252);
+        }
+      } else {
+        host.gfx_load_sprite(1, 1672, 941);
+        host.gfx_load_sprite(2, 64, 64);
+      }
+      return 0;
+    },
+    tick() {},
+    render() {
+      frame += 1;
+      i32[0] = 1196967473; i32[1] = 7; i32[2] = 0; i32[3] = 0;
+      const count = synthetic ? syntheticOrder.length : 33;
+      i32[4] = count; i32[7] = 0; i32[24] = 0; i32[27] = 0; i32[29] = 1;
+      i32[18464] = 0; i32[18465] = count; i32[18466] = -1;
+      for (let index = 0; index < count; index += 1) {
+        const bi = 32 + index * 3;
+        const bf = 80004 + index * 13;
+        const background = index === 0;
+        const tile = syntheticOrder[index];
+        i32[bi] = synthetic ? (mode === "sheet" ? 1 : tile + 1) : (background ? 1 : 2);
+        i32[bi + 1] = synthetic || !background ? (0xb4ffffff | 0) : -1;
+        i32[bi + 2] = 0;
+        f32[bf] = synthetic ? (index < 18 ? 16 + (index % 6) * 104
+          : 700 + (index % 4) * 55) : (background ? 0
+          : 30 + ((index - 1) % 8) * 115 + Math.sin(frame / 10 + index) * 4);
+        f32[bf + 1] = synthetic ? (index < 18 ? 14 + Math.floor(index / 6) * 104
+          : 30 + (Math.floor(index / 4) % 8) * 55) : (background ? 0
+          : 25 + Math.floor((index - 1) / 8) * 120);
+        f32[bf + 2] = synthetic ? 80 : (background ? 960 : 64);
+        f32[bf + 3] = synthetic ? 80 : (background ? 540 : 64);
+        for (let field = 4; field < 10; field += 1) f32[bf + field] = 0;
+        if (synthetic && mode === "sheet") {
+          f32[bf + 4] = (tile % 6) * 252;
+          f32[bf + 5] = Math.floor(tile / 6) * 252;
+          f32[bf + 6] = 252;
+          f32[bf + 7] = 252;
+        }
+        f32[bf + 10] = 1; f32[bf + 11] = 1; f32[bf + 12] = 0;
+      }
+    }
+  };
+  const game = {
+    strings: synthetic ? Object.fromEntries(Array.from({ length: mode === "sheet" ? 1 : 18 },
+      (_, index) => [index + 1, mode === "sheet" ? "assets/tiles-sheet.png" : `assets/tile-${index}.png`]))
+      : { 1: "assets/arena_background.png", 2: "assets/smoke.png" },
+    assets: {
+      ...syntheticAssets,
+      "assets/arena_background.png": "/samples/asset_breakout/assets/arena_background.png",
+      "assets/smoke.png": "/samples/windows_launch_smoke/assets/smoke.png"
+    },
+    memory: {
+      gfx_cmd_i32: { offset: 0, length: 67888 },
+      gfx_cmd_f32: { offset: 300000, length: 146564 },
+      host_i32: { offset: 900000, length: 768 },
+      host_f32: { offset: 903072, length: 64 }
+    }
+  };
+  installCollectionViewAbi(game, exports);
+  window.STASIS_GAME = game;
+  window.fetch = (url, options) => String(url) === "__STASIS_WASM_URL__"
+    ? Promise.resolve(new Response(new ArrayBuffer(0))) : actualFetch(url, options);
+  window.WebAssembly = {
+    Global: actualWasm.Global,
+    instantiate: async (_bytes, imports) => {
+      host = imports.env;
+      return { instance: { exports } };
+    }
+  };
+  const script = document.createElement("script");
+  script.src = "../../game.js";
+  document.body.append(script);
+</script>
+</html>

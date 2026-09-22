@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { performance as nodePerformance } from "node:perf_hooks";
 import { installCollectionViewAbi } from "./collection_view_abi.mjs";
 
 const source = fs.readFileSync(new URL("../game.js", import.meta.url), "utf8");
@@ -49,7 +50,7 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false,
     viewport(_x, _y, width, height) { stats.viewports.push([width, height]); }, clearColor() {}, clear() {}, useProgram() {}, uniform2f(_location, width, height) {
       stats.uniforms.push([width, height]);
     }, uniform1i() {},
-    texParameteri() {}, pixelStorei() {}, texImage2D() { stats.texImageCalls += 1; if (textureThrow || (textureFailureAt && stats.texImageCalls === textureFailureAt)) throw new Error("fake texture failure"); }, texSubImage2D(...args) { stats.texSubImageCalls += 1; const source = args[args.length - 1]; stats.textureUploads.push({ width: Number(source?.width) || 0, height: Number(source?.height) || 0 }); if (textureThrow) throw new Error("fake texture failure"); }, generateMipmap() {}, activeTexture() {}, bindTexture() {}, getError: () => { stats.getErrorCalls += 1; return glErrorAt && stats.getErrorCalls === glErrorAt ? 1280 : 0; },
+    texParameteri() {}, pixelStorei() {}, texImage2D(_target, _level, _internal, width, height) { stats.texImageCalls += 1; stats.pageSizes.push([width, height]); if (textureThrow || (textureFailureAt && stats.texImageCalls === textureFailureAt)) throw new Error("fake texture failure"); }, texSubImage2D(...args) { stats.texSubImageCalls += 1; const source = args[args.length - 1]; stats.textureUploads.push({ width: Number(source?.width) || 0, height: Number(source?.height) || 0 }); if (textureThrow) throw new Error("fake texture failure"); }, generateMipmap() {}, activeTexture() {}, bindTexture() {}, getError: () => { stats.getErrorCalls += 1; return glErrorAt && stats.getErrorCalls === glErrorAt ? 1280 : 0; },
     isContextLost: () => stats.contextLost, getParameter: () => maxTextureSize,
     enable() {}, disable() {}, scissor(x, y, width, height) { stats.scissors.push([x, y, width, height]); }, blendFunc() {}, blendFuncSeparate() {}, drawArraysInstanced(_mode, _first, _vertices, count) {
       stats.instanced += 1;
@@ -59,11 +60,11 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false,
   return gl;
 }
 
-async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], spritePivot = [4, 5], spriteScale = [1, 1], instanceFlags = 0, runMetadata = [0, 0, 0, 0, 0], webgl = true, throwing = false, textureThrow = false, textureFailureAt = 0, glErrorAt = 0, imageReady = true, timing = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null, hudQuery = "", atlasBudgetBytes = undefined, maxTextureSize = 4096, expectReady = true } = {}) {
+async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], spriteXOffset = null, spritePivot = [4, 5], spriteScale = [1, 1], instanceFlags = 0, runMetadata = [0, 0, 0, 0, 0], webgl = true, throwing = false, textureThrow = false, textureFailureAt = 0, glErrorAt = 0, imageReady = true, timing = false, realTime = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null, hudQuery = "", atlasBudgetBytes = undefined, maxTextureSize = 4096, expectReady = true } = {}) {
   const memory = new WebAssembly.Memory({ initial: 16 });
   const i32 = new Int32Array(memory.buffer, 0, I32_COUNT);
   const f32 = new Float32Array(memory.buffer, F32_OFFSET, F32_COUNT);
-  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], viewports: [], scissors: [], transforms: [], imageArgs: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [], createdTextures: 0, texImageCalls: 0, texSubImageCalls: 0, textureUploads: [], getErrorCalls: 0, deletedTextures: 0 };
+  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], viewports: [], scissors: [], transforms: [], imageArgs: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [], createdTextures: 0, texImageCalls: 0, texSubImageCalls: 0, pageSizes: [], textureUploads: [], getErrorCalls: 0, deletedTextures: 0 };
   let now = 0;
   const context2d = {
     globalAlpha: 1,
@@ -191,7 +192,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
         i32[baseI] = spriteHandles[index] || 1;
         i32[baseI + 1] = 0xffffffb4;
         i32[baseI + 2] = instanceFlags;
-        f32[baseF] = index + 0.5; f32[baseF + 1] = 2; f32[baseF + 2] = 8; f32[baseF + 3] = 10;
+        f32[baseF] = index + 0.5 + (spriteXOffset?.value || 0); f32[baseF + 1] = 2; f32[baseF + 2] = 8; f32[baseF + 3] = 10;
         const dimensions = spriteSizes?.[(spriteHandles[index] || 1) - 1] || spriteSize || imageExtent;
         const partial = spriteUv[0] !== 0 || spriteUv[1] !== 0 || spriteUv[2] !== 1 || spriteUv[3] !== 1;
         f32[baseF + 4] = partial ? spriteUv[0] * dimensions[0] : 0;
@@ -226,7 +227,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     document, screen: { width: 640, height: 360 }, devicePixelRatio: 1,
     location,
     URLSearchParams,
-    performance: { now: () => now }, WebAssembly: { Global: WebAssembly.Global, instantiate: async (_bytes, imports) => { env = imports.env; return { instance }; } },
+    performance: { now: () => realTime ? nodePerformance.now() : now }, WebAssembly: { Global: WebAssembly.Global, instantiate: async (_bytes, imports) => { env = imports.env; return { instance }; } },
     fetch: async source => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(0), blob: async () => fetchBlob ? fetchBlob(source) : { source } }),
     requestAnimationFrame: callback => { raf.push(callback); return raf.length; }, cancelAnimationFrame() {},
     addEventListener(type, callback) { windowListeners.set(type, callback); }, console, Image: class { constructor() { stats.imageConstructed += 1; this.complete = imageReady; this.naturalWidth = imageReady ? imageExtent[0] : 0; this.naturalHeight = imageReady ? imageExtent[1] : 0; } decode() { stats.imageDecodeCalls += 1; return imageDecode ? imageDecode(this) : Promise.resolve(); } }, FontFace: class { load() { return Promise.resolve(this); } },
@@ -1249,6 +1250,162 @@ test("atlas page boundaries split the adjacent sprite run", async () => {
   assert.equal(runtime.stats.instanced, 4);
   assert.deepEqual(runtime.stats.instances, [64, 64, 64, 64]);
   assert.equal(runtime.body.dataset.atlasPages, "4");
+});
+
+test("atlas efficiency measurement: separate images versus an authored sheet", async () => {
+  const spriteCount = 18;
+  const drawOrder = [
+    ...Array.from({ length: spriteCount }, (_, index) => index + 1),
+    ...Array.from({ length: 128 }, (_, index) => index % 2 ? spriteCount : 1)
+  ];
+  const separate = await loadRuntime({
+    sprites: drawOrder.length, spriteHandles: drawOrder, spriteSize: [252, 252],
+    spriteUv: [0, 0, 1, 1], realTime: true
+  });
+  separate.frame();
+  const separateFirst = {
+    pages: separate.stats.pageSizes, allocatedBytes: Number(separate.body.dataset.atlasAllocatedBytes),
+    pixelUploads: Number(separate.body.dataset.atlasUploadCount),
+    pixelUploadBytes: Number(separate.body.dataset.atlasUploadBytes),
+    instanceUploadBytes: Number(separate.body.dataset.uploadedBytes),
+    draws: Number(separate.body.dataset.drawCalls),
+    binds: Number(separate.body.dataset.textureBinds),
+    transitions: Number(separate.body.dataset.atlasTransitions)
+  };
+  assert.deepEqual(separateFirst.pages, Array(6).fill(0).map(() => [512, 512]));
+  assert.equal(separateFirst.allocatedBytes, 6 * 512 * 512 * 4);
+  assert.equal(separateFirst.pixelUploads, spriteCount + 6); // Entries plus white texel per page.
+  assert.ok(separateFirst.draws > 100);
+  assert.equal(separateFirst.instanceUploadBytes, drawOrder.length * 64);
+
+  const sheet = await loadRuntime({
+    sprites: drawOrder.length, spriteHandles: Array(drawOrder.length).fill(1),
+    spriteSize: [1512, 756], spriteUv: [0, 0, 1, 1], realTime: true
+  });
+  sheet.frame();
+  const sheetFirst = {
+    pages: sheet.stats.pageSizes, allocatedBytes: Number(sheet.body.dataset.atlasAllocatedBytes),
+    pixelUploads: Number(sheet.body.dataset.atlasUploadCount),
+    pixelUploadBytes: Number(sheet.body.dataset.atlasUploadBytes),
+    instanceUploadBytes: Number(sheet.body.dataset.uploadedBytes),
+    draws: Number(sheet.body.dataset.drawCalls),
+    binds: Number(sheet.body.dataset.textureBinds),
+    transitions: Number(sheet.body.dataset.atlasTransitions)
+  };
+  assert.deepEqual(sheetFirst.pages, [[2048, 2048]]);
+  assert.equal(sheetFirst.allocatedBytes, 2048 * 2048 * 4);
+  assert.equal(sheetFirst.pixelUploads, 2);
+  assert.equal(sheetFirst.draws, 1);
+  assert.equal(sheetFirst.instanceUploadBytes, drawOrder.length * 64);
+
+  const firstSeparateUploadCount = Number(separate.body.dataset.atlasUploadCount);
+  const firstSheetUploadCount = Number(sheet.body.dataset.atlasUploadCount);
+  const separateReplay = [];
+  const sheetReplay = [];
+  for (let frame = 0; frame < 25; frame += 1) {
+    separate.frame();
+    sheet.frame();
+    separateReplay.push(Number(separate.body.dataset.hostReplayMs));
+    sheetReplay.push(Number(sheet.body.dataset.hostReplayMs));
+  }
+  assert.equal(Number(separate.body.dataset.atlasUploadCount), firstSeparateUploadCount);
+  assert.equal(Number(sheet.body.dataset.atlasUploadCount), firstSheetUploadCount);
+  const median = values => [...values].sort((left, right) => left - right)[12];
+  if (process.env.STASIS_ATLAS_REPORT === "1") {
+    console.log("ATLAS_MEASUREMENT " + JSON.stringify({
+      source: "runtime/web/game.js", imageCount: spriteCount, imageSize: [252, 252],
+      padding: 2, paddedArea: spriteCount * 256 * 256,
+      sheetSize: [1512, 756], drawCount: drawOrder.length,
+      separate: { ...separateFirst, medianHostReplayMs: median(separateReplay) },
+      sheet: { ...sheetFirst, medianHostReplayMs: median(sheetReplay) }
+    }));
+  }
+});
+
+test("atlas efficiency measurement: mixed sizes, game assets, and animation residency", async () => {
+  const mixedSizes = [
+    ...Array(6).fill([252, 252]), ...Array(4).fill([120, 240]),
+    ...Array(4).fill([64, 96]), ...Array(4).fill([32, 48])
+  ];
+  const mixedOrder = [
+    ...Array.from({ length: mixedSizes.length }, (_, index) => index + 1),
+    ...Array.from({ length: 128 }, (_, index) => index % 2 ? mixedSizes.length : 1)
+  ];
+  const mixed = await loadRuntime({
+    sprites: mixedOrder.length, spriteHandles: mixedOrder, spriteSizes: mixedSizes,
+    spriteUv: [0, 0, 1, 1]
+  });
+  mixed.frame();
+  const mixedPaddedArea = mixedSizes.reduce((total, [width, height]) =>
+    total + (width + 4) * (height + 4), 0);
+  assert.ok(mixedPaddedArea < 2048 * 2048);
+  const mixedResult = {
+    sizes: mixedSizes, paddedArea: mixedPaddedArea, pages: mixed.stats.pageSizes,
+    allocatedBytes: Number(mixed.body.dataset.atlasAllocatedBytes),
+    pixelUploads: Number(mixed.body.dataset.atlasUploadCount),
+    pixelUploadBytes: Number(mixed.body.dataset.atlasUploadBytes),
+    instanceUploadBytes: Number(mixed.body.dataset.uploadedBytes),
+    draws: Number(mixed.body.dataset.drawCalls),
+    binds: Number(mixed.body.dataset.textureBinds),
+    transitions: Number(mixed.body.dataset.atlasTransitions)
+  };
+
+  const pngDimensions = path => {
+    const bytes = fs.readFileSync(new URL(path, import.meta.url));
+    assert.equal(bytes.toString("ascii", 1, 4), "PNG");
+    return [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
+  };
+  const background = pngDimensions("../../../samples/asset_breakout/assets/arena_background.png");
+  const smoke = pngDimensions("../../../samples/windows_launch_smoke/assets/smoke.png");
+  assert.deepEqual(background, [1672, 941]);
+  assert.deepEqual(smoke, [64, 64]);
+  const gameOrder = Array.from({ length: 128 }, (_, index) => index % 2 ? 2 : 1);
+  const game = await loadRuntime({
+    sprites: gameOrder.length, spriteHandles: gameOrder, spriteSizes: [background, smoke],
+    spriteUv: [0, 0, 1, 1]
+  });
+  game.frame();
+  assert.deepEqual(game.stats.pageSizes, [[2048, 2048]]);
+  assert.equal(Number(game.body.dataset.drawCalls), 1);
+  const gameResult = {
+    assets: [{ path: "samples/asset_breakout/assets/arena_background.png", size: background },
+      { path: "samples/windows_launch_smoke/assets/smoke.png", size: smoke }],
+    paddedArea: (background[0] + 4) * (background[1] + 4)
+      + (smoke[0] + 4) * (smoke[1] + 4),
+    pages: game.stats.pageSizes, allocatedBytes: Number(game.body.dataset.atlasAllocatedBytes),
+    pixelUploads: Number(game.body.dataset.atlasUploadCount),
+    pixelUploadBytes: Number(game.body.dataset.atlasUploadBytes),
+    instanceUploadBytes: Number(game.body.dataset.uploadedBytes),
+    draws: Number(game.body.dataset.drawCalls),
+    binds: Number(game.body.dataset.textureBinds),
+    transitions: Number(game.body.dataset.atlasTransitions)
+  };
+
+  const uv = [0, 0, 0.5, 0.5];
+  const offset = { value: 0 };
+  const animated = await loadRuntime({
+    sprites: 1, spriteHandles: [1], spriteSize: [64, 64], spriteUv: uv,
+    spriteXOffset: offset
+  });
+  animated.frame();
+  const originalQuad = animated.stats.uploads.at(-1);
+  const uploadCount = Number(animated.body.dataset.atlasUploadCount);
+  uv[0] = 0.5;
+  uv[2] = 1;
+  offset.value = 30;
+  animated.frame();
+  const movedQuad = animated.stats.uploads.at(-1);
+  assert.notEqual(movedQuad[0], originalQuad[0]);
+  assert.notEqual(movedQuad[4], originalQuad[4]);
+  assert.equal(Number(animated.body.dataset.atlasUploadCount), uploadCount);
+  if (process.env.STASIS_ATLAS_REPORT === "1") {
+    console.log("ATLAS_MEASUREMENT " + JSON.stringify({
+      mixed: mixedResult, representative: gameResult,
+      animation: { pixelUploadsBefore: uploadCount,
+        pixelUploadsAfter: Number(animated.body.dataset.atlasUploadCount),
+        instanceBytesPerFrame: Number(animated.body.dataset.uploadedBytes) }
+    }));
+  }
 });
 
 test("oversize sprites within MAX_TEXTURE_SIZE use a dedicated WebGL atlas domain", async () => {
