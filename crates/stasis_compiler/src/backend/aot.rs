@@ -3099,6 +3099,31 @@ mod tests {
     }
 
     #[test]
+    fn aot_static_struct_view_uses_one_unsigned_bounds_comparison() {
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "struct Draw { x: f32; y: f32; opacity: i32; }\nglobal draws: Draw[4];\nfunction write(index: i32): i32 {\n    let draw: Draw = draws[index];\n    draw.x = 1.0;\n    draw.y = 2.0;\n    draw.opacity = 255;\n    return draw.opacity;\n}\nfunction main(): i32 { return write(0); }\n",
+        );
+        let captured = capture_aot_clif_by_function(&mut process);
+        let clif = captured.get("write").expect("write CLIF");
+        assert_eq!(
+            clif.matches("trapz").count(),
+            1,
+            "static struct view did not consolidate AOT bounds checks:\n{clif}"
+        );
+        assert_eq!(
+            clif.matches("icmp").count(),
+            1,
+            "known non-negative static length retained a redundant signed AOT comparison:\n{clif}"
+        );
+        assert!(
+            clif.contains("icmp ult"),
+            "static struct view AOT bounds check must retain the unsigned upper-bound comparison:\n{clif}"
+        );
+    }
+
+    #[test]
     fn aot_dynamic_global_array_fallback_uses_runtime_helper_signature() {
         let mut process = AotProcess::new();
         process.upsert_file(

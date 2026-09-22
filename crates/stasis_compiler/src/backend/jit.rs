@@ -10445,6 +10445,15 @@ test `boolean fail`(): bool { return false; }
             1,
             "static struct view did not consolidate bounds checks at alias creation:\n{clif}"
         );
+        assert_eq!(
+            clif.matches("icmp").count(),
+            1,
+            "known non-negative static length retained a redundant signed index comparison:\n{clif}"
+        );
+        assert!(
+            clif.contains("icmp ult"),
+            "static struct view bounds check must retain the unsigned upper-bound comparison:\n{clif}"
+        );
         assert!(
             clif.contains("store"),
             "expected direct field stores:\n{clif}"
