@@ -29,7 +29,9 @@ use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::{JitExternProfile, JitProcess};
 use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
-use stasis_compiler::backend::wasm::{WasmProcess, COLLECTION_VIEW_ABI_VERSION};
+use stasis_compiler::backend::wasm::{
+    WasmProcess, COLLECTION_VIEW_ABI_VERSION, STRING_LITERAL_TABLE_VERSION,
+};
 use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::parser::{
     map_rewritten_test_range_to_original, rewrite_top_level_test_declarations,
@@ -5982,10 +5984,15 @@ fn web_runtime_config(
     process: &WasmProcess,
     development_build: bool,
 ) -> Value {
-    let strings = process
-        .string_literals()
+    let string_literal_table = process
+        .string_literal_metadata()
         .iter()
-        .map(|(id, value)| (id.to_string(), Value::String(value.clone())))
+        .map(|(id, metadata)| {
+            (
+                id.to_string(),
+                json!([metadata.offset, metadata.byte_length]),
+            )
+        })
         .collect::<serde_json::Map<_, _>>();
     let memory = process
         .memory_layout()
@@ -6039,7 +6046,12 @@ fn web_runtime_config(
     }
     let mut config = json!({
         "name": workspace.manifest.name,
-        "strings": strings,
+        // Static literal payloads live in the Wasm UTF-8 table.  Keep an
+        // empty dynamic compatibility map for hand-authored/test hosts;
+        // package literals must never be copied into this JavaScript object.
+        "strings": {},
+        "stringLiteralTable": string_literal_table,
+        "stringLiteralTableVersion": STRING_LITERAL_TABLE_VERSION,
         "memory": memory,
         "views": views,
         "globals": globals,

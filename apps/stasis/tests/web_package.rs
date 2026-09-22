@@ -612,6 +612,21 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     let runtime = fs::read_to_string(output.join("game.js"))
         .expect("game.js")
         .replace("\r\n", "\n");
+    let runtime_config = runtime_config(&runtime);
+    assert_eq!(runtime_config["strings"], serde_json::json!({}));
+    assert_eq!(
+        runtime_config["stringLiteralTableVersion"],
+        serde_json::json!(1)
+    );
+    let literal_table = runtime_config["stringLiteralTable"]
+        .as_object()
+        .expect("static literal metadata table");
+    assert!(!literal_table.is_empty());
+    assert!(literal_table.values().all(|metadata| {
+        metadata.as_array().is_some_and(|pair| {
+            pair.len() == 2 && pair[0].as_u64().is_some() && pair[1].as_u64().is_some()
+        })
+    }));
     let index = fs::read_to_string(output.join("index.html"))
         .expect("index.html")
         .replace("\r\n", "\n");

@@ -36,6 +36,18 @@ pub fn wasm_global_hash(path: &str) -> i32 {
 }
 
 pub const COLLECTION_VIEW_ABI_VERSION: i32 = 2;
+pub const STRING_LITERAL_TABLE_VERSION: i32 = 1;
+
+/// Physical location of one statically emitted UTF-8 literal in Wasm memory.
+///
+/// The Web host uses this compact map to decode literals from the module's
+/// memory instead of copying their payloads into the generated JavaScript
+/// package.  Handles remain the compiler's stable hash values.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct WasmStringLiteralMetadata {
+    pub offset: u32,
+    pub byte_length: u32,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct WasmProcess {
@@ -43,6 +55,7 @@ pub struct WasmProcess {
     required_roots: Vec<String>,
     module: Vec<u8>,
     string_literals: BTreeMap<i32, String>,
+    string_literal_metadata: BTreeMap<i32, WasmStringLiteralMetadata>,
     memory_layout: BTreeMap<String, WasmMemoryLayout>,
     struct_views: BTreeMap<i32, BTreeMap<String, String>>,
     debug_symbols: bool,
@@ -80,6 +93,10 @@ impl WasmProcess {
 
     pub fn string_literals(&self) -> &BTreeMap<i32, String> {
         &self.string_literals
+    }
+
+    pub fn string_literal_metadata(&self) -> &BTreeMap<i32, WasmStringLiteralMetadata> {
+        &self.string_literal_metadata
     }
 
     pub fn memory_layout(&self) -> &BTreeMap<String, WasmMemoryLayout> {
@@ -160,7 +177,8 @@ impl WasmProcess {
             }
         }
 
-        self.string_literals = collect_string_literals(&lowered, &analysis.constant_values);
+        self.string_literals = collect_string_literals(&lowered, &analysis.constant_values)
+            .map_err(CompileError::Backend)?;
         let (memory_bindings, _) = build_memory_bindings(&analysis, &types, &self.string_literals)
             .map_err(CompileError::Backend)?;
         self.memory_layout = memory_bindings
@@ -210,6 +228,7 @@ impl WasmProcess {
             self.module,
             self.imported_symbols,
             self.replay_state_snapshot_supported,
+            self.string_literal_metadata,
         ) = encode_module(
             &lowered,
             &analysis,
@@ -1088,7 +1107,15 @@ fn encode_module(
     types: &TypeTable,
     string_literals: &BTreeMap<i32, String>,
     debug_symbols: bool,
-) -> Result<(Vec<u8>, BTreeSet<String>, bool), String> {
+) -> Result<
+    (
+        Vec<u8>,
+        BTreeSet<String>,
+        bool,
+        BTreeMap<i32, WasmStringLiteralMetadata>,
+    ),
+    String,
+> {
     let mut internal_by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (index, (function, _)) in functions.iter().enumerate() {
         internal_by_name
@@ -1155,6 +1182,19 @@ fn encode_module(
     let (memory_bindings, memory_bytes) = build_memory_bindings(analysis, types, string_literals)?;
     let (string_literal_memory, total_memory_bytes) =
         build_string_literal_memory(string_literals, memory_bytes)?;
+    let string_literal_metadata = string_literal_memory
+        .iter()
+        .map(|(handle, binding)| {
+            (
+                *handle,
+                WasmStringLiteralMetadata {
+                    offset: binding.offset,
+                    byte_length: u32::try_from(binding.byte_len)
+                        .expect("validated web string literal byte length"),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let struct_collections = build_struct_collections(analysis, types, &memory_bindings)?;
     let mut globals = Vec::new();
     for (name, type_id) in &analysis.global_path_types {
@@ -1504,14 +1544,37 @@ fn encode_module(
         })
         .collect::<Vec<_>>();
     initial_memory.sort_by_key(|(binding, _)| binding.offset);
-    let literal_segments = string_literal_memory
-        .iter()
-        .filter(|(_, binding)| binding.byte_len > 0)
-        .collect::<Vec<_>>();
-    if !initial_memory.is_empty() || !literal_segments.is_empty() {
+    let literal_table = if let Some((_, first_binding)) = string_literal_memory.iter().next() {
+        let table_offset = first_binding.offset;
+        let mut bytes = Vec::new();
+        for (handle, binding) in &string_literal_memory {
+            let expected_offset = table_offset
+                .checked_add(
+                    u32::try_from(bytes.len())
+                        .map_err(|_| "web string literal table exceeds u32 range".to_string())?,
+                )
+                .ok_or_else(|| "web string literal table offset overflow".to_string())?;
+            if binding.offset != expected_offset {
+                return Err(format!(
+                    "web string literal table metadata is not contiguous at handle {handle}"
+                ));
+            }
+            let literal = string_literals
+                .get(handle)
+                .ok_or_else(|| format!("missing web string literal bytes for handle {handle}"))?;
+            bytes.extend_from_slice(literal.as_bytes());
+        }
+        Some((table_offset, bytes))
+    } else {
+        None
+    };
+    let has_literal_table = literal_table
+        .as_ref()
+        .is_some_and(|(_, bytes)| !bytes.is_empty());
+    if !initial_memory.is_empty() || has_literal_table {
         let mut data_section = Vec::new();
         uleb(
-            (initial_memory.len() + literal_segments.len()) as u32,
+            (initial_memory.len() + usize::from(has_literal_table)) as u32,
             &mut data_section,
         );
         for (binding, value) in initial_memory {
@@ -1532,14 +1595,10 @@ fn encode_module(
             uleb(bytes.len() as u32, &mut data_section);
             data_section.extend(bytes);
         }
-        for (handle, binding) in literal_segments {
-            let bytes = string_literals
-                .get(handle)
-                .ok_or_else(|| format!("missing web string literal bytes for handle {handle}"))?
-                .as_bytes();
+        if let Some((offset, bytes)) = literal_table.filter(|(_, bytes)| !bytes.is_empty()) {
             data_section.push(0);
             data_section.push(0x41);
-            sleb(binding.offset as i32, &mut data_section);
+            sleb(offset as i32, &mut data_section);
             data_section.push(0x0b);
             uleb(bytes.len() as u32, &mut data_section);
             data_section.extend(bytes);
@@ -1569,7 +1628,12 @@ fn encode_module(
     };
     append_name_section(&function_names, &mut module);
     let imported_symbols = imports.into_iter().map(|(_, symbol, _)| symbol).collect();
-    Ok((module, imported_symbols, replay_state_snapshot_supported))
+    Ok((
+        module,
+        imported_symbols,
+        replay_state_snapshot_supported,
+        string_literal_metadata,
+    ))
 }
 
 #[derive(Clone)]
@@ -5847,64 +5911,71 @@ fn encode_zero(type_id: TypeId, out: &mut Vec<u8>) -> Result<(), String> {
 fn collect_string_literals(
     functions: &[(FunctionMeta, FunctionHIR)],
     constants: &BTreeMap<String, ConstantValue>,
-) -> BTreeMap<i32, String> {
+) -> Result<BTreeMap<i32, String>, String> {
+    fn insert(out: &mut BTreeMap<i32, String>, value: &str) -> Result<(), String> {
+        let handle = crate::backend::emit::hash_string_literal(value);
+        if let Some(previous) = out.get(&handle) {
+            if previous != value {
+                return Err(format!(
+                    "web string literal hash collision for handle {handle}: '{previous}' vs '{value}'"
+                ));
+            }
+        } else {
+            out.insert(handle, value.to_string());
+        }
+        Ok(())
+    }
     fn expression(
         value: &SimpleExpr,
         constants: &BTreeMap<String, ConstantValue>,
         out: &mut BTreeMap<i32, String>,
-    ) {
+    ) -> Result<(), String> {
         match value {
-            SimpleExpr::StringLiteral(value) => {
-                out.insert(
-                    crate::backend::emit::hash_string_literal(value),
-                    value.clone(),
-                );
-            }
+            SimpleExpr::StringLiteral(value) => insert(out, value)?,
             SimpleExpr::Identifier(name) => {
                 if let Some(ConstantValue::String { value, .. }) = constants.get(name) {
-                    out.insert(
-                        crate::backend::emit::hash_string_literal(value),
-                        value.clone(),
-                    );
+                    insert(out, value)?;
                 }
             }
-            SimpleExpr::Condition(value) => condition(value, constants, out),
-            SimpleExpr::IndexedPath { index, .. } => expression(index, constants, out),
+            SimpleExpr::Condition(value) => condition(value, constants, out)?,
+            SimpleExpr::IndexedPath { index, .. } => expression(index, constants, out)?,
             SimpleExpr::Call { args, .. } => {
                 for arg in args {
-                    expression(arg, constants, out);
+                    expression(arg, constants, out)?;
                 }
             }
             SimpleExpr::Binary { lhs, rhs, .. } => {
-                expression(lhs, constants, out);
-                expression(rhs, constants, out);
+                expression(lhs, constants, out)?;
+                expression(rhs, constants, out)?;
             }
             _ => {}
         }
+        Ok(())
     }
     fn condition(
         value: &SimpleCondition,
         constants: &BTreeMap<String, ConstantValue>,
         out: &mut BTreeMap<i32, String>,
-    ) {
+    ) -> Result<(), String> {
         match value {
             SimpleCondition::Comparison { lhs, rhs, .. } => {
-                expression(lhs, constants, out);
-                expression(rhs, constants, out);
+                expression(lhs, constants, out)?;
+                expression(rhs, constants, out)?;
             }
-            SimpleCondition::Expr(value) => expression(value, constants, out),
+            SimpleCondition::Expr(value) => expression(value, constants, out)?,
             SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
-                condition(lhs, constants, out);
-                condition(rhs, constants, out);
+                condition(lhs, constants, out)?;
+                condition(rhs, constants, out)?;
             }
-            SimpleCondition::Not(value) => condition(value, constants, out),
+            SimpleCondition::Not(value) => condition(value, constants, out)?,
         }
+        Ok(())
     }
     fn statements(
         values: &[SimpleStmt],
         constants: &BTreeMap<String, ConstantValue>,
         out: &mut BTreeMap<i32, String>,
-    ) {
+    ) -> Result<(), String> {
         for value in values {
             match value {
                 SimpleStmt::Let {
@@ -5914,17 +5985,17 @@ fn collect_string_literals(
                     expression: value, ..
                 }
                 | SimpleStmt::Expr(value)
-                | SimpleStmt::Return(value) => expression(value, constants, out),
-                SimpleStmt::Convert { source, .. } => expression(source, constants, out),
+                | SimpleStmt::Return(value) => expression(value, constants, out)?,
+                SimpleStmt::Convert { source, .. } => expression(source, constants, out)?,
                 SimpleStmt::If {
                     condition: value,
                     then_statements,
                     else_statements,
                 } => {
-                    condition(value, constants, out);
-                    statements(then_statements, constants, out);
+                    condition(value, constants, out)?;
+                    statements(then_statements, constants, out)?;
                     if let Some(values) = else_statements {
-                        statements(values, constants, out);
+                        statements(values, constants, out)?;
                     }
                 }
                 SimpleStmt::For {
@@ -5933,23 +6004,24 @@ fn collect_string_literals(
                     step,
                     body_statements,
                 } => {
-                    statements(std::slice::from_ref(init), constants, out);
-                    condition(value, constants, out);
-                    statements(std::slice::from_ref(step), constants, out);
-                    statements(body_statements, constants, out);
+                    statements(std::slice::from_ref(init), constants, out)?;
+                    condition(value, constants, out)?;
+                    statements(std::slice::from_ref(step), constants, out)?;
+                    statements(body_statements, constants, out)?;
                 }
                 SimpleStmt::Foreach {
                     body_statements, ..
-                } => statements(body_statements, constants, out),
+                } => statements(body_statements, constants, out)?,
                 SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
             }
         }
+        Ok(())
     }
     let mut out = BTreeMap::new();
     for (_, hir) in functions {
-        statements(&hir.statements, constants, &mut out);
+        statements(&hir.statements, constants, &mut out)?;
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -6353,6 +6425,62 @@ function render(): i32 { return 0; }
             Some(&"direct literal".to_string())
         );
         assert!(!strings.values().any(|value| value == "/assets/unused.svg"));
+    }
+
+    #[test]
+    fn publishes_stable_literal_offsets_and_one_utf8_data_table() {
+        let source = r#"
+extern function consume(value: string): i32;
+function main(): i32 { return consume("ascii"); }
+function tick(): i32 { return consume("é"); }
+function render(): i32 { return consume(""); }
+"#;
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file("literal_table.stasis", source);
+        process.compile().expect("compile literal table module");
+
+        let mut expected_offset = 0;
+        for (handle, value) in process.string_literals() {
+            let metadata = process
+                .string_literal_metadata()
+                .get(handle)
+                .expect("metadata for every literal handle");
+            assert_eq!(metadata.offset, expected_offset);
+            assert_eq!(metadata.byte_length, value.len() as u32);
+            expected_offset += metadata.byte_length;
+        }
+        assert_eq!(
+            section_entry_count(process.module_bytes(), 11),
+            1,
+            "all static UTF-8 payloads share one Wasm data segment"
+        );
+
+        let mut repeat = WasmProcess::new();
+        repeat.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        repeat.upsert_file("literal_table.stasis", source);
+        repeat
+            .compile()
+            .expect("compile repeat literal table module");
+        assert_eq!(
+            process.string_literal_metadata(),
+            repeat.string_literal_metadata(),
+            "literal metadata handles and offsets are deterministic"
+        );
+
+        let mut empty_with_initial_memory = WasmProcess::new();
+        empty_with_initial_memory.set_required_emit_roots(&["main".into()]);
+        empty_with_initial_memory.upsert_file(
+            "empty_literal_table.stasis",
+            "global values: i32[1]; extern function consume(value: string): i32; function main(): i32 { return consume(\"\"); }",
+        );
+        empty_with_initial_memory
+            .compile()
+            .expect("empty literals may share a module with initial memory data");
+        assert!(empty_with_initial_memory
+            .string_literal_metadata()
+            .values()
+            .any(|metadata| metadata.byte_length == 0));
     }
 
     #[test]
