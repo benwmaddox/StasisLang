@@ -1,5 +1,8 @@
 # Display metrics contract
 
+For game-facing coordinate spaces, transform ownership, and layout rules, see
+[Display and coordinate spaces](knowledge/display-and-coordinate-spaces.md).
+
 Stasis games author rendering and input in one logical top-left coordinate
 space. `init_window(360, 720, ...)` therefore selects a `360 x 720` logical
 canvas even when the platform owns a `1080 x 2400` native window and drawable.
@@ -57,7 +60,7 @@ Display state is grouped under `host_frame.display`:
 
 | Fields | Meaning |
 | --- | --- |
-| `screen_width_px`, `screen_height_px` | platform screen extent |
+| `screen_width_px`, `screen_height_px` | compatibility slots populated with available presentation extents, not guaranteed physical monitor dimensions; prefer `available_width` and `available_height` |
 | `native_width_px`, `native_height_px` | native window or surface extent |
 | `drawable_width_px`, `drawable_height_px` | render-target pixel extent |
 | `logical_width`, `logical_height` | stable game coordinate extent |
