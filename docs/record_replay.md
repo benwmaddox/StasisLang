@@ -83,12 +83,14 @@ a substitute for declaring it reproducible.
 
 Live code swaps, data reloads, and asset reloads abort a record/replay session. Direct
 nondeterministic host operations outside the HostFrame snapshot are not virtualized in schema v1.
-Schema v2 currently ships in the desktop JIT commands above. Generated native and Web metadata
-publish the compiler-owned observed-input identity plus a canonical simulation-state descriptor.
-The descriptor is explicitly marked `descriptor_only`, and the enclosing replay capability remains
-`metadata_only`, until a target exposes the bounded snapshot operations and runs the replay
-controller through its ordinary lifecycle. A standalone Web controller validates and projects the
-v2 stream for host integration tests, but generated `game.js` does not yet activate it. Packaged
-native desktop and Android likewise still require host loading, lifecycle orchestration, and file
-import/export before they can advertise replay support. No cross-target floating-point bit-identity
-guarantee is implied.
+Schema v2 remains the recording format emitted by the desktop JIT commands above; schema-v3
+identity wraps the same portable compatibility in a producer/consumer envelope for packaged
+hosts. Generated native desktop and Android packages publish that complete compatibility,
+canonical state descriptor, and context-taking snapshot adapters alongside the AOT objects. The
+common native shell accepts `--replay PATH` (and the Android SAF startup URI bridge) before guest
+initialization, restores the sparse post-`main()` state, projects recorded HostFrame input, runs
+the ordinary tick/verify/render sequence, and reports bounded completion or divergence receipts.
+The Web controller validates and projects the same compact stream and is covered as a host
+integration surface; generated browser applications still choose when to activate that controller.
+Native and Web replay compare the portable simulation contract, while each consumer keeps its own
+runtime provenance. No cross-target floating-point bit-identity guarantee is implied.

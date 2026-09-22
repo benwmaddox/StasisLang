@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use stasis_assets::{prepare_asset_bundle, sha256_bytes, DEFAULT_ASSET_MANIFEST_PATH};
 use stasis_compiler::backend::aot::{AotEngineBundle, AotProcess};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
 use stasis_compiler::backend::program_snapshot::{
@@ -4293,6 +4294,42 @@ fn package_engine_bundle_monolithic_desktop(
         .map(ProgramSnapshot::replay_compatibility)
         .map(|compatibility| compatibility.state_snapshot)
         .filter(|snapshot| replay_snapshot_bridge_can_emit(snapshot));
+    let replay_asset_manifest_root = aot_root.join("replay_asset_manifest");
+    let asset_manifest_sha256 = {
+        let snapshot = backend
+            .last_program_snapshot
+            .as_ref()
+            .ok_or_else(|| "AOT program snapshot missing during replay packaging".to_string())?;
+        let result = (|| -> Result<Option<String>, String> {
+            let resolved = crate::release_assets::resolve_snapshot_assets(project_dir, snapshot)?;
+            if resolved.assets.is_empty() && resolved.dynamic_assets.is_empty() {
+                return Ok(None);
+            }
+            prepare_asset_bundle(
+                &resolved,
+                &replay_asset_manifest_root,
+                project_dir.join(".stasis_cache/assets"),
+            )
+            .map_err(|error| format!("failed to prepare desktop replay asset manifest: {error}"))?;
+            let manifest_path = replay_asset_manifest_root.join(DEFAULT_ASSET_MANIFEST_PATH);
+            let bytes = std::fs::read(&manifest_path).map_err(|error| {
+                format!(
+                    "failed to read desktop replay asset manifest {}: {error}",
+                    manifest_path.display()
+                )
+            })?;
+            Ok(Some(sha256_bytes(&bytes)))
+        })();
+        if replay_asset_manifest_root.exists() {
+            std::fs::remove_dir_all(&replay_asset_manifest_root).map_err(|error| {
+                format!(
+                    "failed to clean desktop replay asset manifest {}: {error}",
+                    replay_asset_manifest_root.display()
+                )
+            })?;
+        }
+        result?
+    };
     let bindings_source = aot_root.join("published_aot_bindings.c");
     crate::mobile_aot_bindings::write_mobile_aot_bindings_source_with_profile_and_snapshot(
         &manifest_json,
@@ -4303,6 +4340,27 @@ fn package_engine_bundle_monolithic_desktop(
         0,
         0,
         replay_state_snapshot.as_ref(),
+    )?;
+    let replay_identity_header = aot_root.join("published_replay_identity.h");
+    let replay_identity_source = aot_root.join("published_replay_identity.c");
+    let portable_replay_compatibility = crate::packaged_replay_compatibility(
+        backend
+            .last_program_snapshot
+            .as_ref()
+            .ok_or_else(|| "AOT program snapshot missing during replay packaging".to_string())?,
+        asset_manifest_sha256,
+    )?;
+    crate::mobile_aot_bindings::write_mobile_aot_replay_identity(
+        &portable_replay_compatibility,
+        &backend
+            .last_program_snapshot
+            .as_ref()
+            .ok_or_else(|| "AOT program snapshot missing during replay packaging".to_string())?
+            .replay_compatibility()
+            .state_snapshot,
+        replay_state_snapshot.is_some(),
+        &replay_identity_header,
+        &replay_identity_source,
     )?;
     let symbols_header = aot_root.join("published_aot_symbols.h");
     let replay_state_declarations = if replay_state_snapshot.is_some() {
@@ -4334,6 +4392,7 @@ fn package_engine_bundle_monolithic_desktop(
     for path in bundle.object_paths() {
         object_list.push_str(&format!("  \"{}\"\n", cmake_path(path)));
     }
+    object_list.push_str(&format!("  \"{}\"\n", cmake_path(&replay_identity_source)));
     object_list.push_str(")\n");
     let object_list_path = aot_root.join("published_aot_objects.cmake");
     std::fs::write(&object_list_path, object_list)

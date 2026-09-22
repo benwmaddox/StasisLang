@@ -52,6 +52,21 @@ platform.
 
 Future candidates are recorded in `docs/android_release_shell_backlog.md`.
 
+## Packaged replay documents
+
+The generated Android shell accepts a schema-v3 replay through an
+`ACTION_VIEW`/`ACTION_OPEN_DOCUMENT` URI or the
+`stasis.replay_uri` intent extra. Before loading the native library and before
+`SDLActivity.onCreate` starts the native runtime, Java copies the document into app-private storage with a 256 MiB
+bound, flushes it, and publishes it with a same-directory rename. Native
+startup then consumes that published path through the same bounded
+`--replay` loader and rejects any bounded SAF diagnostic before guest
+initialization. `requestReplayImport()` stages a document for a relaunch;
+`requestReplayExport()` writes the staged document through
+`ACTION_CREATE_DOCUMENT`, with the same size bound and a durable provider
+close. SAF providers own the final external-document transaction, so an
+interrupted provider write is not reported as a successful export.
+
 The generated shell also supports an opt-in integration-test launch extra,
 `stasis.seam_test_id`. It enables bounded `stasis.seam_test.v1` log markers for
 initialization, the first frame, stable frame 30, and fixture-owned probe

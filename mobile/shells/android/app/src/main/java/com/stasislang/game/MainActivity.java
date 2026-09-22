@@ -22,6 +22,7 @@ import android.widget.FrameLayout;
 import android.widget.TextView;
 import com.stasislang.shell.StasisAssetCache;
 import com.stasislang.shell.NetworkJoinPolicy;
+import com.stasislang.shell.StasisReplaySaf;
 import org.libsdl.app.SDLActivity;
 import java.io.File;
 import java.io.IOException;
@@ -37,10 +38,15 @@ public final class MainActivity extends SDLActivity {
     private static final boolean STASIS_NETWORK_CLIENT_ENABLED =
             @STASIS_NETWORK_CLIENT_ENABLED@ != 0;
     private static final String NETWORK_JOIN_URL_EXTRA = "stasis.network_join_url";
+    private static final String REPLAY_URI_EXTRA = "stasis.replay_uri";
+    private static final int REQUEST_REPLAY_IMPORT = 4801;
+    private static final int REQUEST_REPLAY_EXPORT = 4802;
 
     private static native void nativeSetAssetRoot(String path);
     private static native void nativeSetAssetVerificationError(String diagnostic);
     private static native void nativeSetAssetManifestSha256(String sha256);
+    private static native void nativeSetReplayPath(String path);
+    private static native void nativeSetReplayImportError(String diagnostic);
     private static native void nativeSetSeamTestId(String testId);
     private static native boolean nativeReadPerformanceMetrics(float[] output);
     private static native void nativeSetPerformanceMetricsEnabled(boolean enabled);
@@ -66,6 +72,9 @@ public final class MainActivity extends SDLActivity {
     private Runnable hudUpdater;
     private String displayedRuntimeError;
     private String startupAssetVerificationDiagnostic;
+    private String startupReplayImportDiagnostic;
+    private File stagedReplayFile;
+    private File pendingReplayExportSource;
     private volatile boolean externalUrlHostActive;
 
     @Override
@@ -90,7 +99,14 @@ public final class MainActivity extends SDLActivity {
 
     @Override
     protected void onCreate(Bundle state) {
+        File startupReplay = stageStartupReplay(getIntent());
+        String startupReplayDiagnostic = startupReplayImportDiagnostic;
         System.loadLibrary("main");
+        nativeSetReplayImportError(null);
+        nativeSetReplayPath(startupReplay == null ? null : startupReplay.getAbsolutePath());
+        if (startupReplayDiagnostic != null) {
+            nativeSetReplayImportError(startupReplayDiagnostic);
+        }
         if (STASIS_NETWORK_CLIENT_ENABLED) nativeSetNetworkClientBackground(true);
         provisionNetworkClient(getIntent());
         String seamTestId = getIntent().getStringExtra("stasis.seam_test_id");
@@ -164,6 +180,65 @@ public final class MainActivity extends SDLActivity {
         provisionNetworkClient(intent);
     }
 
+    /** Opens the bounded SAF picker; the selected replay is staged for the next launch. */
+    public void requestReplayImport() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/json");
+        try {
+            startActivityForResult(intent, REQUEST_REPLAY_IMPORT);
+        } catch (ActivityNotFoundException | SecurityException error) {
+            showRuntimeError("Replay import is unavailable");
+        }
+    }
+
+    /** Exports the replay staged by import through a bounded SAF document provider. */
+    public void requestReplayExport() {
+        if (stagedReplayFile == null || !stagedReplayFile.isFile()) {
+            showRuntimeError("No staged replay is available to export");
+            return;
+        }
+        pendingReplayExportSource = stagedReplayFile;
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/json");
+        intent.putExtra(Intent.EXTRA_TITLE, "stasis-replay.json");
+        try {
+            startActivityForResult(intent, REQUEST_REPLAY_EXPORT);
+        } catch (ActivityNotFoundException | SecurityException error) {
+            pendingReplayExportSource = null;
+            showRuntimeError("Replay export is unavailable");
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        Uri uri = data.getData();
+        if (requestCode == REQUEST_REPLAY_IMPORT) {
+            try {
+                stagedReplayFile = StasisReplaySaf.importReplay(
+                        getContentResolver(), uri, getFilesDir());
+                nativeSetReplayImportError(null);
+                showRuntimeError(
+                        "Replay imported. Relaunch with this document before native startup to play it.");
+            } catch (IOException error) {
+                nativeSetReplayImportError(StasisReplaySaf.boundDiagnostic(error));
+                showRuntimeError("Replay import failed\n" + StasisReplaySaf.boundDiagnostic(error));
+            }
+        } else if (requestCode == REQUEST_REPLAY_EXPORT) {
+            File source = pendingReplayExportSource;
+            pendingReplayExportSource = null;
+            if (source == null) return;
+            try {
+                StasisReplaySaf.exportReplay(getContentResolver(), uri, source);
+            } catch (IOException error) {
+                showRuntimeError("Replay export failed\n" + StasisReplaySaf.boundDiagnostic(error));
+            }
+        }
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
@@ -235,6 +310,39 @@ public final class MainActivity extends SDLActivity {
         String joinUrl = trusted ? intent.getStringExtra(NETWORK_JOIN_URL_EXTRA) : null;
         intent.removeExtra(NETWORK_JOIN_URL_EXTRA);
         if (joinUrl != null && !joinUrl.isEmpty()) nativeProvisionNetworkClient(joinUrl);
+    }
+
+    private File stageStartupReplay(Intent intent) {
+        Uri source = startupReplayUri(intent);
+        if (source == null) return null;
+        try {
+            stagedReplayFile = StasisReplaySaf.importReplay(
+                    getContentResolver(), source, getFilesDir());
+            startupReplayImportDiagnostic = null;
+            return stagedReplayFile;
+        } catch (IOException error) {
+            startupReplayImportDiagnostic = StasisReplaySaf.boundDiagnostic(error);
+            return null;
+        }
+    }
+
+    private static Uri startupReplayUri(Intent intent) {
+        if (intent == null) return null;
+        String extra = intent.getStringExtra(REPLAY_URI_EXTRA);
+        if (extra != null && !extra.isEmpty()) {
+            try {
+                return Uri.parse(extra);
+            } catch (RuntimeException ignored) {
+                return null;
+            }
+        }
+        String action = intent.getAction();
+        if (Intent.ACTION_VIEW.equals(action)
+                || Intent.ACTION_OPEN_DOCUMENT.equals(action)
+                || Intent.ACTION_GET_CONTENT.equals(action)) {
+            return intent.getData();
+        }
+        return null;
     }
 
     private void installDiagnosticOverlay() {

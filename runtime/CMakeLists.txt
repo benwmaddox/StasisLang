@@ -266,6 +266,8 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
         stasis_mobile_runtime STATIC
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
+        stasis_replay_consumer.c
+        cJSON.c
     )
     configure_stasis_target(stasis_mobile_runtime ON)
     set_property(TARGET stasis_mobile_runtime PROPERTY C_STANDARD 11)
@@ -281,6 +283,7 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
     install(TARGETS stasis_mobile_runtime ARCHIVE DESTINATION lib)
     install(
         FILES stasis_asset_path.h stasis_mobile_runtime.h stasis_mobile_aot_runtime.h
+              stasis_replay_consumer.h
               stasis_network_join_card.h stasis_performance_metrics.h stasis_package_provenance_reader.h
               stasis_platform_services.h
         DESTINATION include
@@ -522,6 +525,8 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
         tests/stasis_mobile_runtime_test.c
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
+        stasis_replay_consumer.c
+        cJSON.c
         stasis_platform_services.c
     )
     set_property(TARGET stasis_mobile_runtime_test PROPERTY C_STANDARD 11)
@@ -532,10 +537,22 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
     target_include_directories(stasis_mobile_runtime_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME stasis_mobile_runtime_lifecycle COMMAND stasis_mobile_runtime_test)
     add_executable(
+        stasis_replay_consumer_test
+        tests/stasis_replay_consumer_test.c
+        stasis_replay_consumer.c
+        cJSON.c
+    )
+    set_property(TARGET stasis_replay_consumer_test PROPERTY C_STANDARD 11)
+    set_property(TARGET stasis_replay_consumer_test PROPERTY C_STANDARD_REQUIRED ON)
+    target_include_directories(stasis_replay_consumer_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME stasis_replay_consumer_contract COMMAND stasis_replay_consumer_test)
+    add_executable(
         stasis_mobile_runtime_network_test
         tests/stasis_mobile_runtime_test.c
         stasis_mobile_runtime.c
         stasis_mobile_aot_runtime.c
+        stasis_replay_consumer.c
+        cJSON.c
         stasis_platform_services.c
     )
     set_property(TARGET stasis_mobile_runtime_network_test PROPERTY C_STANDARD 11)

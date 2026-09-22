@@ -14237,6 +14237,9 @@ mod tests {
         assert!(android_manifest.contains(
             "android:name=\"android.window.PROPERTY_COMPAT_ALLOW_USER_ASPECT_RATIO_OVERRIDE\""
         ));
+        assert!(android_manifest.contains("android.intent.action.VIEW"));
+        assert!(android_manifest.contains("android:mimeType=\"application/json\""));
+        assert!(android_manifest.contains("android:mimeType=\"application/octet-stream\""));
         assert!(android_manifest.matches("android:value=\"false\"").count() >= 2);
         assert!(android_manifest.contains("android:label=\"Mobile Smoke\""));
         assert!(android_manifest.contains("android:screenOrientation=\"fullSensor\""));
@@ -14279,6 +14282,9 @@ mod tests {
         assert!(android_activity.contains("nativeSetSeamTestId"));
         assert!(android_activity.contains("nativeSetAssetManifestSha256"));
         assert!(android_activity.contains("getManifestSha256"));
+        assert!(android_activity.contains("stageStartupReplay"));
+        assert!(android_activity.contains("requestReplayImport"));
+        assert!(android_activity.contains("requestReplayExport"));
         assert!(android_activity
             .contains("private static final String STASIS_ANDROID_ORIENTATION = \"fullSensor\";"));
         assert!(!android_activity.contains("@STASIS_ANDROID_ORIENTATION@"));
@@ -14337,6 +14343,15 @@ mod tests {
         assert!(android_jni.contains("STASIS_SEAM_TEST_ID"));
         assert!(android_jni.contains("nativeSetAssetManifestSha256"));
         assert!(android_jni.contains("STASIS_ASSET_MANIFEST_SHA256"));
+        assert!(android_jni.contains("nativeSetReplayPath"));
+        assert!(android_jni.contains("nativeSetReplayImportError"));
+        let replay_saf = fs::read_to_string(
+            android.join("android/app/src/main/java/com/stasislang/shell/StasisReplaySaf.java"),
+        )
+        .expect("read Android replay SAF helper");
+        assert!(replay_saf.contains("MAX_REPLAY_BYTES = 256L * 1024L * 1024L"));
+        assert!(replay_saf.contains("publishAtomically"));
+        assert!(replay_saf.contains("exportReplay"));
         let runtime_header = fs::read_to_string(android.join("runtime/stasis_mobile_runtime.h"))
             .expect("read shared mobile runtime header");
         assert!(runtime_header.contains("typedef int32_t (*StasisMobileI32Entry)(void)"));
