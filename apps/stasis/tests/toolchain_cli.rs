@@ -553,6 +553,7 @@ fn assert_generated_knowledge(project: &Path) {
         "practical-examples/pong-score-after-the-ball-crosses-the-goal.md",
         "practical-examples/snake-reject-a-reverse-turn.md",
         "geometry-and-collision.md",
+        "display-and-coordinate-spaces.md",
         "loading-screens.md",
         "semantic-edit-and-validation.md",
     ];
@@ -571,6 +572,7 @@ fn assert_generated_knowledge(project: &Path) {
         "examples/src/pong_goal.stasis",
         "examples/src/snake_turn.stasis",
         "examples/src/loading_screen.stasis",
+        "examples/src/display_spaces.stasis",
         "examples/assets/hero.svg",
         "examples/assets/music.wav",
         "media/loading-screen/success.mp4",
@@ -586,6 +588,7 @@ fn assert_generated_knowledge(project: &Path) {
         "examples/tests/pong_goal.test.stasis",
         "examples/tests/snake_turn.test.stasis",
         "examples/tests/loading_screen.test.stasis",
+        "examples/tests/display_spaces.test.stasis",
     ];
     for example in knowledge_examples.iter().copied() {
         assert_eq!(
@@ -667,6 +670,30 @@ fn assert_generated_knowledge(project: &Path) {
         String::from_utf8_lossy(&examples_checked.stdout),
         String::from_utf8_lossy(&examples_checked.stderr)
     );
+    let example_manifest_path = runnable_examples.join("stasis.json");
+    let original_example_manifest =
+        fs::read(&example_manifest_path).expect("read copied knowledge manifest");
+    let mut coordinate_manifest: Value = serde_json::from_slice(&original_example_manifest)
+        .expect("parse copied knowledge manifest");
+    coordinate_manifest["entry"] = Value::String("src/display_spaces.stasis".to_string());
+    fs::write(
+        &example_manifest_path,
+        serde_json::to_vec_pretty(&coordinate_manifest).expect("write coordinate manifest"),
+    )
+    .expect("select coordinate example in copied workspace");
+    let coordinate_checked = stasis(
+        &["--json", "--workspace", "build/knowledge-examples", "check"],
+        project,
+    );
+    assert_eq!(
+        coordinate_checked.status.code(),
+        Some(0),
+        "coordinate knowledge example check failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&coordinate_checked.stdout),
+        String::from_utf8_lossy(&coordinate_checked.stderr)
+    );
+    fs::write(&example_manifest_path, original_example_manifest)
+        .expect("restore copied knowledge manifest");
     let examples_tested = stasis(
         &["--json", "--workspace", "build/knowledge-examples", "test"],
         project,
