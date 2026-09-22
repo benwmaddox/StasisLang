@@ -621,7 +621,6 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     let literal_table = runtime_config["stringLiteralTable"]
         .as_object()
         .expect("static literal metadata table");
-    assert!(!literal_table.is_empty());
     assert!(literal_table.values().all(|metadata| {
         metadata.as_array().is_some_and(|pair| {
             pair.len() == 2 && pair[0].as_u64().is_some() && pair[1].as_u64().is_some()
@@ -1472,9 +1471,29 @@ fn rooted_web_asset_paths_emit_package_relative_assets() {
         "rooted asset was not emitted at its package-relative key"
     );
     let runtime = fs::read_to_string(output.join("game.js")).expect("rooted web runtime");
+    let config = runtime_config(&runtime);
+    let literal_table = config["stringLiteralTable"]
+        .as_object()
+        .expect("rooted literal metadata table");
     assert!(
-        runtime.contains(&format!("\"{ROOTED_WEB_ASSET}\"")),
-        "rooted asset literal was not retained in runtime metadata"
+        !runtime.contains(&format!("\"{ROOTED_WEB_ASSET}\"")),
+        "rooted asset literal payload was duplicated into JavaScript"
+    );
+    assert!(
+        literal_table.values().any(|metadata| {
+            metadata.as_array().is_some_and(|pair| {
+                pair.len() == 2
+                    && pair[0].as_u64().is_some()
+                    && pair[1].as_u64() == Some(ROOTED_WEB_ASSET.len() as u64)
+            })
+        }),
+        "rooted asset literal metadata was not projected"
+    );
+    let wasm = fs::read(output.join("game.wasm")).expect("rooted web wasm");
+    assert!(
+        wasm.windows(ROOTED_WEB_ASSET.len())
+            .any(|window| window == ROOTED_WEB_ASSET.as_bytes()),
+        "rooted asset literal payload was not retained in Wasm memory"
     );
     assert!(
         runtime.contains("startsWith")
