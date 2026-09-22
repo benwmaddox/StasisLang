@@ -14,7 +14,10 @@ The first two pixels of each page are reserved for a white solid texel. Each
 image receives two pixels of extruded padding per side. Eighteen 252x252 images
 therefore occupy six 512x512 pages (three 256x256 padded images per page),
 although all 18 padded images cover only 1,179,648 of 4,194,304 pixels in a
-2048 page. Alternating two images on different pages produces 133 transitions
+2048 page. A constructive single-page layout places six padded 256x256 images
+per row for three rows (1536x768); the 2px solid-texel reservation still fits
+at the start of the first row. Alternating two images on different pages
+produces 133 transitions
 and 134 draws for 146 sprite instances. An equivalent authored 6x3 sheet uses
 one 2048 page and one draw. The sheet reserves 16 MiB instead of 6 MiB, a
 10 MiB cost. Preallocating a 2048 page for every game would waste memory for
@@ -78,9 +81,10 @@ bytes each. Upload counters are cumulative; draw/bind counters are per frame.
 | Mixed 6x252, 4x120x240, 4x64x96, 4x32x48 | 548,928 / 786,432 (69.8%) | 3 x 512 / 3,145,728 B | 21 / 2,195,760 B | 9,344 B | 131 / 131 / 130 |
 
 The separate fixture has 1,143,072 content pixels and 36,576 padding pixels;
-the sheet has the same content pixels and 9,088 padding pixels. The area test
-proves one 2048 page has enough raw space, but does not claim that this exact
-shelf allocator could place the images there without changing its page policy.
+the sheet has the same content pixels and 9,088 padding pixels. The 6x3 layout
+proves the separate image set fits one 2048 page with padding and the solid
+texel. The mixed-size case establishes low padded area but does not assert a
+specific one-page placement for that ordering.
 The 18-image order includes a first-pass page traversal (18 images) before
 the 128 alternating draws, which explains 134 rather than 128 draws.
 
