@@ -10445,6 +10445,15 @@ test `boolean fail`(): bool { return false; }
             1,
             "static struct view did not consolidate bounds checks at alias creation:\n{clif}"
         );
+        assert_eq!(
+            clif.matches("icmp").count(),
+            1,
+            "known non-negative static length retained a redundant signed index comparison:\n{clif}"
+        );
+        assert!(
+            clif.contains("icmp ult"),
+            "static struct view bounds check must retain the unsigned upper-bound comparison:\n{clif}"
+        );
         assert!(
             clif.contains("store"),
             "expected direct field stores:\n{clif}"
@@ -10452,6 +10461,40 @@ test `boolean fail`(): bool { return false; }
         assert!(
             clif.contains("load.i32"),
             "expected direct field load:\n{clif}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_static_struct_view_negative_index_child() {
+        if std::env::var_os("STASIS_JIT_NEGATIVE_INDEX_CHILD").is_none() {
+            return;
+        }
+
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "bounds.stasis",
+            "struct Draw { x: f32; y: f32; opacity: i32; }\nglobal draws: Draw[4];\nfunction write(index: i32): i32 {\n    let draw: Draw = draws[index];\n    draw.opacity = 255;\n    return draw.opacity;\n}\nfunction main(): i32 { return write(0 - 1); }\n",
+        );
+        process
+            .compile()
+            .expect("compile negative-index JIT fixture");
+        let result = process.execute_i32_noarg_by_name("main");
+        panic!("negative runtime index returned instead of trapping: {result:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_static_struct_view_negative_runtime_index_traps() {
+        let status = std::process::Command::new(std::env::current_exe().expect("current test exe"))
+            .arg("jit_static_struct_view_negative_index_child")
+            .arg("--nocapture")
+            .env("STASIS_JIT_NEGATIVE_INDEX_CHILD", "1")
+            .status()
+            .expect("launch negative-index JIT child");
+        assert!(
+            !status.success(),
+            "negative runtime index unexpectedly completed in JIT child"
         );
     }
 

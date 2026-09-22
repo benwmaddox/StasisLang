@@ -531,6 +531,7 @@ pub(crate) struct StructViewValue {
     pub(crate) base: Value,
     pub(crate) index: Value,
     pub(crate) len: Value,
+    pub(crate) len_non_negative: bool,
     pub(crate) storage_kind: StructViewStorageKind,
     pub(crate) known_collection_hash: Option<i32>,
     pub(crate) bounds_proven: bool,
@@ -555,6 +556,7 @@ pub(crate) struct LocalBinding {
 pub(crate) struct StructViewBinding {
     pub(crate) index_var: Variable,
     pub(crate) len_var: Variable,
+    pub(crate) len_non_negative: bool,
     pub(crate) storage_kind: StructViewStorageKind,
     pub(crate) known_collection_hash: Option<i32>,
     pub(crate) bounds_proven: bool,
@@ -749,6 +751,7 @@ where
                                     ParameterStorageKind::Soa => StructViewStorageKind::Soa,
                                 }),
                             known_collection_hash: None,
+                            len_non_negative: false,
                             bounds_proven: false,
                         }),
                     )
@@ -2270,7 +2273,12 @@ pub(crate) fn emit_simple_statements(
                     // may reuse the fact.
                     if !view_bounds_proven && struct_view.storage_kind == StructViewStorageKind::Soa
                     {
-                        emit_array_bounds_trap(builder, struct_view.index, struct_view.len);
+                        emit_array_bounds_trap(
+                            builder,
+                            struct_view.index,
+                            struct_view.len,
+                            struct_view.len_non_negative,
+                        );
                         view_bounds_proven = true;
                     }
                     let variable = declare_new_variable(
@@ -2302,6 +2310,7 @@ pub(crate) fn emit_simple_statements(
                             struct_view: Some(StructViewBinding {
                                 index_var,
                                 len_var,
+                                len_non_negative: struct_view.len_non_negative,
                                 storage_kind: struct_view.storage_kind,
                                 known_collection_hash: struct_view.known_collection_hash,
                                 bounds_proven: view_bounds_proven,
@@ -4441,6 +4450,7 @@ pub(crate) fn try_emit_struct_view_value(
                         base: builder.use_var(local.var),
                         index: builder.use_var(struct_view.index_var),
                         len: builder.use_var(struct_view.len_var),
+                        len_non_negative: struct_view.len_non_negative,
                         storage_kind: struct_view.storage_kind,
                         known_collection_hash: struct_view.known_collection_hash,
                         bounds_proven: struct_view.bounds_proven,
@@ -4458,6 +4468,7 @@ pub(crate) fn try_emit_struct_view_value(
                         base,
                         index,
                         len,
+                        len_non_negative: true,
                         storage_kind: StructViewStorageKind::Soa,
                         known_collection_hash: match binding.collection_handle {
                             ForeachCollectionHandle::PathHash(hash) => Some(hash),
@@ -4483,6 +4494,7 @@ pub(crate) fn try_emit_struct_view_value(
                         base,
                         index,
                         len,
+                        len_non_negative: true,
                         storage_kind: StructViewStorageKind::Aos,
                         known_collection_hash: None,
                         bounds_proven: true,
@@ -4569,6 +4581,7 @@ pub(crate) fn try_emit_struct_view_value(
                 base: collection_handle,
                 index: index_binding.value,
                 len: len_value,
+                len_non_negative: known_len.is_some(),
                 storage_kind: StructViewStorageKind::Soa,
                 known_collection_hash: (!values_by_name.contains_key(collection_path))
                     .then(|| hash_global_path(collection_path)),
@@ -12888,7 +12901,7 @@ pub(crate) fn emit_local_indexed_collection_load(
     if let Some(view) = collection_binding.struct_view {
         if !view.bounds_proven {
             let len = builder.use_var(view.len_var);
-            emit_array_bounds_trap(builder, index_binding.value, len);
+            emit_array_bounds_trap(builder, index_binding.value, len, view.len_non_negative);
         }
     }
     emit_local_indexed_collection_load_for_handle(
@@ -12919,7 +12932,7 @@ fn emit_collection_handle_bounds_trap(
         &[collection_handle, max_length_kind],
     );
     let len = builder.inst_results(call)[0];
-    emit_array_bounds_trap(builder, index, len);
+    emit_array_bounds_trap(builder, index, len, false);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13006,7 +13019,7 @@ pub(crate) fn emit_local_indexed_collection_assignment(
     if let Some(view) = collection_binding.struct_view {
         if !view.bounds_proven {
             let len = builder.use_var(view.len_var);
-            emit_array_bounds_trap(builder, index_binding.value, len);
+            emit_array_bounds_trap(builder, index_binding.value, len, view.len_non_negative);
         }
     }
     emit_local_indexed_collection_assignment_for_handle(
@@ -13403,12 +13416,24 @@ fn emit_direct_array_store(
     Ok(())
 }
 
-fn emit_array_bounds_trap(builder: &mut FunctionBuilder<'_>, index: Value, len: Value) {
-    let non_negative = builder
-        .ins()
-        .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
+fn emit_array_bounds_trap(
+    builder: &mut FunctionBuilder<'_>,
+    index: Value,
+    len: Value,
+    len_non_negative: bool,
+) {
     let below_len = builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
-    let valid = builder.ins().band(non_negative, below_len);
+    let valid = if len_non_negative {
+        // With a non-negative i32 length, every negative index is greater than
+        // or equal to the length when both are interpreted as unsigned. The
+        // unsigned comparison therefore proves both halves of 0 <= index < len.
+        below_len
+    } else {
+        let non_negative = builder
+            .ins()
+            .icmp_imm(IntCC::SignedGreaterThanOrEqual, index, 0);
+        builder.ins().band(non_negative, below_len)
+    };
     builder.ins().trapz(valid, TrapCode::HEAP_OUT_OF_BOUNDS);
 }
 
@@ -13450,7 +13475,7 @@ fn emit_fixed_collection_bounds_trap(
             )
         })?;
     let collection_len = builder.ins().iconst(types::I32, collection_len as i64);
-    emit_array_bounds_trap(builder, index, collection_len);
+    emit_array_bounds_trap(builder, index, collection_len, true);
     Ok(())
 }
 
