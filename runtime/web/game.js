@@ -33,6 +33,9 @@
   let pendingExternalActionGeneration = 0;
   const commands = [];
   const game = window.STASIS_GAME || { strings: {}, memory: {}, assets: {} };
+  const STRING_LITERAL_TABLE_VERSION = 1;
+  const stringLiteralTableVersion = game.stringLiteralTableVersion ?? 1;
+  const stringLiteralTable = game.stringLiteralTable ?? game.literalTable ?? game.string_literals ?? {};
   const replaySource = (() => {
     if (!globalThis.location || typeof URLSearchParams !== "function") return null;
     return new URLSearchParams(globalThis.location.search).get("stasis-replay");
@@ -98,6 +101,7 @@
   const fontLoads = new Map();
   const cachedText = new Map();
   const immutableTextHandles = new Map();
+  const literalTextCache = new Map();
   // Keep these values aligned with the public AssetState enum in asset_tasks.stasis.
   const ASSET_STATE_NONE = 0;
   const ASSET_STATE_PENDING = 1;
@@ -175,6 +179,9 @@
   const MAX_SPRITE_CACHE_ENTRIES = 128;
   let nextHandle = 1;
   let instance;
+  let wasmModuleGeneration = 0;
+  let literalCacheGeneration = -1;
+  let literalCacheBuffer = null;
   let replayController = null;
   let replayTick = 1;
   // @stasis-feature network begin
@@ -487,7 +494,59 @@
     };
     return missingSpriteResource;
   };
-  const stringValue = id => game.strings[String(id)] || "";
+  const literalMetadata = id => {
+    const key = String(id);
+    if (!stringLiteralTable || typeof stringLiteralTable !== "object"
+      || !Object.prototype.hasOwnProperty.call(stringLiteralTable, key)) {
+      return { present: false, valid: false, offset: 0, byteLength: 0 };
+    }
+    const raw = stringLiteralTable[key];
+    const offset = Array.isArray(raw) ? raw[0] : raw?.offset;
+    const byteLength = Array.isArray(raw)
+      ? raw[1]
+      : raw?.byte_length ?? raw?.byte_len ?? raw?.length;
+    return {
+      present: true,
+      valid: Number.isSafeInteger(offset) && offset >= 0
+        && Number.isSafeInteger(byteLength) && byteLength >= 0,
+      offset, byteLength,
+    };
+  };
+  const clearLiteralTextCache = () => {
+    literalTextCache.clear();
+    literalCacheGeneration = wasmModuleGeneration;
+    literalCacheBuffer = null;
+  };
+  const literalText = id => {
+    const metadata = literalMetadata(id);
+    if (!metadata.present) return undefined;
+    if (!metadata.valid) return null;
+    const memory = instance?.exports?.memory;
+    const buffer = memory?.buffer;
+    if (!buffer || typeof buffer.byteLength !== "number") return null;
+    if (literalCacheGeneration !== wasmModuleGeneration || literalCacheBuffer !== buffer) {
+      literalTextCache.clear();
+      literalCacheGeneration = wasmModuleGeneration;
+      literalCacheBuffer = buffer;
+    }
+    const key = String(id);
+    if (literalTextCache.has(key)) return literalTextCache.get(key);
+    const end = metadata.offset + metadata.byteLength;
+    if (!Number.isSafeInteger(end) || end > buffer.byteLength) return null;
+    try {
+      const bytes = new Uint8Array(buffer, metadata.offset, metadata.byteLength);
+      const value = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      literalTextCache.set(key, value);
+      return value;
+    } catch {
+      return null;
+    }
+  };
+  const stringValue = id => {
+    const literal = literalText(id);
+    if (literal !== undefined) return literal || "";
+    return game.strings?.[String(id)] || "";
+  };
   const assetKey = value => {
     if (value === "/assets") return "assets";
     if (value.startsWith("/assets/")) return value.slice(1);
@@ -1033,6 +1092,13 @@
       } catch {
         return null;
       }
+    }
+    const literal = literalText(reference);
+    if (literal !== undefined) {
+      if (literal === null) return null;
+      const text = literal;
+      const bytes = new TextEncoder().encode(text).length;
+      return bytes <= maxBytes ? { text, bytes } : null;
     }
     if (Object.prototype.hasOwnProperty.call(game.strings || {}, String(reference))) {
       const text = String(game.strings[String(reference)]);
@@ -4095,6 +4161,11 @@
       if (!getGpuBatcher()) throw new Error("WebGL2 is required by the Stasis Web renderer");
       const result = await WebAssembly.instantiate(await wasmBytes(), imports);
       instance = result.instance;
+      wasmModuleGeneration += 1;
+      clearLiteralTextCache();
+      if (stringLiteralTableVersion !== STRING_LITERAL_TABLE_VERSION) {
+        throw new Error(`string literal table version mismatch: package=${stringLiteralTableVersion} runtime=${STRING_LITERAL_TABLE_VERSION}`);
+      }
       const wasmCollectionViewAbi = instance.exports.__stasis_collection_view_abi_version;
       const wasmCollectionViewAbiVersion = wasmCollectionViewAbi instanceof WebAssembly.Global
         ? Number(wasmCollectionViewAbi.value) : 0;

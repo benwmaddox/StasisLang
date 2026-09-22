@@ -80,6 +80,10 @@ test("web dynamic text replacement reuses a bounded handle and ignores stale fon
 });
 
 test("web dynamic text buffer wins over a colliding string literal handle", async () => {
+  const fontPath = "assets/font.ttf";
+  const literalCollision = "literal collision";
+  const fontBytes = new TextEncoder().encode(fontPath);
+  const literalBytes = new TextEncoder().encode(literalCollision);
   const game = {
     memory: {
       "run.font": { hash: 101, handle: 1101, offset: 0, length: 1, stride: 4, type_id: 1 },
@@ -94,13 +98,21 @@ test("web dynamic text buffer wins over a colliding string literal handle", asyn
     views: {
       "101": { font: "run.font", handle: "run.handle", width: "run.width", height: "run.height" },
     },
-    strings: { "1": "assets/font.ttf", "1202": "literal collision" },
+    stringLiteralTableVersion: 1,
+    stringLiteralTable: {
+      "1": { offset: 64, byte_length: fontBytes.length },
+      "1202": { offset: 96, byte_length: literalBytes.length },
+    },
+    strings: {},
   };
   const encoded = new TextEncoder().encode("buffer wins");
   let currentLength = encoded.length;
   const result = await loadRuntime(game, {
     globalGetI32: hash => hash === 203 ? currentLength : 0,
     main: (env, memory) => {
+      const bytes = new Uint8Array(memory.buffer);
+      bytes.set(fontBytes, 64);
+      bytes.set(literalBytes, 96);
       const dynamicBytes = new Uint8Array(memory.buffer, 32, 32);
       dynamicBytes.set(encoded);
       const font = env.load_font(1, 20);
