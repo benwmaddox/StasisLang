@@ -412,7 +412,7 @@ def main() -> int:
     assert "build_followup_request(shared_context" in host_agent
     assert "source_file_path(project" in host_agent
     assert "MAX_TOOL_CALLS_PER_BATCH = 50" in host_agent
-    assert 'DEFAULT_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")' in host_comparison
+    assert 'DEFAULT_MODELS = ("gpt-6-sol", "gpt-6-luna")' in host_comparison
     assert "private static native String nativeRunTick(String projectRoot, int touchX, int touchY, int touchActive, int screenWidth, int screenHeight)" in activity
     assert "static native int nativeRunFrameInto(String projectRoot" in activity
     assert "static native String nativeFrameAbiDescriptor()" in activity
@@ -1283,13 +1283,14 @@ def main() -> int:
     assert "AI_PREF_API_KEY" in activity
     assert "readSecretPreference(aiPrefs, AI_PREF_API_KEY)" in activity
     assert "aiPrefs.getString(AI_PREF_MODEL" in activity
-    assert 'DEFAULT_AI_MODEL = "gpt-5.6-sol"' in activity
+    assert 'DEFAULT_AI_MODEL = "gpt-6-sol"' in activity
     assert 'reasoningSummary.setText("Reasoning: medium")' in activity
     assert 'put("effort", "medium")' in activity
-    assert 'GPT-5.6 Sol defaults to medium reasoning' in activity
+    assert 'GPT-6 Sol defaults to medium reasoning' in activity
+    assert '"gpt-5.6-sol".equals(configuredModel)' in activity
     assert '"gpt-5.6-terra".equals(configuredModel)' in activity
     assert "AI_PREF_MODEL_DEFAULT_VERSION" in activity
-    assert 'DEFAULT_MODEL = "gpt-5.6-sol"' in host_agent
+    assert 'DEFAULT_MODEL = "gpt-6-sol"' in host_agent
     assert 'DEFAULT_REASONING_EFFORT = "medium"' in host_agent
     assert "MAX_WORKING_NOTES_CHARS = 2_000" in host_agent
     assert '"required": ["mode", "working_notes"]' in host_agent

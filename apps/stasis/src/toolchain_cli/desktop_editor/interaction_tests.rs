@@ -616,7 +616,7 @@ fn wide_header_usage_never_overlaps_provider() {
         let task = editor.state.session.active_task_mut().unwrap();
         task.set_provider_state(ProviderState {
             provider: Some("installed_codex_subscription".into()),
-            model: Some("gpt-5.6-sol".into()),
+            model: Some("gpt-6-sol".into()),
             ..ProviderState::default()
         })
         .unwrap();
@@ -625,7 +625,7 @@ fn wide_header_usage_never_overlaps_provider() {
         let size = egui::vec2(width, 900.0);
         frame(&mut editor, &context, size, vec![]);
         let output = frame(&mut editor, &context, size, vec![]);
-        let provider = text_rects(&output, "Provider: Codex / gpt-5.6-sol  v")[0];
+        let provider = text_rects(&output, "Provider: Codex / gpt-6-sol  v")[0];
         let usage = text_rects(&output, "Usage  2796 tokens")[0];
         assert!(
             usage.min.y > provider.max.y,
@@ -698,7 +698,7 @@ fn compact_chrome_reserves_space_for_notices_task_creation_and_status() {
         );
         assert!(screen.contains_rect(title));
         assert!(text_rects(&output, "New task objective").is_empty());
-        assert!(text_rects(&output, "Provider: Codex / gpt-5.6-sol  v").is_empty());
+        assert!(text_rects(&output, "Provider: Codex / gpt-6-sol  v").is_empty());
 
         editor.state.dispatch(TaskSessionCommand::NewTask);
         frame(&mut editor, &context, size, vec![]);

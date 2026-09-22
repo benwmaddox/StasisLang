@@ -12,7 +12,9 @@ It waits for verified PNG completion and shows a preview. Capture does not
 send an AI request; the next task reply includes that task's attached images.
 
 The selected transport and model must explicitly support image input. Codex
-uses the installed transport with `gpt-5.6-sol`. OpenRouter checks the selected
+uses the installed transport with `gpt-6-sol` by default and allows documented
+image input for GPT-6 Sol and Luna while retaining the prior GPT-5.6 Sol slug.
+OpenRouter checks the selected
 model's image modality using provider metadata and fails closed when the model
 is absent or does not advertise image input. It sends immutable, hash-verified
 image snapshots as multimodal `image_url` data content. Capability is checked

@@ -144,8 +144,8 @@ public final class MainActivity extends Activity {
     private static final String GITHUB_PREF_VALIDATED_TARGET = "github_validated_target_v1";
     private static final String AI_TRACE_LOG = "ai_trace.jsonl";
     private static final String AI_USAGE_LOG = "ai_usage.jsonl";
-    private static final String DEFAULT_AI_MODEL = "gpt-5.6-sol";
-    private static final int DEFAULT_AI_MODEL_VERSION = 2;
+    private static final String DEFAULT_AI_MODEL = "gpt-6-sol";
+    private static final int DEFAULT_AI_MODEL_VERSION = 3;
     private static final String AI_PROMPT_CACHE_KEY = "stasis-android-workshop-v2";
     private static final long AI_TRACE_RETENTION_MS = 24L * 60L * 60L * 1000L;
     private static final long DEFAULT_TICK_INTERVAL_MS = 16L;
@@ -2336,12 +2336,15 @@ public final class MainActivity extends Activity {
         aiSettingsBody.addView(aiApiKeyEditor, fullWidth());
 
         aiModelEditor = new EditText(this);
-        aiModelEditor.setHint("Model (GPT-5.6 Sol default)");
-        aiModelEditor.setContentDescription("OpenAI model; GPT-5.6 Sol defaults to medium reasoning");
+        aiModelEditor.setHint("Model (GPT-6 Sol default)");
+        aiModelEditor.setContentDescription("OpenAI model; GPT-6 Sol defaults to medium reasoning");
         aiModelEditor.setSingleLine(true);
         String configuredModel = aiPrefs.getString(AI_PREF_MODEL, DEFAULT_AI_MODEL);
         if (aiPrefs.getInt(AI_PREF_MODEL_DEFAULT_VERSION, 0) < DEFAULT_AI_MODEL_VERSION) {
-            if ("gpt-5.6-terra".equals(configuredModel)) configuredModel = DEFAULT_AI_MODEL;
+            if ("gpt-5.6-sol".equals(configuredModel)
+                    || "gpt-5.6-terra".equals(configuredModel)) {
+                configuredModel = DEFAULT_AI_MODEL;
+            }
             aiPrefs.edit().putString(AI_PREF_MODEL, configuredModel)
                     .putInt(AI_PREF_MODEL_DEFAULT_VERSION, DEFAULT_AI_MODEL_VERSION).apply();
         }
@@ -6844,7 +6847,7 @@ public final class MainActivity extends Activity {
             }
             request.put("allowed_verifier_tools", new JSONArray().put("write_test_file"));
             request.put("risk", policy.risk.name().toLowerCase());
-            String reviewerModel = useCodex ? model : "gpt-5.6-sol";
+            String reviewerModel = useCodex ? model : "gpt-6-sol";
             appendAiTrace("verifier_request", new JSONObject()
                     .put("provider", useCodex ? "codex_subscription" : "openai_api")
                     .put("requested_model", reviewerModel)

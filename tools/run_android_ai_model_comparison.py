@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a repeatable, isolated GPT-5.6 Workshop model comparison."""
+"""Run a repeatable, isolated GPT-6 Workshop model comparison."""
 from __future__ import annotations
 
 import argparse
@@ -16,7 +16,7 @@ import android_ai_agent_host as host
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASELINE = ROOT / "mobile/android/app/src/main/assets/workshop_sample"
-DEFAULT_MODELS = ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna")
+DEFAULT_MODELS = ("gpt-6-sol", "gpt-6-luna")
 DEFAULT_ACCEPTANCE_TEST = ROOT / "tools/fixtures/ball_20_comparison_acceptance.test.stasis"
 
 
@@ -92,7 +92,7 @@ def run_acceptance(project: Path, acceptance_test: Path) -> dict[str, Any]:
 
 def write_markdown(path: Path, prompt: str, rows: list[dict[str, Any]]) -> None:
     lines = [
-        "# Android Workshop GPT-5.6 comparison",
+        "# Android Workshop GPT-6 comparison",
         "",
         f"Prompt: `{prompt}`",
         "",

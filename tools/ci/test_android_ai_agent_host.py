@@ -19,18 +19,68 @@ class AndroidAiAgentHostTests(unittest.TestCase):
     def test_agent_turn_limit_is_fifteen(self) -> None:
         self.assertEqual(15, host.MAX_TURNS)
 
-    def test_all_gpt_5_6_comparison_models_have_pricing(self) -> None:
+    def test_legacy_and_gpt_6_models_have_pricing(self) -> None:
         self.assertEqual(
-            {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"},
+            {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-sol", "gpt-6-luna"},
             set(host.DEFAULT_MODEL_PRICING_PER_MILLION),
         )
-
-    def test_comparison_defaults_cover_all_gpt_5_6_models(self) -> None:
+        self.assertEqual("gpt-6-sol", host.DEFAULT_MODEL)
         self.assertEqual(
-            ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
+            {"input": 2.00, "cached_input": 0.20, "cache_write": 2.50, "output": 10.00},
+            {key: host.DEFAULT_MODEL_PRICING_PER_MILLION["gpt-6-sol"][key]
+             for key in ("input", "cached_input", "cache_write", "output")},
+        )
+        self.assertEqual(
+            {"input": 0.10, "cached_input": 0.01, "cache_write": 0.125, "output": 0.50},
+            {key: host.DEFAULT_MODEL_PRICING_PER_MILLION["gpt-6-luna"][key]
+             for key in ("input", "cached_input", "cache_write", "output")},
+        )
+
+    def test_comparison_defaults_use_the_gpt_6_execution_tiers(self) -> None:
+        self.assertEqual(
+            ("gpt-6-sol", "gpt-6-luna"),
             comparison.DEFAULT_MODELS,
         )
         self.assertTrue(comparison.DEFAULT_ACCEPTANCE_TEST.is_file())
+
+    def test_gpt_6_long_context_pricing_is_applied_per_call(self) -> None:
+        short_calls = [
+            {
+                "kind": "openai_exchange",
+                "usage": {
+                    "input_tokens": 150_000,
+                    "cached_input_tokens": 10_000,
+                    "cache_write_input_tokens": 10_000,
+                    "uncached_input_tokens": 130_000,
+                    "output_tokens": 10_000,
+                },
+            }
+            for _ in range(2)
+        ]
+        short_summary = host.aggregate_trace_usage(short_calls, "gpt-6-sol")
+        self.assertEqual(0.774, short_summary["estimated_cost_usd"])
+
+        boundary_summary = host.aggregate_trace_usage([{
+            "kind": "openai_exchange",
+            "usage": {
+                "input_tokens": 272_000,
+                "uncached_input_tokens": 272_000,
+                "output_tokens": 10_000,
+            },
+        }], "gpt-6-sol")
+        self.assertEqual(0.644, boundary_summary["estimated_cost_usd"])
+
+        long_summary = host.aggregate_trace_usage([{
+            "kind": "openai_exchange",
+            "usage": {
+                "input_tokens": 273_000,
+                "cached_input_tokens": 20_000,
+                "cache_write_input_tokens": 3_000,
+                "uncached_input_tokens": 250_000,
+                "output_tokens": 10_000,
+            },
+        }], "gpt-6-sol")
+        self.assertEqual(1.173, long_summary["estimated_cost_usd"])
 
     def test_comparison_reports_acceptance_ratio_and_cache_rate(self) -> None:
         trace = {

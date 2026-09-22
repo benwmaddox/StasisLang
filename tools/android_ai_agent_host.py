@@ -23,7 +23,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROJECT = ROOT / "mobile/android/app/src/main/assets/workshop_sample"
-DEFAULT_MODEL = "gpt-5.6-sol"
+DEFAULT_MODEL = "gpt-6-sol"
 DEFAULT_REASONING_EFFORT = "medium"
 DEFAULT_TRACE_DIR = ROOT / "artifacts/android_ai_runs"
 MAX_TURNS = 15
@@ -293,6 +293,26 @@ DEFAULT_MODEL_PRICING_PER_MILLION = {
         "output": 6.00,
         "source": "OpenAI standard API pricing checked 2026-07-12.",
     },
+    "gpt-6-sol": {
+        "input": 2.00,
+        "cached_input": 0.20,
+        "cache_write": 2.50,
+        "output": 10.00,
+        "long_context_input_tokens": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
+        "source": "OpenAI standard API pricing checked 2026-09-22.",
+    },
+    "gpt-6-luna": {
+        "input": 0.10,
+        "cached_input": 0.01,
+        "cache_write": 0.125,
+        "output": 0.50,
+        "long_context_input_tokens": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
+        "source": "OpenAI standard API pricing checked 2026-09-22.",
+    },
 }
 
 def response_usage_from_body(body: dict[str, Any]) -> dict[str, int]:
@@ -335,12 +355,32 @@ def aggregate_trace_usage(trace_events: list[dict[str, Any]], model: str) -> dic
     pricing = DEFAULT_MODEL_PRICING_PER_MILLION.get(model, {})
     cost = None
     if pricing:
-        cost = (
-            totals["uncached_input_tokens"] * float(pricing["input"])
-            + totals["cached_input_tokens"] * float(pricing["cached_input"])
-            + totals["cache_write_input_tokens"] * float(pricing.get("cache_write", pricing["input"]))
-            + totals["output_tokens"] * float(pricing["output"])
-        ) / 1_000_000.0
+        cost = 0.0
+        for call in per_call:
+            input_tokens = int(call.get("input_tokens") or 0)
+            cached_tokens = int(call.get("cached_input_tokens") or 0)
+            cache_write_tokens = int(call.get("cache_write_input_tokens") or 0)
+            if "uncached_input_tokens" in call:
+                uncached_tokens = int(call.get("uncached_input_tokens") or 0)
+            else:
+                uncached_tokens = max(input_tokens - cached_tokens - cache_write_tokens, 0)
+            output_tokens = int(call.get("output_tokens") or 0)
+            long_context = input_tokens > int(pricing.get("long_context_input_tokens", 0))
+            input_multiplier = (
+                float(pricing.get("long_context_input_multiplier", 1.0))
+                if long_context else 1.0
+            )
+            output_multiplier = (
+                float(pricing.get("long_context_output_multiplier", 1.0))
+                if long_context else 1.0
+            )
+            cost += (
+                uncached_tokens * float(pricing["input"]) * input_multiplier
+                + cached_tokens * float(pricing["cached_input"]) * input_multiplier
+                + cache_write_tokens * float(pricing.get("cache_write", pricing["input"]))
+                * input_multiplier
+                + output_tokens * float(pricing["output"]) * output_multiplier
+            ) / 1_000_000.0
     return {
         "calls": calls,
         "totals": totals,

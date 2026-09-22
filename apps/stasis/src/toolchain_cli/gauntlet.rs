@@ -277,7 +277,7 @@ impl Default for GauntletRoleModels {
 
 fn default_builder_escalation_model() -> Option<GauntletRoleModel> {
     Some(GauntletRoleModel {
-        model: Some("gpt-5.6-sol".to_string()),
+        model: Some("gpt-6-sol".to_string()),
         reasoning_effort: Some("high".to_string()),
         timeout_minutes: default_model_timeout_minutes(),
     })
@@ -285,7 +285,7 @@ fn default_builder_escalation_model() -> Option<GauntletRoleModel> {
 
 fn default_luna_role_model() -> GauntletRoleModel {
     GauntletRoleModel {
-        model: Some("gpt-5.6-luna".to_string()),
+        model: Some("gpt-6-luna".to_string()),
         reasoning_effort: Some("max".to_string()),
         timeout_minutes: default_model_timeout_minutes(),
     }
@@ -918,10 +918,10 @@ mod tests {
             2 * 1024 * 1024
         );
         assert_eq!(config.execution.compaction.retain_recent_turns, 6);
-        assert_eq!(config.models.scout.model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(config.models.scout.model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(config.models.scout.reasoning_effort.as_deref(), Some("max"));
         assert_eq!(config.models.scout.timeout_minutes, 30);
-        assert_eq!(config.models.builder.model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(config.models.builder.model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(
             config.models.builder.reasoning_effort.as_deref(),
             Some("max")
@@ -931,14 +931,14 @@ mod tests {
             .builder_escalation
             .as_ref()
             .expect("default builder escalation");
-        assert_eq!(escalation.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(escalation.model.as_deref(), Some("gpt-6-sol"));
         assert_eq!(escalation.reasoning_effort.as_deref(), Some("high"));
         let controller_escalation = config
             .models
             .controller_escalation
             .as_ref()
             .expect("default controller escalation");
-        assert_eq!(controller_escalation.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(controller_escalation.model.as_deref(), Some("gpt-6-sol"));
         assert_eq!(
             controller_escalation.reasoning_effort.as_deref(),
             Some("high")
@@ -1067,7 +1067,7 @@ mod tests {
         config.execution.compaction = GauntletCompaction::default();
         config.models.scout.model = Some("bad model with spaces".to_string());
         assert!(config.validate().is_err());
-        config.models.scout.model = Some("gpt-5.6-luna".to_string());
+        config.models.scout.model = Some("gpt-6-luna".to_string());
         config.models.scout.timeout_minutes = 0;
         assert!(config.validate().is_err());
     }

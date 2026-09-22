@@ -59,7 +59,7 @@ result. It is the simplest form for automation and repeatable evaluations.
 `:ai PROMPT` runs a bounded coding turn through the locally installed `codex` executable and its
 existing ChatGPT/Codex subscription sign-in. Stasis does not request, store, or infer an API key.
 On Windows, the provider prefers the current npm-installed native Codex binary over older desktop
-shims on `PATH`. It defaults to `gpt-5.6-sol` with medium reasoning. Set `STASIS_CODEX_EXE`,
+shims on `PATH`. It defaults to `gpt-6-sol` with medium reasoning. Set `STASIS_CODEX_EXE`,
 `STASIS_AI_MODEL`, or `STASIS_AI_REASONING_EFFORT` to override those selections. `:ai status`,
 `:ai cancel`, and Ctrl+C expose status and cancellation without stopping the live runtime.
 Deterministic `--live-script` files may also contain `:ai PROMPT`; each line runs through the same
