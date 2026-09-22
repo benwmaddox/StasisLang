@@ -2791,6 +2791,25 @@ mod tests {
         link_config: &stasis_jit::AotLinkConfig,
         environment: &[(&str, &Path)],
     ) -> Option<i32> {
+        let status = run_linked_i32_noarg_fixture_status(
+            process,
+            function_name,
+            label,
+            link_config,
+            environment,
+        )?;
+        let code = status.code().expect("expected process exit code");
+        Some(code)
+    }
+
+    #[cfg(windows)]
+    fn run_linked_i32_noarg_fixture_status(
+        process: &AotProcess,
+        function_name: &str,
+        label: &str,
+        link_config: &stasis_jit::AotLinkConfig,
+        environment: &[(&str, &Path)],
+    ) -> Option<std::process::ExitStatus> {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
@@ -2825,9 +2844,7 @@ mod tests {
         }
         link_result.expect("link executable");
 
-        let status = run_signed_test_executable(&exe_path, environment);
-        let code = status.code().expect("expected process exit code");
-        Some(code)
+        Some(run_signed_test_executable(&exe_path, environment))
     }
 
     fn capture_aot_clif_by_function(process: &mut AotProcess) -> BTreeMap<String, String> {
@@ -3103,7 +3120,7 @@ mod tests {
         let mut process = AotProcess::new();
         process.upsert_file(
             "bounds.stasis",
-            "struct Draw { x: f32; y: f32; opacity: i32; }\nglobal draws: Draw[4];\nfunction write(index: i32): i32 {\n    let draw: Draw = draws[index];\n    draw.x = 1.0;\n    draw.y = 2.0;\n    draw.opacity = 255;\n    return draw.opacity;\n}\nfunction main(): i32 { return write(0); }\n",
+            "struct Draw { x: f32; y: f32; opacity: i32; }\nglobal draws: Draw[4];\nfunction write(index: i32): i32 {\n    let draw: Draw = draws[index];\n    draw.x = 1.0;\n    draw.y = 2.0;\n    draw.opacity = 255;\n    return draw.opacity;\n}\nfunction main(): i32 { return write(0 - 1); }\n",
         );
         let captured = capture_aot_clif_by_function(&mut process);
         let clif = captured.get("write").expect("write CLIF");
@@ -3121,6 +3138,22 @@ mod tests {
             clif.contains("icmp ult"),
             "static struct view AOT bounds check must retain the unsigned upper-bound comparison:\n{clif}"
         );
+
+        #[cfg(windows)]
+        if let Some(link_config) = resolve_link_config_for_smoke() {
+            let status = run_linked_i32_noarg_fixture_status(
+                &process,
+                "main",
+                "negative_static_struct_index",
+                &link_config,
+                &[],
+            )
+            .expect("link negative-index AOT fixture");
+            assert!(
+                !status.success(),
+                "negative runtime index unexpectedly completed in AOT executable"
+            );
+        }
     }
 
     #[test]
