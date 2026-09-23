@@ -4613,7 +4613,7 @@ mod tests {
         ));
         fs::create_dir_all(&root).expect("builder event temp directory");
         let model = GauntletRoleModel {
-            model: Some("gpt-5.6-luna".to_string()),
+            model: Some("gpt-6-luna".to_string()),
             reasoning_effort: Some("max".to_string()),
             timeout_minutes: 30,
         };
@@ -4626,7 +4626,7 @@ mod tests {
         assert_eq!(event["kind"], "role_attempt_started");
         assert_eq!(event["data"]["role"], "builder");
         assert_eq!(event["data"]["candidate"], "candidate-0001");
-        assert_eq!(event["data"]["model"], "gpt-5.6-luna");
+        assert_eq!(event["data"]["model"], "gpt-6-luna");
         assert_eq!(event["data"]["reasoning_effort"], "max");
         assert_eq!(event["data"]["max_turns"], 17);
         fs::remove_dir_all(&root).expect("remove builder event temp directory");

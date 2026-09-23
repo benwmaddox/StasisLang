@@ -153,7 +153,7 @@ model, reasoning effort, tools, and cacheable request prefix. Standard remains
 the default because Fast consumes subscription allowance more quickly. The API
 key fallback does not reuse this subscription Fast setting.
 
-The configured GPT-5.6 model applies to both providers. Phone-native Codex
+The configured GPT-6 model applies to both providers. Phone-native Codex
 resolves the requested slug against the signed-in account's visible model
 catalog and rejects an unavailable model rather than silently substituting the
 catalog default.

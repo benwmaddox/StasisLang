@@ -145,11 +145,11 @@ The project root contains a strict, versioned `gauntlet.json`:
     }
   },
   "models": {
-    "scout": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "timeout_minutes": 30},
+    "scout": {"model": "gpt-6-luna", "reasoning_effort": "max", "timeout_minutes": 30},
     "lead": {"timeout_minutes": 30},
-    "builder": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "timeout_minutes": 30},
-    "builder_escalation": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
-    "controller_escalation": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
+    "builder": {"model": "gpt-6-luna", "reasoning_effort": "max", "timeout_minutes": 30},
+    "builder_escalation": {"model": "gpt-6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
+    "controller_escalation": {"model": "gpt-6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
     "visual_critic": {"timeout_minutes": 30},
     "gameplay_critic": {"timeout_minutes": 30}
   }
@@ -222,9 +222,9 @@ is 2 MiB and six turns.
 Every role has an independent optional `model` and `reasoning_effort`, plus a
 `timeout_minutes` value that defaults to 30 and may be configured from 1
 through 120. New
-Gauntlet configurations default the scout and builder to `gpt-5.6-luna` with `max`
+Gauntlet configurations default the scout and builder to `gpt-6-luna` with `max`
 reasoning. If the primary builder cannot finish, the same candidate receives one
-bounded rescue attempt from `gpt-5.6-sol` with `high` reasoning. Lead and both critics inherit `STASIS_AI_MODEL`,
+bounded rescue attempt from `gpt-6-sol` with `high` reasoning. Lead and both critics inherit `STASIS_AI_MODEL`,
 `STASIS_AI_REASONING_EFFORT`, and ultimately the installed defaults. An explicit
 empty role object also selects that inherited behavior. Values are passed
 directly to the installed Codex CLI, so a model identifier must actually be
@@ -232,13 +232,13 @@ supported there. A fully explicit configuration can use:
 
 ```json
 {
-  "scout": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "timeout_minutes": 30},
-  "lead": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
-  "builder": {"model": "gpt-5.6-luna", "reasoning_effort": "max", "timeout_minutes": 30},
-  "builder_escalation": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
-  "controller_escalation": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
-  "visual_critic": {"model": "gpt-5.6-sol", "reasoning_effort": "medium", "timeout_minutes": 30},
-  "gameplay_critic": {"model": "gpt-5.6-sol", "reasoning_effort": "high", "timeout_minutes": 30}
+  "scout": {"model": "gpt-6-luna", "reasoning_effort": "max", "timeout_minutes": 30},
+  "lead": {"model": "gpt-6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
+  "builder": {"model": "gpt-6-luna", "reasoning_effort": "max", "timeout_minutes": 30},
+  "builder_escalation": {"model": "gpt-6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
+  "controller_escalation": {"model": "gpt-6-sol", "reasoning_effort": "high", "timeout_minutes": 30},
+  "visual_critic": {"model": "gpt-6-sol", "reasoning_effort": "medium", "timeout_minutes": 30},
+  "gameplay_critic": {"model": "gpt-6-sol", "reasoning_effort": "high", "timeout_minutes": 30}
 }
 ```
 

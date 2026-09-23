@@ -8,7 +8,7 @@ No provider setting is required. Install and sign in to Codex, then optionally s
 
 ```powershell
 $env:STASIS_AI_PROVIDER = "codex"
-$env:STASIS_AI_MODEL = "gpt-5.6-sol"
+$env:STASIS_AI_MODEL = "gpt-6-sol"
 $env:STASIS_AI_REASONING_EFFORT = "medium"
 ```
 

@@ -519,9 +519,9 @@ impl ProviderConfig {
 }
 
 pub(crate) fn codex_model_supports_image_input(model: &str) -> bool {
-    // The Gauntlet visual and gameplay critics exercise image input with this
-    // explicit model. Unknown aliases stay disabled so capture fails closed.
-    matches!(model.trim(), "gpt-5.6-sol")
+    // Preserve the previously verified model while recognizing both GPT-6
+    // models' documented image-input support. Unknown aliases stay disabled.
+    matches!(model.trim(), "gpt-5.6-sol" | "gpt-6-sol" | "gpt-6-luna")
 }
 
 pub enum ConfiguredProvider {
@@ -2542,6 +2542,8 @@ mod tests {
     #[test]
     fn image_input_capability_is_explicit_and_fails_closed() {
         assert!(codex_model_supports_image_input("gpt-5.6-sol"));
+        assert!(codex_model_supports_image_input("gpt-6-sol"));
+        assert!(codex_model_supports_image_input("gpt-6-luna"));
         assert!(!codex_model_supports_image_input("gpt-5.6-luna"));
         assert!(!codex_model_supports_image_input("latest"));
         assert!(!codex_model_supports_image_input("unknown-model"));

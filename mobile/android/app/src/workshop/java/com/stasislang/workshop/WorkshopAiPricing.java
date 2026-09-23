@@ -70,6 +70,8 @@ final class WorkshopAiPricing {
     private static final Rates SOL = gpt56(5.00, 0.50, 6.25, 30.00);
     private static final Rates TERRA = gpt56(2.50, 0.25, 3.125, 15.00);
     private static final Rates LUNA = gpt56(1.00, 0.10, 1.25, 6.00);
+    private static final Rates GPT_6_SOL = gpt6(2.00, 0.20, 2.50, 10.00);
+    private static final Rates GPT_6_LUNA = gpt6(0.10, 0.01, 0.125, 0.50);
 
     private WorkshopAiPricing() {}
 
@@ -91,6 +93,8 @@ final class WorkshopAiPricing {
         if ("gpt-5.6".equals(model) || "gpt-5.6-sol".equals(model)) return SOL;
         if ("gpt-5.6-terra".equals(model)) return TERRA;
         if ("gpt-5.6-luna".equals(model)) return LUNA;
+        if ("gpt-6-sol".equals(model)) return GPT_6_SOL;
+        if ("gpt-6-luna".equals(model)) return GPT_6_LUNA;
         return null;
     }
 
@@ -113,5 +117,9 @@ final class WorkshopAiPricing {
 
     private static Rates gpt56(double input, double cached, double cacheWrite, double output) {
         return new Rates(input, cached, cacheWrite, output, true, true, true, "medium");
+    }
+
+    private static Rates gpt6(double input, double cached, double cacheWrite, double output) {
+        return new Rates(input, cached, cacheWrite, output, true, false, true, "medium");
     }
 }

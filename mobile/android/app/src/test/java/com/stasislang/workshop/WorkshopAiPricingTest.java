@@ -9,7 +9,7 @@ import org.junit.Test;
 
 public final class WorkshopAiPricingTest {
     @Test
-    public void recognizesSupportedGpt5AndLaterModelsAndSnapshots() {
+    public void recognizesSupportedOpenAiModelsAndSnapshots() {
         String[] models = {
                 "gpt-5", "gpt-5-2025-08-07", "gpt-5-mini", "gpt-5-mini-2025-08-07",
                 "gpt-5-nano", "gpt-5-nano-2025-08-07", "gpt-5-pro", "gpt-5-pro-2025-10-06",
@@ -18,7 +18,8 @@ public final class WorkshopAiPricingTest {
                 "gpt-5.4", "gpt-5.4-2026-03-05", "gpt-5.4-mini", "gpt-5.4-mini-2026-03-17",
                 "gpt-5.4-nano", "gpt-5.4-nano-2026-03-17", "gpt-5.4-pro", "gpt-5.4-pro-2026-03-05",
                 "gpt-5.5", "gpt-5.5-2026-04-23", "gpt-5.5-pro", "gpt-5.5-pro-2026-04-23",
-                "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"
+                "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+                "gpt-6-sol", "gpt-6-luna"
         };
         for (String model : models) assertTrue(model, WorkshopAiPricing.isKnown(model));
         assertTrue(WorkshopAiPricing.isKnown("gpt-5.6"));
@@ -45,6 +46,8 @@ public final class WorkshopAiPricingTest {
         assertRates("gpt-5.6-sol", 5.00, 0.50, 6.25, 30.00);
         assertRates("gpt-5.6-terra", 2.50, 0.25, 3.125, 15.00);
         assertRates("gpt-5.6-luna", 1.00, 0.10, 1.25, 6.00);
+        assertRates("gpt-6-sol", 2.00, 0.20, 2.50, 10.00);
+        assertRates("gpt-6-luna", 0.10, 0.01, 0.125, 0.50);
     }
 
     @Test
@@ -64,9 +67,25 @@ public final class WorkshopAiPricingTest {
     public void exposesModelSpecificRequestCompatibility() {
         assertFalse(WorkshopAiPricing.forModel("gpt-5.5").explicitCacheBreakpoints);
         assertTrue(WorkshopAiPricing.forModel("gpt-5.6-sol").explicitCacheBreakpoints);
+        assertFalse(WorkshopAiPricing.forModel("gpt-6-sol").explicitCacheBreakpoints);
+        assertFalse(WorkshopAiPricing.forModel("gpt-6-luna").explicitCacheBreakpoints);
+        assertTrue(WorkshopAiPricing.forModel("gpt-6-sol").structuredOutputs);
+        assertTrue(WorkshopAiPricing.forModel("gpt-6-luna").structuredOutputs);
         assertEquals("high", WorkshopAiPricing.forModel("gpt-5-pro").reasoningEffort);
         assertFalse(WorkshopAiPricing.forModel("gpt-5.2-pro").structuredOutputs);
         assertFalse(WorkshopAiPricing.forModel("gpt-5.4-pro").structuredOutputs);
+    }
+
+    @Test
+    public void appliesGpt6LongContextPricingMultipliers() {
+        WorkshopAiPricing.Rates sol = WorkshopAiPricing.forModel("gpt-6-sol");
+        assertNotNull(sol);
+        assertEquals(16.2, sol.estimate(300_000, 0, 0, 1_000_000), 0.0000001);
+        assertEquals(1.5, sol.conservativeInputCostUsd(300_000), 0.0000001);
+        assertEquals(15.0, sol.effectiveOutputUsdPerMillion(300_000), 0.0000001);
+        WorkshopAiPricing.Rates luna = WorkshopAiPricing.forModel("gpt-6-luna");
+        assertNotNull(luna);
+        assertEquals(0.81, luna.estimate(300_000, 0, 0, 1_000_000), 0.0000001);
     }
 
     private static void assertRates(String model, double input, double cached, double cacheWrite,
