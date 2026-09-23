@@ -526,3 +526,25 @@ Bad: installed and sibling build DLLs initially overrode matching runtime paths;
 an empty inferred asset set also initially published an unnecessary identity file.
 Adjustment: stage a fresh matching CLI/runtime pair and test both inferred assets
 and assetless packages before interpreting package-size or host-smoke results.
+
+
+## 2026-09-23 - Maddox #654 PR CI timeout follow-up
+
+PR #833 job 107427103256 exhausted the integration step's 15-minute budget
+while Web package assertions were still passing. Compilation took 2m40s;
+Web started 6m26s into the step after the earlier integrations. Web packaging
+now runs in its own 15-minute step in the same required job, reusing the Cargo
+build. The broad target loop excludes it so each suite still runs once.
+No timeout was increased and no test was disabled.
+
+Validation: existing Cargo/placement policy tests (19) and action-version policy
+passed. `python tools/cargo_cache.py run -- cargo test -p stasis --test
+web_package -- --test-threads=1` passed all 17 tests locally in 46.74s;
+`git diff --check` passed. Hosted Linux timing remains for CI verification.
+Visual evidence: not applicable (workflow-only follow-up).
+Theory gained: the timeout budget must match the owning suite, including compile
+cost; passing suites can exceed a combined step budget without a failed assertion.
+Good: retained the same required job and shared compilation.
+Bad: the previous combined budget hid the Web suite's independent runtime cost.
+Adjustment: preserve separate bounded steps and guard single ownership in the
+existing CI placement tests.
