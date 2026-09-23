@@ -5650,6 +5650,7 @@ mod tests {
             params,
             return_type,
             inline: false,
+            host_export: None,
             effect_contract: None,
             requires_contract: None,
             dependencies: Vec::new(),

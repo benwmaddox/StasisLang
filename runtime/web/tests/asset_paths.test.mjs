@@ -72,6 +72,7 @@ export async function loadRuntime(game, options = {}) {
   const instance = {
     exports: {
       memory,
+      ...options.exports,
       __stasis_global_get_i32: hash => options.globalGetI32?.(hash) ?? 0,
       main: () => { options.main?.(env, memory); return 0; },
       tick: () => { options.tick?.(env, memory); return 0; },
@@ -135,7 +136,7 @@ export async function loadRuntime(game, options = {}) {
     setTimeout,
     clearTimeout,
   };
-  contextObject.window = { STASIS_GAME: game, screen };
+  contextObject.window = { STASIS_GAME: game, screen, STASIS_HOST_READY: options.hostReady };
   vm.runInNewContext(source, contextObject, { filename: "runtime/web/game.js" });
   const runtimePromise = contextObject.window.STASIS_RUNTIME_PROMISE;
   runtimePromise?.catch(() => {});
@@ -386,4 +387,38 @@ test("web startup rejects a mismatched Wasm collection-view ABI before main", as
   });
   await assert.rejects(result.runtimePromise, /collection view ABI mismatch: package=2 wasm=1 runtime=2/);
   assert.equal(mainCalls, 0);
+});
+
+
+test("declared host exports initialize state after main before first frame", async () => {
+  let observed = 0;
+  const order = [];
+  const runtime = await loadRuntime({ memory: {}, host_exports: { abi_version: 1, functions: [{
+    symbol: "stasis_host_v1_set_access",
+    signature: { name: "set_access", parameters: ["i32", "i32", "bool"], return_type: "void" }
+  }] } }, {
+    main() { observed = 10; order.push("main"); },
+    exports: { stasis_host_v1_set_access(a, b, enabled) { if (enabled) observed = a + b; } },
+    hostReady(host) {
+      order.push("host");
+      assert.throws(() => host.invoke("set_access", 20, 22, 1), /bool/);
+      assert.throws(() => host.invoke("main"), /not declared/);
+      host.invoke("set_access", 20, 22, true);
+    },
+    onFrame() { order.push("frame"); }
+  });
+  assert.equal(runtime.document.body.dataset.ready, "true", runtime.errorBox.textContent);
+  assert.equal(observed, 42);
+  assert.deepEqual(order, ["main", "host", "frame"]);
+});
+
+
+test("unsupported host export ABI stops startup before main", async () => {
+  let mainCalls = 0;
+  const runtime = await loadRuntime({ memory: {}, host_exports: { abi_version: 2, functions: [] } }, {
+    main() { mainCalls += 1; }
+  });
+  assert.equal(mainCalls, 0);
+  assert.equal(runtime.document.body.dataset.ready, "false");
+  assert.match(runtime.errorBox.textContent, /host export ABI/);
 });

@@ -73,3 +73,7 @@ function render(): i32 {
 function on_code_swap(): void {
     return;
 }
+
+function @host_export(set_access) set_access(first: i32, second: i32, enabled: bool): void {
+    if (enabled) { score = first + second; }
+}

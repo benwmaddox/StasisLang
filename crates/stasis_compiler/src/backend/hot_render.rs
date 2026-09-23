@@ -1189,6 +1189,7 @@ mod tests {
                 params: Vec::new(),
                 return_type: 0,
                 inline: false,
+                host_export: None,
                 effect_contract: None,
                 requires_contract: None,
                 dependencies: Vec::new(),

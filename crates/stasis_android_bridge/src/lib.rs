@@ -2025,6 +2025,18 @@ fn with_initialized_runtime_session<R>(
     })
 }
 
+/// Runs main once, then invokes the declared guest export before the next tick.
+pub fn invoke_android_workshop_host_export(
+    project_root: impl AsRef<Path>,
+    entry_file: impl AsRef<Path>,
+    name: &str,
+    arguments: &[stasis_compiler::host_exports::HostValue],
+) -> Result<Option<i32>, String> {
+    with_initialized_runtime_session(project_root.as_ref(), entry_file.as_ref(), |session| {
+        session.jit.invoke_host_export(name, arguments)
+    })
+}
+
 pub fn set_android_workshop_i32_global(
     project_root: impl AsRef<Path>,
     entry_file: impl AsRef<Path>,
@@ -5767,6 +5779,29 @@ function tick(): void {}
 
         fs::remove_dir_all(&root).ok();
         clear_runtime_session_for_test();
+    }
+
+    #[test]
+    fn host_export_initializes_main_before_first_tick() {
+        use stasis_compiler::host_exports::HostValue::{Bool, I32};
+        let _guard = bridge_runtime_test_guard();
+        clear_runtime_session_for_test();
+        let root = temp_project("host_export");
+        fs::write(root.join("src/main.stasis"), "global GameState { tick_count: i32; } function main(): void { GameState.tick_count = 10; } function @host_export(set_access) configure(a: i32, b: i32, enabled: bool): void { if (enabled) { GameState.tick_count = a + b; } } function tick(): void { GameState.tick_count += 1; }").unwrap();
+        invoke_android_workshop_host_export(
+            &root,
+            Path::new("src/main.stasis"),
+            "set_access",
+            &[I32(20), I32(22), Bool(true)],
+        )
+        .unwrap();
+        let first =
+            run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
+                .unwrap();
+        assert!(!first.initialized);
+        assert_eq!(first.observed_game_tick_count, 43);
+        clear_runtime_session_for_test();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
