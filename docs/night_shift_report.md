@@ -437,3 +437,22 @@ the required native desktop generation/import workflow.
 - Visual evidence: not applicable; fixture isolation change, with existing pixel assertions exercised by the launch test.
 - Theory gained: copying a developer sample must exclude generated output before testing package creation; the package command correctly refuses pre-existing output.
 - Good: the exact failed launch test now completes successfully. Bad: local generated artifacts obscured the source-only fixture assumption. Adjustment: reuse source-only fixture setup and disclose independent baseline limits.
+
+
+## 2026-09-23 - #640 Web PNG physical sampling (partial)
+
+Prepare sprite pixels from both framebuffer axes, retain actual scales above
+8x, and keep sheet crops in logical source coordinates. Separate sprite sampling
+invalidation preserves sufficient cached resources across smaller-axis changes.
+213 Web tests pass; real Chrome before/after, 1x/2x/fractional and pixel-identical
+context restoration passed. Full repo baseline stops at the unrelated missing
+CLI build fingerprint in `desktop_hot_swap_generation_seam`.
+
+Visual evidence: inspected `docs/evidence/task640-web-png/{before,after,one,two,fractional,restored}.png`;
+fine detail improves, crops remain stable, and restoration matches. Native,
+Workshop, Apple and physical-device acceptance remains incomplete. See
+`docs/validation/png_physical_raster_640.md` for the backend audit and limits.
+
+Theory gained: physical sampling dimensions and logical source crop dimensions
+are separate invariants; unchanged destination geometry alone cannot prove crop
+parity. Visual review caught the distinction and the sheet test now enforces it.
