@@ -524,6 +524,48 @@ return value;
 
 ## 7. Functions and Calls
 
+### Declared host exports
+
+A concrete guest function can declare `@host_export(name)`, for example:
+
+```stasis
+function @host_export(set_access) configure(a: i32, b: i32, enabled: bool): void {
+    if (enabled) { state.value = a + b; }
+}
+```
+
+The declaration is a reachability root even when guest code never calls it. ABI v1
+supports zero to three `i32`/`bool` parameters and `void`/`i32` returns. Arrays,
+views, structs, floats, generic declarations and caller preconditions are rejected.
+Extern declarations and fixed lifecycle functions cannot declare host exports.
+Names must be ASCII identifiers unique across the complete imported program;
+`main`, `tick`, `render`, `on_code_swap` and the `stasis_` prefix are reserved.
+
+Every backend publishes `stasis_host_v1_<name>`. Source function identity and
+`aot_fn_*` object symbols remain internal implementation details. Native bindings
+use C calling convention and `int32_t` for both parameter types; a bool argument
+must be exactly 0 or 1. No pointers or guest storage layouts cross this interface.
+Generated `stasis_host_exports.h` and the bundle `host_exports` manifest record
+ABI version, typed signature, stable symbol, source path and canonical SymbolId.
+The existing lifecycle ABI and collection-view versions do not change.
+
+Call exports after `main` and between ticks on the runtime thread. JIT hosts use
+`invoke_host_export` with typed `HostValue` arguments. Android Workshop uses
+`invoke_android_workshop_host_export`, which initializes `main` once before the
+call. Packaged native/mobile hosts include the generated header and call the
+stable symbol. Web hosts can set `window.STASIS_HOST_READY = async host => ...`
+before loading the runtime; it runs after `main` and completes before the first
+frame. Its `host.invoke(name, ...arguments)` adapter checks JavaScript integer and
+boolean types; the same adapter is available as `window.STASIS_HOST` afterward.
+
+Changing a published name or signature is an application ABI change: use a new
+name and rebuild hosts/packages together. JIT rejects removal or signature changes
+of an accepted export during a live swap, preserving the accepted generation.
+Adding exports is allowed. Unknown ABI versions and duplicate or mismatched
+manifest targets fail packaging. Stable symbols do not depend on source order,
+compiler function IDs, or the source function's spelling.
+
+
 ### 7.1 Function Declaration
 
 ```stasis

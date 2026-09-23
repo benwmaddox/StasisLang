@@ -2263,6 +2263,8 @@ fn write_mobile_aot_package_manifest(
         "target": target.as_str(),
         "engine_manifest": mobile_aot_relative_path(output_dir, engine_manifest_path)?,
         "symbols_header": mobile_aot_relative_path(output_dir, symbols_header)?,
+        "host_exports_header": "stasis_host_exports.h",
+        "host_exports": engine_manifest["host_exports"],
         "bindings_source": mobile_aot_relative_path(output_dir, bindings_source)?,
         "replay_identity_header": mobile_aot_relative_path(output_dir, replay_identity_header)?,
         "replay_identity_source": mobile_aot_relative_path(output_dir, replay_identity_source)?,

@@ -958,6 +958,12 @@ impl AotProcess {
                 .as_ref()
                 .map_or(&[], |snapshot| snapshot.hot_render_images()),
         )?;
+        let exports = crate::host_exports::HostExports::from_compiler(&self.compiler);
+        let export_json = serde_json::to_string(&exports).map_err(|error| error.to_string())?;
+        let manifest =
+            manifest.replacen('{', &format!("{{\n  \"host_exports\": {export_json},"), 1);
+        fs::write(output_dir.join("stasis_host_exports.h"), exports.header()?)
+            .map_err(|error| error.to_string())?;
         fs::write(&manifest_path, manifest).map_err(|error| {
             format!(
                 "failed to write engine bundle manifest {}: {error}",

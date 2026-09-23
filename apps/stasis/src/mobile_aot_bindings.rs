@@ -106,6 +106,7 @@ pub fn write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot(
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| "mobile AOT manifest missing functions array".to_string())?;
     let render_lifecycle_version = mobile_aot_render_lifecycle_version(manifest, functions)?;
+    let host_exports = stasis_compiler::host_exports::HostExports::from_manifest(manifest)?;
     let literals = manifest
         .get("string_literals")
         .and_then(serde_json::Value::as_array)
@@ -131,6 +132,13 @@ pub fn write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot(
             .get("symbol")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "mobile AOT function missing symbol".to_string())?;
+        if host_exports
+            .functions
+            .iter()
+            .any(|record| record.target_symbol == symbol)
+        {
+            continue;
+        }
         let return_type = mobile_aot_c_return_type(function)?;
         if name == "gfx_cmd_construction_finish" {
             out.push_str(&format!("extern int32_t {symbol}(int32_t);\n"));
@@ -138,6 +146,12 @@ pub fn write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot(
             out.push_str(&format!("extern {return_type} {symbol}(void);\n"));
         }
     }
+    out.push_str(&host_exports.c_wrappers()?);
+    fs::write(
+        output_path.with_file_name("stasis_host_exports.h"),
+        host_exports.header()?,
+    )
+    .map_err(|error| error.to_string())?;
     for (name, wrapper) in [
         ("main", "stasis_mobile_main_entry"),
         ("tick", "stasis_mobile_tick_entry"),
@@ -267,6 +281,7 @@ pub fn audit_mobile_aot_bindings(
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| "mobile AOT manifest missing functions array".to_string())?;
     let render_lifecycle_version = mobile_aot_render_lifecycle_version(manifest, functions)?;
+    let host_exports = stasis_compiler::host_exports::HostExports::from_manifest(manifest)?;
     for function in functions {
         let name = function
             .get("name")
@@ -276,6 +291,13 @@ pub fn audit_mobile_aot_bindings(
             .get("symbol")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "mobile AOT function missing symbol".to_string())?;
+        if host_exports
+            .functions
+            .iter()
+            .any(|record| record.target_symbol == symbol)
+        {
+            continue;
+        }
         let return_type = mobile_aot_c_return_type(function)?;
         let declaration = if name == "gfx_cmd_construction_finish" {
             format!("extern int32_t {symbol}(int32_t);")
@@ -310,6 +332,14 @@ pub fn audit_mobile_aot_bindings(
         if !bindings_source.contains(&expected) {
             return Err(format!(
                 "mobile AOT bindings wrapper '{wrapper}' does not target generated symbol '{symbol}'"
+            ));
+        }
+    }
+    for record in &host_exports.functions {
+        if !bindings_source.contains(&record.signature.c_wrapper(&record.target_symbol)) {
+            return Err(format!(
+                "mobile AOT bindings missing host export '{}'",
+                record.symbol
             ));
         }
     }

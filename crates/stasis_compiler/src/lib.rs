@@ -5,6 +5,7 @@ pub mod backend;
 pub mod compiler;
 pub mod data_flow;
 pub mod frontend;
+pub mod host_exports;
 pub mod identity;
 pub mod ir;
 pub mod performance;

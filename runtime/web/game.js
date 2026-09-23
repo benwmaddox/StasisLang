@@ -158,6 +158,7 @@
     contentScale: 1,
     rasterScale: 1,
     textRasterScale: 1,
+    spriteRasterScale: 1,
     densityTier: 1,
     displayGeneration: 1,
     densityGeneration: 1,
@@ -169,6 +170,7 @@
   let resizeGenerationPending = true;
   let logicalExtentPending = false;
   let onDensityChange = () => {};
+  let onSpriteRasterScaleChange = () => {};
   let onTextRasterScaleChange = () => {};
   let spriteTierCache = new Map();
   let spriteCacheHits = 0;
@@ -745,12 +747,13 @@
     const contentScale = Math.min(scaleX, scaleY);
     const rasterScale = Math.max(1, Math.min(8, contentScale));
     const densityTier = densityTierFor(rasterScale);
-    // Text must cover both axes of the actual framebuffer transform. Asset
-    // density tiers are bounded; they cannot cap glyph resolution. Round up
-    // to a reusable tier where possible, then use the true scale above it.
-    const textScale = Math.max(1, scaleX, scaleY);
-    const textRasterScale = Math.max(textScale, densityTierFor(textScale));
+    // Prepared pixels must cover both axes of the actual framebuffer transform.
+    // Round up to a reusable tier where possible, then use the true scale above
+    // it. Resource limits and insufficient source detail remain explicit outcomes.
+    const physicalScale = Math.max(1, scaleX, scaleY);
+    const textRasterScale = Math.max(physicalScale, densityTierFor(physicalScale));
     const textRasterScaleChanged = display.textRasterScale !== textRasterScale;
+    const spriteRasterScaleChanged = display.spriteRasterScale !== textRasterScale;
     const fallback = [
       requestedDpr !== backingDpr ? "dpr" : "",
       dimensionScale < 1 ? "dimension" : "",
@@ -780,6 +783,7 @@
     display.contentScale = contentScale;
     display.rasterScale = rasterScale;
     display.textRasterScale = textRasterScale;
+    display.spriteRasterScale = textRasterScale;
     display.densityTier = densityTier;
     display.backingBytes = backingWidth * backingHeight * 4;
     display.fallback = fallback || "none";
@@ -798,6 +802,7 @@
       display.densityKey = String(densityTier);
       onDensityChange();
     }
+    if (spriteRasterScaleChanged) onSpriteRasterScaleChange();
     if (textRasterScaleChanged) onTextRasterScaleChange();
     if (canvas.width !== backingWidth) canvas.width = backingWidth;
     if (canvas.height !== backingHeight) canvas.height = backingHeight;
@@ -1292,7 +1297,7 @@
           }
         : metadataDimensions
     );
-    const tier = densityTierFor(display.rasterScale);
+    const tier = display.spriteRasterScale;
     const requestedWidth = logical ? logical.width * tier : metadataDimensions?.width || 0;
     const requestedHeight = logical ? logical.height * tier : metadataDimensions?.height || 0;
     const uncappedWidth = finitePositive(requestedWidth, metadataDimensions?.width || 1);
@@ -1802,7 +1807,7 @@
     sprites.set(handle, createSpriteResource(pathId, width, height));
     return handle;
   };
-  const invalidateDensityResources = () => {
+  onSpriteRasterScaleChange = () => {
     let invalidated = 0;
     for (const resource of sprites.values()) {
       resource.generation += 1;
@@ -1812,17 +1817,18 @@
       startSpritePreparation(resource, resource.onReady);
       invalidated += 1;
     }
-    for (const font of fonts.values()) {
-      font.densityTier = display.densityTier;
-      font.densityGeneration = display.densityGeneration;
-      font.cacheKey = [font.source, font.size, display.densityTier, RASTER_OPTIONS].join(":");
-    }
     if (document.body?.dataset) {
       document.body.dataset.assetDensityInvalidations = String(invalidated);
       document.body.dataset.assetDensityGeneration = String(display.densityGeneration);
     }
   };
-  onDensityChange = invalidateDensityResources;
+  onDensityChange = () => {
+    for (const font of fonts.values()) {
+      font.densityTier = display.densityTier;
+      font.densityGeneration = display.densityGeneration;
+      font.cacheKey = [font.source, font.size, display.densityTier, RASTER_OPTIONS].join(":");
+    }
+  };
   onTextRasterScaleChange = () => {
     for (const font of fonts.values()) invalidatePreparedTextForFont(font.handle);
     // Direct fallback text follows the same sampling lifetime as owned fonts.
@@ -3455,8 +3461,8 @@
       const variant = resource.missing
         ? { key: "missing", drawable: resource.drawable, width: 2, height: 2 }
         : spriteVariantFor(resource, cropRequested);
-      const logicalWidth = resource.width;
-      const logicalHeight = resource.height;
+      const logicalWidth = resource.logicalWidth || resource.width;
+      const logicalHeight = resource.logicalHeight || resource.height;
       const logicalX = cropRequested ? f32[baseF + 4] : 0;
       const logicalY = cropRequested ? f32[baseF + 5] : 0;
       const logicalCropWidth = cropRequested ? f32[baseF + 6] : logicalWidth;
@@ -4208,8 +4214,45 @@
       } else {
         writeHostFrame(performance.now());
       }
+      const declaredHostExports = game.host_exports ?? { abi_version: 1, functions: [] };
+      if (declaredHostExports.abi_version !== 1 || !Array.isArray(declaredHostExports.functions)) {
+        throw new Error("unsupported host export ABI version");
+      }
+      const hostFunctions = new Map();
+      for (const record of declaredHostExports.functions) {
+        const signature = record.signature;
+        if (!signature || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(signature.name)
+          || record.symbol !== `stasis_host_v1_${signature.name}`
+          || hostFunctions.has(signature.name) || typeof instance.exports[record.symbol] !== "function"
+          || !Array.isArray(signature.parameters) || signature.parameters.length > 3
+          || signature.parameters.some(type => type !== "i32" && type !== "bool")
+          || (signature.return_type !== "void" && signature.return_type !== "i32")) {
+          throw new Error("invalid declared host export");
+        }
+        hostFunctions.set(signature.name, record);
+      }
       const mainResult = instance.exports.main();
       finishHostFrame();
+      window.STASIS_HOST = Object.freeze({
+        invoke(name, ...args) {
+          const record = hostFunctions.get(name);
+          if (!record) throw new Error(`host export '${name}' is not declared`);
+          if (args.length !== record.signature.parameters.length) throw new Error("host export argument count mismatch");
+          const values = args.map((value, index) => {
+            const type = record.signature.parameters[index];
+            if (type === "bool") {
+              if (typeof value !== "boolean") throw new Error("host export requires bool argument");
+              return value ? 1 : 0;
+            }
+            if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647) {
+              throw new Error("host export requires i32 argument");
+            }
+            return value;
+          });
+          return instance.exports[record.symbol](...values);
+        }
+      });
+      if (typeof window.STASIS_HOST_READY === "function") await window.STASIS_HOST_READY(window.STASIS_HOST);
       if (replayModule) {
         replayController = replayModule.createReplayController(replayBytes, {
           packageIdentity: game.replayIdentity,

@@ -3939,6 +3939,7 @@ fn emit_engine_bundle_runtime_bridge_object(
     function_aliases: &[PackagedFunctionAlias],
     render_alias: Option<&PackagedRenderAlias>,
     string_literals: &[EngineBundleManifestStringLiteralRow],
+    host_exports: Option<&stasis_compiler::host_exports::HostExports>,
 ) -> Result<PathBuf, String> {
     let source_path = backend
         .aot_artifact_root
@@ -3951,10 +3952,22 @@ fn emit_engine_bundle_runtime_bridge_object(
         .last_program_snapshot
         .as_ref()
         .map(ProgramSnapshot::replay_compatibility);
-    let source = build_engine_bundle_runtime_bridge_source_with_snapshot(
+    let function_symbols: Vec<String> = function_symbols
+        .iter()
+        .filter(|symbol| {
+            host_exports.is_none_or(|exports| {
+                !exports
+                    .functions
+                    .iter()
+                    .any(|record| &record.target_symbol == *symbol)
+            })
+        })
+        .cloned()
+        .collect();
+    let mut source = build_engine_bundle_runtime_bridge_source_with_snapshot(
         &backend.aot_compile_config.target,
         runtime_fields,
-        function_symbols,
+        &function_symbols,
         function_aliases,
         render_alias,
         string_literals,
@@ -3963,6 +3976,9 @@ fn emit_engine_bundle_runtime_bridge_object(
             .map(|compatibility| &compatibility.state_snapshot)
             .filter(|snapshot| replay_snapshot_bridge_can_emit(snapshot)),
     )?;
+    if let Some(exports) = host_exports {
+        source.push_str(&exports.c_wrappers()?);
+    }
     std::fs::write(&source_path, source).map_err(|error| {
         format!(
             "failed to write engine bundle runtime bridge source {}: {error}",
@@ -4340,6 +4356,11 @@ fn package_engine_bundle_monolithic_desktop(
         0,
         replay_state_snapshot.as_ref(),
     )?;
+    std::fs::copy(
+        aot_root.join("stasis_host_exports.h"),
+        output_exe.with_extension("host_exports.h"),
+    )
+    .map_err(|error| format!("failed to publish host export header: {error}"))?;
     let replay_identity_header = aot_root.join("published_replay_identity.h");
     let replay_identity_source = aot_root.join("published_replay_identity.c");
     let portable_replay_compatibility = crate::packaged_replay_compatibility(
@@ -4699,6 +4720,16 @@ fn package_engine_bundle_release(
             desktop_network,
         );
     }
+    let host_manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&bundle.manifest_path).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let host_exports = stasis_compiler::host_exports::HostExports::from_manifest(&host_manifest)?;
+    std::fs::write(
+        packaged_output_exe.with_extension("host_exports.h"),
+        host_exports.header()?,
+    )
+    .map_err(|error| error.to_string())?;
     let mut function_aliases = vec![PackagedFunctionAlias {
         alias: "main",
         target_symbol: entry_symbol.clone(),
@@ -4720,6 +4751,12 @@ fn package_engine_bundle_release(
     }
 
     let mut export_symbols: BTreeSet<String> = BTreeSet::new();
+    export_symbols.extend(
+        host_exports
+            .functions
+            .iter()
+            .map(|record| record.symbol.clone()),
+    );
     export_symbols.insert(entry_symbol.clone());
     export_symbols.insert("main".to_string());
     export_symbols.insert("stasis_aot_bind_runtime_globals".to_string());
@@ -4792,6 +4829,7 @@ fn package_engine_bundle_release(
         &function_aliases,
         render_alias.as_ref(),
         &string_literals,
+        Some(&host_exports),
     )?;
     let mut object_paths: Vec<PathBuf> = bundle.object_paths().cloned().collect();
     object_paths.push(bridge_object);
@@ -7046,6 +7084,7 @@ mod tests {
             &function_aliases,
             None,
             manifest.string_literals.as_deref().unwrap_or_default(),
+            None,
         )
         .expect("compile Brickout runtime bridge");
 
@@ -7648,6 +7687,7 @@ function render(): i32 {
             &aliases,
             Some(&render_alias),
             manifest.string_literals.as_deref().unwrap_or_default(),
+            None,
         )
         .expect("compile production AOT lifecycle bridge");
         assert!(bridge_object.exists());
@@ -8132,6 +8172,7 @@ function render(): i32 {
             &aliases,
             None,
             &[],
+            None,
         )
         .expect("compile direct storage bridge");
         let mut objects = bundle.object_paths().cloned().collect::<Vec<_>>();
@@ -8238,6 +8279,7 @@ function render(): i32 {
             &aliases,
             None,
             &[],
+            None,
         )
         .expect("compile runtime bridge");
         let mut objects = bundle.object_paths().cloned().collect::<Vec<_>>();

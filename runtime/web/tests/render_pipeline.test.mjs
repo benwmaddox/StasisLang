@@ -411,7 +411,7 @@ test("orientation and DPR settlement reuse decoded sprite ownership without tier
   runtime.frame();
   assert.equal(runtime.body.dataset.spriteRasterCount, "1");
   assert.equal(runtime.body.dataset.spriteDecodedCount, "1");
-  assert.equal(runtime.body.dataset.assetCacheBytes, String(16 * 16 * 4));
+  assert.equal(runtime.body.dataset.assetCacheBytes, String(32 * 32 * 4));
 
   runtime.setPresentation(960, 480, 1);
   runtime.frame();
@@ -440,7 +440,7 @@ test("orientation and DPR settlement reuse decoded sprite ownership without tier
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(runtime.body.dataset.spriteRasterCount, "4", "one real orientation transition prepares one tier");
   assert.equal(runtime.body.dataset.spriteDecodedCount, "1");
-  assert.equal(runtime.body.dataset.assetCacheBytes, String(16 * 16 * 4), "obsolete landscape tiers are released");
+  assert.equal(runtime.body.dataset.assetCacheBytes, String(32 * 32 * 4), "obsolete landscape tiers are released");
   runtime.frame();
   runtime.frame();
   assert.equal(runtime.body.dataset.spriteRasterCount, "4", "portrait settlement does not thrash");
@@ -1987,4 +1987,63 @@ test("performance HUD query opt-in starts development overlay visible", async ()
   assert.equal(runtime.hud.hidden, false);
   assert.equal(runtime.hud.dataset.visible, "true");
   assert.equal(runtime.hud["aria-hidden"], "false");
+});
+
+
+test("PNG sampling covers both backing axes including fractional and above-tier fits", async () => {
+  for (const [width, height, scale] of [[640, 360, 1], [1280, 720, 2], [800, 360, 1.25], [1280, 360, 2], [5500, 360, 5500 / 640]]) {
+    const runtime = await loadRuntime({ cssExtent: [width, height], sprites: 64,
+      spriteHandles: Array(64).fill(1), spriteSize: [16, 16], spriteUv: [0, 0, 1, 1],
+      imageExtent: [256, 256], assets: { "": "detail.png" },
+      assetMetadata: { "": { encoding: "png", prepared_width: 256, prepared_height: 256 } } });
+    runtime.frame();
+    const extent = Math.ceil(16 * scale);
+    assert.equal(runtime.body.dataset.assetPreparedWidth, String(extent));
+    assert.equal(runtime.body.dataset.assetPreparedHeight, String(extent));
+    assert.equal(runtime.body.dataset.assetCacheBytes, String(extent * extent * 4));
+    assert.deepEqual(runtime.stats.uploads.at(-1).slice(2, 4), [8, 10]);
+    assert.ok(runtime.stats.textureUploads.some(upload => upload.width === extent + 4 && upload.height === extent + 4));
+  }
+});
+
+test("PNG sampling resize and restoration preserve logical atlas geometry", async () => {
+  const runtime = await loadRuntime({ cssExtent: [1280, 360], sprites: 64,
+    spriteHandles: Array(64).fill(1), spriteSize: [16, 16], spriteUv: [0, 0, 1, 1],
+    imageExtent: [256, 256], assets: { "": "detail.png" },
+    assetMetadata: { "": { encoding: "png", prepared_width: 256, prepared_height: 256 } } });
+  runtime.frame();
+  const quad = runtime.stats.uploads.at(-1).slice(0, 4);
+  runtime.setPresentation(1920, 360, 1);
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  runtime.frame();
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "48");
+  assert.deepEqual(runtime.stats.uploads.at(-1).slice(0, 4), quad);
+  const count = runtime.body.dataset.spriteRasterCount;
+  runtime.setPresentation(1920, 720, 1);
+  runtime.frame();
+  await new Promise(resolve => setImmediate(resolve));
+  runtime.frame();
+  assert.equal(runtime.body.dataset.spriteRasterCount, count);
+  runtime.loseContext();
+  runtime.restoreContext();
+  runtime.frame();
+  assert.equal(runtime.body.dataset.assetPreparedWidth, "48");
+  assert.deepEqual(runtime.stats.uploads.at(-1).slice(0, 4), quad);
+  assert.ok(runtime.stats.textureUploads.filter(upload => upload.width === 52 && upload.height === 52).length >= 2);
+});
+
+
+test("PNG sheet crops stay in logical source coordinates at physical density", async () => {
+  for (const dpr of [1, 1.25, 2]) {
+    const runtime = await loadRuntime({ dpr, sprites: 64, spriteHandles: Array(64).fill(1),
+      spriteSize: [16, 16], spriteUv: [0.25, 0, 0.75, 1], imageExtent: [64, 64],
+      assets: { "": "sheet.png" },
+      assetMetadata: { "": { encoding: "png", prepared_width: 64, prepared_height: 64 } } });
+    runtime.frame();
+    const uv = runtime.stats.uploads.at(-1).slice(4, 8);
+    assert.equal(Math.round((uv[2] - uv[0]) * 512), 8 * dpr);
+    assert.equal(Math.round((uv[3] - uv[1]) * 512), 16 * dpr);
+  }
 });

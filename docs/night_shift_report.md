@@ -437,3 +437,61 @@ the required native desktop generation/import workflow.
 - Visual evidence: not applicable; fixture isolation change, with existing pixel assertions exercised by the launch test.
 - Theory gained: copying a developer sample must exclude generated output before testing package creation; the package command correctly refuses pre-existing output.
 - Good: the exact failed launch test now completes successfully. Bad: local generated artifacts obscured the source-only fixture assumption. Adjustment: reuse source-only fixture setup and disclose independent baseline limits.
+
+
+## 2026-09-23 - #640 Web PNG physical sampling (partial)
+
+Prepare sprite pixels from both framebuffer axes, retain actual scales above
+8x, and keep sheet crops in logical source coordinates. Separate sprite sampling
+invalidation preserves sufficient cached resources across smaller-axis changes.
+213 Web tests pass; real Chrome before/after, 1x/2x/fractional and pixel-identical
+context restoration passed. Full repo baseline stops at the unrelated missing
+CLI build fingerprint in `desktop_hot_swap_generation_seam`.
+
+Visual evidence: inspected `docs/evidence/task640-web-png/{before,after,one,two,fractional,restored}.png`;
+fine detail improves, crops remain stable, and restoration matches. Native,
+Workshop, Apple and physical-device acceptance remains incomplete. See
+`docs/validation/png_physical_raster_640.md` for the backend audit and limits.
+
+Theory gained: physical sampling dimensions and logical source crop dimensions
+are separate invariants; unchanged destination geometry alone cannot prove crop
+parity. Visual review caught the distinction and the sheet test now enforces it.
+
+
+## 2026-09-23 - Maddox #689 declared packaged host exports
+
+Added parser-owned `@host_export(name)` with ABI-v1 scalar signatures, retained
+reachability, stable `stasis_host_v1_*` symbols, typed manifest provenance and C
+headers. JIT, Web, Windows packaging and shared mobile/monolithic bindings use
+the same declaration. Android and browser adapters initialize host state after
+main and before the first tick/frame. Existing lifecycle/layout versions remain
+unchanged. Live swaps reject removal or signature changes of accepted exports.
+
+Tests first observed missing JIT symbols, missing native manifest metadata and
+missing browser startup invocation. Real JIT and Wasm execution now observe the
+setter; generated native AOT objects execute through the mobile C runtime and
+export the stable symbol in the Windows PE table. Android bridge ordering and
+ABI rejection/rollback checks pass. Runtime and host contract audits retain
+810 and 975 comparisons. Focused commands are recorded in the PR.
+
+Baseline `tools/validate_repo.sh` reached workspace integration tests then
+stopped because the CLI lacked the installed runtime's build fingerprint.
+Rebuilding/signing the native runtime and rebuilding the CLI with matching
+explicit provenance restored the exact failing desktop hot-swap test (4/4).
+The full aggregate was not rerun; final validation uses focused bounded gates.
+No Android device/emulator run was performed for this scalar ABI change.
+
+Visual evidence: not applicable.
+
+Theory gained: a host export is a source-owned reachability and ABI contract,
+while FnId/object names remain compiler implementation details. The generated
+mobile executable observes a setter between main and tick, and Web/JIT observe
+the same scalar lanes. An adjacent host capability setter can use the same
+annotation and adapters without a game-specific compiler path.
+
+Good: shared typed metadata drives native headers/wrappers and backend export
+selection; executable tests check the boundary rather than only string output.
+Bad: the baseline initially paired a freshly built CLI with mismatched installed
+runtime provenance, and two test-only metadata constructors required updating.
+Adjustment: establish the matching signed CLI/runtime pair before aggregate
+gates and compile metadata-owning library tests early in schema changes.
