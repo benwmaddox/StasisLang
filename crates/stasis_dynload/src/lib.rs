@@ -1040,6 +1040,43 @@ pub fn invoke_i32_i32_i32_to_i32(
     }
 }
 
+pub fn invoke_i32_i32_to_void(address: usize, arg0: i32, arg1: i32) -> Result<(), String> {
+    if address == 0 {
+        return Err("cannot invoke null function pointer".to_string());
+    }
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
+    let _execution = JitExecutionGuard::enter();
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32, i32) = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32, i32) = unsafe { std::mem::transmute(address) };
+    callback(arg0, arg1);
+    Ok(())
+}
+
+pub fn invoke_i32_i32_i32_to_void(
+    address: usize,
+    arg0: i32,
+    arg1: i32,
+    arg2: i32,
+) -> Result<(), String> {
+    if address == 0 {
+        return Err("cannot invoke null function pointer".to_string());
+    }
+    let _dispatch_lock = jit_dispatch_lock()
+        .lock()
+        .expect("jit dispatch lock mutex poisoned");
+    let _execution = JitExecutionGuard::enter();
+    #[cfg(windows)]
+    let callback: extern "system" fn(i32, i32, i32) = unsafe { std::mem::transmute(address) };
+    #[cfg(not(windows))]
+    let callback: extern "C" fn(i32, i32, i32) = unsafe { std::mem::transmute(address) };
+    callback(arg0, arg1, arg2);
+    Ok(())
+}
+
 pub fn invoke_i32_i32_i32_i32_to_void(
     address: usize,
     arg0: i32,

@@ -190,6 +190,7 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
             "/D_CRT_SECURE_NO_WARNINGS",
         ])
         .arg(format!("/I{}", runtime.display()))
+        .arg(format!("/I{}", bundle_dir.display()))
         .arg(runtime.join("tests/stasis_generated_mobile_integration.c"))
         .arg(runtime.join("stasis_mobile_runtime.c"))
         .arg(runtime.join("stasis_replay_consumer.c"))
@@ -217,6 +218,14 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         String::from_utf8_lossy(&output.stderr)
     );
     sign_output_artifact_if_configured(&executable).expect("sign generated mobile runtime harness");
+    use object::Object;
+    let executable_bytes = fs::read(&executable).expect("read linked PE");
+    let pe = object::File::parse(executable_bytes.as_slice()).expect("parse linked PE");
+    assert!(pe
+        .exports()
+        .expect("PE exports")
+        .iter()
+        .any(|export| export.name() == b"stasis_host_v1_set_access"));
 
     let run = Command::new(&executable)
         .current_dir(&tree.0)
@@ -229,6 +238,7 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         String::from_utf8_lossy(&run.stderr)
     );
     let stdout = String::from_utf8(run.stdout).expect("UTF-8 harness output");
+    assert!(stdout.contains("host export observed by first mobile tick: 47"));
     let trace = stdout
         .split_whitespace()
         .find_map(|field| field.strip_prefix("trace="))

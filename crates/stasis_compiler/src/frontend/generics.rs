@@ -786,6 +786,16 @@ impl Expansion {
             };
             for declaration in &externs {
                 reject_reserved_declaration_name(&file.path, "extern function", &declaration.name)?;
+                if declaration
+                    .annotations
+                    .iter()
+                    .any(|annotation| annotation.name == "host_export")
+                {
+                    return Err(ExpansionError::for_file(
+                        file.path.clone(),
+                        "@host_export requires a guest body, not an extern declaration".to_string(),
+                    ));
+                }
             }
             if let Some(extern_decl) = externs
                 .iter()
@@ -804,6 +814,8 @@ impl Expansion {
             };
             for function in functions {
                 reject_reserved_declaration_name(&file.path, "function", &function.name)?;
+                crate::host_exports::parse(&function)
+                    .map_err(|message| ExpansionError::for_file(file.path.clone(), message))?;
                 if !function.generic_parameters.is_empty() {
                     return Err(ExpansionError::for_file(
                         file.path.clone(),

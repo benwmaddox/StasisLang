@@ -456,3 +456,42 @@ Workshop, Apple and physical-device acceptance remains incomplete. See
 Theory gained: physical sampling dimensions and logical source crop dimensions
 are separate invariants; unchanged destination geometry alone cannot prove crop
 parity. Visual review caught the distinction and the sheet test now enforces it.
+
+
+## 2026-09-23 - Maddox #689 declared packaged host exports
+
+Added parser-owned `@host_export(name)` with ABI-v1 scalar signatures, retained
+reachability, stable `stasis_host_v1_*` symbols, typed manifest provenance and C
+headers. JIT, Web, Windows packaging and shared mobile/monolithic bindings use
+the same declaration. Android and browser adapters initialize host state after
+main and before the first tick/frame. Existing lifecycle/layout versions remain
+unchanged. Live swaps reject removal or signature changes of accepted exports.
+
+Tests first observed missing JIT symbols, missing native manifest metadata and
+missing browser startup invocation. Real JIT and Wasm execution now observe the
+setter; generated native AOT objects execute through the mobile C runtime and
+export the stable symbol in the Windows PE table. Android bridge ordering and
+ABI rejection/rollback checks pass. Runtime and host contract audits retain
+810 and 975 comparisons. Focused commands are recorded in the PR.
+
+Baseline `tools/validate_repo.sh` reached workspace integration tests then
+stopped because the CLI lacked the installed runtime's build fingerprint.
+Rebuilding/signing the native runtime and rebuilding the CLI with matching
+explicit provenance restored the exact failing desktop hot-swap test (4/4).
+The full aggregate was not rerun; final validation uses focused bounded gates.
+No Android device/emulator run was performed for this scalar ABI change.
+
+Visual evidence: not applicable.
+
+Theory gained: a host export is a source-owned reachability and ABI contract,
+while FnId/object names remain compiler implementation details. The generated
+mobile executable observes a setter between main and tick, and Web/JIT observe
+the same scalar lanes. An adjacent host capability setter can use the same
+annotation and adapters without a game-specific compiler path.
+
+Good: shared typed metadata drives native headers/wrappers and backend export
+selection; executable tests check the boundary rather than only string output.
+Bad: the baseline initially paired a freshly built CLI with mismatched installed
+runtime provenance, and two test-only metadata constructors required updating.
+Adjustment: establish the matching signed CLI/runtime pair before aggregate
+gates and compile metadata-owning library tests early in schema changes.

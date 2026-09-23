@@ -87,6 +87,10 @@ impl WasmProcess {
         self.compiler.upsert_file(path, content);
     }
 
+    pub fn host_exports(&self) -> crate::host_exports::HostExports {
+        crate::host_exports::HostExports::from_compiler(&self.compiler)
+    }
+
     pub fn module_bytes(&self) -> &[u8] {
         &self.module
     }
@@ -409,14 +413,16 @@ fn physical_param_count(
 }
 
 fn is_host_export(function: &FunctionMeta) -> bool {
-    matches!(
-        function.name.as_str(),
-        "main"
-            | "render"
-            | "on_code_swap"
-            | "gfx_cmd_construction_reset"
-            | "gfx_cmd_construction_finish"
-    ) || matches_root(function, "tick")
+    function.host_export.is_some()
+        || matches!(
+            function.name.as_str(),
+            "main"
+                | "render"
+                | "on_code_swap"
+                | "gfx_cmd_construction_reset"
+                | "gfx_cmd_construction_finish"
+        )
+        || matches_root(function, "tick")
 }
 
 #[derive(Debug, Clone)]
@@ -1426,7 +1432,7 @@ fn encode_module(
         if !is_host_export(function) {
             continue;
         }
-        string(&function.name, &mut export_section);
+        string(&crate::host_exports::symbol(function), &mut export_section);
         export_section.push(0);
         uleb((imports.len() + index) as u32, &mut export_section);
     }

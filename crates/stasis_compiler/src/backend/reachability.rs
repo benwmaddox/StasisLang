@@ -19,6 +19,12 @@ pub(crate) fn compute_reachable_function_ids(
     required_emit_roots: &[String],
 ) -> BTreeSet<FunctionId> {
     let mut roots: Vec<FunctionId> = Vec::new();
+    roots.extend(
+        functions
+            .iter()
+            .filter(|function| function.host_export.is_some())
+            .map(|function| function.id),
+    );
     for root_name in DEFAULT_ROOTS {
         roots.extend(
             functions

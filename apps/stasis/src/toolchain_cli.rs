@@ -6363,6 +6363,7 @@ fn web_runtime_config(
         "globals": globals,
         "assets": {},
         "collectionViewAbiVersion": COLLECTION_VIEW_ABI_VERSION,
+        "host_exports": process.host_exports(),
         "renderContractVersion": if render_construction_lifecycle_version == 1 { GFX_CMD_VERSION } else { GFX_CMD_LEGACY_VERSION },
         "renderConstructionLifecycleVersion": render_construction_lifecycle_version,
         "replayCompatibility": replay_compatibility,

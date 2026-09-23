@@ -1,3 +1,4 @@
+#include "stasis_host_exports.h"
 #include "stasis_mobile_runtime.h"
 #include "stasis_mobile_aot_runtime.h"
 #include "stasis_render_contract.h"
@@ -476,6 +477,15 @@ int main(void) {
     CHECK(submitted_frames == 0);
     stasis_mobile_runtime_shutdown();
     CHECK(shutdowns == 6);
+    next_bind_mode = 0;
+    CHECK(stasis_mobile_runtime_initialize(&config, &entries) == STASIS_MOBILE_RUNTIME_OK);
+    CHECK(stasis_jit_global_i32_load(hash_path("score")) == 10);
+    stasis_host_v1_set_access(20, 22, 1);
+    CHECK(stasis_jit_global_i32_load(hash_path("score")) == 42);
+    CHECK(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_OK);
+    CHECK(stasis_jit_global_i32_load(hash_path("score")) == 47);
+    stasis_mobile_runtime_shutdown();
+    printf("host export observed by first mobile tick: 47\n");
     printf("stasis.seam_test.v1 IT-013 order=123 paused_poll=1 reinit=1 main_stop=11 tick_stop=22 render_stop=33 frames_after_failures=0\n");
     return 0;
 }

@@ -4214,8 +4214,45 @@
       } else {
         writeHostFrame(performance.now());
       }
+      const declaredHostExports = game.host_exports ?? { abi_version: 1, functions: [] };
+      if (declaredHostExports.abi_version !== 1 || !Array.isArray(declaredHostExports.functions)) {
+        throw new Error("unsupported host export ABI version");
+      }
+      const hostFunctions = new Map();
+      for (const record of declaredHostExports.functions) {
+        const signature = record.signature;
+        if (!signature || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(signature.name)
+          || record.symbol !== `stasis_host_v1_${signature.name}`
+          || hostFunctions.has(signature.name) || typeof instance.exports[record.symbol] !== "function"
+          || !Array.isArray(signature.parameters) || signature.parameters.length > 3
+          || signature.parameters.some(type => type !== "i32" && type !== "bool")
+          || (signature.return_type !== "void" && signature.return_type !== "i32")) {
+          throw new Error("invalid declared host export");
+        }
+        hostFunctions.set(signature.name, record);
+      }
       const mainResult = instance.exports.main();
       finishHostFrame();
+      window.STASIS_HOST = Object.freeze({
+        invoke(name, ...args) {
+          const record = hostFunctions.get(name);
+          if (!record) throw new Error(`host export '${name}' is not declared`);
+          if (args.length !== record.signature.parameters.length) throw new Error("host export argument count mismatch");
+          const values = args.map((value, index) => {
+            const type = record.signature.parameters[index];
+            if (type === "bool") {
+              if (typeof value !== "boolean") throw new Error("host export requires bool argument");
+              return value ? 1 : 0;
+            }
+            if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647) {
+              throw new Error("host export requires i32 argument");
+            }
+            return value;
+          });
+          return instance.exports[record.symbol](...values);
+        }
+      });
+      if (typeof window.STASIS_HOST_READY === "function") await window.STASIS_HOST_READY(window.STASIS_HOST);
       if (replayModule) {
         replayController = replayModule.createReplayController(replayBytes, {
           packageIdentity: game.replayIdentity,

@@ -46,6 +46,7 @@ pub struct FunctionMeta {
     pub return_type: TypeId,
     /// Requests body substitution at eligible call sites. The real function is still emitted.
     pub inline: bool,
+    pub host_export: Option<crate::host_exports::HostExport>,
     /// Optional compile-time assertion over the function's reachable effects.
     pub effect_contract: Option<Vec<String>>,
     /// Caller-owned collection preflights required by this function.
@@ -728,6 +729,7 @@ impl Compiler {
                     params: indexed_function.params,
                     return_type: indexed_function.return_type,
                     inline: indexed_function.inline,
+                    host_export: indexed_function.host_export,
                     effect_contract: indexed_function.effect_contract,
                     requires_contract: indexed_function.requires_contract,
                     dependencies: Vec::new(),
@@ -737,6 +739,17 @@ impl Compiler {
                         || body_changed
                         || reverse_invalidated.contains(&self.files[file_id].path),
                 });
+            }
+        }
+        let mut host_names = BTreeSet::new();
+        for function in &self.functions {
+            if let Some(export) = &function.host_export {
+                if !host_names.insert(&export.name) {
+                    return Err(CompileError::Frontend(format!(
+                        "duplicate host export '{}'",
+                        export.name
+                    )));
+                }
             }
         }
         self.module_resolution =

@@ -1229,14 +1229,14 @@ impl JitProcess {
                 .try_into()
                 .expect("layout digest prefix has eight bytes"),
         );
-        let host_export_signatures = self
+        let host_export_signatures: BTreeMap<String, String> = self
             .compiler
             .functions()
             .iter()
             .filter(|function| self.is_host_export(function))
             .map(|function| {
                 (
-                    function.name.clone(),
+                    crate::host_exports::symbol(function),
                     format!("{:?}->{:?}", function.params, function.return_type),
                 )
             })
@@ -1250,7 +1250,7 @@ impl JitProcess {
                 staged_artifacts
                     .iter()
                     .find(|artifact| artifact.function_id == function.id)
-                    .map(|artifact| (function.name.clone(), artifact.code_ptr))
+                    .map(|artifact| (crate::host_exports::symbol(function), artifact.code_ptr))
             })
             .collect();
         let emitted_clif_bytes = patch_artifacts
@@ -1268,6 +1268,15 @@ impl JitProcess {
             .map(|arena| arena.executable_bytes)
             .sum();
         let total_jit_bytes = retained_jit_bytes + executable_bytes;
+        if let Some(previous) = &self.generation_metadata {
+            for (symbol, signature) in &previous.host_export_signatures {
+                if symbol.starts_with("stasis_host_v1_")
+                    && host_export_signatures.get(symbol) != Some(signature)
+                {
+                    return Err(crate::compiler::CompileError::Backend(format!("host export '{symbol}' ABI changed; restart with a new package or preserve its signature")));
+                }
+            }
+        }
         let staged_metadata = JitGenerationMetadata {
             source_revision: files_fingerprint,
             layout_hash,
@@ -1347,20 +1356,81 @@ impl JitProcess {
         self.program_snapshot.as_deref()
     }
 
+    /// Invoke only a source-declared export, between lifecycle calls.
+    pub fn invoke_host_export(
+        &self,
+        name: &str,
+        arguments: &[crate::host_exports::HostValue],
+    ) -> Result<Option<i32>, String> {
+        use crate::host_exports::HostValue;
+        let function = self
+            .compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function
+                    .host_export
+                    .as_ref()
+                    .is_some_and(|export| export.name == name)
+            })
+            .ok_or_else(|| format!("host export '{name}' not found"))?;
+        let export = function.host_export.as_ref().expect("selected host export");
+        if export.parameters.len() != arguments.len() {
+            return Err("host export argument count mismatch".to_string());
+        }
+        let args: Vec<i32> = export
+            .parameters
+            .iter()
+            .zip(arguments)
+            .map(|(ty, value)| match (ty.as_str(), value) {
+                ("i32", HostValue::I32(value)) => Ok(*value),
+                ("bool", HostValue::Bool(value)) => Ok(i32::from(*value)),
+                _ => Err("host export argument type mismatch".to_string()),
+            })
+            .collect::<Result<_, _>>()?;
+        let symbol = export.symbol();
+        let address = *self
+            .generation_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.host_export_code_ptrs.get(&symbol))
+            .ok_or_else(|| format!("host export '{name}' has no accepted code"))?
+            as usize;
+        if export.return_type == "void" {
+            match args.as_slice() {
+                [] => stasis_dynload::invoke_noarg_void(address)?,
+                [a] => stasis_dynload::invoke_i32_to_void(address, *a)?,
+                [a, b] => stasis_dynload::invoke_i32_i32_to_void(address, *a, *b)?,
+                [a, b, c] => stasis_dynload::invoke_i32_i32_i32_to_void(address, *a, *b, *c)?,
+                _ => return Err("unsupported host export argument count".to_string()),
+            }
+            Ok(None)
+        } else {
+            Ok(Some(match args.as_slice() {
+                [] => stasis_dynload::invoke_noarg_i32(address)?,
+                [a] => stasis_dynload::invoke_i32_to_i32(address, *a)?,
+                [a, b] => stasis_dynload::invoke_i32_i32_to_i32(address, *a, *b)?,
+                [a, b, c] => stasis_dynload::invoke_i32_i32_i32_to_i32(address, *a, *b, *c)?,
+                _ => return Err("unsupported host export argument count".to_string()),
+            }))
+        }
+    }
+
     pub fn generation_metadata(&self) -> Option<&JitGenerationMetadata> {
         self.generation_metadata.as_ref()
     }
 
     fn is_host_export(&self, function: &FunctionMeta) -> bool {
         function.requires_contract.is_none()
-            && (matches!(
-                function.name.as_str(),
-                "main"
-                    | "render"
-                    | "on_code_swap"
-                    | "gfx_cmd_construction_reset"
-                    | "gfx_cmd_construction_finish"
-            ) || matches_root(function, "tick")
+            && (function.host_export.is_some()
+                || matches!(
+                    function.name.as_str(),
+                    "main"
+                        | "render"
+                        | "on_code_swap"
+                        | "gfx_cmd_construction_reset"
+                        | "gfx_cmd_construction_finish"
+                )
+                || matches_root(function, "tick")
                 || self
                     .required_emit_roots
                     .iter()
@@ -2342,7 +2412,9 @@ impl JitProcess {
             .iter()
             .filter(|function| self.is_host_export(function))
         {
-            *counts.entry(function.name.as_str()).or_insert(0usize) += 1;
+            *counts
+                .entry(crate::host_exports::symbol(function))
+                .or_insert(0usize) += 1;
         }
         if let Some((name, count)) = counts.into_iter().find(|(_, count)| *count != 1) {
             return Err(format!(

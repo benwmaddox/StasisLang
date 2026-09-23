@@ -21,6 +21,7 @@ pub struct IndexedFunction {
     pub param_type_names: Vec<String>,
     pub return_type: TypeId,
     pub inline: bool,
+    pub host_export: Option<crate::host_exports::HostExport>,
     pub effect_contract: Option<Vec<String>>,
     pub requires_contract: Option<Vec<String>>,
     pub dependencies: Vec<IndexedCallDependency>,
@@ -89,6 +90,9 @@ pub fn index_file_with_diagnostic(
                 diagnostic_for_function(&function, message, signature_range.clone())
             })?;
         let name_hash = hash_text(&function.name);
+        let host_export = crate::host_exports::parse(&function).map_err(|message| {
+            diagnostic_for_function(&function, message, signature_range.clone())
+        })?;
         let inline = function
             .annotations
             .iter()
@@ -100,7 +104,12 @@ pub fn index_file_with_diagnostic(
             parse_requires_contract(&function.annotations).map_err(|message| {
                 diagnostic_for_function(&function, message, signature_range.clone())
             })?;
-        let signature_hash = hash_signature(name_hash, &params, return_type, inline);
+        let mut signature_hash = hash_signature(name_hash, &params, return_type, inline);
+        if let Some(export) = &host_export {
+            signature_hash = signature_hash
+                .wrapping_mul(1099511628211)
+                .wrapping_add(hash_text(&export.symbol()));
+        }
         let body_text = source.get(function.body_range.clone()).ok_or_else(|| {
             diagnostic_for_function(
                 &function,
@@ -138,6 +147,7 @@ pub fn index_file_with_diagnostic(
             param_type_names,
             return_type,
             inline,
+            host_export,
             effect_contract,
             requires_contract,
             dependencies,
