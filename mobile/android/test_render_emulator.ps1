@@ -567,7 +567,7 @@ try {
     if (-not $SkipBuild) {
         $gradle = Resolve-Gradle
         Invoke-BoundedScript (Join-Path $scriptRoot "build_debug.ps1") @(
-            "-RenderAcceptance", "-SkipCodexNative",
+            "-RenderAcceptance",
             "-NoGradleDaemon", "-GradlePath", $gradle
         ) "build-workshop" | Out-Null
         Assert-In-Time "Workshop build"

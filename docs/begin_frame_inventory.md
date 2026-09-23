@@ -38,9 +38,6 @@ described by the current design, not a new guest lowering.
 
 - Line 174: `begin_frame();`
 
-## [apps/stasis/src/toolchain_cli/gauntlet.rs](../apps/stasis/src/toolchain_cli/gauntlet.rs)
-
-- Line 799: `begin_frame();`
 
 ## [apps/stasis/tests/desktop_screenshot_capture.rs](../apps/stasis/tests/desktop_screenshot_capture.rs)
 

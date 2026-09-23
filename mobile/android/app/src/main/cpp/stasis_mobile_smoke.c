@@ -85,13 +85,6 @@ typedef int (*stasis_android_external_url_host_fn)(
 typedef void (*stasis_android_bridge_set_external_url_host_fn)(
         stasis_android_external_url_host_fn callback, void *context);
 typedef void (*stasis_android_bridge_external_url_action_fn)(void);
-typedef char *(*stasis_codex_android_string_fn)(const char *codex_home);
-typedef uint64_t (*stasis_codex_android_begin_response_fn)(void);
-typedef void (*stasis_codex_android_cancel_response_fn)(void);
-typedef char *(*stasis_codex_android_response_fn)(const char *codex_home, const char *request_json, uint64_t generation);
-typedef char *(*stasis_codex_android_ai_contract_fn)(void);
-typedef int (*stasis_codex_android_initialize_fn)(void *env, void *context);
-typedef void (*stasis_codex_android_free_string_fn)(char *value);
 typedef struct RustBridgeApi {
     void *handle;
     stasis_android_bridge_version_fn version;
@@ -162,22 +155,6 @@ static int workshop_open_external_url(
     (*env)->DeleteLocalRef(env, bytes);
     return accepted == JNI_TRUE ? 1 : 0;
 }
-typedef struct CodexBridgeApi {
-    void *handle;
-    stasis_codex_android_initialize_fn initialize;
-    stasis_codex_android_string_fn begin_device_login;
-    stasis_codex_android_string_fn account_status;
-    stasis_codex_android_string_fn account_rate_limits;
-    stasis_codex_android_begin_response_fn begin_response;
-    stasis_codex_android_cancel_response_fn cancel_response;
-    stasis_codex_android_response_fn response;
-    stasis_codex_android_ai_contract_fn ai_contract;
-    stasis_codex_android_free_string_fn free_string;
-    int attempted;
-} CodexBridgeApi;
-
-static CodexBridgeApi codex_bridge_api = {0};
-
 typedef struct StasisJniFrameDescriptor {
     const char *lane;
     size_t byte_capacity;
@@ -501,128 +478,6 @@ Java_com_stasislang_workshop_MainActivity_nativeSetStorageRoot(
     }
     (*env)->ReleaseStringUTFChars(env, storage_root, root);
     return configured;
-}
-
-static CodexBridgeApi *load_codex_bridge_api(void) {
-    if (codex_bridge_api.attempted) {
-        return codex_bridge_api.handle == NULL ? NULL : &codex_bridge_api;
-    }
-
-    codex_bridge_api.attempted = 1;
-    codex_bridge_api.handle = dlopen("libstasis_codex_android.so", RTLD_NOW | RTLD_LOCAL);
-    if (codex_bridge_api.handle == NULL) {
-        __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG,
-                "Phone-native Codex bridge unavailable: %s", dlerror());
-        return NULL;
-    }
-    codex_bridge_api.begin_device_login = (stasis_codex_android_string_fn)dlsym(
-            codex_bridge_api.handle, "stasis_codex_android_begin_device_login");
-    codex_bridge_api.initialize = (stasis_codex_android_initialize_fn)dlsym(
-            codex_bridge_api.handle, "stasis_codex_android_initialize");
-    codex_bridge_api.account_status = (stasis_codex_android_string_fn)dlsym(
-            codex_bridge_api.handle, "stasis_codex_android_account_status");
-    codex_bridge_api.account_rate_limits = (stasis_codex_android_string_fn)dlsym(
-            codex_bridge_api.handle, "stasis_codex_android_account_rate_limits");
-    codex_bridge_api.begin_response = (stasis_codex_android_begin_response_fn)dlsym(
-            codex_bridge_api.handle, "stasis_codex_android_begin_response");
-    codex_bridge_api.cancel_response = (stasis_codex_android_cancel_response_fn)dlsym(
-            codex_bridge_api.handle, "stasis_codex_android_cancel_response");
-    codex_bridge_api.response = (stasis_codex_android_response_fn)dlsym(
-            codex_bridge_api.handle, "stasis_codex_android_response");
-    codex_bridge_api.ai_contract = (stasis_codex_android_ai_contract_fn)dlsym(
-            codex_bridge_api.handle, "stasis_codex_android_ai_contract");
-    codex_bridge_api.free_string = (stasis_codex_android_free_string_fn)dlsym(
-            codex_bridge_api.handle, "stasis_codex_android_free_string");
-    if (codex_bridge_api.initialize == NULL ||
-        codex_bridge_api.begin_device_login == NULL ||
-        codex_bridge_api.account_status == NULL ||
-        codex_bridge_api.account_rate_limits == NULL ||
-        codex_bridge_api.begin_response == NULL ||
-        codex_bridge_api.cancel_response == NULL ||
-        codex_bridge_api.response == NULL ||
-        codex_bridge_api.free_string == NULL) {
-        __android_log_print(ANDROID_LOG_WARN, STASIS_ANDROID_LOG_TAG,
-                "Phone-native Codex bridge missing required symbols");
-        dlclose(codex_bridge_api.handle);
-        memset(&codex_bridge_api, 0, sizeof(codex_bridge_api));
-        codex_bridge_api.attempted = 1;
-        return NULL;
-    }
-    return &codex_bridge_api;
-}
-
-static jstring call_codex_bridge(JNIEnv *env, jstring codex_home, int begin_login) {
-    if (codex_home == NULL) {
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Codex home was null\"}");
-    }
-    const char *home = (*env)->GetStringUTFChars(env, codex_home, NULL);
-    if (home == NULL) {
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Codex home was unreadable\"}");
-    }
-    CodexBridgeApi *bridge = load_codex_bridge_api();
-    if (bridge == NULL) {
-        (*env)->ReleaseStringUTFChars(env, codex_home, home);
-        return (*env)->NewStringUTF(env, "{\"status\":\"unavailable\",\"error\":\"Phone-native Codex library is not packaged\"}");
-    }
-    char *response = begin_login ? bridge->begin_device_login(home) : bridge->account_status(home);
-    (*env)->ReleaseStringUTFChars(env, codex_home, home);
-    if (response == NULL) {
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Phone-native Codex returned no response\"}");
-    }
-    jstring result = (*env)->NewStringUTF(env, response);
-    bridge->free_string(response);
-    return result;
-}
-
-static jstring call_codex_rate_limits(JNIEnv *env, jstring codex_home) {
-    if (codex_home == NULL) {
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Codex home was null\"}");
-    }
-    const char *home = (*env)->GetStringUTFChars(env, codex_home, NULL);
-    if (home == NULL) {
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Codex home was unreadable\"}");
-    }
-    CodexBridgeApi *bridge = load_codex_bridge_api();
-    if (bridge == NULL) {
-        (*env)->ReleaseStringUTFChars(env, codex_home, home);
-        return (*env)->NewStringUTF(env, "{\"status\":\"unavailable\",\"error\":\"Phone-native Codex library is not packaged\"}");
-    }
-    char *response = bridge->account_rate_limits(home);
-    (*env)->ReleaseStringUTFChars(env, codex_home, home);
-    if (response == NULL) {
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Phone-native Codex returned no rate limits\"}");
-    }
-    jstring result = (*env)->NewStringUTF(env, response);
-    bridge->free_string(response);
-    return result;
-}
-
-static jstring call_codex_response(JNIEnv *env, jstring codex_home, jstring request_json, uint64_t generation) {
-    if (codex_home == NULL || request_json == NULL) {
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Codex request was null\"}");
-    }
-    const char *home = (*env)->GetStringUTFChars(env, codex_home, NULL);
-    const char *request = (*env)->GetStringUTFChars(env, request_json, NULL);
-    if (home == NULL || request == NULL) {
-        if (home != NULL) (*env)->ReleaseStringUTFChars(env, codex_home, home);
-        if (request != NULL) (*env)->ReleaseStringUTFChars(env, request_json, request);
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Codex request was unreadable\"}");
-    }
-    CodexBridgeApi *bridge = load_codex_bridge_api();
-    if (bridge == NULL) {
-        (*env)->ReleaseStringUTFChars(env, codex_home, home);
-        (*env)->ReleaseStringUTFChars(env, request_json, request);
-        return (*env)->NewStringUTF(env, "{\"status\":\"unavailable\",\"error\":\"Phone-native Codex library is not packaged\"}");
-    }
-    char *response = bridge->response(home, request, generation);
-    (*env)->ReleaseStringUTFChars(env, codex_home, home);
-    (*env)->ReleaseStringUTFChars(env, request_json, request);
-    if (response == NULL) {
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Phone-native Codex returned no response\"}");
-    }
-    jstring result = (*env)->NewStringUTF(env, response);
-    bridge->free_string(response);
-    return result;
 }
 
 static int try_rust_bridge_run_tick(const char *project_root, int touch_x, int touch_y, int touch_active, int screen_w, int screen_h, char *message, size_t message_size) {
@@ -980,80 +835,6 @@ Java_com_stasislang_workshop_MainActivity_nativeResolveFont(
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeCodexBeginDeviceLogin(
-        JNIEnv *env, jclass activity_class, jstring codex_home) {
-    (void)activity_class;
-    return call_codex_bridge(env, codex_home, 1);
-}
-
-JNIEXPORT jint JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeCodexInitialize(
-        JNIEnv *env, jclass activity_class, jobject context) {
-    (void)activity_class;
-    CodexBridgeApi *bridge = load_codex_bridge_api();
-    if (bridge == NULL || context == NULL) return -1;
-    return bridge->initialize(env, context);
-}
-
-JNIEXPORT jstring JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeCodexAccountStatus(
-        JNIEnv *env, jclass activity_class, jstring codex_home) {
-    (void)activity_class;
-    return call_codex_bridge(env, codex_home, 0);
-}
-
-JNIEXPORT jstring JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeCodexAccountRateLimits(
-        JNIEnv *env, jclass activity_class, jstring codex_home) {
-    (void)activity_class;
-    return call_codex_rate_limits(env, codex_home);
-}
-
-JNIEXPORT jstring JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeSharedAiContract(
-        JNIEnv *env, jclass activity_class) {
-    (void)activity_class;
-    CodexBridgeApi *bridge = load_codex_bridge_api();
-    if (bridge == NULL || bridge->ai_contract == NULL || bridge->free_string == NULL) {
-        return (*env)->NewStringUTF(env,
-                "{\"status\":\"error\",\"error\":\"shared AI contract unavailable\"}");
-    }
-    char *message = bridge->ai_contract();
-    if (message == NULL) {
-        return (*env)->NewStringUTF(env,
-                "{\"status\":\"error\",\"error\":\"shared AI contract returned no result\"}");
-    }
-    jstring result = (*env)->NewStringUTF(env, message);
-    bridge->free_string(message);
-    return result;
-}
-
-JNIEXPORT jstring JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeCodexResponse(
-        JNIEnv *env, jclass activity_class, jstring codex_home, jstring request_json, jlong generation) {
-    (void)activity_class;
-    return call_codex_response(env, codex_home, request_json, (uint64_t)generation);
-}
-
-JNIEXPORT jlong JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeCodexBeginResponse(
-        JNIEnv *env, jclass activity_class) {
-    (void)env;
-    (void)activity_class;
-    CodexBridgeApi *bridge = load_codex_bridge_api();
-    return bridge == NULL ? 0 : (jlong)bridge->begin_response();
-}
-
-JNIEXPORT void JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeCodexCancelResponse(
-        JNIEnv *env, jclass activity_class) {
-    (void)env;
-    (void)activity_class;
-    CodexBridgeApi *bridge = load_codex_bridge_api();
-    if (bridge != NULL) bridge->cancel_response();
-}
-
-JNIEXPORT jstring JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeCompileProject(JNIEnv *env, jclass activity_class, jstring project_root) {
     (void)activity_class;
     const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
@@ -1102,61 +883,6 @@ Java_com_stasislang_workshop_MainActivity_nativeSourceItems(
     return response;
 }
 
-JNIEXPORT jstring JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeFindReferences(
-        JNIEnv *env, jclass activity_class, jstring project_root, jstring symbol, jint limit) {
-    (void)activity_class;
-    RustBridgeApi *bridge = load_rust_bridge_api();
-    if (bridge == NULL || bridge->find_references == NULL) {
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Rust reference bridge unavailable\"}");
-    }
-    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
-    const char *reference_symbol = (*env)->GetStringUTFChars(env, symbol, NULL);
-    if (root == NULL || reference_symbol == NULL) {
-        if (root != NULL) (*env)->ReleaseStringUTFChars(env, project_root, root);
-        if (reference_symbol != NULL) (*env)->ReleaseStringUTFChars(env, symbol, reference_symbol);
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"unable to read reference lookup input\"}");
-    }
-    char *result = bridge->find_references(
-            root, "src/main.stasis", reference_symbol, limit < 1 ? 1u : (uintptr_t)limit);
-    (*env)->ReleaseStringUTFChars(env, project_root, root);
-    (*env)->ReleaseStringUTFChars(env, symbol, reference_symbol);
-    if (result == NULL) {
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"reference bridge returned null\"}");
-    }
-    jstring response = (*env)->NewStringUTF(env, result);
-    bridge->free_string(result);
-    return response;
-}
-
-JNIEXPORT jstring JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeSemanticEdit(
-        JNIEnv *env, jclass activity_class, jstring project_root, jstring request_json,
-        jboolean dry_run, jboolean validate, jboolean run_tests) {
-    (void)activity_class;
-    RustBridgeApi *bridge = load_rust_bridge_api();
-    if (bridge == NULL || bridge->semantic_edit == NULL) {
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"Rust semantic edit bridge unavailable\"}");
-    }
-    const char *root = (*env)->GetStringUTFChars(env, project_root, NULL);
-    const char *request = (*env)->GetStringUTFChars(env, request_json, NULL);
-    if (root == NULL || request == NULL) {
-        if (root != NULL) (*env)->ReleaseStringUTFChars(env, project_root, root);
-        if (request != NULL) (*env)->ReleaseStringUTFChars(env, request_json, request);
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"unable to read semantic edit input\"}");
-    }
-    char *result = bridge->semantic_edit(
-            root, "src/main.stasis", request,
-            dry_run ? 1 : 0, validate ? 1 : 0, run_tests ? 1 : 0);
-    (*env)->ReleaseStringUTFChars(env, project_root, root);
-    (*env)->ReleaseStringUTFChars(env, request_json, request);
-    if (result == NULL) {
-        return (*env)->NewStringUTF(env, "{\"status\":\"error\",\"error\":\"semantic edit bridge returned null\"}");
-    }
-    jstring response = (*env)->NewStringUTF(env, result);
-    bridge->free_string(result);
-    return response;
-}
 JNIEXPORT jint JNICALL
 Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h, jobject frame_i32, jobject frame_f32, jobject frame_u8) {
     (void)activity_class;

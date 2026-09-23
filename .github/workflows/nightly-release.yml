@@ -441,13 +441,9 @@ jobs:
           try {
             .\stasis.exe probe-graphics-runtime
             .\stasis.exe --json editor-info
-            .\stasis.exe editor --help
+            .\stasis.exe live --help
             & .\samples\windows_launch_smoke\verify.ps1 -Toolchain (Resolve-Path .\stasis.exe) -ArtifactRoot (Join-Path (Get-Location) 'windows-launch-evidence')
             .\stasis.exe new ci_smoke --dir cli-smoke
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$checkoutRoot/tools/ci/test_editor_windows.ps1" `
-              -Toolchain (Resolve-Path .\stasis.exe) `
-              -Workspace (Resolve-Path .\cli-smoke) `
-              -GameWindowTitle "ci_smoke"
             .\stasis.exe --workspace cli-smoke check
             .\stasis.exe --workspace cli-smoke test
             .\stasis.exe --workspace cli-smoke build --mode release
@@ -550,7 +546,7 @@ jobs:
           trap restore_network_source EXIT
           pushd "dist/${{ matrix.archive }}"
           ./bin/stasis --json editor-info
-          ./bin/stasis editor --help
+          ./bin/stasis live --help
           ./bin/stasis new ci_smoke --dir cli-smoke
           ./bin/stasis --workspace cli-smoke check
           ./bin/stasis --workspace cli-smoke test

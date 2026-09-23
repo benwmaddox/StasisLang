@@ -102,7 +102,7 @@ public final class WorkshopOnboardingPolicyTest {
         assertTrue(checklist.contains("[x] Test the change"));
         assertTrue(checklist.contains("[ ] Review the saved change"));
         assertTrue(checklist.contains("Choose Changes or Raw Diffs"));
-        assertTrue(checklist.contains("Neither is required"));
-        assertTrue(checklist.contains("permissions are requested only when you start"));
+        assertTrue(checklist.contains("It is not required"));
+        assertTrue(checklist.contains("permission is requested only when you record audio"));
     }
 }

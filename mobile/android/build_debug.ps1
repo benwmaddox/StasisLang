@@ -1,7 +1,6 @@
 param(
     [switch]$Install,
     [switch]$RenderAcceptance,
-    [switch]$SkipCodexNative,
     [switch]$SkipRustBridgeBuild,
     [switch]$NoGradleDaemon,
     [string]$GradlePath = "",
@@ -31,9 +30,6 @@ try {
         & (Join-Path $scriptRoot "rust_bridge_provenance.ps1") -Mode Verify -Profile release
     } else {
         & (Join-Path $scriptRoot "build_rust_bridge.ps1") -Release
-    }
-    if (-not $SkipCodexNative) {
-        & (Join-Path $scriptRoot "build_codex_native.ps1") -Release
     }
 
     $task = if ($Install) { ":app:installWorkshopDebug" } else { ":app:assembleWorkshopDebug" }

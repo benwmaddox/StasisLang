@@ -11,7 +11,6 @@ members = [
   "crates/stasis_language_service",
   "crates/stasis_lsp",
   "crates/stasis_runner",
-  "crates/stasis_ai",
 ]
 
 [workspace.package]
@@ -38,10 +37,7 @@ getrandom = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 atomic-write-file = "0.3"
-base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 cranelift-codegen = { version = "0.117", features = ["arm64"] }
 cranelift-frontend = "0.117"

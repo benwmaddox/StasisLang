@@ -10,9 +10,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::{
     load_and_apply_play_data_bindings_for_test, packaged_replay_compatibility,
-    provision_local_certificate, resolve_play_data_binding_paths,
-    run_live_in_process_with_data, run_play_in_process_with_replay,
-    run_play_in_process_with_window_title,
+    provision_local_certificate, resolve_play_data_binding_paths, run_live_in_process_with_data,
+    run_play_in_process_with_replay, run_play_in_process_with_window_title,
     run_self_host_aot_cli_with_desktop_network,
     run_self_host_aot_cli_with_desktop_network_and_artifact_root,
     run_self_host_aot_cli_with_options, run_self_host_aot_cli_with_options_and_artifact_root,
@@ -37,12 +36,12 @@ use stasis_compiler::frontend::parser::{
 };
 use stasis_compiler::frontend::types::{TYPE_ID_F32, TYPE_ID_I32};
 use stasis_compiler::frontend::workshop::{
-    classify_workshop_reload, find_workshop_references, find_workshop_symbols,
-    load_workshop_edit_workspace, plan_workshop_semantic_edits, workshop_direct_import_files,
-    workshop_reachable_files, workshop_source_hash, workshop_source_items,
-    write_workshop_semantic_plan, write_workshop_semantic_receipt, WorkshopExposure,
-    WorkshopSemanticEdit, WorkshopSemanticEditBatch, WorkshopSemanticEditOperation,
-    WorkshopSemanticEditPlan, WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
+    plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
+    workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
+    write_workshop_semantic_receipt, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
+    WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
+    WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_compiler::SourceDiagnostic;
 use stasis_jit::AotTarget;
@@ -3138,10 +3137,7 @@ fn execute_noarg_entry(jit: &JitProcess, name: &str) -> Result<(), String> {
     }
 }
 
-fn test_workspace(
-    workspace: &Workspace,
-    path: Option<&Path>,
-) -> Result<CommandResult, String> {
+fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandResult, String> {
     let directory = path
         .map(|value| workspace.root.join(value))
         .unwrap_or_else(|| workspace.root.join(&workspace.manifest.tests));
@@ -3328,15 +3324,10 @@ fn run_workspace_live(
     let data_meta = data_bind.get(1).map(|path| workspace.root.join(path));
     let watch_dir = watch_dir.map(|path| workspace.root.join(path));
     let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
-    let transport = if stdio {
-        "stdio"
-    } else {
-        "script"
-    };
+    let transport = if stdio { "stdio" } else { "script" };
     let script = script.map(|path| workspace.root.join(path));
-    let terminal = thread::spawn(move || {
-        run_live_terminal(client, script.as_deref(), json_lines, stdio)
-    });
+    let terminal =
+        thread::spawn(move || run_live_terminal(client, script.as_deref(), json_lines, stdio));
     let config = LiveRunConfig::new(
         workspace.root.clone(),
         entry_relative,
@@ -3396,7 +3387,10 @@ fn resolve_live_entry(workspace: &Workspace, entry: &Path) -> Result<(PathBuf, P
     };
     validate_workspace_destination(workspace, "live transport entry", &entry_path)?;
     if !entry_path.is_file() {
-        return Err(format!("live transport entry is not a file: {}", entry_path.display()));
+        return Err(format!(
+            "live transport entry is not a file: {}",
+            entry_path.display()
+        ));
     }
     let root = workspace
         .root
@@ -8356,6 +8350,20 @@ fn apply_symbol_plan(
     ))
 }
 
+fn overlay_workshop_files(
+    query_files: &[WorkshopSourceFile],
+    edited_files: &[WorkshopSourceFile],
+) -> Vec<WorkshopSourceFile> {
+    let mut files = query_files
+        .iter()
+        .map(|file| (file.path.clone(), file.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for file in edited_files {
+        files.insert(file.path.clone(), file.clone());
+    }
+    files.into_values().collect()
+}
+
 fn normalize_cli_semantic_batch(
     files: &[WorkshopSourceFile],
     batch: &mut WorkshopSemanticEditBatch,
@@ -9357,7 +9365,10 @@ mod tests {
     #[test]
     fn removed_ai_commands_are_rejected() {
         for command in ["ai", "editor", "tui", "gauntlet"] {
-            assert!(ToolchainCli::try_parse_from(["stasis", command]).is_err(), "{command}");
+            assert!(
+                ToolchainCli::try_parse_from(["stasis", command]).is_err(),
+                "{command}"
+            );
         }
     }
 
@@ -11709,8 +11720,8 @@ mod tests {
 
     #[test]
     fn live_entry_is_optional_and_accepts_an_override() {
-        let manifest_entry =
-            ToolchainCli::try_parse_from(["stasis", "live", "--live-stdio"]).expect("parse manifest live transport entry");
+        let manifest_entry = ToolchainCli::try_parse_from(["stasis", "live", "--live-stdio"])
+            .expect("parse manifest live transport entry");
         assert!(matches!(
             manifest_entry.command,
             ToolchainCommand::Live { entry: None, .. }

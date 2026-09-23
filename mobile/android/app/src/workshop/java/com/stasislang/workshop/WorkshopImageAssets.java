@@ -267,46 +267,6 @@ final class WorkshopImageAssets {
         return mutable;
     }
 
-    static AssetInfo saveGeneratedPng(byte[] encoded, File projectRoot, String requestedName) throws IOException {
-        if (encoded == null || encoded.length == 0 || encoded.length > MAX_IMPORT_BYTES) {
-            throw new IOException("generated image exceeds the asset limit");
-        }
-        BitmapFactory.Options bounds = decodeBounds(encoded);
-        validateBounds(bounds);
-        if (!"image/png".equals(bounds.outMimeType)) throw new IOException("generated image must be PNG");
-        String base = requestedName == null ? "" : requestedName.trim();
-        if (base.toLowerCase().endsWith(".png")) base = base.substring(0, base.length() - 4);
-        if (!base.matches("[A-Za-z0-9][A-Za-z0-9_-]{0,63}")) {
-            throw new IOException("image name must use 1-64 letters, numbers, underscores, or hyphens");
-        }
-        File directory = confinedImageDirectory(projectRoot);
-        if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("could not create project image directory");
-        File target = uniqueTarget(directory, base, ".png");
-        requireInside(projectRoot, target);
-        File temporary = File.createTempFile(".ai-review-", ".tmp", directory);
-        boolean published = false;
-        try {
-            FileOutputStream output = new FileOutputStream(temporary);
-            try {
-                output.write(encoded);
-                output.flush();
-                output.getFD().sync();
-            } finally {
-                output.close();
-            }
-            if (!temporary.renameTo(target)) throw new IOException("could not publish accepted AI image");
-            AssetInfo result = inspect(projectRoot, target);
-            WorkshopAssetManifest.putSprite(projectRoot, result, null);
-            published = true;
-            return result;
-        } finally {
-            if (!published) {
-                if (temporary.exists()) temporary.delete();
-                if (target.exists()) target.delete();
-            }
-        }
-    }
-
     private static byte[] readBounded(ContentResolver resolver, Uri source) throws IOException {
         InputStream input = resolver.openInputStream(source);
         if (input == null) throw new IOException("document provider did not open the image");

@@ -64,7 +64,7 @@ class UnsafeBoundaryTests(unittest.TestCase):
     def test_allows_exact_audited_platform_seam_file(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
-            source = root / "crates" / "stasis_ai" / "src" / "lib.rs"
+            source = root / "crates" / "stasis_network" / "src" / "lib.rs"
             source.parent.mkdir(parents=True)
             source.write_text("fn boundary() { unsafe { raw(); } }", encoding="utf-8")
             self.assertEqual(unexpected_unsafe_files(root), [])

@@ -23,7 +23,7 @@ final class WorkshopTestRunnerAcceptance {
     private WorkshopTestRunnerAcceptance() {}
 
     static String run(MainActivity activity, String projectRoot) {
-        WorkshopAiProjectTransaction.Snapshot packaged = null;
+        WorkshopProjectSnapshot.Snapshot packaged = null;
         String packagedFingerprint = null;
         JSONObject cleanup = new JSONObject();
         try {
@@ -35,7 +35,7 @@ final class WorkshopTestRunnerAcceptance {
             activity.acceptanceWriteTest(projectRoot, TEST_PATH, testSource());
             String acceptedCompile = activity.acceptanceCompile(projectRoot);
             requireCompileReady(acceptedCompile, "accepted revision");
-            WorkshopAiProjectTransaction.Snapshot acceptedSnapshot =
+            WorkshopProjectSnapshot.Snapshot acceptedSnapshot =
                     activity.acceptanceCaptureProject(projectRoot);
             String acceptedSha = activity.acceptanceProjectFingerprint(acceptedSnapshot);
             JSONObject acceptedRuntime = activity.acceptanceActivateRuntime(projectRoot);
@@ -221,7 +221,7 @@ final class WorkshopTestRunnerAcceptance {
     }
 
     private static JSONObject restorePackaged(MainActivity activity, String projectRoot,
-            WorkshopAiProjectTransaction.Snapshot packaged, String packagedFingerprint)
+            WorkshopProjectSnapshot.Snapshot packaged, String packagedFingerprint)
             throws Exception {
         activity.acceptanceRestoreProject(projectRoot, packaged);
         String actual = activity.acceptanceProjectFingerprint(
@@ -239,7 +239,7 @@ final class WorkshopTestRunnerAcceptance {
     }
 
     private static JSONObject bestEffortRestore(MainActivity activity, String projectRoot,
-            WorkshopAiProjectTransaction.Snapshot packaged, String packagedFingerprint) {
+            WorkshopProjectSnapshot.Snapshot packaged, String packagedFingerprint) {
         try {
             return restorePackaged(activity, projectRoot, packaged, packagedFingerprint);
         } catch (Exception error) {

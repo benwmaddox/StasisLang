@@ -35,9 +35,9 @@ class NightlyFreshnessContractTests(unittest.TestCase):
         self.assertIn("36 * 60 * 60", self.freshness)
         self.assertIn("::error::main has remained ahead", self.freshness)
 
-    def test_release_smokes_editor_command_on_every_desktop_archive(self):
-        self.assertEqual(1, self.release.count(".\\stasis.exe editor --help"))
-        self.assertEqual(1, self.release.count("./bin/stasis editor --help"))
+    def test_release_smokes_live_command_on_every_desktop_archive(self):
+        self.assertEqual(1, self.release.count(".\\stasis.exe live --help"))
+        self.assertEqual(1, self.release.count("./bin/stasis live --help"))
 
     def test_expensive_seams_wait_for_release_detection(self):
         for job in ("integration_seams", "android_device_seams"):
@@ -68,13 +68,7 @@ class NightlyFreshnessContractTests(unittest.TestCase):
         self.assertIn("tools/windows/stasis-signing.ps1 verify", self.release)
         self.assertIn("Extracted Windows signature verification failed", self.release)
         self.assertIn("windows_signing_manifest.py verify-files", self.release)
-        self.assertIn("tools/ci/test_editor_windows.ps1", self.release)
-        smoke = (ROOT / "tools/ci/test_editor_windows.ps1").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn('titles -contains "Stasis Editor"', smoke)
-        self.assertIn("titles -contains $GameWindowTitle", smoke)
-        self.assertIn("$process.Kill()", smoke)
+        self.assertIn("stasis.exe live --help", self.release)
 
     def test_vsix_secret_scan_skips_only_provenance_bound_native_binaries(self):
         package = (ROOT / "vscode-stasis/package.json").read_text(encoding="utf-8")

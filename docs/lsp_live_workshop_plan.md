@@ -22,8 +22,6 @@ The useful substrate already exists, but it is split across hosts:
 - `crates/stasis_runner/src/live.rs` owns completion ranking and the live request/response schema.
 - `apps/stasis/src/live_workspace.rs` builds compiler-owned symbol, scope, type, reference, and
   completion data for a running workspace.
-- `apps/stasis/src/toolchain_cli/live_tui.rs` consumes parts of those indexes in process, but its
-  language behavior is coupled to the live graphical host.
 - compiler diagnostics can be formatted for builds and live swaps, but there is no persistent
   document-overlay service publishing structured ranges as a user types.
 
@@ -118,12 +116,6 @@ No VS Code provider may independently parse Stasis or spawn a per-request `stasi
 its corresponding LSP capability is available. TextMate grammar remains a lexical fallback until
 semantic tokens ship.
 
-### 5. TUI reuse
-
-Refactor the TUI to hold a `LanguageService` handle and a live-observation handle. Its completion
-pane, selected-item details, definition/reference commands, diagnostics, and rename previews call
-the same operations as LSP. The TUI does not route those calls through JSON-RPC; it uses the Rust
-API in process and retains its deterministic input, rendering, and live command queues.
 
 ## Latency and scheduling contract
 
@@ -402,20 +394,6 @@ or editor-only files do not make that executable stale. The packaged indexed-com
 hover tests support this mapping; it predicts that attach/debug handshakes must publish the same
 accepted-input set rather than a generic workspace revision number.
 
-### Persistent TUI language-service implementation
-
-- Good: one persistent in-process service added diagnostics, hover with compatible live values,
-  definition, and rename preview without introducing a TUI parser or a JSON-RPC loopback.
-- Bad: the TUI previously reused shared completion snapshots but recreated the language service
-  for rename and had no shared diagnostics, hover, or definition command surface.
-- Adjustment: host surfaces should own one long-lived language-service handle, synchronize only
-  changed accepted files, and keep transport queues and human presentation outside the service.
-
-Theory gained: language-operation reuse does not require transport reuse. The LSP and TUI can call
-the same revisioned Rust operations and live-observation broker while each retains its natural
-queue and response format. The persistent-service test proves that static identity and runtime
-values compose in-process; this predicts that live edit preview and rollback can share broker
-state without routing TUI commands through JSON-RPC.
 
 ### LSP-owned Live Workshop process implementation
 

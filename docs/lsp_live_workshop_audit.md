@@ -1,4 +1,4 @@
-# LSP, Live Workshop, TUI, and DAP Completion Audit
+# LSP, Live Workshop, and DAP Completion Audit
 
 This audit maps the requested editor experience to the implementation and executable evidence. The
 compiler and `stasis_language_service` remain the semantic authorities; LSP, VS Code, the TUI, and
@@ -49,14 +49,6 @@ DAP are transports or presentation hosts.
 - `global_receiver_and_owned_field_navigate_to_distinct_definitions` proves that invoking Go to
   Definition on `state` in `state.x` reaches the global declaration, while invoking it on `x`
   reaches the owning struct field.
-
-## TUI reuse
-
-The live TUI uses the persistent service directly for completion and exposes shared commands for
-references, diagnostics, hover/type inspection, definition, compiler-authored quick fixes,
-organize imports, inlay hints, call hierarchy, type hierarchy, and rename preview. Tests exercise
-reference and rename responses, structured quick fixes, persistent service reuse, and live-hover
-composition. Runtime control and terminal rendering remain host-specific.
 
 ## Windows executable policy
 

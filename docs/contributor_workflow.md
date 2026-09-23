@@ -35,7 +35,6 @@ Make the next useful change, verify it, and leave the repository in a reviewable
 5. Keep unsafe Rust inside the audited platform-boundary crates and follow `docs/unsafe_rust.md`; repository validation rejects unsafe blocks in orchestration and product crates.
 6. Give focused Cargo test commands an owning target (`--lib`, `--bin <name>`, or `--test <name>`). An unexpected `running 0 tests` is a failed test selection, not a successful check; correct the package, target, or full test path before continuing.
 
-To smoke-test the installed Codex provider and shared response schema, run `cargo run -p stasis_ai --example codex_provider_smoke` from a signed-in Codex environment.
 
 ## Reviewer Gate Before Implementation
 
