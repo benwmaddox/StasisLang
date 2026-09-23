@@ -225,7 +225,9 @@ int32_t stasis_mobile_runtime_step(void) {
         return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
     }
 
-    stasis_host_get_frame(host_i32, host_f32);
+    if (!runtime_state.replay_active) {
+        stasis_host_get_frame(host_i32, host_f32);
+    }
     apply_guest_host_requests();
     if (runtime_state.replay_active) {
         int32_t replay_result = stasis_replay_consumer_apply_host_frame(

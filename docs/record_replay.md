@@ -37,7 +37,7 @@ initial simulation snapshot contains only canonical scalar or collection locatio
 bits differ from their type default. Zero integers, `false`, positive floating-point zero, and
 zeroed collection lanes consume no entries; negative zero and NaN payloads remain bit-exact.
 
-Schema v2 records a whole-game union of raw HostFrame fields read by reachable `main`, `tick`,
+Schema v3 records a whole-game union of raw HostFrame fields read by reachable `main`, `tick`,
 `render`, and their called helpers. Reads forwarded through collection parameters and local aliases
 are included. A statically known index selects one exact slot; an unresolved dynamic index selects
 the conservative keyboard, pointer, display, or raw-lane family. Unreachable helpers and HostFrame
@@ -83,14 +83,18 @@ a substitute for declaring it reproducible.
 
 Live code swaps, data reloads, and asset reloads abort a record/replay session. Direct
 nondeterministic host operations outside the HostFrame snapshot are not virtualized in schema v1.
-Schema v2 remains the recording format emitted by the desktop JIT commands above; schema-v3
-identity wraps the same portable compatibility in a producer/consumer envelope for packaged
-hosts. Generated native desktop and Android packages publish that complete compatibility,
-canonical state descriptor, and context-taking snapshot adapters alongside the AOT objects. The
+Schema v3 is emitted by the desktop JIT commands above. It wraps portable compatibility in
+a producer/consumer envelope for packaged hosts. Schema-v2 files remain readable by the JIT
+player with their original same-runtime identity. Generated native desktop and Android packages
+publish that complete compatibility, canonical state descriptor, and context-taking snapshot
+adapters alongside the AOT objects. The
 common native shell accepts `--replay PATH` (and the Android SAF startup URI bridge) before guest
 initialization, restores the sparse post-`main()` state, projects recorded HostFrame input, runs
 the ordinary tick/verify/render sequence, and reports bounded completion or divergence receipts.
-The Web controller validates and projects the same compact stream and is covered as a host
-integration surface; generated browser applications still choose when to activate that controller.
-Native and Web replay compare the portable simulation contract, while each consumer keeps its own
-runtime provenance. No cross-target floating-point bit-identity guarantee is implied.
+Generated Web packages with `web.replay: true` include the same compact controller. Open
+`index.html?stasis-replay=<same-origin replay URL>` to load a recording before `main()`, restore
+the sparse initial state, and play through ordinary ticks with checkpoint and final-hash
+verification. Completion or failure is published on the page as `data-replay-state`,
+`data-replay-tick`, and `data-replay-error`. Native and Web replay compare the portable simulation
+contract, while each consumer keeps its own runtime provenance. No cross-target floating-point
+bit-identity guarantee is implied.

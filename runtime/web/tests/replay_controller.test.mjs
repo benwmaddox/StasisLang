@@ -109,6 +109,40 @@ test("schema-v3 decoder validates producer provenance and accepts a different We
   );
 });
 
+test("schema-v3 initial state must be sparse, sorted, and unique", () => {
+  const source = v3Document({ total_ticks: 1 });
+  const scalar = (path, bits) => ({
+    location: { kind: "scalar", path },
+    value: { type_name: "i32", bits },
+  });
+  const collection = (path, field, index, bits) => ({
+    location: { kind: "collection", path, field, index },
+    value: { type_name: "i32", bits },
+  });
+  const canonical = [
+    scalar("a", "01000000"),
+    scalar("z", "02000000"),
+    collection("items", "value", 0, "03000000"),
+    collection("items", "value", 2, "04000000"),
+  ];
+  assert.doesNotThrow(() => decodeReplay({
+    ...source,
+    initial_state: { ...source.initial_state, values: canonical },
+  }));
+
+  for (const values of [
+    [scalar("a", "01000000"), scalar("a", "02000000")],
+    [scalar("z", "02000000"), scalar("a", "01000000")],
+    [collection("items", "value", 2, "04000000"), collection("items", "value", 0, "03000000")],
+    [scalar("a", "00000000")],
+  ]) {
+    assert.throws(
+      () => decodeReplay({ ...source, initial_state: { ...source.initial_state, values } }),
+      error => error instanceof ReplayDecodeError && error.code === "noncanonical_initial_state",
+    );
+  }
+});
+
 test("schema-v3 compares every portable compatibility field and descriptor", () => {
   const source = v3Document({ total_ticks: 1 });
   const expected = packagedIdentity(source);
@@ -137,6 +171,26 @@ test("schema-v3 compares every portable compatibility field and descriptor", () 
     const mutated = { ...expected, compatibility: { ...expected.compatibility, [field]: descriptors } };
     assert.throws(() => createReplayController(source, { packageIdentity: mutated }), ReplayIdentityError, field);
   }
+});
+
+test("schema-v3 descriptor comparison ignores object property insertion order", () => {
+  const source = v3Document({ total_ticks: 1 });
+  const expected = packagedIdentity(source);
+  const reorder = descriptors => descriptors.map(entry => ({
+    family: entry.family,
+    path: entry.path,
+    index: entry.index,
+    slot: entry.slot,
+  }));
+  const packageWithReorderedKeys = {
+    ...expected,
+    compatibility: {
+      ...expected.compatibility,
+      observed_i32: reorder(expected.compatibility.observed_i32),
+      observed_f32: reorder(expected.compatibility.observed_f32),
+    },
+  };
+  assert.doesNotThrow(() => createReplayController(source, { packageIdentity: packageWithReorderedKeys }));
 });
 
 test("schema-v2 retains exact target and runtime matching with packaged identity metadata", () => {

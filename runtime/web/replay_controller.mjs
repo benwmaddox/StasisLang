@@ -380,6 +380,38 @@ function decodeInitialState(value) {
   return { values, state_sha256: text(value.state_sha256, "initial_state.state_sha256", { hash: true }) };
 }
 
+const compareUtf8 = (left, right) => {
+  const leftBytes = utf8(left);
+  const rightBytes = utf8(right);
+  const sharedLength = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index];
+  }
+  return leftBytes.length - rightBytes.length;
+};
+
+function validateCanonicalInitialState(initialState) {
+  let previous = null;
+  initialState.values.forEach((entry, index) => {
+    if (/^0+$/.test(entry.value.bits)) {
+      fail(`initial state entry ${index} explicitly encodes a default value`, "noncanonical_initial_state");
+    }
+    if (previous) {
+      let order = previous.location.kind === entry.location.kind
+        ? compareUtf8(previous.location.path, entry.location.path)
+        : previous.location.kind === "scalar" ? -1 : 1;
+      if (order === 0 && entry.location.kind === "collection") {
+        order = compareUtf8(previous.location.field, entry.location.field);
+        if (order === 0) order = previous.location.index - entry.location.index;
+      }
+      if (order >= 0) {
+        fail(`initial state entries must be sorted and unique; entry ${index} is not canonical`, "noncanonical_initial_state");
+      }
+    }
+    previous = entry;
+  });
+}
+
 const decodeI32Change = (change, label, count) => {
   checkKeys(change, ["slot", "value"]);
   return { slot: integer(change.slot, `${label}.slot`, 0, count - 1), value: integer(change.value, `${label}.value`, -0x80000000, 0x7fffffff) };
@@ -398,6 +430,7 @@ function decodeCompactDocument(root) {
   const identity = v3 ? decodeIdentityV3(root.identity) : decodeIdentityV2(root.identity);
   const compatibility = v3 ? identity.compatibility : identity;
   const initial_state = decodeInitialState(root.initial_state);
+  if (v3) validateCanonicalInitialState(initial_state);
   checkKeys(root.initial_input, ["i32_values", "f32_bits"]);
   const initialInputI32 = array(root.initial_input.i32_values, "initial_input.i32_values", WEB_REPLAY_LIMITS.maxHostValues);
   const initialInputF32 = array(root.initial_input.f32_bits, "initial_input.f32_bits", WEB_REPLAY_LIMITS.maxHostValues);
@@ -764,9 +797,9 @@ const scalarBitsLe = (value, expectedType, label) => {
 export function createDescriptorInitialStateRestorer({ descriptor, writeSnapshotBytes } = {}) {
   if (typeof writeSnapshotBytes !== "function") throw new TypeError("descriptor initial-state restorer requires writeSnapshotBytes(bytes)");
   const normalized = decodeStateDescriptor(descriptor);
-  const locations = new Map(normalized.entries.map(entry => [
+  const locations = new Map(normalized.entries.map((entry, order) => [
     entry.kind === "scalar" ? `scalar\u0000${entry.path}` : `collection\u0000${entry.path}\u0000${entry.field}`,
-    entry,
+    { entry, order },
   ]));
   return Object.freeze({
     descriptor: normalized,
@@ -775,20 +808,31 @@ export function createDescriptorInitialStateRestorer({ descriptor, writeSnapshot
         throw new ReplayDecodeError("initial state restorer requires decoded initial_state.values", "invalid_initial_state");
       }
       const snapshot = new Uint8Array(normalized.required_bytes);
+      let previousOrder = -1;
+      let previousElementIndex = -1;
       initialState.values.forEach((stateEntry, index) => {
         if (!isPlainObject(stateEntry) || !isPlainObject(stateEntry.location)) {
           throw new ReplayDecodeError(`initial state entry ${index} is invalid`, "invalid_initial_state");
         }
-        const descriptorEntry = locations.get(stateLocationKey(stateEntry.location));
-        if (!descriptorEntry) {
+        const location = locations.get(stateLocationKey(stateEntry.location));
+        if (!location) {
           throw new ReplayDecodeError(`initial state entry ${index} is absent from the replay state descriptor`, "state_location_mismatch");
         }
+        const { entry: descriptorEntry, order } = location;
         const elementIndex = stateEntry.location.kind === "scalar" ? 0 : stateEntry.location.index;
         if (!Number.isSafeInteger(elementIndex) || elementIndex < 0 || elementIndex >= descriptorEntry.element_count) {
           throw new ReplayDecodeError(`initial state entry ${index} index is outside descriptor bounds`, "state_location_mismatch");
         }
+        if (order < previousOrder || (order === previousOrder && elementIndex <= previousElementIndex)) {
+          throw new ReplayDecodeError(`initial state entries must be sorted and unique; entry ${index} is not canonical`, "noncanonical_initial_state");
+        }
         const bytes = scalarBitsLe(stateEntry.value, descriptorEntry.storage_type, `initial state entry ${index}`);
+        if (bytes.every(byte => byte === 0)) {
+          throw new ReplayDecodeError(`initial state entry ${index} explicitly encodes a default value`, "noncanonical_initial_state");
+        }
         snapshot.set(bytes, descriptorEntry.offset + elementIndex * descriptorEntry.element_bytes);
+        previousOrder = order;
+        previousElementIndex = elementIndex;
       });
       const written = writeSnapshotBytes(snapshot);
       if (written && typeof written.then === "function") throw new TypeError("initial state snapshot writer must be synchronous");
@@ -857,6 +901,21 @@ export function createCanonicalStateHashAdapter(hashState) {
   return Object.freeze({ hashState: (...args) => normalizeHash(fn(...args)) });
 }
 
+const observedDescriptorsEqual = (expected, actual) => Array.isArray(expected)
+  && Array.isArray(actual)
+  && expected.length === actual.length
+  && expected.every((entry, index) => {
+    const found = actual[index];
+    return entry !== null
+      && typeof entry === "object"
+      && found !== null
+      && typeof found === "object"
+      && entry.slot === found.slot
+      && entry.index === found.index
+      && entry.path === found.path
+      && entry.family === found.family;
+  });
+
 const compareIdentity = (actual, expected, schemaVersion) => {
   if (!expected) return;
   if (schemaVersion === WEB_REPLAY_LIMITS.schemaVersion && expected.compatibility) {
@@ -866,8 +925,8 @@ const compareIdentity = (actual, expected, schemaVersion) => {
     for (const key of keys) {
       if (expectedCompatibility[key] !== undefined && expectedCompatibility[key] !== actualCompatibility[key]) throw new ReplayIdentityError(`compatibility.${key}`, expectedCompatibility[key], actualCompatibility[key]);
     }
-    if (expectedCompatibility.observed_i32 !== undefined && JSON.stringify(expectedCompatibility.observed_i32) !== JSON.stringify(actualCompatibility.observed_i32)) throw new ReplayIdentityError("compatibility.observed_i32", expectedCompatibility.observed_i32, actualCompatibility.observed_i32);
-    if (expectedCompatibility.observed_f32 !== undefined && JSON.stringify(expectedCompatibility.observed_f32) !== JSON.stringify(actualCompatibility.observed_f32)) throw new ReplayIdentityError("compatibility.observed_f32", expectedCompatibility.observed_f32, actualCompatibility.observed_f32);
+    if (expectedCompatibility.observed_i32 !== undefined && !observedDescriptorsEqual(expectedCompatibility.observed_i32, actualCompatibility.observed_i32)) throw new ReplayIdentityError("compatibility.observed_i32", expectedCompatibility.observed_i32, actualCompatibility.observed_i32);
+    if (expectedCompatibility.observed_f32 !== undefined && !observedDescriptorsEqual(expectedCompatibility.observed_f32, actualCompatibility.observed_f32)) throw new ReplayIdentityError("compatibility.observed_f32", expectedCompatibility.observed_f32, actualCompatibility.observed_f32);
     return;
   }
   const exactExpected = expected.compatibility
@@ -877,8 +936,8 @@ const compareIdentity = (actual, expected, schemaVersion) => {
   for (const key of keys) {
     if (exactExpected[key] !== undefined && exactExpected[key] !== actual[key]) throw new ReplayIdentityError(`identity.${key}`, exactExpected[key], actual[key]);
   }
-  if (exactExpected.observed_i32 !== undefined && JSON.stringify(exactExpected.observed_i32) !== JSON.stringify(actual.observed_i32)) throw new ReplayIdentityError("identity.observed_i32", exactExpected.observed_i32, actual.observed_i32);
-  if (exactExpected.observed_f32 !== undefined && JSON.stringify(exactExpected.observed_f32) !== JSON.stringify(actual.observed_f32)) throw new ReplayIdentityError("identity.observed_f32", exactExpected.observed_f32, actual.observed_f32);
+  if (exactExpected.observed_i32 !== undefined && !observedDescriptorsEqual(exactExpected.observed_i32, actual.observed_i32)) throw new ReplayIdentityError("identity.observed_i32", exactExpected.observed_i32, actual.observed_i32);
+  if (exactExpected.observed_f32 !== undefined && !observedDescriptorsEqual(exactExpected.observed_f32, actual.observed_f32)) throw new ReplayIdentityError("identity.observed_f32", exactExpected.observed_f32, actual.observed_f32);
 };
 
 const truncateDiagnostic = message => {

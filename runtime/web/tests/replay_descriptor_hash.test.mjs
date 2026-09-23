@@ -204,6 +204,52 @@ test("initial-state restore zeros the canonical snapshot then applies exact spar
   assert.deepEqual([...restored], [1, 0xfe, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0x45, 0x23, 0xc1, 0x7f]);
 });
 
+test("initial-state restore rejects noncanonical sparse entries before writing any state", () => {
+  const snapshot = descriptor([
+    { path: "enabled", field: "", storage_type: "bool", element_count: 1 },
+    { path: "score", field: "", storage_type: "i32", element_count: 1 },
+    { path: "actors", field: "hp", storage_type: "i32", element_count: 2 },
+  ]);
+  let writes = 0;
+  let liveState = new Uint8Array(snapshot.required_bytes).fill(0x55);
+  const restore = createDescriptorInitialStateRestorer({
+    descriptor: snapshot,
+    writeSnapshotBytes: bytes => {
+      writes += 1;
+      liveState = Uint8Array.from(bytes);
+      return bytes.byteLength;
+    },
+  });
+  const enabled = bits => ({
+    location: { kind: "scalar", path: "enabled" },
+    value: { type_name: "bool", bits },
+  });
+  const score = bits => ({
+    location: { kind: "scalar", path: "score" },
+    value: { type_name: "i32", bits },
+  });
+  const actor = (index, bits) => ({
+    location: { kind: "collection", path: "actors", field: "hp", index },
+    value: { type_name: "i32", bits },
+  });
+  const malformed = [
+    [enabled("01"), enabled("01")],
+    [score("01000000"), enabled("01")],
+    [actor(1, "02000000"), actor(0, "01000000")],
+    [enabled("00")],
+    [enabled("01"), score("00000000")],
+  ];
+  for (const values of malformed) {
+    const before = Uint8Array.from(liveState);
+    assert.throws(
+      () => restore.restoreInitialState({ values }),
+      error => error instanceof ReplayDecodeError && error.code === "noncanonical_initial_state",
+    );
+    assert.equal(writes, 0, "invalid sparse input must not reach the state writer");
+    assert.deepEqual(liveState, before, "invalid sparse input must leave live state untouched");
+  }
+});
+
 test("initial-state restore rejects descriptor drift and incomplete writers", () => {
   const snapshot = descriptor([{ path: "score", field: "", storage_type: "i32", element_count: 1 }]);
   const restore = createDescriptorInitialStateRestorer({ descriptor: snapshot, writeSnapshotBytes: () => 3 });

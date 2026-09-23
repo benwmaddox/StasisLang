@@ -1,9 +1,11 @@
 #include <jni.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "stasis_performance_metrics.h"
 #include "stasis_mobile_aot_runtime.h"
+#include "stasis_mobile_runtime.h"
 
 void stasis_host_get_latest_performance_metrics(uint32_t *tick_us, uint32_t *render_us);
 int stasis_host_get_latest_performance_metrics_v1(
@@ -270,6 +272,31 @@ Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeReadRuntimeError(
     char message[512];
     if (!stasis_host_copy_runtime_error(message, sizeof(message))) {
         return NULL;
+    }
+    return (*env)->NewStringUTF(env, message);
+}
+
+JNIEXPORT jstring JNICALL
+Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeReadReplayReceipt(
+    JNIEnv *env,
+    jclass activity
+) {
+    (void)activity;
+    const StasisReplayReceipt *receipt = stasis_mobile_runtime_replay_receipt();
+    if (receipt == NULL || receipt->code[0] == '\0' ||
+            (receipt->result == STASIS_REPLAY_OK && receipt->completed == 0)) {
+        return NULL;
+    }
+    char message[640];
+    if (receipt->result == STASIS_REPLAY_COMPLETE &&
+            receipt->verified != 0 && receipt->completed != 0) {
+        snprintf(message, sizeof(message), "Replay complete at tick %llu",
+            (unsigned long long)receipt->tick);
+    } else {
+        snprintf(message, sizeof(message), "Replay %s at tick %llu: %s",
+            receipt->code,
+            (unsigned long long)receipt->tick,
+            receipt->diagnostic);
     }
     return (*env)->NewStringUTF(env, message);
 }

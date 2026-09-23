@@ -36,21 +36,72 @@ public final class StasisReplaySaf {
         if (resolver == null || source == null || filesDir == null) {
             throw new IOException("replay import requires a resolver, URI, and files directory");
         }
+        try (InputStream input = resolver.openInputStream(source)) {
+            if (input == null) throw new IOException("SAF replay document could not be opened");
+            return importReplay(input, filesDir, MAX_REPLAY_BYTES);
+        }
+    }
+
+    static File importReplay(InputStream input, File filesDir, long maximumBytes)
+            throws IOException {
+        if (input == null || filesDir == null || maximumBytes <= 0L) {
+            throw new IOException("replay import requires an input, directory, and positive limit");
+        }
         if (!filesDir.isDirectory() && !filesDir.mkdirs() && !filesDir.isDirectory()) {
             throw new IOException("replay import directory is unavailable");
         }
         File destination = new File(filesDir, "stasis_replay.json");
         File staging = new File(filesDir,
                 ".stasis_replay.json.part." + Long.toHexString(System.nanoTime()));
-        try (InputStream input = resolver.openInputStream(source)) {
-            if (input == null) throw new IOException("SAF replay document could not be opened");
-            copyBounded(input, staging, MAX_REPLAY_BYTES);
+        while (staging.exists()) {
+            staging = new File(filesDir,
+                    ".stasis_replay.json.part." + Long.toHexString(System.nanoTime()));
+        }
+        try {
+            copyBounded(input, staging, maximumBytes);
         } catch (IOException error) {
             deleteQuietly(staging);
             throw error;
         }
         publishAtomically(staging, destination);
         return destination;
+    }
+
+    /** Remembers that a warm import should be selected on the next game launch. */
+    public static void markReplayPending(File filesDir) throws IOException {
+        if (filesDir == null || !filesDir.isDirectory()) {
+            throw new IOException("replay import directory is unavailable");
+        }
+        File marker = new File(filesDir, ".stasis_replay.pending");
+        if (marker.isFile()) return;
+        File staging = new File(filesDir,
+                ".stasis_replay.pending.part." + Long.toHexString(System.nanoTime()));
+        while (staging.exists()) {
+            staging = new File(filesDir,
+                    ".stasis_replay.pending.part." + Long.toHexString(System.nanoTime()));
+        }
+        try (FileOutputStream output = new FileOutputStream(staging)) {
+            output.write(1);
+            output.flush();
+            output.getFD().sync();
+        } catch (IOException error) {
+            deleteQuietly(staging);
+            throw error;
+        }
+        if (!staging.renameTo(marker)) {
+            deleteQuietly(staging);
+            throw new IOException("replay import could not queue playback for the next launch");
+        }
+    }
+
+    public static boolean isReplayPending(File filesDir) {
+        return filesDir != null && new File(filesDir, ".stasis_replay.pending").isFile();
+    }
+
+    public static boolean clearReplayPending(File filesDir) {
+        if (filesDir == null) return false;
+        File marker = new File(filesDir, ".stasis_replay.pending");
+        return !marker.exists() || marker.delete();
     }
 
     /**
@@ -111,8 +162,12 @@ public final class StasisReplaySaf {
             throw new IOException("replay import could not stage the previous document");
         }
         if (!staging.renameTo(destination)) {
-            if (hadPrevious) backup.renameTo(destination);
+            boolean restored = !hadPrevious || backup.renameTo(destination);
             deleteQuietly(staging);
+            if (hadPrevious && !restored) {
+                throw new IOException(
+                        "replay import could not publish the document; previous replay retained for recovery");
+            }
             throw new IOException("replay import could not publish the document");
         }
         if (hadPrevious) deleteQuietly(backup);

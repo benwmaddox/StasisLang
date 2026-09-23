@@ -54,18 +54,31 @@ Future candidates are recorded in `docs/android_release_shell_backlog.md`.
 
 ## Packaged replay documents
 
-The generated Android shell accepts a schema-v3 replay through an
-`ACTION_VIEW`/`ACTION_OPEN_DOCUMENT` URI or the
-`stasis.replay_uri` intent extra. Before loading the native library and before
-`SDLActivity.onCreate` starts the native runtime, Java copies the document into app-private storage with a 256 MiB
-bound, flushes it, and publishes it with a same-directory rename. Native
-startup then consumes that published path through the same bounded
-`--replay` loader and rejects any bounded SAF diagnostic before guest
-initialization. `requestReplayImport()` stages a document for a relaunch;
-`requestReplayExport()` writes the staged document through
-`ACTION_CREATE_DOCUMENT`, with the same size bound and a durable provider
-close. SAF providers own the final external-document transaction, so an
-interrupted provider write is not reported as a successful export.
+The generated Android shell offers `Play` and `Import replay` from its
+launcher dialog before `MainActivity` loads the native library. Import opens
+`ACTION_OPEN_DOCUMENT` for JSON or octet-stream documents. Java copies the
+selected URI into app-private storage with a 256 MiB bound, flushes it, and
+publishes it with a same-directory rename before native startup consumes the
+path through the bounded `--replay` loader. The same startup bridge accepts a
+cold `ACTION_VIEW` URI or the `stasis.replay_uri` intent extra. A warm
+`ACTION_VIEW` is also bounded and staged, then Android displays a restart
+message and keeps the selection queued for the next launch instead of dropping
+it. Failed copies leave the previous published replay intact; failed rollback
+keeps the prior document in private recovery storage.
+
+The Java status overlay polls the packaged host's replay receipt and displays
+verified completion or divergence; replay load failures remain on the runtime
+error surface. Android also opens a result dialog from the terminal receipt
+when SDL closes, so completion or divergence stays visible after the game exits.
+`requestReplayExport()` writes a copy of the staged imported replay
+through `ACTION_CREATE_DOCUMENT`, with the same size bound and a durable
+provider close. It does not create a new recording or claim that it does. SAF
+providers own the final external-document transaction, so an interrupted
+provider write is not reported as a successful export.
+
+`StasisReplaySafTest` covers the exact size boundary, rejection of empty and
+oversized input, temporary-file cleanup, and preservation of the previous
+published replay when the source fails during copying.
 
 The generated shell also supports an opt-in integration-test launch extra,
 `stasis.seam_test_id`. It enables bounded `stasis.seam_test.v1` log markers for

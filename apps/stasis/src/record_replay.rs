@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use stasis_compiler::backend::jit::{JitProcess, JitScalarValue};
 use stasis_compiler::backend::program_snapshot::{ProgramExternImport, ProgramSnapshot};
-use stasis_compiler::backend::state_layout::{state_layout_version, StateCollectionFieldLayout};
+use stasis_compiler::backend::state_layout::{
+    is_replay_host_or_presentation_path, state_layout_version, StateCollectionFieldLayout,
+    StateLayout,
+};
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::fs;
@@ -1123,7 +1126,20 @@ fn validate_compact_initial_state(state: &InitialState) -> Result<(), String> {
             "compact replay initial state exceeds the {MAX_REPLAY_FRAMES}-entry limit"
         ));
     }
+    let mut previous_location: Option<(u8, &str, &str, i32)> = None;
     for (entry_index, entry) in state.values.iter().enumerate() {
+        let location = match &entry.location {
+            StateLocation::Scalar { path } => (0, path.as_str(), "", 0),
+            StateLocation::Collection { path, field, index } => {
+                (1, path.as_str(), field.as_str(), *index)
+            }
+        };
+        if previous_location.is_some_and(|previous| previous >= location) {
+            return Err(format!(
+                "compact replay initial state entry {entry_index} is duplicate or out of order"
+            ));
+        }
+        previous_location = Some(location);
         match &entry.location {
             StateLocation::Scalar { path } => {
                 validate_compact_field_text("initial state scalar path", path)?;
@@ -1144,6 +1160,11 @@ fn validate_compact_initial_state(state: &InitialState) -> Result<(), String> {
         }
         validate_compact_field_text("initial state type", &entry.value.type_name)?;
         validate_compact_scalar_encoding(entry_index, &entry.value)?;
+        if entry.value.bits.bytes().all(|byte| byte == b'0') {
+            return Err(format!(
+                "compact replay initial state entry {entry_index} explicitly stores a default value"
+            ));
+        }
     }
     Ok(())
 }
@@ -2611,10 +2632,11 @@ fn capture_initial_state(jit: &JitProcess) -> Result<InitialState, String> {
     validate_supported_state(jit)?;
     let mut values = Vec::new();
     let layout = jit.state_layout();
+    let excluded = replay_excluded_paths(&layout);
     let mut scalars = layout.scalars;
     scalars.sort_by(|left, right| left.path.cmp(&right.path));
     for scalar in scalars {
-        if is_host_or_presentation_path(&scalar.path) {
+        if excluded.contains(&scalar.path) {
             continue;
         }
         let value = jit.read_global_scalar(&scalar.path)?;
@@ -2628,7 +2650,7 @@ fn capture_initial_state(jit: &JitProcess) -> Result<InitialState, String> {
     let mut collections = layout.collections;
     collections.sort_by(|left, right| left.path.cmp(&right.path));
     for collection in collections {
-        if is_host_or_presentation_path(&collection.path) {
+        if excluded.contains(&collection.path) {
             continue;
         }
         let mut fields = collection.fields;
@@ -2661,6 +2683,7 @@ fn capture_initial_state(jit: &JitProcess) -> Result<InitialState, String> {
 fn restore_initial_state(jit: &JitProcess, state: &InitialState) -> Result<(), String> {
     validate_supported_state(jit)?;
     let layout = jit.state_layout();
+    let excluded = replay_excluded_paths(&layout);
     // Validate and decode the complete sparse payload before clearing any live
     // state. A malformed location or scalar type must leave the game untouched.
     let mut decoded_values = Vec::with_capacity(state.values.len());
@@ -2670,7 +2693,7 @@ fn restore_initial_state(jit: &JitProcess, state: &InitialState) -> Result<(), S
                 if !layout
                     .scalars
                     .iter()
-                    .any(|scalar| scalar.path == *path && !is_host_or_presentation_path(path))
+                    .any(|scalar| scalar.path == *path && !excluded.contains(path))
                 {
                     return Err(format!(
                         "replay initial state has unknown scalar path '{path}'"
@@ -2682,9 +2705,7 @@ fn restore_initial_state(jit: &JitProcess, state: &InitialState) -> Result<(), S
                 let collection = layout
                     .collections
                     .iter()
-                    .find(|collection| {
-                        collection.path == *path && !is_host_or_presentation_path(path)
-                    })
+                    .find(|collection| collection.path == *path && !excluded.contains(path))
                     .ok_or_else(|| {
                         format!("replay initial state has unknown collection path '{path}'")
                     })?;
@@ -2712,14 +2733,14 @@ fn restore_initial_state(jit: &JitProcess, state: &InitialState) -> Result<(), S
         decoded_values.push((entry.location.clone(), decode_scalar(&entry.value, target)?));
     }
     for scalar in layout.scalars {
-        if is_host_or_presentation_path(&scalar.path) {
+        if excluded.contains(&scalar.path) {
             continue;
         }
         let current = jit.read_global_scalar(&scalar.path)?;
         jit.write_global_scalar(&scalar.path, default_value(current))?;
     }
     for collection in layout.collections {
-        if is_host_or_presentation_path(&collection.path) {
+        if excluded.contains(&collection.path) {
             continue;
         }
         for field in collection.fields {
@@ -2753,12 +2774,13 @@ fn restore_initial_state(jit: &JitProcess, state: &InitialState) -> Result<(), S
 pub fn simulation_state_hash(jit: &JitProcess) -> Result<String, String> {
     validate_supported_state(jit)?;
     let layout = jit.state_layout();
+    let excluded = replay_excluded_paths(&layout);
     let mut hasher = Sha256::new();
     hasher.update(b"stasis.simulation-state.v1\0");
     let mut scalars = layout.scalars;
     scalars.sort_by(|left, right| left.path.cmp(&right.path));
     for scalar in scalars {
-        if !is_host_or_presentation_path(&scalar.path) {
+        if !excluded.contains(&scalar.path) {
             hash_value(
                 &mut hasher,
                 &scalar.path,
@@ -2769,7 +2791,7 @@ pub fn simulation_state_hash(jit: &JitProcess) -> Result<String, String> {
     let mut collections = layout.collections;
     collections.sort_by(|left, right| left.path.cmp(&right.path));
     for collection in collections {
-        if is_host_or_presentation_path(&collection.path) {
+        if excluded.contains(&collection.path) {
             continue;
         }
         let mut fields = collection.fields;
@@ -2810,11 +2832,12 @@ fn replay_field_element_count(
 }
 
 fn validate_supported_state(jit: &JitProcess) -> Result<(), String> {
-    let unsupported = jit
-        .state_layout()
+    let layout = jit.state_layout();
+    let excluded = replay_excluded_paths(&layout);
+    let unsupported = layout
         .opaque
         .into_iter()
-        .filter(|value| !is_host_or_presentation_path(&value.path))
+        .filter(|value| !excluded.contains(&value.path))
         .map(|value| value.path)
         .collect::<Vec<_>>();
     if unsupported.is_empty() {
@@ -2827,6 +2850,19 @@ fn validate_supported_state(jit: &JitProcess) -> Result<(), String> {
     }
 }
 
+fn replay_excluded_paths(layout: &StateLayout) -> HashSet<String> {
+    layout
+        .scalars
+        .iter()
+        .map(|value| value.path.as_str())
+        .chain(layout.collections.iter().map(|value| value.path.as_str()))
+        .chain(layout.opaque.iter().map(|value| value.path.as_str()))
+        .filter(|path| is_replay_host_or_presentation_path(layout, path))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[cfg(test)]
 fn is_host_or_presentation_path(path: &str) -> bool {
     path == "host_i32"
         || path == "host_f32"
@@ -3388,6 +3424,59 @@ mod tests {
             compact_input_at_tick(&document, 4).unwrap().i32_values,
             vec![0]
         );
+    }
+
+    #[test]
+    fn compact_validation_rejects_noncanonical_initial_state() {
+        let baseline = CompactInputSnapshot {
+            i32_values: vec![0],
+            f32_bits: vec![0],
+        };
+        let segments = vec![CompactInputSegment {
+            tick_gap: 0,
+            run_ticks: 1,
+            i32_changes: Vec::new(),
+            f32_changes: Vec::new(),
+        }];
+        let mut document = compact_test_document(baseline, segments, 1);
+        let first = StateEntry {
+            location: StateLocation::Scalar {
+                path: "a".to_string(),
+            },
+            value: EncodedScalar {
+                type_name: "i32".to_string(),
+                bits: "00000001".to_string(),
+            },
+        };
+        let last = StateEntry {
+            location: StateLocation::Scalar {
+                path: "z".to_string(),
+            },
+            value: EncodedScalar {
+                type_name: "i32".to_string(),
+                bits: "00000002".to_string(),
+            },
+        };
+        document.initial_state.values = vec![first.clone(), last.clone()];
+        validate_compact_document(&document).expect("ordered nondefault state");
+
+        let mut duplicate = document.clone();
+        duplicate.initial_state.values.insert(1, first);
+        assert!(validate_compact_document(&duplicate)
+            .expect_err("duplicate location must fail")
+            .contains("duplicate or out of order"));
+
+        let mut out_of_order = document.clone();
+        out_of_order.initial_state.values = vec![last, document.initial_state.values[0].clone()];
+        assert!(validate_compact_document(&out_of_order)
+            .expect_err("reversed locations must fail")
+            .contains("duplicate or out of order"));
+
+        let mut explicit_default = document;
+        explicit_default.initial_state.values[0].value.bits = "00000000".to_string();
+        assert!(validate_compact_document(&explicit_default)
+            .expect_err("sparse state must omit defaults")
+            .contains("default value"));
     }
 
     #[test]

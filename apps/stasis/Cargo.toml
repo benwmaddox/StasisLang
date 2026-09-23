@@ -43,6 +43,7 @@ base64 = "0.22"
 [dev-dependencies]
 object = "0.36"
 winit = { version = "0.29", default-features = false, features = ["rwh_06"] }
+tungstenite.workspace = true
 
 [lib]
 path = "src/lib.rs"

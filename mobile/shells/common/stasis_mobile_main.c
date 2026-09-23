@@ -731,6 +731,37 @@ int SDL_main(int argc, char **argv) {
         }
 #endif
     }
+    if (replay_bytes != NULL) {
+        const StasisReplayReceipt *receipt = stasis_mobile_runtime_replay_receipt();
+        if (receipt != NULL) {
+            SDL_Log(
+                "Stasis replay receipt: code=%s tick=%llu interval_start=%llu verified=%u completed=%u diagnostic=%s",
+                receipt->code,
+                (unsigned long long)receipt->tick,
+                (unsigned long long)receipt->interval_start,
+                (unsigned)receipt->verified,
+                (unsigned)receipt->completed,
+                receipt->diagnostic
+            );
+        }
+        if (receipt == NULL || receipt->result != STASIS_REPLAY_COMPLETE ||
+                receipt->verified == 0 || receipt->completed == 0) {
+            char message[640];
+            const char *code = receipt != NULL && receipt->code[0] != '\0'
+                ? receipt->code : "replay_incomplete";
+            unsigned long long tick = receipt != NULL
+                ? (unsigned long long)receipt->tick : 0ULL;
+            const char *diagnostic = receipt != NULL && receipt->diagnostic[0] != '\0'
+                ? receipt->diagnostic : "recording ended before final-state verification";
+            snprintf(message, sizeof(message),
+                "Stasis replay %s at tick %llu: %s", code, tick, diagnostic);
+            stasis_host_report_runtime_error(message);
+            stasis_pregraphics_info_log("%s", message);
+            if (status == STASIS_MOBILE_RUNTIME_STOP_REQUESTED && game_result == 0) {
+                status = STASIS_MOBILE_RUNTIME_REPLAY_INCOMPLETE;
+            }
+        }
+    }
     stasis_mobile_network_client_shutdown();
     stasis_mobile_runtime_shutdown();
     free(replay_bytes);

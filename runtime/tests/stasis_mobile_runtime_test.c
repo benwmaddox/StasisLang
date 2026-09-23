@@ -505,11 +505,13 @@ static void test_replay_orders_tick_verify_render_and_isolates_input(void) {
     replay_config.replay_state_descriptor = &descriptor;
     replay_config.replay_state_ops = ops;
     replay_test_active = 1;
+    replay_order = 1;
     replay_snapshot_write_calls = 0;
 
     assert(stasis_mobile_runtime_initialize(&replay_config, &valid_entries) ==
         STASIS_MOBILE_RUNTIME_OK);
     assert(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    assert(host_frame_calls == 0);
     assert(replay_order == 4);
     const StasisReplayReceipt *receipt = stasis_mobile_runtime_replay_receipt();
     assert(receipt != NULL && receipt->completed != 0);

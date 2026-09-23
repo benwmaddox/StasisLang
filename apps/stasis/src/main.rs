@@ -1939,19 +1939,14 @@ fn write_mobile_aot_engine_bundle(
     let asset_manifest_path = asset_dir
         .join("stasis_game")
         .join(DEFAULT_ASSET_MANIFEST_PATH);
-    let asset_manifest_sha256 = if resolved.assets.is_empty() && resolved.dynamic_assets.is_empty()
-    {
-        None
-    } else {
-        Some(stasis_assets::sha256_bytes(
-            &fs::read(&asset_manifest_path).map_err(|error| {
-                format!(
-                    "failed to read packaged asset manifest {}: {error}",
-                    asset_manifest_path.display()
-                )
-            })?,
-        ))
-    };
+    let asset_manifest_sha256 = Some(stasis_assets::sha256_bytes(
+        &fs::read(&asset_manifest_path).map_err(|error| {
+            format!(
+                "failed to read packaged asset manifest {}: {error}",
+                asset_manifest_path.display()
+            )
+        })?,
+    ));
     let portable_replay_compatibility =
         packaged_replay_compatibility(&snapshot, asset_manifest_sha256)?;
     let replay_identity_header = output_dir.join("published_replay_identity.h");
@@ -3721,10 +3716,19 @@ function frame_width(): i32 { return 360; }
             &fs::read_to_string(&summary.package_manifest).expect("read no-asset package manifest"),
         )
         .expect("parse no-asset package manifest");
-        assert!(
-            package_manifest["portable_replay_compatibility"]["asset_manifest_sha256"].is_null(),
-            "no reachable assets must preserve null replay asset identity"
+        let packaged_manifest = summary.asset_dir.join("stasis_game/assets/manifest.json");
+        let expected_asset_hash = stasis_assets::sha256_bytes(
+            &fs::read(&packaged_manifest).expect("read empty asset manifest"),
         );
+        assert_eq!(
+            package_manifest["portable_replay_compatibility"]["asset_manifest_sha256"],
+            expected_asset_hash,
+            "empty packaged asset manifests must retain the JIT-visible asset identity"
+        );
+        let replay_identity_source =
+            fs::read_to_string(output_dir.join("published_replay_identity.c"))
+                .expect("read replay identity");
+        assert!(replay_identity_source.contains(&expected_asset_hash));
 
         std::fs::remove_dir_all(&project_dir).ok();
         std::fs::remove_dir_all(&output_dir).ok();

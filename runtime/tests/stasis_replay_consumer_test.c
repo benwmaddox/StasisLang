@@ -283,11 +283,98 @@ static void test_nonempty_rle_checkpoint_and_descriptor_order(void) {
     free(corrupt);
 }
 
+
+static char *replace_once(const char *source, const char *needle, const char *replacement) {
+    const char *at = strstr(source, needle);
+    assert(at != NULL);
+    size_t before = (size_t)(at - source);
+    size_t after = strlen(at + strlen(needle));
+    size_t replacement_length = strlen(replacement);
+    char *result = (char *)malloc(before + replacement_length + after + 1U);
+    assert(result != NULL);
+    memcpy(result, source, before);
+    memcpy(result + before, replacement, replacement_length);
+    memcpy(result + before + replacement_length, at + strlen(needle), after + 1U);
+    return result;
+}
+
+static void test_initial_state_is_canonical_before_restore(void) {
+    static const StasisReplayStateEntry entries[] = {
+        {"scalar", "z", "", "i32", 0, 1, 4},
+        {"collection", "a", "value", "i32", 4, 1, 4},
+    };
+    static const StasisReplayInputDescriptor observed_i32[] = {
+        {0, 1, "input.i32", "raw"},
+    };
+    static const StasisReplayInputDescriptor observed_f32[] = {
+        {0, 2, "input.f32", "raw"},
+    };
+    StasisReplayCompatibility expected = expected_identity();
+    expected.host_i32_count = 3;
+    expected.host_f32_count = 3;
+    expected.input_usage_sha256 = "fc21c652cb8d5c6800c8393e644cab27ac081bcdc885cd39477db71b3790f3f0";
+    expected.observed_i32 = observed_i32;
+    expected.observed_i32_count = 1;
+    expected.observed_f32 = observed_f32;
+    expected.observed_f32_count = 1;
+    const StasisReplayStateDescriptor descriptor = {
+        .required_bytes = 8, .entries = entries, .entry_count = 2,
+    };
+    const StasisReplayStateOps ops = {
+        .size = nonempty_snapshot_size,
+        .write = nonempty_snapshot_write,
+        .restore = nonempty_snapshot_restore,
+    };
+    const char *scalar =
+        "{\"location\":{\"kind\":\"scalar\",\"path\":\"z\"},"
+        "\"value\":{\"type_name\":\"i32\",\"bits\":\"0000002a\"}}";
+    const char *collection =
+        "{\"location\":{\"kind\":\"collection\",\"path\":\"a\","
+        "\"field\":\"value\",\"index\":0},"
+        "\"value\":{\"type_name\":\"i32\",\"bits\":\"00000007\"}}";
+    char original_pair[320];
+    char duplicate_pair[480];
+    char reversed_pair[320];
+    snprintf(original_pair, sizeof(original_pair), "%s,%s", scalar, collection);
+    snprintf(duplicate_pair, sizeof(duplicate_pair), "%s,%s,%s", scalar, scalar, collection);
+    snprintf(reversed_pair, sizeof(reversed_pair), "%s,%s", collection, scalar);
+    char *documents[] = {
+        replace_once(nonempty_fixture, original_pair, duplicate_pair),
+        replace_once(nonempty_fixture, original_pair, reversed_pair),
+        replace_once(nonempty_fixture, "\"bits\":\"0000002a\"", "\"bits\":\"00000000\""),
+        replace_once(
+            nonempty_fixture,
+            "\"state_sha256\":\"cea6ddbb15f5284d09b3eb704f3f7a9cfe2f5b5f80c8a8c218a0281e49df3dd8\"",
+            "\"state_sha256\":\"0ea6ddbb15f5284d09b3eb704f3f7a9cfe2f5b5f80c8a8c218a0281e49df3dd8\""),
+    };
+    const char *codes[] = {
+        "noncanonical_initial_state",
+        "noncanonical_initial_state",
+        "noncanonical_initial_state",
+        "state_mismatch",
+    };
+    for (size_t index = 0; index < 4U; ++index) {
+        nonempty_state[0] = 99;
+        nonempty_state[4] = 88;
+        StasisReplayConsumer consumer;
+        stasis_replay_consumer_init(&consumer);
+        assert(stasis_replay_consumer_load(
+            &consumer, (const uint8_t *)documents[index], strlen(documents[index]),
+            &expected, &descriptor) == STASIS_REPLAY_OK);
+        assert(stasis_replay_consumer_initialize(&consumer, &ops) == STASIS_REPLAY_STATE_MISMATCH);
+        assert(strcmp(stasis_replay_consumer_receipt(&consumer)->code, codes[index]) == 0);
+        assert(nonempty_state[0] == 99 && nonempty_state[4] == 88);
+        stasis_replay_consumer_dispose(&consumer);
+        free(documents[index]);
+    }
+}
+
 int main(void) {
     test_fixture_completes();
     test_duplicate_and_identity_rejected();
     test_corrupted_final_state_diverges();
     test_nonempty_rle_checkpoint_and_descriptor_order();
+    test_initial_state_is_canonical_before_restore();
     puts("stasis_replay_consumer_test: ok");
     return 0;
 }

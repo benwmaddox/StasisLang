@@ -456,7 +456,10 @@ static int replay_compatibility(
         if (expected->asset_manifest_sha256 == NULL
             ? asset_manifest_sha256 != NULL
             : asset_manifest_sha256 == NULL || strcmp(expected->asset_manifest_sha256, asset_manifest_sha256) != 0) {
-            replay_fail(consumer, STASIS_REPLAY_IDENTITY_MISMATCH, "identity_mismatch", "portable replay asset identity differs");
+            replay_fail(consumer, STASIS_REPLAY_IDENTITY_MISMATCH, "identity_mismatch",
+                "portable replay asset identity differs (package %.64s, recording %.64s)",
+                expected->asset_manifest_sha256 == NULL ? "null" : expected->asset_manifest_sha256,
+                asset_manifest_sha256 == NULL ? "null" : asset_manifest_sha256);
             return 0;
         }
         if ((expected->controller_schema_version == 0U
@@ -890,21 +893,11 @@ static uint8_t replay_state_type_tag(const char *type) {
     return 7U;
 }
 
-static int replay_hash_state(
+static int replay_hash_snapshot(
     StasisReplayConsumer *consumer,
-    uint8_t *snapshot,
+    const uint8_t *snapshot,
     char output[65]
 ) {
-    if (consumer->state_ops.write == NULL) {
-        replay_fail(consumer, STASIS_REPLAY_MISSING_STATE_ABI, "missing_snapshot_abi", "replay state snapshot write operation is unavailable");
-        return 0;
-    }
-    int32_t written = consumer->state_ops.write(
-        consumer->state_ops.context, snapshot, (int32_t)consumer->state_descriptor.required_bytes);
-    if (written != (int32_t)consumer->state_descriptor.required_bytes) {
-        replay_fail(consumer, STASIS_REPLAY_STATE_MISMATCH, "state_bytes_mismatch", "replay state snapshot write returned %d", written);
-        return 0;
-    }
     ReplaySha256 hash;
     replay_sha256_init(&hash);
     replay_sha256_update(&hash, "stasis.simulation-state.v1\0", sizeof("stasis.simulation-state.v1\0") - 1U);
@@ -928,7 +921,7 @@ static int replay_hash_state(
                 replay_sha256_update(&hash, entry->path, label_length);
             }
             uint64_t offset = entry->offset + element * entry->element_bytes;
-            uint8_t *value = snapshot + offset;
+            const uint8_t *value = snapshot + offset;
             if (strcmp(entry->storage_type, "bool") == 0 && value[0] > 1U) {
                 replay_fail(consumer, STASIS_REPLAY_STATE_MISMATCH, "invalid_state_value", "replay state bool is outside 0..1");
                 return 0;
@@ -943,6 +936,24 @@ static int replay_hash_state(
     for (size_t index = 0; index < 32U; ++index) snprintf(output + index * 2U, 3U, "%02x", digest[index]);
     output[64] = '\0';
     return 1;
+}
+
+static int replay_hash_state(
+    StasisReplayConsumer *consumer,
+    uint8_t *snapshot,
+    char output[65]
+) {
+    if (consumer->state_ops.write == NULL) {
+        replay_fail(consumer, STASIS_REPLAY_MISSING_STATE_ABI, "missing_snapshot_abi", "replay state snapshot write operation is unavailable");
+        return 0;
+    }
+    int32_t written = consumer->state_ops.write(
+        consumer->state_ops.context, snapshot, (int32_t)consumer->state_descriptor.required_bytes);
+    if (written != (int32_t)consumer->state_descriptor.required_bytes) {
+        replay_fail(consumer, STASIS_REPLAY_STATE_MISMATCH, "state_bytes_mismatch", "replay state snapshot write returned %d", written);
+        return 0;
+    }
+    return replay_hash_snapshot(consumer, snapshot, output);
 }
 
 static int replay_restore_initial_state(StasisReplayConsumer *consumer) {
@@ -962,6 +973,8 @@ static int replay_restore_initial_state(StasisReplayConsumer *consumer) {
         return 0;
     }
     const cJSON *values = cJSON_GetObjectItemCaseSensitive((const cJSON *)consumer->initial_state, "values");
+    size_t previous_entry_index = SIZE_MAX;
+    uint64_t previous_element = 0U;
     for (int index = 0; index < cJSON_GetArraySize(values); ++index) {
         const cJSON *entry = cJSON_GetArrayItem(values, index);
         static const char *const entry_required[] = {"location", "value"};
@@ -1000,20 +1013,41 @@ static int replay_restore_initial_state(StasisReplayConsumer *consumer) {
             replay_fail(consumer, STASIS_REPLAY_STATE_MISMATCH, "state_location_mismatch", "replay initial state location is absent or out of bounds");
             goto fail;
         }
+        size_t entry_index = (size_t)(descriptor_entry - consumer->state_descriptor.entries);
+        if (previous_entry_index != SIZE_MAX &&
+            (entry_index < previous_entry_index ||
+             (entry_index == previous_entry_index && element <= previous_element))) {
+            replay_fail(consumer, STASIS_REPLAY_STATE_MISMATCH, "noncanonical_initial_state", "replay initial state locations must be strictly ordered and unique");
+            goto fail;
+        }
+        previous_entry_index = entry_index;
+        previous_element = element;
         uint8_t *destination = snapshot + descriptor_entry->offset + element * descriptor_entry->element_bytes;
         if (!replay_parse_scalar_bytes(consumer, value, descriptor_entry->storage_type, destination, descriptor_entry->element_bytes)) goto fail;
+        int nondefault = 0;
+        for (size_t byte = 0; byte < descriptor_entry->element_bytes; ++byte) {
+            if (destination[byte] != 0U) nondefault = 1;
+        }
+        if (!nondefault) {
+            replay_fail(consumer, STASIS_REPLAY_STATE_MISMATCH, "noncanonical_initial_state", "replay initial state must omit default values");
+            goto fail;
+        }
     }
     {
+        char actual[65];
+        const cJSON *state_hash = cJSON_GetObjectItemCaseSensitive((const cJSON *)consumer->initial_state, "state_sha256");
+        if (!replay_hash_snapshot(consumer, snapshot, actual) || strcmp(actual, state_hash->valuestring) != 0) {
+            if (consumer->receipt.result == STASIS_REPLAY_OK) replay_fail(consumer, STASIS_REPLAY_STATE_MISMATCH, "state_mismatch", "replay initial state hash differs");
+            goto fail;
+        }
         int32_t restored = consumer->state_ops.restore(
             consumer->state_ops.context, snapshot, size);
         if (restored != size) {
             replay_fail(consumer, STASIS_REPLAY_STATE_MISMATCH, "state_bytes_mismatch", "replay state snapshot restore returned %d", restored);
             goto fail;
         }
-        char actual[65];
-        const cJSON *state_hash = cJSON_GetObjectItemCaseSensitive((const cJSON *)consumer->initial_state, "state_sha256");
         if (!replay_hash_state(consumer, snapshot, actual) || strcmp(actual, state_hash->valuestring) != 0) {
-            if (consumer->receipt.result == STASIS_REPLAY_OK) replay_fail(consumer, STASIS_REPLAY_STATE_MISMATCH, "state_mismatch", "replay initial state hash differs");
+            if (consumer->receipt.result == STASIS_REPLAY_OK) replay_fail(consumer, STASIS_REPLAY_STATE_MISMATCH, "state_mismatch", "replay restored initial state hash differs");
             goto fail;
         }
     }
@@ -1243,7 +1277,7 @@ int32_t stasis_replay_consumer_verify_tick(
     if (valid && strcmp(actual, expected) != 0) {
         uint64_t interval_start = consumer->last_verified_tick + 1U;
         consumer->receipt.interval_start = interval_start;
-        replay_fail(consumer, STASIS_REPLAY_DIVERGED, "replay_diverged", "replay diverged within ticks %llu..=%llu; detected at checkpoint %llu", (unsigned long long)interval_start, (unsigned long long)tick, (unsigned long long)tick);
+        replay_fail(consumer, STASIS_REPLAY_DIVERGED, "replay_diverged", "replay diverged within ticks %llu..=%llu; detected at checkpoint %llu (expected %.64s, actual %.64s)", (unsigned long long)interval_start, (unsigned long long)tick, (unsigned long long)tick, expected, actual);
         free(snapshot);
         return STASIS_REPLAY_DIVERGED;
     }

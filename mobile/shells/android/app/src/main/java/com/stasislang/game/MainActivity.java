@@ -20,6 +20,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 import com.stasislang.shell.StasisAssetCache;
 import com.stasislang.shell.NetworkJoinPolicy;
 import com.stasislang.shell.StasisReplaySaf;
@@ -33,12 +34,14 @@ public final class MainActivity extends SDLActivity {
     private static final String STASIS_ANDROID_ORIENTATION = "@STASIS_ANDROID_ORIENTATION@";
     private static final String INVALID_ASSET_ROOT = ".stasis_asset_root_unavailable";
     private static final long HUD_UPDATE_INTERVAL_MS = 200L;
+    private static final long REPLAY_RECEIPT_POLL_INTERVAL_MS = 16L;
     private static final double FRAME_BUDGET_MILLIS = 1000.0 / 60.0;
     private static final boolean STASIS_NETWORK_ENABLED = @STASIS_NETWORK_ENABLED@ != 0;
     private static final boolean STASIS_NETWORK_CLIENT_ENABLED =
             @STASIS_NETWORK_CLIENT_ENABLED@ != 0;
     private static final String NETWORK_JOIN_URL_EXTRA = "stasis.network_join_url";
     private static final String REPLAY_URI_EXTRA = "stasis.replay_uri";
+    static final String REPLAY_RESULT_EXTRA = "stasis.replay_result";
     private static final int REQUEST_REPLAY_IMPORT = 4801;
     private static final int REQUEST_REPLAY_EXPORT = 4802;
 
@@ -51,6 +54,7 @@ public final class MainActivity extends SDLActivity {
     private static native boolean nativeReadPerformanceMetrics(float[] output);
     private static native void nativeSetPerformanceMetricsEnabled(boolean enabled);
     private static native String nativeReadRuntimeError();
+    private static native String nativeReadReplayReceipt();
     private static native String nativeReadNetworkJoinUrl();
     private static native int nativeProvisionNetworkClient(String joinUrl);
     private static native int nativeSetNetworkClientBackground(boolean background);
@@ -67,10 +71,14 @@ public final class MainActivity extends SDLActivity {
     private FrameLayout diagnosticLayer;
     private TextView performanceHud;
     private TextView runtimeError;
+    private TextView runtimeStatus;
     private TextView joinUrl;
     private String joinUrlValue;
     private Runnable hudUpdater;
+    private Runnable replayReceiptUpdater;
+    private boolean terminalReplayResultLaunched;
     private String displayedRuntimeError;
+    private String displayedReplayReceipt;
     private String startupAssetVerificationDiagnostic;
     private String startupReplayImportDiagnostic;
     private File stagedReplayFile;
@@ -170,7 +178,12 @@ public final class MainActivity extends SDLActivity {
         super.onCreate(state);
         installDiagnosticOverlay();
         if (startupError != null) showRuntimeError(startupError);
+        if (startupReplayDiagnostic != null) {
+            showRuntimeError("Replay import failed\n" + startupReplayDiagnostic);
+        }
+        if (startupReplay != null) showRuntimeStatus("Replay loaded for startup.");
         startPerformanceHudUpdates();
+        if (startupReplay != null) startReplayReceiptUpdates();
     }
 
     @Override
@@ -178,13 +191,16 @@ public final class MainActivity extends SDLActivity {
         super.onNewIntent(intent);
         setIntent(intent);
         provisionNetworkClient(intent);
+        stageWarmReplay(intent);
     }
 
     /** Opens the bounded SAF picker; the selected replay is staged for the next launch. */
     public void requestReplayImport() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("application/json");
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES,
+                new String[] {"application/json", "application/octet-stream"});
         try {
             startActivityForResult(intent, REQUEST_REPLAY_IMPORT);
         } catch (ActivityNotFoundException | SecurityException error) {
@@ -192,7 +208,7 @@ public final class MainActivity extends SDLActivity {
         }
     }
 
-    /** Exports the replay staged by import through a bounded SAF document provider. */
+    /** Exports a copy of the staged replay through a bounded SAF document provider. */
     public void requestReplayExport() {
         if (stagedReplayFile == null || !stagedReplayFile.isFile()) {
             showRuntimeError("No staged replay is available to export");
@@ -214,6 +230,20 @@ public final class MainActivity extends SDLActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_REPLAY_EXPORT) {
+            File source = pendingReplayExportSource;
+            pendingReplayExportSource = null;
+            if (resultCode != RESULT_OK || data == null || data.getData() == null
+                    || source == null) return;
+            try {
+                StasisReplaySaf.exportReplay(getContentResolver(), data.getData(), source);
+                showRuntimeStatus(
+                        "Replay copy exported. It is the imported replay; no new recording was created.");
+            } catch (IOException error) {
+                showRuntimeError("Replay export failed\n" + StasisReplaySaf.boundDiagnostic(error));
+            }
+            return;
+        }
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         if (requestCode == REQUEST_REPLAY_IMPORT) {
@@ -221,20 +251,15 @@ public final class MainActivity extends SDLActivity {
                 stagedReplayFile = StasisReplaySaf.importReplay(
                         getContentResolver(), uri, getFilesDir());
                 nativeSetReplayImportError(null);
-                showRuntimeError(
-                        "Replay imported. Relaunch with this document before native startup to play it.");
+                if (markReplayPendingForNextLaunch()) {
+                    showRuntimeStatus("Replay imported. Restart the game to play it.");
+                } else {
+                    showRuntimeError(
+                            "Replay imported but could not be queued. Open it again after restarting the game.");
+                }
             } catch (IOException error) {
                 nativeSetReplayImportError(StasisReplaySaf.boundDiagnostic(error));
                 showRuntimeError("Replay import failed\n" + StasisReplaySaf.boundDiagnostic(error));
-            }
-        } else if (requestCode == REQUEST_REPLAY_EXPORT) {
-            File source = pendingReplayExportSource;
-            pendingReplayExportSource = null;
-            if (source == null) return;
-            try {
-                StasisReplaySaf.exportReplay(getContentResolver(), uri, source);
-            } catch (IOException error) {
-                showRuntimeError("Replay export failed\n" + StasisReplaySaf.boundDiagnostic(error));
             }
         }
     }
@@ -250,7 +275,14 @@ public final class MainActivity extends SDLActivity {
     protected void onPause() {
         externalUrlHostActive = false;
         if (STASIS_NETWORK_CLIENT_ENABLED) nativeSetNetworkClientBackground(true);
+        showTerminalReplayResultIfAvailable();
         super.onPause();
+    }
+
+    @Override
+    protected void onStop() {
+        showTerminalReplayResultIfAvailable();
+        super.onStop();
     }
 
     public boolean openExternalUrlFromNative(byte[] utf8Url) {
@@ -294,6 +326,8 @@ public final class MainActivity extends SDLActivity {
     protected void onDestroy() {
         externalUrlHostActive = false;
         nativeSetPerformanceMetricsEnabled(false);
+        showTerminalReplayResultIfAvailable();
+        stopReplayReceiptUpdates();
         stopPerformanceHudUpdates();
         if (STASIS_NETWORK_CLIENT_ENABLED) nativeShutdownNetworkClient();
         super.onDestroy();
@@ -314,8 +348,29 @@ public final class MainActivity extends SDLActivity {
 
     private File stageStartupReplay(Intent intent) {
         Uri source = startupReplayUri(intent);
-        if (source == null) return null;
+        if (source == null) {
+            if (!StasisReplaySaf.isReplayPending(getFilesDir())) return null;
+            File pending = new File(getFilesDir(), "stasis_replay.json");
+            if (!pending.isFile() || pending.length() <= 0L
+                    || pending.length() > StasisReplaySaf.MAX_REPLAY_BYTES) {
+                startupReplayImportDiagnostic = StasisReplaySaf.boundDiagnostic(
+                        new IOException("queued replay is missing or outside the bounded file limit"));
+                clearReplayPendingLaunch();
+                return null;
+            }
+            if (!clearReplayPendingLaunch()) {
+                startupReplayImportDiagnostic = StasisReplaySaf.boundDiagnostic(
+                        new IOException("queued replay could not be consumed for startup"));
+                return null;
+            }
+            stagedReplayFile = pending;
+            startupReplayImportDiagnostic = null;
+            return pending;
+        }
         try {
+            if (!clearReplayPendingLaunch()) {
+                throw new IOException("previous replay selection could not be cleared");
+            }
             stagedReplayFile = StasisReplaySaf.importReplay(
                     getContentResolver(), source, getFilesDir());
             startupReplayImportDiagnostic = null;
@@ -324,6 +379,36 @@ public final class MainActivity extends SDLActivity {
             startupReplayImportDiagnostic = StasisReplaySaf.boundDiagnostic(error);
             return null;
         }
+    }
+
+    private void stageWarmReplay(Intent intent) {
+        Uri source = startupReplayUri(intent);
+        if (source == null) return;
+        try {
+            stagedReplayFile = StasisReplaySaf.importReplay(
+                    getContentResolver(), source, getFilesDir());
+            if (markReplayPendingForNextLaunch()) {
+                showRuntimeStatus("Replay imported. Restart the game to play it.");
+            } else {
+                showRuntimeError(
+                        "Replay imported but could not be queued. Open it again after restarting the game.");
+            }
+        } catch (IOException error) {
+            showRuntimeError("Replay import failed\n" + StasisReplaySaf.boundDiagnostic(error));
+        }
+    }
+
+    private boolean markReplayPendingForNextLaunch() {
+        try {
+            StasisReplaySaf.markReplayPending(getFilesDir());
+            return true;
+        } catch (IOException error) {
+            return false;
+        }
+    }
+
+    private boolean clearReplayPendingLaunch() {
+        return StasisReplaySaf.clearReplayPending(getFilesDir());
     }
 
     private static Uri startupReplayUri(Intent intent) {
@@ -379,6 +464,20 @@ public final class MainActivity extends SDLActivity {
                 Gravity.TOP | Gravity.START);
         params.setMargins(dp(4), dp(4), dp(4), 0);
         diagnosticLayer.addView(performanceHud, params);
+
+        runtimeStatus = new TextView(this);
+        runtimeStatus.setTextColor(Color.rgb(220, 255, 230));
+        runtimeStatus.setTextSize(12.0f);
+        runtimeStatus.setPadding(dp(10), dp(8), dp(10), dp(8));
+        runtimeStatus.setBackgroundColor(Color.argb(220, 12, 64, 42));
+        runtimeStatus.setContentDescription("Stasis replay status");
+        runtimeStatus.setVisibility(View.GONE);
+        FrameLayout.LayoutParams statusParams = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        statusParams.setMargins(dp(8), dp(64), dp(8), 0);
+        diagnosticLayer.addView(runtimeStatus, statusParams);
 
         runtimeError = new TextView(this);
         runtimeError.setTextColor(Color.rgb(255, 210, 210));
@@ -439,6 +538,7 @@ public final class MainActivity extends SDLActivity {
             @Override public void run() {
                 updatePerformanceHud();
                 updateRuntimeError();
+                updateReplayReceipt();
                 updateJoinUrl();
                 if (hudUpdater != null) {
                     hudHandler.postDelayed(this, HUD_UPDATE_INTERVAL_MS);
@@ -446,6 +546,29 @@ public final class MainActivity extends SDLActivity {
             }
         };
         hudHandler.postDelayed(hudUpdater, HUD_UPDATE_INTERVAL_MS);
+    }
+
+    private void startReplayReceiptUpdates() {
+        if (replayReceiptUpdater != null) return;
+        replayReceiptUpdater = new Runnable() {
+            @Override public void run() {
+                updateRuntimeError();
+                if (updateReplayReceipt()) {
+                    replayReceiptUpdater = null;
+                    return;
+                }
+                if (replayReceiptUpdater != null) {
+                    hudHandler.postDelayed(this, REPLAY_RECEIPT_POLL_INTERVAL_MS);
+                }
+            }
+        };
+        hudHandler.post(replayReceiptUpdater);
+    }
+
+    private void stopReplayReceiptUpdates() {
+        if (replayReceiptUpdater == null) return;
+        hudHandler.removeCallbacks(replayReceiptUpdater);
+        replayReceiptUpdater = null;
     }
 
     private void stopPerformanceHudUpdates() {
@@ -507,9 +630,59 @@ public final class MainActivity extends SDLActivity {
                 && message.equals(startupAssetVerificationDiagnostic)
                 && displayedRuntimeError != null
                 && displayedRuntimeError.equals(
-                        "Asset verification failed\n" + startupAssetVerificationDiagnostic))) {
+                        "Asset verification failed\n" + startupAssetVerificationDiagnostic))
+                && !(startupReplayImportDiagnostic != null
+                && message.equals(startupReplayImportDiagnostic)
+                && displayedRuntimeError != null
+                && displayedRuntimeError.equals(
+                        "Replay import failed\n" + startupReplayImportDiagnostic))) {
             showRuntimeError(message);
         }
+    }
+
+    private boolean updateReplayReceipt() {
+        String receipt = nativeReadReplayReceipt();
+        if (receipt == null || receipt.isEmpty()) return false;
+        if (isVerifiedReplayCompletionReceipt(receipt)) {
+            showRuntimeStatus(receipt);
+        } else {
+            showRuntimeError(formatReplayReceiptForDisplay(receipt));
+        }
+        return true;
+    }
+
+    private void showTerminalReplayResultIfAvailable() {
+        if (terminalReplayResultLaunched) return;
+        String receipt = nativeReadReplayReceipt();
+        if (receipt == null || receipt.isEmpty()) return;
+        terminalReplayResultLaunched = true;
+        if (isVerifiedReplayCompletionReceipt(receipt)) {
+            showRuntimeStatus(receipt);
+        } else {
+            showRuntimeError(formatReplayReceiptForDisplay(receipt));
+        }
+        Intent result = new Intent(this, ReplayResultActivity.class);
+        result.putExtra(REPLAY_RESULT_EXTRA, formatReplayReceiptForDisplay(receipt));
+        try {
+            startActivity(result);
+        } catch (RuntimeException error) {
+            Toast.makeText(getApplicationContext(),
+                    formatReplayReceiptForDisplay(receipt), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    static boolean isVerifiedReplayCompletionReceipt(String receipt) {
+        return receipt != null && receipt.startsWith("Replay complete at tick ");
+    }
+
+    static String formatReplayReceiptForDisplay(String receipt) {
+        if (receipt == null) return "";
+        String prefix = "Replay replay_";
+        if (!receipt.startsWith(prefix)) return receipt;
+        int tickMarker = receipt.indexOf(" at tick ", prefix.length());
+        if (tickMarker <= prefix.length()) return receipt;
+        String code = receipt.substring(prefix.length(), tickMarker).replace('_', ' ');
+        return "Replay " + code + receipt.substring(tickMarker);
     }
 
     private void updateJoinUrl() {
@@ -536,6 +709,16 @@ public final class MainActivity extends SDLActivity {
                 && !lower.contains("localhost")
                 && !lower.contains("127.0.0.1")
                 && !lower.contains("0.0.0.0");
+    }
+
+    private void showRuntimeStatus(String message) {
+        if (runtimeStatus == null || message == null || message.equals(displayedReplayReceipt)) return;
+        displayedReplayReceipt = message;
+        String displayMessage = "Stasis replay status\n" + message;
+        runtimeStatus.setText(displayMessage);
+        runtimeStatus.setContentDescription(displayMessage);
+        runtimeStatus.setVisibility(View.VISIBLE);
+        runtimeStatus.announceForAccessibility(displayMessage);
     }
 
     private void showRuntimeError(String message) {
