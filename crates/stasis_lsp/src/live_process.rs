@@ -116,7 +116,7 @@ impl LiveProcessBroker {
             .current_dir(&self.inner.project_root)
             .arg("--workspace")
             .arg(&self.inner.project_root)
-            .arg("tui");
+            .arg("live");
         if let Some(entry) = entry.filter(|entry| !entry.trim().is_empty()) {
             command.arg(entry.trim());
         }
