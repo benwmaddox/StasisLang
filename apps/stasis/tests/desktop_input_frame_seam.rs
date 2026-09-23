@@ -3,7 +3,7 @@
 use serde_json::json;
 use stasis_compiler::backend::jit::JitProcess;
 use stasis_dynload::{
-    global_path_hash, register_global_f32_array, register_global_i32_array,
+    global_path_hash, invoke_noarg_void, register_global_f32_array, register_global_i32_array,
     register_global_u8_array, Library, StasisGraphicsApi, STASIS_RENDER_F32_COUNT,
     STASIS_RENDER_I32_COUNT, STASIS_RENDER_U8_COUNT,
 };
@@ -213,6 +213,16 @@ fn desktop_sdl_input_changes_jit_state_and_submitted_frame_on_the_intended_tick(
     );
     jit.compile().expect("compile desktop input fixture");
     assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(0));
+
+    // Prime native window metrics, then close this blank host frame so the next
+    // HostFrame snapshot can pump the injected events.
+    gfx.host_get_frame(&mut host_i32, &mut host_f32)
+        .expect("prime native HostFrame metrics");
+    let end_frame = injector
+        ._library
+        .symbol_address("stasis_end_frame")
+        .expect("graphics runtime must expose host end-frame entry");
+    invoke_noarg_void(end_frame).expect("finish initial native metrics frame");
 
     injector.event(EVENT_KEY_DOWN, KEY_SPACE, 0.0, 0.0);
     injector.event(EVENT_POINTER_DOWN, TOUCH_ID, 80.0, 45.0);
