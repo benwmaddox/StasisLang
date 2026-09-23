@@ -3435,9 +3435,9 @@ pub(crate) fn append_replay_state_snapshot_bridge_source(
             ));
         }
         if entry.kind == "scalar" {
-            source.push_str(&format!("extern {c_type} {symbol};\n"));
+            source.push_str(&format!("STASIS_EXPORT extern {c_type} {symbol};\n"));
         } else {
-            source.push_str(&format!("extern {c_type} {symbol}[];\n"));
+            source.push_str(&format!("STASIS_EXPORT extern {c_type} {symbol}[];\n"));
         }
     }
     if expected_offset != snapshot.required_bytes {
@@ -3447,6 +3447,21 @@ pub(crate) fn append_replay_state_snapshot_bridge_source(
         ));
     }
 
+    if required_bytes > 0
+        && snapshot.entries.iter().any(|entry| {
+            entry.element_count > 0 && matches!(entry.storage_type.as_str(), "i32" | "f32" | "f64")
+        })
+    {
+        source.push_str(
+            r#"static void stasis_copy_bytes(void *destination, const void *source, uint32_t byte_count) {
+    uint8_t *destination_bytes = (uint8_t *)destination;
+    const uint8_t *source_bytes = (const uint8_t *)source;
+    uint32_t index;
+    for (index = 0; index < byte_count; ++index) destination_bytes[index] = source_bytes[index];
+}
+"#,
+        );
+    }
     source.push_str("STASIS_EXPORT int32_t stasis_replay_state_snapshot_size(void) {\n");
     source.push_str(&format!("    return {required_bytes};\n"));
     source.push_str("}\n");
@@ -3457,7 +3472,7 @@ pub(crate) fn append_replay_state_snapshot_bridge_source(
         source.push_str("    (void)out;\n    (void)capacity;\n    return 0;\n}\n");
     } else {
         source.push_str(&format!(
-            "    const int32_t required = {required_bytes};\n    if (out == (uint8_t *)0 || capacity < required) return -required;\n    uint32_t bits32 = 0;\n    uint64_t bits64 = 0;\n    float f32_value = 0.0f;\n    double f64_value = 0.0;\n"
+            "    const int32_t required = {required_bytes};\n    if (out == (uint8_t *)0 || capacity < required) return -required;\n    uint32_t bits32 = 0;\n    uint64_t bits64 = 0;\n"
         ));
 
         for entry in &snapshot.entries {
@@ -3496,13 +3511,13 @@ pub(crate) fn append_replay_state_snapshot_bridge_source(
                         element_offset + 3
                     )),
                     "f32" => source.push_str(&format!(
-                        "    f32_value = (float)({expression});\n    memcpy(&bits32, &f32_value, sizeof(bits32));\n    out[{element_offset}] = (uint8_t)(bits32 & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 8) & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 16) & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 24) & 0xffu);\n",
+                        "    stasis_copy_bytes(&bits32, &({expression}), 4u);\n    out[{element_offset}] = (uint8_t)(bits32 & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 8) & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 16) & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 24) & 0xffu);\n",
                         element_offset + 1,
                         element_offset + 2,
                         element_offset + 3
                     )),
                     "f64" => source.push_str(&format!(
-                        "    f64_value = (double)({expression});\n    memcpy(&bits64, &f64_value, sizeof(bits64));\n    out[{element_offset}] = (uint8_t)(bits64 & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 8) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 16) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 24) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 32) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 40) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 48) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 56) & 0xffull);\n",
+                        "    stasis_copy_bytes(&bits64, &({expression}), 8u);\n    out[{element_offset}] = (uint8_t)(bits64 & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 8) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 16) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 24) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 32) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 40) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 48) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 56) & 0xffull);\n",
                         element_offset + 1,
                         element_offset + 2,
                         element_offset + 3,
@@ -3535,23 +3550,8 @@ pub(crate) fn append_replay_state_snapshot_bridge_source(
     }
     source.push_str("    if (input == (const uint8_t *)0) return -required;\n");
 
-    // Clear every represented simulation value before decoding. The descriptor has already
-    // excluded host/presentation state and the generated statements are intentionally
-    // compile-time-unrolled (there is no runtime reflection or loop here).
-    for entry in &snapshot.entries {
-        if entry.element_count == 0 {
-            continue;
-        }
-        let symbol = replay_snapshot_storage_symbol(entry);
-        for index in 0..entry.element_count {
-            let expression = if entry.kind == "scalar" {
-                symbol.clone()
-            } else {
-                format!("{symbol}[{index}]")
-            };
-            source.push_str(&format!("    {expression} = 0;\n"));
-        }
-    }
+    // Exact-size and null checks above precede a complete, unrolled decode that overwrites
+    // every represented value, so no separate preclear is needed.
     source.push_str("    uint32_t bits32 = 0;\n    uint64_t bits64 = 0;\n");
     for entry in &snapshot.entries {
         if entry.element_count == 0 {
@@ -3607,11 +3607,11 @@ pub(crate) fn append_replay_state_snapshot_bridge_source(
             }
             match entry.storage_type.as_str() {
                 "i32" | "f32" => source.push_str(&format!(
-                    "    memcpy(&({expression}), &bits32, sizeof(bits32));\n"
+                    "    stasis_copy_bytes(&({expression}), &bits32, 4u);\n"
                 )),
                 "u32" => source.push_str(&format!("    {expression} = bits32;\n")),
                 "f64" => source.push_str(&format!(
-                    "    memcpy(&({expression}), &bits64, sizeof(bits64));\n"
+                    "    stasis_copy_bytes(&({expression}), &bits64, 8u);\n"
                 )),
                 "bool" | "u8" | "u16" => {}
                 other => {
@@ -3688,7 +3688,6 @@ typedef unsigned long long uintptr_t;\n\
 #define STASIS_EXPORT __attribute__((visibility(\"default\")))\n\
 #endif\n",
     );
-    source.push_str("#include <string.h>\n");
     if let Some(snapshot) =
         replay_state_snapshot.filter(|snapshot| replay_snapshot_bridge_can_emit(snapshot))
     {
@@ -6115,13 +6114,13 @@ mod tests {
         )
         .expect("build replay snapshot bridge");
 
-        assert!(source.contains("extern int32_t stasis_state_scalar__scalar;"));
-        assert!(source.contains("extern int32_t stasis_state_array__primitive[];"));
+        assert!(source.contains("STASIS_EXPORT extern int32_t stasis_state_scalar__scalar;"));
+        assert!(source.contains("STASIS_EXPORT extern int32_t stasis_state_array__primitive[];"));
         assert!(source.contains("stasis_state_array__primitive[0]"));
         assert!(source.contains("stasis_state_array__primitive[1]"));
-        assert!(source.contains("extern float stasis_state_array__named__lane[];"));
-        assert!(source.contains("extern int32_t stasis_state_scalar__flag;"));
-        assert!(source.contains("extern double stasis_state_scalar__wide;"));
+        assert!(source.contains("STASIS_EXPORT extern float stasis_state_array__named__lane[];"));
+        assert!(source.contains("STASIS_EXPORT extern int32_t stasis_state_scalar__flag;"));
+        assert!(source.contains("STASIS_EXPORT extern double stasis_state_scalar__wide;"));
         assert!(source.contains("return 25;"));
         assert!(source.contains("return -required;"));
         assert!(source.contains("out[1] = (uint8_t)(bits32 & 0xffu);"));
@@ -6129,15 +6128,18 @@ mod tests {
         assert!(source
             .contains("out[0] = (uint8_t)(((int32_t)(stasis_state_scalar__flag) != 0) ? 1 : 0);"));
         assert!(source.contains("out[12] = (uint8_t)((bits64 >> 56) & 0xffull);"));
-        assert!(source.contains("memcpy(&bits32, &f32_value, sizeof(bits32));"));
-        assert!(source.contains("memcpy(&bits64, &f64_value, sizeof(bits64));"));
+        assert!(source
+            .contains("stasis_copy_bytes(&bits32, &(stasis_state_array__named__lane[0]), 4u);"));
+        assert!(source.contains("stasis_copy_bytes(&bits64, &(stasis_state_scalar__wide), 8u);"));
+        assert!(!source.contains("memcpy("));
+        assert!(!source.contains("#include <string.h>"));
         assert!(source.contains(
             "STASIS_EXPORT int32_t stasis_replay_state_snapshot_restore(const uint8_t *input, int32_t bytes)"
         ));
         assert!(source.contains("if (bytes != required) return required == 0 ? -1 : -required;"));
         assert!(source
-            .contains("memcpy(&(stasis_state_array__named__lane[0]), &bits32, sizeof(bits32));"));
-        assert!(source.contains("memcpy(&(stasis_state_scalar__wide), &bits64, sizeof(bits64));"));
+            .contains("stasis_copy_bytes(&(stasis_state_array__named__lane[0]), &bits32, 4u);"));
+        assert!(source.contains("stasis_copy_bytes(&(stasis_state_scalar__wide), &bits64, 8u);"));
         let guard = source
             .find("if (out == (uint8_t *)0 || capacity < required) return -required;")
             .expect("capacity guard");
@@ -6202,6 +6204,93 @@ mod tests {
         .expect("build empty replay snapshot bridge");
         assert!(empty_source.contains("return 0;\n}\n"));
         assert!(empty_source.contains("(void)out;"));
+        assert!(!empty_source.contains("stasis_copy_bytes("));
+    }
+
+    #[test]
+    fn i32_only_replay_snapshot_emits_freestanding_copy_helper() {
+        let snapshot = ProgramReplayStateSnapshot {
+            schema: "stasis.replay_state_snapshot.v2".to_string(),
+            abi_version: 2,
+            support: "descriptor_only".to_string(),
+            byte_order: "little_endian".to_string(),
+            hash_scope: "simulation_after_tick".to_string(),
+            required_bytes: 4,
+            entries: vec![ProgramReplayStateEntry {
+                kind: "scalar".to_string(),
+                path: "signed".to_string(),
+                field: String::new(),
+                storage_type: "i32".to_string(),
+                offset: 0,
+                element_count: 1,
+                element_bytes: 4,
+            }],
+            unsupported_paths: Vec::new(),
+            size_operation: "stasis_replay_state_snapshot_size".to_string(),
+            write_operation: "stasis_replay_state_snapshot_write".to_string(),
+            restore_operation: "stasis_replay_state_snapshot_restore".to_string(),
+        };
+        let runtime_fields = [PackagedRuntimeField {
+            name: "stasis_state_scalar__signed".to_string(),
+            size: 4,
+            field_type: "i32".to_string(),
+            array_count: 1,
+            initial_value: None,
+            collection_path: None,
+            collection_field: None,
+            runtime_path: None,
+        }];
+        let source = build_engine_bundle_runtime_bridge_source_with_snapshot(
+            &stasis_jit::AotTarget::Native,
+            &runtime_fields,
+            &[],
+            &[],
+            None,
+            &[],
+            Some(&snapshot),
+        )
+        .expect("build integer-only replay snapshot bridge");
+        assert!(source.contains("STASIS_EXPORT extern int32_t stasis_state_scalar__signed;"));
+        assert!(source.contains("static void stasis_copy_bytes("));
+        assert!(source.contains("stasis_copy_bytes(&(stasis_state_scalar__signed), &bits32, 4u);"));
+        let forward_declaration = source
+            .find("STASIS_EXPORT extern int32_t stasis_state_scalar__signed;")
+            .expect("exported integer storage forward declaration");
+        let exported_definition = source
+            .find("STASIS_EXPORT int32_t stasis_state_scalar__signed = 0;")
+            .expect("matching exported integer storage definition");
+        assert!(forward_declaration < exported_definition);
+        assert!(!source.contains("memcpy("));
+        assert!(!source.contains("#include <string.h>"));
+
+        #[cfg(windows)]
+        {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let temp_root = std::env::temp_dir().join(format!(
+                "stasis-i32-replay-bridge-syntax-{}-{stamp}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&temp_root).expect("create integer replay bridge temp root");
+            let source_path = temp_root.join("replay_bridge.c");
+            let object_path = temp_root.join("replay_bridge.obj");
+            fs::write(&source_path, &source).expect("write integer replay bridge C");
+            let compiler = default_runtime_bridge_compiler(&stasis_jit::AotTarget::Native);
+            let output = Command::new(compiler)
+                .args(["/nologo", "/c", "/TC", "/Zl", "/GS-", "/X"])
+                .arg(format!("/Fo{}", object_path.display()))
+                .arg(&source_path)
+                .output()
+                .expect("run clang-cl for integer replay bridge");
+            fs::remove_dir_all(&temp_root).ok();
+            assert!(
+                output.status.success(),
+                "integer-only replay bridge must compile without standard headers: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]
@@ -6559,6 +6648,8 @@ mod tests {
         assert!(source.contains("typedef signed int int32_t;"));
         assert!(source.contains("int32_t balance__hp[3] = {70, 110, 85};"));
         assert!(!source.starts_with("#include <stdint.h>"));
+        assert!(!source.contains("#include <string.h>"));
+        assert!(!source.contains("stasis_copy_bytes("));
 
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
