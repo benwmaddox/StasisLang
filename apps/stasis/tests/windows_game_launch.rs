@@ -1328,6 +1328,178 @@ fn recording_audio_asset_mp4_is_non_silent_repeatable_and_aligned() {
 }
 
 #[test]
+fn record_recompiles_changed_imports_across_fresh_cli_processes() {
+    let root = repository_root();
+    let runtime = std::env::var_os("STASIS_RUNTIME_DLL_PATH")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            let path = root.join("runtime/build/bin/Release/stasis_graphics.dll");
+            path.is_file().then_some(path)
+        });
+    let Some(runtime) = runtime else {
+        eprintln!("imported-source recording integration skipped: graphics runtime is unavailable");
+        return;
+    };
+    let cli = std::env::var_os("STASIS_RECORD_TEST_CLI")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_stasis")));
+    if let Err(error) = Command::new(&cli).arg("help").output() {
+        if error.raw_os_error() == Some(4551) {
+            eprintln!(
+                "imported-source recording integration skipped: Windows Application Control blocked the test CLI"
+            );
+            return;
+        }
+        panic!("probe stasis CLI for imported-source recording: {error}");
+    }
+
+    let fixture = root.join("samples/windows_launch_smoke");
+    let test_tree = TestTree(temp_dir("record_import_invalidation"));
+    let project = test_tree.0.join("windows_launch_smoke");
+    copy_tree(&fixture, &project);
+    materialize_toolchain_stdlib(&project);
+
+    let entry = project.join("main.stasis");
+    let entry_source = r#"
+import "src/render.stasis";
+
+function main(): i32 { return 0; }
+function tick(): i32 { return 0; }
+function render(): i32 {
+    render_scene();
+    return 0;
+}
+function on_code_swap(): void { return; }
+"#;
+    fs::create_dir_all(project.join("src")).expect("create source graph directory");
+    fs::write(&entry, entry_source).expect("write recording entry fixture");
+
+    let render = project.join("src/render.stasis");
+    let initial_render_source = r#"
+import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
+import "palette.stasis";
+
+function render_scene(): i32 {
+    clear(palette_red(), palette_green(), palette_blue(), 1.0);
+    return 0;
+}
+"#;
+    fs::write(&render, initial_render_source).expect("write imported renderer fixture");
+    let palette = project.join("src/palette.stasis");
+    fs::write(
+        &palette,
+        "function palette_red(): f32 { return 0.05; }\n\
+         function palette_green(): f32 { return 0.07; }\n\
+         function palette_blue(): f32 { return 0.80; }\n",
+    )
+    .expect("write transitive palette fixture");
+    let entry_before = fs::read(&entry).expect("snapshot entry source");
+    let evidence_directory =
+        std::env::var_os("STASIS_RECORD_IMPORT_EVIDENCE_DIR").map(PathBuf::from);
+
+    let record_frame = |name: &str| {
+        // Each record command is a separate child CLI process by design.
+        let output = test_tree.0.join(name);
+        let replay = test_tree.0.join(format!("{name}.replay.json"));
+        let mut command = Command::new(&cli);
+        command
+            .current_dir(&project)
+            .env("STASIS_RUNTIME_DLL_PATH", &runtime)
+            .args([
+                "record",
+                "main.stasis",
+                "--output",
+                output.to_str().expect("record output path"),
+                "--width",
+                "320",
+                "--height",
+                "180",
+                "--fps",
+                "60",
+                "--frames",
+                "1",
+                "--record-replay",
+            ])
+            .arg(replay.to_str().expect("record replay path"));
+        let completed = launch(command, &format!("import invalidation record {name}"));
+        assert!(
+            completed.status.success(),
+            "recording {name} failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&completed.stdout),
+            String::from_utf8_lossy(&completed.stderr)
+        );
+        let frames = recording_frames(&output);
+        assert_eq!(frames.len(), 1, "recording {name} frame count");
+        if let Some(evidence_directory) = evidence_directory.as_ref() {
+            fs::create_dir_all(evidence_directory).expect("create recording evidence directory");
+            fs::copy(&frames[0], evidence_directory.join(format!("{name}.png")))
+                .expect("preserve recording evidence PNG");
+        }
+        let replay: serde_json::Value =
+            serde_json::from_slice(&fs::read(&replay).expect("read recording replay identity"))
+                .expect("parse recording replay identity");
+        let identity = &replay["identity"];
+        let source_hash = identity["compatibility"]["source_sha256"]
+            .as_str()
+            .or_else(|| identity["source_sha256"].as_str())
+            .unwrap_or_else(|| panic!("recording {name} omitted source identity: {replay}"))
+            .to_string();
+        assert_eq!(source_hash.len(), 64, "recording {name} source SHA-256");
+        let pixel = image::open(&frames[0])
+            .unwrap_or_else(|error| panic!("decode recording {name}: {error}"))
+            .to_rgba8()
+            .get_pixel(160, 90)
+            .0;
+        (pixel, source_hash)
+    };
+
+    let (baseline, baseline_source_hash) = record_frame("baseline");
+    assert!(
+        baseline[2] > baseline[0].saturating_add(60),
+        "baseline did not render the palette's blue from the full import graph: {baseline:?}"
+    );
+
+    let changed_render_source = initial_render_source.replace(
+        "clear(palette_red(), palette_green(), palette_blue(), 1.0);",
+        "clear(palette_blue(), palette_green(), palette_red(), 1.0);",
+    );
+    fs::write(&render, changed_render_source).expect("change direct imported renderer");
+    let (changed_render, changed_render_source_hash) = record_frame("changed-render");
+    assert!(
+        changed_render[0] > changed_render[2].saturating_add(60),
+        "new CLI process reused the old compiled renderer after src/render.stasis changed: {changed_render:?}"
+    );
+    assert_ne!(
+        baseline_source_hash, changed_render_source_hash,
+        "recording identity must include the changed direct import"
+    );
+
+    fs::write(
+        &palette,
+        "function palette_red(): f32 { return 0.05; }\n\
+         function palette_green(): f32 { return 1.0; }\n\
+         function palette_blue(): f32 { return 0.80; }\n",
+    )
+    .expect("change transitive imported palette");
+    let (changed_transitive_import, changed_transitive_source_hash) =
+        record_frame("changed-transitive-palette");
+    assert!(
+        changed_transitive_import[1] > changed_transitive_import[0].saturating_add(10),
+        "new CLI process did not compile the changed transitive palette: {changed_transitive_import:?}"
+    );
+    assert_ne!(
+        changed_render_source_hash, changed_transitive_source_hash,
+        "recording identity must include the changed transitive import"
+    );
+    assert_eq!(
+        fs::read(&entry).expect("entry source after import changes"),
+        entry_before,
+        "recording imported-source changes must not touch the entry file"
+    );
+}
+
+#[test]
 fn recording_imported_network_client_is_offline_repeatable_and_non_mutating() {
     let root = repository_root();
     let runtime = std::env::var_os("STASIS_RUNTIME_DLL_PATH")
