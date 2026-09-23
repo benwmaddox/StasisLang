@@ -3008,7 +3008,7 @@ fn ensure_initial_commit(root: &Path) -> Result<(), String> {
 
 pub(super) fn sync_vendor_checkpoint(workspace: &Workspace) -> Result<(), String> {
     let mut manifest = workspace.manifest.clone();
-    if !super::super::update_vendor_snapshot(&workspace.root, &mut manifest)? {
+    if !super::super::update_vendor_snapshot(&workspace.root, &mut manifest, true)? {
         return Ok(());
     }
     git_ok(&workspace.root, &["add", "stasis.json", "vendor/stasis"])?;

@@ -17,7 +17,14 @@ The documentation and standard library are one vendor snapshot. `stasis vendor u
 both directories and their manifest release ID and hash in one transaction. Automatic vendor
 synchronization uses that same transaction, so it repairs missing or stale documentation together
 with the standard library. Stasis owns `vendor/stasis`; use the update command to repair it rather
-than editing the snapshot by hand.
+than editing the snapshot by hand. New vendor pins use hash version 2, which treats CRLF and LF as
+equivalent for valid UTF-8 Stasis source, Markdown, JSON, and SVG text without NUL bytes. It still
+detects other text changes, added or missing paths, and exact binary byte changes. Older manifests
+without a hash version use the legacy raw-byte contract; a converted tree is accepted only when its
+release baseline can be authenticated. Otherwise `stasis vendor status` reports the pin as
+unverified without claiming local edits, and an explicit `stasis vendor update` migrates the pin.
+Generated Git and editor settings keep text at LF by default (with CRLF for Windows batch files);
+status remains stable if another checkout converts text to CRLF.
 
 ## Theory-building practice
 
