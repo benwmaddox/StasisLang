@@ -393,6 +393,9 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
     let parent = &test_tree.0;
     let project = parent.join("windows_launch_smoke");
     copy_tree(&fixture, &project);
+    for generated in ["build", "dist", "target", ".stasis_cache"] {
+        fs::remove_dir_all(project.join(generated)).ok();
+    }
     materialize_toolchain_stdlib(&project);
 
     let nested_launch_dir = project.join("nested/launch");

@@ -429,3 +429,11 @@ the required native desktop generation/import workflow.
 - Good: independent review found and closed a literal-table ownership race before publication.
 - Bad: the original unsafe audit hid further installer and freestanding-bridge baseline failures; shared Cargo artifacts also retained a deleted worktree path.
 - Adjustment: verify the full canonical-checkout gate with fresh package build scripts, and keep freestanding generated C independent of SDK headers.
+
+### Follow-up: source-only Windows launch fixture
+
+- Reused the existing copied-fixture cleanup for `build`, `dist`, `target`, and `.stasis_cache` in the failed launch matrix. The original sample artifacts remain untouched. The exact launch regression now passes (171 seconds).
+- The separate bounded remaining-workspace run passed compiler unit/integration coverage and all four sprite seam tests, then stopped at the existing native-window focus seam: the graphics runtime rejected its focus request. Eleven later dynload tests failed from the poisoned shared mutex (41 passed, 12 failed). No further source repairs were attempted. The complete repository gate remains unpassed; its prior aggregate run exceeded 900 seconds.
+- Visual evidence: not applicable; fixture isolation change, with existing pixel assertions exercised by the launch test.
+- Theory gained: copying a developer sample must exclude generated output before testing package creation; the package command correctly refuses pre-existing output.
+- Good: the exact failed launch test now completes successfully. Bad: local generated artifacts obscured the source-only fixture assumption. Adjustment: reuse source-only fixture setup and disclose independent baseline limits.
