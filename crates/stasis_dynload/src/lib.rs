@@ -13,6 +13,11 @@ use std::time::{Duration, Instant};
 mod dynamic_library;
 pub use dynamic_library::{atomic_rename_no_replace, Library};
 
+#[cfg(windows)]
+mod aot_probe_session;
+#[cfg(windows)]
+pub use aot_probe_session::{AotProbeSession, AotProbeStorageDescriptor, AotProbeStorageKind};
+
 #[cfg(feature = "cross-atlas-research")]
 mod cross_atlas_research;
 #[cfg(feature = "cross-atlas-research")]
@@ -2194,6 +2199,10 @@ pub fn clear_jit_string_literal_table() {
     let mut guard = table
         .lock()
         .expect("jit string literal table mutex poisoned");
+    #[cfg(windows)]
+    if !aot_probe_session::current_thread_owns_session() {
+        return;
+    }
     guard.clear();
 }
 
@@ -2227,6 +2236,10 @@ pub fn replace_jit_string_literal_table(literals: &HashMap<i32, String>) {
     let mut guard = table
         .lock()
         .expect("jit string literal table mutex poisoned");
+    #[cfg(windows)]
+    if !aot_probe_session::current_thread_owns_session() {
+        return;
+    }
     guard.clear();
     guard.extend(literals.iter().map(|(id, value)| (*id, value.clone())));
 }
@@ -2255,6 +2268,10 @@ pub fn upsert_jit_string_literal(id: i32, value: &str) {
     let mut guard = table
         .lock()
         .expect("jit string literal table mutex poisoned");
+    #[cfg(windows)]
+    if !aot_probe_session::current_thread_owns_session() {
+        return;
+    }
     guard.insert(id, value.to_string());
 }
 
@@ -2357,6 +2374,10 @@ impl Drop for JitExecutionGuard {
 }
 
 fn ensure_rebind_allowed() -> Result<(), String> {
+    #[cfg(windows)]
+    if !aot_probe_session::current_thread_owns_session() {
+        return Err("the active AOT probe session owns the runtime storage registry".to_string());
+    }
     (guest_execution_count().load(Ordering::Acquire) == 0)
         .then_some(())
         .ok_or_else(|| {
@@ -3072,10 +3093,7 @@ fn ensure_jit_u16_array_capacity_unlocked(
     Ok(())
 }
 
-pub fn clear_registered_global_memory() {
-    let Ok(_rebind) = acquire_rebind_guard() else {
-        return;
-    };
+fn clear_registered_global_storage_unlocked() {
     registered_i32_ptrs()
         .lock()
         .expect("registered i32 ptr table mutex poisoned")
@@ -3149,6 +3167,13 @@ pub fn clear_registered_global_memory() {
         .lock()
         .expect("direct array required-length table mutex poisoned")
         .clear();
+}
+
+pub fn clear_registered_global_memory() {
+    let Ok(_rebind) = acquire_rebind_guard() else {
+        return;
+    };
+    clear_registered_global_storage_unlocked();
     unsafe { stasis_platform_service_reset_native() };
 }
 

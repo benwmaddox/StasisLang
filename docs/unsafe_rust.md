@@ -45,3 +45,18 @@ Rust. `tools/validate_repo.sh` enforces this file-level boundary.
 Unsafe blocks should be small and adjacent to the boundary operation. Each must state the ownership,
 validity, alignment, and synchronization fact that makes the operation valid. A safe wrapper is
 appropriate only when its signature or owning type preserves those facts for every caller.
+
+## Linked AOT probe sessions
+
+Windows compiler seams cross the DLL storage boundary through
+`stasis_dynload::AotProbeSession`. The session owns the exact runtime DLL and
+linked guest DLL. Compiler code supplies typed descriptors from its generated
+storage layout; it never dereferences exported addresses itself. These inputs
+are for trusted compiler-generated binaries, not arbitrary native modules.
+
+A session claims an empty DLL registry before publishing guest storage. An
+occupied registry is rejected rather than overwritten. Calls and typed copied
+snapshots require exclusive session access. Teardown removes the session's
+registrations and string literals before releasing the guest DLL, then releases
+the runtime DLL. The compiler seam must not restore pointers borrowed from a
+separate statically linked host registry into the DLL registry.

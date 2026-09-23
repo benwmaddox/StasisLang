@@ -218,6 +218,26 @@ impl Library {
             )
         }
     }
+
+    #[cfg(windows)]
+    pub(crate) fn owns_address(&self, address: usize) -> bool {
+        if address == 0 {
+            return false;
+        }
+        let mut module = std::ptr::null_mut();
+        const GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: u32 = 0x2;
+        const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x4;
+        // SAFETY: FROM_ADDRESS treats the value as an address; the output pointer is valid.
+        let result = unsafe {
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT
+                    | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                address as *const u16,
+                &mut module,
+            )
+        };
+        result != 0 && module == self.handle
+    }
 }
 
 impl Drop for Library {
@@ -248,6 +268,8 @@ unsafe extern "system" {
     fn LoadLibraryW(path: *const u16) -> *mut c_void;
     fn FreeLibrary(handle: *mut c_void) -> i32;
     fn GetProcAddress(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn GetModuleHandleExW(flags: u32, name_or_address: *const u16, module: *mut *mut c_void)
+        -> i32;
 }
 
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
