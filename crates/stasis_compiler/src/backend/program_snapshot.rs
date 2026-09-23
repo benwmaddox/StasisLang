@@ -340,7 +340,10 @@ fn compiler_layout_digest(
     types: &TypeTable,
 ) -> [u8; 32] {
     let mut facts = Vec::new();
+    let mut pending_type_ids = Vec::new();
     for (type_id, fields) in &analysis.named_struct_field_types {
+        pending_type_ids.push(*type_id);
+        pending_type_ids.extend(fields.values().copied());
         let mut fact = format!("struct:{}", semantic_type_fact(types, *type_id));
         for (field, field_type) in fields {
             fact.push_str(&format!(
@@ -351,12 +354,15 @@ fn compiler_layout_digest(
         facts.push(fact);
     }
     for (path, type_id) in &analysis.global_path_types {
+        pending_type_ids.push(*type_id);
         facts.push(format!(
             "global:{path}:{}",
             semantic_type_fact(types, *type_id)
         ));
     }
     for (path, info) in &analysis.collection_infos {
+        pending_type_ids.extend(info.element_type);
+        pending_type_ids.extend(info.field_types.values().copied());
         let element = info.element_type.map_or_else(
             || "none".to_string(),
             |type_id| semantic_type_fact(types, type_id),
@@ -371,24 +377,33 @@ fn compiler_layout_digest(
         facts.push(fact);
     }
     for (path, descriptor) in &analysis.typed_collection_descriptors {
+        pending_type_ids.extend(descriptor.element_type);
+        pending_type_ids.extend(descriptor.key_type);
+        pending_type_ids.extend(descriptor.value_type);
+        pending_type_ids.extend(descriptor.lanes.iter().map(|lane| lane.type_id));
         facts.push(format!(
             "typed_collection:{path}:{}",
             typed_collection_layout_metadata(descriptor, types)
         ));
     }
     for function in functions {
-        let params = function
-            .params
-            .iter()
-            .map(|type_id| semantic_type_fact(types, *type_id))
-            .collect::<Vec<_>>()
-            .join(",");
-        facts.push(format!(
-            "function:{}({params}):{}",
-            function.symbol_id,
-            semantic_type_fact(types, function.return_type)
-        ));
+        pending_type_ids.extend(function.params.iter().copied());
+        pending_type_ids.push(function.return_type);
     }
+    let mut seen_type_ids = BTreeSet::new();
+    let mut semantic_types = BTreeSet::new();
+    while let Some(type_id) = pending_type_ids.pop() {
+        if !seen_type_ids.insert(type_id) {
+            continue;
+        }
+        if types.type_info(type_id).is_some() {
+            semantic_types.insert(format!("type:{}", semantic_type_fact(types, type_id)));
+        }
+        if let Some(element_type) = types.indexed_element_type_id(type_id) {
+            pending_type_ids.push(element_type);
+        }
+    }
+    facts.extend(semantic_types);
     facts.sort();
     let digest = Sha256::digest(facts.join("\n").as_bytes());
     let mut bytes = [0u8; 32];
