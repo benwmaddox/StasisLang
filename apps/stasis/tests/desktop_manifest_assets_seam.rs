@@ -161,25 +161,57 @@ fn manifest_assets_survive_wrong_cwd_and_render_sprite_direct_and_cached_text() 
         .expect(
         "STASIS_RUNTIME_LIBRARY_PATH (or legacy STASIS_RUNTIME_DLL_PATH) must name the CI-built SDL runtime",
     );
-    let selected_runtime = runtime_library_candidate_paths()
-        .into_iter()
+    let runtime_candidates = runtime_library_candidate_paths();
+    let selected_runtime = runtime_candidates
+        .iter()
         .find(|candidate| candidate.is_file())
-        .expect("select configured graphics runtime");
+        .expect("select graphics runtime")
+        .clone();
+    let sibling_runtime = std::env::current_exe()
+        .expect("resolve test executable")
+        .parent()
+        .expect("test executable directory")
+        .join("stasis_graphics.dll");
+    let expected_runtime = if sibling_runtime.is_file() {
+        sibling_runtime
+    } else {
+        runtime_path.clone()
+    };
     assert_eq!(
         selected_runtime
             .canonicalize()
             .expect("canonical selected runtime"),
-        runtime_path
+        expected_runtime
             .canonicalize()
-            .expect("canonical configured runtime"),
-        "explicit runtime must outrank repository development fallbacks"
+            .expect("canonical expected runtime"),
+        "select the bundled sibling runtime when present, otherwise the configured runtime"
+    );
+
+    let configured_index = runtime_candidates
+        .iter()
+        .position(|candidate| candidate == &runtime_path)
+        .expect("configured runtime must be present in candidate ordering");
+    let repository_runtime_suffix = Path::new("runtime")
+        .join("build")
+        .join("bin")
+        .join("stasis_graphics.dll");
+    let repository_fallback_index = runtime_candidates
+        .iter()
+        .enumerate()
+        .position(|(index, candidate)| {
+            index != configured_index && candidate.ends_with(&repository_runtime_suffix)
+        })
+        .expect("repository development fallback must be present in candidate ordering");
+    assert!(
+        configured_index < repository_fallback_index,
+        "configured runtime must precede repository development fallbacks"
     );
     std::env::set_var("STASIS_GFX_LOG_SPRITES", "1");
-    let gfx = StasisGraphicsApi::load(&runtime_path).expect("load graphics runtime");
+    let gfx = StasisGraphicsApi::load(&selected_runtime).expect("load graphics runtime");
     assert!(gfx
         .init_window(320, 180, "Stasis IT-008 manifest assets seam")
         .expect("initialize native window"));
-    let native = NativeAssetHarness::load(&runtime_path);
+    let native = NativeAssetHarness::load(&selected_runtime);
 
     let mut gfx_i32 = vec![0; STASIS_RENDER_I32_COUNT];
     let mut gfx_f32 = vec![0.0; STASIS_RENDER_F32_COUNT];
