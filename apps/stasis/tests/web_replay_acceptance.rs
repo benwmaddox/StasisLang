@@ -176,9 +176,9 @@ fn browser_executable() -> Option<PathBuf> {
     ];
     #[cfg(all(not(windows), not(target_os = "macos")))]
     let candidates = [
+        PathBuf::from("/usr/bin/google-chrome"),
         PathBuf::from("/usr/bin/chromium"),
         PathBuf::from("/usr/bin/chromium-browser"),
-        PathBuf::from("/usr/bin/google-chrome"),
         PathBuf::from("/usr/bin/microsoft-edge"),
     ];
     candidates.into_iter().find(|path| path.is_file())
@@ -229,8 +229,11 @@ fn cdp_command<S: Read + Write>(
 
 fn run_browser(browser: &Path, profile: &Path, url: &str) -> String {
     fs::create_dir_all(profile).expect("create isolated headless browser profile");
+    let browser_log = profile.join("chrome.stderr.log");
     let child = Command::new(browser)
         .arg("--headless=new")
+        .arg("--no-sandbox")
+        .arg("--disable-gpu-sandbox")
         .arg("--disable-background-networking")
         .arg("--disable-component-update")
         .arg("--disable-default-apps")
@@ -249,7 +252,9 @@ fn run_browser(browser: &Path, profile: &Path, url: &str) -> String {
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::from(
+            fs::File::create(&browser_log).expect("create browser startup log"),
+        ))
         .spawn()
         .expect("launch headless browser for packaged Web replay");
     let mut child = BrowserProcess(child);
@@ -260,7 +265,10 @@ fn run_browser(browser: &Path, profile: &Path, url: &str) -> String {
             break contents;
         }
         if let Some(status) = child.0.try_wait().expect("check headless browser process") {
-            panic!("headless browser exited before DevTools startup: {status}");
+            let log = fs::read_to_string(&browser_log).unwrap_or_default();
+            let tail = log.chars().rev().take(2_000).collect::<String>();
+            let tail = tail.chars().rev().collect::<String>();
+            panic!("headless browser exited before DevTools startup: {status}; stderr: {tail}");
         }
         assert!(
             Instant::now() < startup_deadline,
