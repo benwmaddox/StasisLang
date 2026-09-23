@@ -332,7 +332,7 @@ fn cleanup_stage(stage_root: &Path) {
     }
 }
 
-fn validate_args(args: &RecordArgs) -> Result<u64, String> {
+pub(super) fn validate_args(args: &RecordArgs) -> Result<u64, String> {
     if args.width == 0 || args.width > MAX_DIMENSION {
         return Err(format!("--width must be between 1 and {MAX_DIMENSION}"));
     }
