@@ -215,7 +215,12 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
       gfx_cmd_f32: { offset: F32_OFFSET, length: F32_COUNT },
       host_i32: { offset: 900000, length: 768 },
       host_f32: { offset: 903072, length: 64 },
+      "run.font": { hash: 101, handle: 1101, offset: 910000, length: 1, stride: 4, type_id: 1 },
+      "run.handle": { hash: 102, handle: 1102, offset: 910004, length: 1, stride: 4, type_id: 1 },
+      "run.width": { hash: 103, handle: 1103, offset: 910008, length: 1, stride: 4, type_id: 2 },
+      "run.height": { hash: 104, handle: 1104, offset: 910012, length: 1, stride: 4, type_id: 2 },
     },
+    views: { "101": { font: "run.font", handle: "run.handle", width: "run.width", height: "run.height" } },
     strings: {}, assets, asset_metadata: assetMetadata,
   };
   if (atlasBudgetBytes !== undefined) game.atlasBudgetBytes = atlasBudgetBytes;
@@ -258,6 +263,12 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     setTextFixture(font, text, textId = 1) {
       contextObject.window.STASIS_GAME.strings[textId] = text;
       textFixture = { font, handle: env.stasis_jit_gfx_cache_text(font, textId) };
+    },
+    replaceTextFixture(font, text) {
+      game.strings[1] = text;
+      const replaced = env.stasis_jit_text_run_replace_from(101, 0, 1, font, 1);
+      textFixture = { font, handle: new DataView(memory.buffer).getInt32(910004, true) };
+      return replaced;
     },
     dispatchKey: event => windowListeners.get("keydown")?.(event),
     loseContext: () => { stats.contextLost = true; canvasListeners.get("webglcontextlost")?.({ preventDefault() {} }); },
@@ -1762,6 +1773,66 @@ test("same density tier reuses text while a tier transition rebuilds its physica
   assert.equal(textUpload(2), 1);
   assert.equal(runtime.body.dataset.preparedTextBytes, String(40 * 2 * 22 * 2 * 4));
   assert.deepEqual(runtime.stats.uploads.at(-1).slice(2, 4), [40, 22]);
+});
+
+test("text sampling covers fitted and nonuniform backing axes beyond density tiers", async () => {
+  for (const [width, height, scale] of [[1280, 360, 2], [640, 900, 3], [5760, 360, 9], [5500, 360, 5500 / 640]]) {
+    const runtime = await loadRuntime({ cssExtent: [width, height] });
+    const font = runtime.env.load_font(0, 18);
+    await new Promise(resolve => setImmediate(resolve));
+    runtime.setTextFixture(font, "physical");
+    runtime.frame();
+    const fill = runtime.rasterStats.textFills.at(-1);
+    assert.deepEqual([fill.width, fill.height], [Math.ceil(64 * scale), Math.ceil(22 * scale)]);
+    assert.deepEqual(fill.args, ["physical", 0, 18]);
+    assert.deepEqual(runtime.rasterStats.transforms.at(-1),
+      [fill.width / 64, 0, 0, fill.height / 22, 0, 0]);
+    assert.deepEqual(runtime.stats.uploads.at(-1).slice(2, 4), [64, 22]);
+    assert.equal(runtime.body.dataset.preparedTextBytes, String(Math.ceil(64 * scale) * Math.ceil(22 * scale) * 4));
+  }
+});
+
+test("text rebuilds when the larger backing axis changes within an unchanged density tier", async () => {
+  const runtime = await loadRuntime({ cssExtent: [1280, 360] });
+  const draw = () => {
+    runtime.env.web_begin_frame(0, 0, 0);
+    runtime.env.web_draw_text(4, 8, "x");
+    runtime.frame();
+  };
+  draw();
+  assert.equal(runtime.body.dataset.densityTier, "1");
+  assert.deepEqual(runtime.rasterStats.transforms.at(-1), [2, 0, 0, 2, 0, 0]);
+  runtime.setPresentation(1920, 360, 1);
+  draw();
+  assert.equal(runtime.body.dataset.densityTier, "1");
+  assert.equal(runtime.rasterStats.textFills.length, 2);
+  assert.deepEqual(runtime.rasterStats.transforms.at(-1), [3, 0, 0, 3, 0, 0]);
+  assert.equal(runtime.body.dataset.preparedTextBytes, String(56 * 22 * 3 * 3 * 4));
+  runtime.setPresentation(1920, 720, 1);
+  draw();
+  assert.equal(runtime.body.dataset.densityTier, "2");
+  assert.equal(runtime.rasterStats.textFills.length, 2, "unchanged text scale reuses its resource");
+});
+
+test("dynamic text replacement and restore retain physical sampling and logical placement", async () => {
+  const runtime = await loadRuntime({ cssExtent: [5760, 360] });
+  const font = runtime.env.load_font(0, 18);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runtime.replaceTextFixture(font, "old"), 1);
+  runtime.frame();
+  assert.equal(runtime.replaceTextFixture(font, "new value"), 1);
+  runtime.frame();
+  const fill = runtime.rasterStats.textFills.at(-1);
+  assert.deepEqual([fill.width, fill.height], [72 * 9, 22 * 9]);
+  const quad = runtime.stats.uploads.at(-1).slice(0, 4);
+  assert.deepEqual(quad, [4, 8, 72, 22]);
+  assert.equal(runtime.replaceTextFixture(font, "x".repeat(4097)), 0);
+  runtime.loseContext();
+  runtime.restoreContext();
+  runtime.frame();
+  assert.deepEqual(runtime.stats.uploads.at(-1).slice(0, 4), quad);
+  assert.equal(runtime.rasterStats.textFills.at(-1), fill);
+  assert.ok(runtime.stats.textureUploads.filter(upload => upload.width === 652 && upload.height === 202).length >= 2);
 });
 
 test("context restoration reuploads physical text without changing its logical quad", async () => {

@@ -403,3 +403,11 @@ the required native desktop generation/import workflow.
 - The credentialed OpenRouter live run remains unverified because no credential was configured.
 - Visual evidence: not applicable to this report-validation fix; no new graphical behavior.
 - Theory gained: configured model selection is request intent; task-scoped transport usage records describe execution across fallback and repair turns. Mixed-model and unapproved-later-turn tests verify this distinction.
+
+## 2026-09-23 - #639 Web physical text sampling
+
+- Fixed Web text sampling for nonuniform and >8x backing transforms; fractional Canvas rounding now preserves the logical baseline through the atlas mapping. Added focused static/dynamic/fallback cache and restoration tests plus a reproducible real-browser capture harness.
+- Validation: all 210 Web tests, Chrome host-renderer acceptance, Node syntax and diff checks passed. The required repository baseline is blocked by a pre-existing unsafe-boundary violation in `crates/stasis_compiler/tests/sprite_run_writer_public_seam.rs`.
+- Visual evidence: inspected `docs/evidence/task639-web-text/before.png` and `after.png`; text is sharper with identical logical bounds/baselines and no visible clipping for the captured strings. This is real Canvas2D/WebGL2 with a synthetic guest ABI and SwiftShader, not packaged-game or physical-device qualification.
+- Cross-platform #639 remains Active. `docs/validation/text_physical_raster_639.md` records native/Workshop cap and rounding gaps and unavailable Apple/physical-phone qualification. #547 retains consumer migration and desktop lifecycle acceptance.
+- Theory gained: text sampling must cover both actual backing axes independently of the bounded scalar sprite tier; unchanged text scale can safely reuse its resource when only the sprite tier changes.

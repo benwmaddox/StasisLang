@@ -131,11 +131,31 @@ the browser can know them. Density generation invalidates each live atlas
 entry once, and stale async preparations are rejected by resource generation
 and tier key before becoming drawable.
 
+### Web text sampling
+
+Web text uses a separate `textRasterScale` receipt. It covers the larger of the
+actual backing-width/logical-width and backing-height/logical-height ratios,
+with a minimum of 1. It rounds upward to an available density tier through 8x;
+above 8x it uses the actual ratio. This includes CSS fitting, DPR and the final
+backing allocation caps, and covers both axes of nonuniform transforms.
+
+Canvas dimensions are `ceil(logical extent * textRasterScale)`. Canvas drawing
+uses each rounded dimension divided by its logical extent, matching the atlas
+quad mapping exactly so fractional rounding does not shift the logical baseline.
+Texture extent failures are explicit; text never falls back to a smaller bitmap.
+Prepared-cache and atlas accounting use physical dimensions. Font readiness,
+release and calibration invalidation remain unchanged. Sampling-scale changes
+invalidate prepared text including fallback handle zero; unchanged text sampling
+reuses it even when the separate sprite density tier changes.
+
+See [the #639 platform audit](validation/text_physical_raster_639.md) for the
+remaining native/mobile qualification work and browser evidence.
+
 ## Resource cache policy
 
 SVG entries are keyed by canonical source identity, logical target extent, the
 current raster scale, and the fixed raster options used by the shared runtime.
-Font and cached-text entries use logical font size plus a bounded backing scale.
+Native font and cached-text entries use logical font size plus a bounded backing scale.
 Desktop fonts use at least 2x backing resolution for small fitted text, or the
 higher current raster scale up to 8x, and use linear filtering when drawn down.
 Raster dimensions use checked, bounded `ceil(logical_extent * font_scale)`;
