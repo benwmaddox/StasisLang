@@ -13,7 +13,7 @@ use crate::backend::emit::hash_global_path;
 use crate::backend::program_snapshot::ProgramSnapshot;
 use crate::backend::reachability::matches_root;
 use crate::backend::state_layout::{
-    build_state_layout, collection_field_element_count, is_command_buffer_path,
+    build_state_layout, collection_field_element_count, is_replay_host_or_presentation_path,
     StateCollectionLayout, StateScalarLayout,
 };
 use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
@@ -486,15 +486,6 @@ fn replay_storage_width(storage_type: &str) -> Option<u32> {
     }
 }
 
-fn is_replay_host_or_presentation_path(path: &str) -> bool {
-    path == "host_i32"
-        || path == "host_f32"
-        || path.starts_with("host_i32.")
-        || path.starts_with("host_f32.")
-        || path.starts_with("host_req_")
-        || is_command_buffer_path(path)
-}
-
 fn append_replay_state_write(
     plan: &mut ReplayStateWritePlan,
     offset: &mut u64,
@@ -528,9 +519,6 @@ fn append_replay_scalar_write(
     global_indices: &BTreeMap<String, u32>,
     memory: &BTreeMap<String, MemoryBinding>,
 ) -> Result<(), String> {
-    if is_replay_host_or_presentation_path(&scalar.path) {
-        return Ok(());
-    }
     let type_id = global_types.get(&scalar.path).copied().ok_or_else(|| {
         format!(
             "web replay state snapshot scalar '{}' is missing its compiler type",
@@ -565,9 +553,6 @@ fn append_replay_collection_writes(
     collection: &StateCollectionLayout,
     memory: &BTreeMap<String, MemoryBinding>,
 ) -> Result<(), String> {
-    if is_replay_host_or_presentation_path(&collection.path) {
-        return Ok(());
-    }
     let logical_capacity = u64::try_from(collection.capacity).map_err(|_| {
         format!(
             "web replay state snapshot collection '{}' has negative capacity {}",
@@ -653,7 +638,7 @@ fn build_replay_state_write_plan(
         types,
     )?;
     for opaque in &layout.opaque {
-        if !is_replay_host_or_presentation_path(&opaque.path) {
+        if !is_replay_host_or_presentation_path(&layout, &opaque.path) {
             return Ok(None);
         }
     }
@@ -673,6 +658,9 @@ fn build_replay_state_write_plan(
     let mut scalars = layout.scalars.iter().collect::<Vec<_>>();
     scalars.sort_by(|left, right| left.path.cmp(&right.path));
     for scalar in scalars {
+        if is_replay_host_or_presentation_path(&layout, &scalar.path) {
+            continue;
+        }
         append_replay_scalar_write(
             &mut plan,
             &mut offset,
@@ -685,6 +673,9 @@ fn build_replay_state_write_plan(
     let mut collections = layout.collections.iter().collect::<Vec<_>>();
     collections.sort_by(|left, right| left.path.cmp(&right.path));
     for collection in collections {
+        if is_replay_host_or_presentation_path(&layout, &collection.path) {
+            continue;
+        }
         append_replay_collection_writes(&mut plan, &mut offset, collection, memory)?;
     }
     plan.required_bytes = u32::try_from(offset).map_err(|_| {

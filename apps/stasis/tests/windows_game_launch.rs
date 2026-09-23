@@ -68,6 +68,20 @@ fn materialize_toolchain_stdlib(project: &Path) {
 }
 
 fn finish_child(mut child: Child, description: &str, timeout: Duration) -> CompletedProcess {
+    let stdout_pipe = child.stdout.take().expect("capture child stdout");
+    let stderr_pipe = child.stderr.take().expect("capture child stderr");
+    let stdout_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut pipe = stdout_pipe;
+        pipe.read_to_end(&mut output).expect("read child stdout");
+        output
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut pipe = stderr_pipe;
+        pipe.read_to_end(&mut output).expect("read child stderr");
+        output
+    });
     let started = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().expect("poll child") {
@@ -76,28 +90,21 @@ fn finish_child(mut child: Child, description: &str, timeout: Duration) -> Compl
         if started.elapsed() >= timeout {
             child.kill().ok();
             child.wait().ok();
-            panic!("{description} exceeded {} seconds", timeout.as_secs());
+            let stdout = stdout_reader.join().expect("join stdout reader");
+            let stderr = stderr_reader.join().expect("join stderr reader");
+            panic!(
+                "{description} exceeded {} seconds: stdout={} stderr={}",
+                timeout.as_secs(),
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
         }
         thread::sleep(Duration::from_millis(25));
     };
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_end(&mut stdout)
-        .unwrap();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_end(&mut stderr)
-        .unwrap();
     CompletedProcess {
         status,
-        stdout,
-        stderr,
+        stdout: stdout_reader.join().expect("join stdout reader"),
+        stderr: stderr_reader.join().expect("join stderr reader"),
     }
 }
 
@@ -1114,6 +1121,124 @@ fn headless_compact_replay_round_trip_verifies_final_state_and_mp4() {
     } else {
         eprintln!("ffmpeg unavailable; compact replay MP4 validation skipped");
     }
+}
+
+#[test]
+fn packaged_native_replay_consumes_jit_recording_and_reports_final_divergence() {
+    let root = repository_root();
+    let runtime = std::env::var_os("STASIS_RUNTIME_DLL_PATH")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .or_else(|| {
+            let path = root.join("runtime/build/bin/Release/stasis_graphics.dll");
+            path.is_file().then_some(path)
+        });
+    let Some(runtime) = runtime else {
+        eprintln!("native packaged replay skipped: graphics runtime is unavailable");
+        return;
+    };
+    let test_tree = TestTree(temp_dir("packaged_native_replay"));
+    let project = test_tree.0.join("windows_launch_smoke");
+    copy_tree(&root.join("samples/windows_launch_smoke"), &project);
+    for generated in ["build", "dist", "target", ".stasis_cache"] {
+        fs::remove_dir_all(project.join(generated)).ok();
+    }
+    materialize_toolchain_stdlib(&project);
+
+    let recording = test_tree.0.join("packaged.replay.json");
+    let mut record = stasis_command(&project);
+    record.env("STASIS_RUNTIME_DLL_PATH", &runtime).args([
+        "record",
+        "main.stasis",
+        "--output",
+        test_tree.0.join("baseline").to_str().unwrap(),
+        "--width",
+        "320",
+        "--height",
+        "180",
+        "--fps",
+        "30",
+        "--frames",
+        "4",
+        "--record-replay",
+        recording.to_str().unwrap(),
+    ]);
+    let recorded = launch(record, "JIT recording for native package");
+    assert!(
+        recorded.status.success(),
+        "JIT recording failed: {}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&recording).unwrap()).unwrap()
+            ["schema_version"],
+        3
+    );
+
+    let mut package = stasis_command(&project);
+    package.args(["package", "--target", "desktop", "--development-build"]);
+    let packaged = launch_with_timeout(package, "native replay package", Duration::from_secs(600));
+    assert!(
+        packaged.status.success(),
+        "native package failed: {}",
+        String::from_utf8_lossy(&packaged.stderr)
+    );
+    let exe = project.join("dist/windows_launch_smoke-desktop/windows_launch_smoke.exe");
+    assert!(exe.is_file());
+
+    let screenshot = test_tree.0.join("packaged-replay.png");
+    let mut replay = Command::new(&exe);
+    replay
+        .current_dir(exe.parent().unwrap())
+        .arg("--replay")
+        .arg(&recording);
+    configure_capture(&mut replay, &screenshot, false);
+    let result = launch(replay, "native packaged replay");
+    if app_control_blocked(&result) {
+        eprintln!("native packaged replay skipped: Windows Application Control blocked package");
+        return;
+    }
+    let output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        result.status.success(),
+        "native packaged replay failed: {output}"
+    );
+    assert!(
+        output.contains("Stasis replay receipt: code=replay_complete")
+            && output.contains("tick=4")
+            && output.contains("verified=1 completed=1"),
+        "native packaged replay omitted verified completion receipt: {output}"
+    );
+    assert!(screenshot.is_file(), "native replay did not render a frame");
+
+    let corrupted = test_tree.0.join("diverged.replay.json");
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&fs::read(&recording).unwrap()).expect("parse recorded replay");
+    document["final_state"]["state_sha256"] = serde_json::Value::String("0".repeat(64));
+    fs::write(&corrupted, serde_json::to_vec(&document).unwrap()).unwrap();
+    let mut diverged = Command::new(&exe);
+    diverged
+        .current_dir(exe.parent().unwrap())
+        .arg("--replay")
+        .arg(&corrupted);
+    let result = launch(diverged, "native packaged replay final divergence");
+    let output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        !result.status.success(),
+        "native packaged divergence should fail: {output}"
+    );
+    assert!(
+        output.contains("replay_diverged") && output.contains("tick=4"),
+        "native packaged divergence omitted bounded final receipt: {output}"
+    );
 }
 
 #[test]

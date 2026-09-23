@@ -1,9 +1,11 @@
 #include <jni.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "stasis_performance_metrics.h"
 #include "stasis_mobile_aot_runtime.h"
+#include "stasis_mobile_runtime.h"
 
 void stasis_host_get_latest_performance_metrics(uint32_t *tick_us, uint32_t *render_us);
 int stasis_host_get_latest_performance_metrics_v1(
@@ -108,6 +110,52 @@ Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeSetAssetManifestSha256(
     (*env)->ReleaseStringUTFChars(env, value, hash);
 }
 #endif
+
+JNIEXPORT void JNICALL
+Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeSetReplayPath(
+    JNIEnv *env,
+    jclass activity,
+    jstring path
+) {
+    (void)activity;
+    if (path == NULL) {
+        unsetenv("STASIS_REPLAY_PATH");
+        return;
+    }
+    const char *value = (*env)->GetStringUTFChars(env, path, NULL);
+    if (value == NULL) return;
+    if (strlen(value) > 1023U) {
+        unsetenv("STASIS_REPLAY_PATH");
+    } else {
+        setenv("STASIS_REPLAY_PATH", value, 1);
+    }
+    (*env)->ReleaseStringUTFChars(env, path, value);
+}
+
+JNIEXPORT void JNICALL
+Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeSetReplayImportError(
+    JNIEnv *env,
+    jclass activity,
+    jstring value
+) {
+    (void)activity;
+    if (value == NULL) {
+        unsetenv("STASIS_REPLAY_IMPORT_ERROR");
+        return;
+    }
+    const char *message = (*env)->GetStringUTFChars(env, value, NULL);
+    if (message == NULL) return;
+    if (strlen(message) > 400U) {
+        setenv(
+            "STASIS_REPLAY_IMPORT_ERROR",
+            "code=replay_saf_failure path=stasis_replay.json detail=diagnostic exceeded native limit",
+            1
+        );
+    } else {
+        setenv("STASIS_REPLAY_IMPORT_ERROR", message, 1);
+    }
+    (*env)->ReleaseStringUTFChars(env, value, message);
+}
 
 /* The join URL is deliberately a native-shell-only read.  It contains the
  * pairing secret and must never enter Stasis globals, deterministic frames,
@@ -224,6 +272,31 @@ Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeReadRuntimeError(
     char message[512];
     if (!stasis_host_copy_runtime_error(message, sizeof(message))) {
         return NULL;
+    }
+    return (*env)->NewStringUTF(env, message);
+}
+
+JNIEXPORT jstring JNICALL
+Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeReadReplayReceipt(
+    JNIEnv *env,
+    jclass activity
+) {
+    (void)activity;
+    const StasisReplayReceipt *receipt = stasis_mobile_runtime_replay_receipt();
+    if (receipt == NULL || receipt->code[0] == '\0' ||
+            (receipt->result == STASIS_REPLAY_OK && receipt->completed == 0)) {
+        return NULL;
+    }
+    char message[640];
+    if (receipt->result == STASIS_REPLAY_COMPLETE &&
+            receipt->verified != 0 && receipt->completed != 0) {
+        snprintf(message, sizeof(message), "Replay complete at tick %llu",
+            (unsigned long long)receipt->tick);
+    } else {
+        snprintf(message, sizeof(message), "Replay %s at tick %llu: %s",
+            receipt->code,
+            (unsigned long long)receipt->tick,
+            receipt->diagnostic);
     }
     return (*env)->NewStringUTF(env, message);
 }

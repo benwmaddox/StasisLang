@@ -38,6 +38,12 @@ int stasis_audio_voice_is_playing(int voice_handle);
 #endif
 #include "stasis_mobile_runtime.h"
 #include "stasis_network_join_card.h"
+#if defined(__has_include)
+#if __has_include("published_replay_identity.h")
+#include "published_replay_identity.h"
+#define STASIS_HAS_PUBLISHED_REPLAY_IDENTITY 1
+#endif
+#endif
 
 void stasis_host_report_runtime_error(const char *message);
 
@@ -463,14 +469,100 @@ static int configure_asset_root(void) {
 #endif
 }
 
+static int load_replay_argument(
+    int argc,
+    char **argv,
+    uint8_t **output,
+    size_t *output_size,
+    const char **error
+) {
+    const char *import_error = SDL_getenv("STASIS_REPLAY_IMPORT_ERROR");
+    if (import_error != NULL && import_error[0] != '\0') {
+        *error = import_error;
+        return 0;
+    }
+    const char *path = NULL;
+    for (int index = 1; index < argc; ++index) {
+        if (strcmp(argv[index], "--replay") == 0) {
+            if (path != NULL || index + 1 >= argc || argv[index + 1][0] == '\0') {
+                *error = "Stasis packaged --replay requires exactly one file path";
+                return 0;
+            }
+            path = argv[++index];
+        } else if (strncmp(argv[index], "--replay=", 9) == 0) {
+            if (path != NULL || argv[index][9] == '\0') {
+                *error = "Stasis packaged --replay requires exactly one file path";
+                return 0;
+            }
+            path = argv[index] + 9;
+        }
+    }
+    if (path == NULL) path = SDL_getenv("STASIS_REPLAY_PATH");
+    if (path == NULL || path[0] == '\0') return 1;
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        *error = "Stasis could not open the packaged replay file";
+        return 0;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        *error = "Stasis could not seek the packaged replay file";
+        return 0;
+    }
+    long length = ftell(file);
+    if (length <= 0 || (uint64_t)length > STASIS_REPLAY_MAX_FILE_BYTES) {
+        fclose(file);
+        *error = "Stasis packaged replay exceeds its bounded file limit";
+        return 0;
+    }
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        *error = "Stasis could not rewind the packaged replay file";
+        return 0;
+    }
+    uint8_t *bytes = (uint8_t *)malloc((size_t)length);
+    if (bytes == NULL) {
+        fclose(file);
+        *error = "Stasis could not allocate the packaged replay file";
+        return 0;
+    }
+    size_t read_bytes = fread(bytes, 1U, (size_t)length, file);
+    int close_result = fclose(file);
+    if (read_bytes != (size_t)length || close_result != 0) {
+        free(bytes);
+        *error = "Stasis could not read the packaged replay file";
+        return 0;
+    }
+    *output = bytes;
+    *output_size = read_bytes;
+    return 1;
+}
+
 int SDL_main(int argc, char **argv) {
     stasis_mobile_set_external_url_opener(stasis_open_external_url);
-    (void)argc;
-    (void)argv;
+    uint8_t *replay_bytes = NULL;
+    size_t replay_byte_count = 0U;
+    const char *replay_error = NULL;
+    if (!load_replay_argument(
+            argc, argv, &replay_bytes, &replay_byte_count, &replay_error)) {
+        stasis_host_report_runtime_error(replay_error);
+        SDL_Log("%s", replay_error);
+        return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+    }
+#if !defined(STASIS_HAS_PUBLISHED_REPLAY_IDENTITY)
+    if (replay_bytes != NULL) {
+        free(replay_bytes);
+        stasis_host_report_runtime_error(
+            "Stasis packaged replay metadata is unavailable in this build");
+        SDL_Log("Stasis packaged replay metadata is unavailable in this build");
+        return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+    }
+#endif
     stasis_network_client_provision_from_shell();
     if (configure_asset_root() != 0) {
         stasis_host_report_runtime_error("Stasis could not configure the bundled asset root");
         SDL_Log("Stasis could not configure the bundled asset root");
+        free(replay_bytes);
         stasis_mobile_network_client_shutdown();
         return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
     }
@@ -486,6 +578,7 @@ int SDL_main(int argc, char **argv) {
             log_asset_rejection_marker(seam_test_id, asset_error);
         }
 #endif
+        free(replay_bytes);
         stasis_mobile_network_client_shutdown();
         stasis_mobile_wait_for_error_surface_quit();
         return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
@@ -502,7 +595,23 @@ int SDL_main(int argc, char **argv) {
         STASIS_AOT_TICK,
         STASIS_AOT_RENDER,
     };
-    StasisMobileRuntimeConfig config = {1280, 720, "@STASIS_APP_NAME@"};
+    StasisMobileRuntimeConfig config = {
+        1280,
+        720,
+        "@STASIS_APP_NAME@",
+        replay_bytes,
+        replay_byte_count,
+#if defined(STASIS_HAS_PUBLISHED_REPLAY_IDENTITY)
+        replay_bytes == NULL ? NULL : stasis_published_replay_compatibility(),
+        replay_bytes == NULL ? NULL : stasis_published_replay_state_descriptor(),
+        replay_bytes == NULL ? (StasisReplayStateOps){0}
+                             : stasis_published_replay_state_ops(),
+#else
+        NULL,
+        NULL,
+        {0},
+#endif
+    };
 #if defined(STASIS_ENABLE_SEAM_TESTS)
     const char *seam_test_id = SDL_getenv("STASIS_SEAM_TEST_ID");
     seam_it021_audio = seam_test_id != NULL && strcmp(seam_test_id, "IT-021") == 0;
@@ -622,8 +731,40 @@ int SDL_main(int argc, char **argv) {
         }
 #endif
     }
+    if (replay_bytes != NULL) {
+        const StasisReplayReceipt *receipt = stasis_mobile_runtime_replay_receipt();
+        if (receipt != NULL) {
+            SDL_Log(
+                "Stasis replay receipt: code=%s tick=%llu interval_start=%llu verified=%u completed=%u diagnostic=%s",
+                receipt->code,
+                (unsigned long long)receipt->tick,
+                (unsigned long long)receipt->interval_start,
+                (unsigned)receipt->verified,
+                (unsigned)receipt->completed,
+                receipt->diagnostic
+            );
+        }
+        if (receipt == NULL || receipt->result != STASIS_REPLAY_COMPLETE ||
+                receipt->verified == 0 || receipt->completed == 0) {
+            char message[640];
+            const char *code = receipt != NULL && receipt->code[0] != '\0'
+                ? receipt->code : "replay_incomplete";
+            unsigned long long tick = receipt != NULL
+                ? (unsigned long long)receipt->tick : 0ULL;
+            const char *diagnostic = receipt != NULL && receipt->diagnostic[0] != '\0'
+                ? receipt->diagnostic : "recording ended before final-state verification";
+            snprintf(message, sizeof(message),
+                "Stasis replay %s at tick %llu: %s", code, tick, diagnostic);
+            stasis_host_report_runtime_error(message);
+            stasis_pregraphics_info_log("%s", message);
+            if (status == STASIS_MOBILE_RUNTIME_STOP_REQUESTED && game_result == 0) {
+                status = STASIS_MOBILE_RUNTIME_REPLAY_INCOMPLETE;
+            }
+        }
+    }
     stasis_mobile_network_client_shutdown();
     stasis_mobile_runtime_shutdown();
+    free(replay_bytes);
     if (game_result != 0) {
 #if defined(__ANDROID__)
         stasis_mobile_wait_for_error_surface_quit();

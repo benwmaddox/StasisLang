@@ -215,6 +215,28 @@ pub struct StateCapacityChangeReport {
     pub delta_bytes: i64,
 }
 
+/// Presentation inputs are host observations, even when games give HostFrame globals custom names.
+pub fn is_replay_host_or_presentation_path(layout: &StateLayout, path: &str) -> bool {
+    if path == "host_i32"
+        || path == "host_f32"
+        || path.starts_with("host_i32.")
+        || path.starts_with("host_f32.")
+        || path.starts_with("host_req_")
+        || is_command_buffer_path(path)
+    {
+        return true;
+    }
+    layout.structs.iter().any(|structure| {
+        matches!(
+            structure.type_name.as_str(),
+            "HostFrame" | "SpriteRunWriter"
+        ) && (path == structure.path
+            || path
+                .strip_prefix(&structure.path)
+                .is_some_and(|suffix| suffix.starts_with('.')))
+    })
+}
+
 pub fn state_layout_digest(layout: &StateLayout) -> Result<[u8; 32], String> {
     let serialized = serde_json::to_vec(layout)
         .map_err(|error| format!("failed versioning compiler state layout: {error}"))?;
@@ -509,7 +531,9 @@ fn collection_field_active_count(
 }
 
 pub fn is_command_buffer_path(path: &str) -> bool {
-    path.starts_with("gfx_cmd_")
+    path.starts_with("gfx_frame_construction_")
+        || path.starts_with("gfx_sprite_writer_")
+        || path.starts_with("gfx_cmd_")
         || path.starts_with("render_cmd_")
         || path.starts_with("audio_cmd_")
         || path.starts_with("cmd_")

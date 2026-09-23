@@ -4344,6 +4344,7 @@ dependencies = [
  "stasis_lsp",
  "stasis_network",
  "stasis_runner",
+ "tungstenite",
  "winit",
 ]
 

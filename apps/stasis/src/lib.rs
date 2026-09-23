@@ -11,6 +11,7 @@ mod live_workspace;
 mod mobile_aot_bindings;
 mod play_error_toasts;
 mod record_replay;
+mod release_assets;
 mod runtime_exec;
 mod stasis_test_runner;
 mod watch;
@@ -39,6 +40,7 @@ pub use mobile_aot_bindings::{
     write_mobile_aot_bindings_source, write_mobile_aot_bindings_source_with_profile,
     write_mobile_aot_bindings_source_with_profile_and_assets,
     write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot,
+    write_mobile_aot_replay_identity,
 };
 pub use record_replay::{packaged_replay_compatibility, simulation_state_hash, PlayReplayConfig};
 pub use stasis_test_runner::{

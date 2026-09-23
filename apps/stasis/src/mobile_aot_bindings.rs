@@ -425,3 +425,281 @@ pub fn escape_mobile_c_string_literal(value: &str) -> String {
     }
     escaped
 }
+
+pub fn write_mobile_aot_replay_identity(
+    compatibility: &serde_json::Value,
+    snapshot: &ProgramReplayStateSnapshot,
+    snapshot_supported: bool,
+    header_path: &Path,
+    source_path: &Path,
+) -> Result<(), String> {
+    let string_value = |name: &str| {
+        compatibility
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("packaged replay compatibility missing string field '{name}'"))
+    };
+    let number_value = |name: &str| {
+        compatibility
+            .get(name)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| format!("packaged replay compatibility missing integer field '{name}'"))
+    };
+    let optional_string = |name: &str| {
+        let value = compatibility.get(name);
+        if value.is_none() || value.is_some_and(serde_json::Value::is_null) {
+            Ok(None)
+        } else {
+            value
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .map(Some)
+                .ok_or_else(|| {
+                    format!("packaged replay compatibility field '{name}' must be text or null")
+                })
+        }
+    };
+    let stasis_version = string_value("stasis_version")?;
+    let release_id = string_value("release_id")?;
+    let source_sha256 = string_value("source_sha256")?;
+    let state_layout_sha256 = string_value("state_layout_sha256")?;
+    let compiler_layout_sha256 = string_value("compiler_layout_sha256")?;
+    let input_usage_sha256 = string_value("input_usage_sha256")?;
+    let hash_scope = string_value("hash_scope")?;
+    let determinism_profile = string_value("determinism_profile")?;
+    let asset_manifest_sha256 = optional_string("asset_manifest_sha256")?;
+    let controller_schema_version = compatibility
+        .get("controller_schema_version")
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                "packaged replay controller_schema_version must be an integer or null".to_string()
+            })
+        })
+        .transpose()?
+        .unwrap_or(0);
+    let host_schema_version = number_value("host_schema_version")?;
+    let host_i32_count = number_value("host_i32_count")?;
+    let host_f32_count = number_value("host_f32_count")?;
+    let tick_rate_hz = number_value("tick_rate_hz")?;
+
+    let descriptor_values = |name: &str| {
+        compatibility
+            .get(name)
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("packaged replay compatibility missing array field '{name}'"))
+    };
+    let observed_i32 = descriptor_values("observed_i32")?;
+    let observed_f32 = descriptor_values("observed_f32")?;
+    let descriptor_source =
+        |prefix: &str, values: &[serde_json::Value]| -> Result<String, String> {
+            if values.is_empty() {
+                return Ok(String::new());
+            }
+            let mut out = format!("static const StasisReplayInputDescriptor {prefix}[] = {{\n");
+            for (index, value) in values.iter().enumerate() {
+                let slot = value
+                    .get("slot")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| format!("{prefix}[{index}] missing slot"))?;
+                let field_index = value
+                    .get("index")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| format!("{prefix}[{index}] missing index"))?;
+                let path = value
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| format!("{prefix}[{index}] missing path"))?;
+                let family = value
+                    .get("family")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| format!("{prefix}[{index}] missing family"))?;
+                out.push_str(&format!(
+                    "    {{UINT32_C({slot}), UINT32_C({field_index}), \"{}\", \"{}\"}},\n",
+                    escape_mobile_c_string_literal(path),
+                    escape_mobile_c_string_literal(family)
+                ));
+            }
+            out.push_str("};\n");
+            Ok(out)
+        };
+    let mut source = String::from("#include <stdint.h>\n#include \"stasis_replay_consumer.h\"\n\n");
+    source.push_str(&descriptor_source(
+        "stasis_published_replay_i32",
+        observed_i32,
+    )?);
+    source.push_str(&descriptor_source(
+        "stasis_published_replay_f32",
+        observed_f32,
+    )?);
+    if !snapshot.entries.is_empty() {
+        source.push_str(
+            "static const StasisReplayStateEntry stasis_published_replay_state_entries[] = {\n",
+        );
+        for entry in &snapshot.entries {
+            source.push_str(&format!(
+                "    {{\"{}\", \"{}\", \"{}\", \"{}\", UINT64_C({}), UINT64_C({}), UINT8_C({})}},\n",
+                escape_mobile_c_string_literal(&entry.kind),
+                escape_mobile_c_string_literal(&entry.path),
+                escape_mobile_c_string_literal(&entry.field),
+                escape_mobile_c_string_literal(&entry.storage_type),
+                entry.offset,
+                entry.element_count,
+                entry.element_bytes
+            ));
+        }
+        source.push_str("};\n");
+    }
+    source.push_str(&format!(
+        "static const char stasis_published_replay_stasis_version[] = \"{}\";\n\
+static const char stasis_published_replay_release_id[] = \"{}\";\n\
+static const char stasis_published_replay_source_sha256[] = \"{}\";\n\
+static const char stasis_published_replay_state_layout_sha256[] = \"{}\";\n\
+static const char stasis_published_replay_compiler_layout_sha256[] = \"{}\";\n\
+static const char stasis_published_replay_input_usage_sha256[] = \"{}\";\n\
+static const char stasis_published_replay_hash_scope[] = \"{}\";\n\
+static const char stasis_published_replay_determinism_profile[] = \"{}\";\n",
+        escape_mobile_c_string_literal(stasis_version),
+        escape_mobile_c_string_literal(release_id),
+        escape_mobile_c_string_literal(source_sha256),
+        escape_mobile_c_string_literal(state_layout_sha256),
+        escape_mobile_c_string_literal(compiler_layout_sha256),
+        escape_mobile_c_string_literal(input_usage_sha256),
+        escape_mobile_c_string_literal(hash_scope),
+        escape_mobile_c_string_literal(determinism_profile),
+    ));
+    if let Some(asset_hash) = asset_manifest_sha256.as_deref() {
+        source.push_str(&format!(
+            "static const char stasis_published_replay_asset_manifest_sha256[] = \"{}\";\n",
+            escape_mobile_c_string_literal(asset_hash)
+        ));
+    }
+    source.push_str(&format!(
+        "\nstatic const StasisReplayCompatibility stasis_published_replay_compatibility_value = {{\n\
+    stasis_published_replay_stasis_version,\n\
+    stasis_published_replay_release_id,\n\
+    stasis_published_replay_source_sha256,\n\
+    stasis_published_replay_state_layout_sha256,\n\
+    stasis_published_replay_compiler_layout_sha256,\n\
+    {},\n\
+    UINT32_C({}),\n\
+    UINT32_C({}),\n\
+    UINT32_C({}),\n\
+    stasis_published_replay_input_usage_sha256,\n\
+    UINT32_C({}),\n\
+    stasis_published_replay_hash_scope,\n\
+    stasis_published_replay_determinism_profile,\n\
+    UINT32_C({}),\n\
+    {},\n\
+    {},\n\
+    {},\n\
+    {},\n\
+}};\n\
+\nstatic const StasisReplayStateDescriptor stasis_published_replay_state_descriptor_value = {{\n\
+    UINT64_C({}),\n\
+    {},\n\
+    {}\n\
+}};\n",
+        asset_manifest_sha256
+            .as_deref()
+            .map(|_| "stasis_published_replay_asset_manifest_sha256")
+            .unwrap_or("NULL"),
+        host_schema_version,
+        host_i32_count,
+        host_f32_count,
+        tick_rate_hz,
+        controller_schema_version,
+        if observed_i32.is_empty() {
+            "NULL"
+        } else {
+            "stasis_published_replay_i32"
+        },
+        observed_i32.len(),
+        if observed_f32.is_empty() {
+            "NULL"
+        } else {
+            "stasis_published_replay_f32"
+        },
+        observed_f32.len(),
+        snapshot.required_bytes,
+        if snapshot.entries.is_empty() {
+            "NULL"
+        } else {
+            "stasis_published_replay_state_entries"
+        },
+        snapshot.entries.len(),
+    ));
+    if snapshot_supported {
+        source.push_str(
+            "extern int32_t stasis_replay_state_snapshot_size(void);\n\
+extern int32_t stasis_replay_state_snapshot_write(uint8_t *, int32_t);\n\
+extern int32_t stasis_replay_state_snapshot_restore(const uint8_t *, int32_t);\n",
+        );
+        source.push_str(
+            "static int32_t stasis_published_replay_state_size(void *context) {\n\
+    (void)context;\n\
+    return stasis_replay_state_snapshot_size();\n\
+}\n\
+static int32_t stasis_published_replay_state_write(void *context, uint8_t *output, int32_t capacity) {\n\
+    (void)context;\n\
+    return stasis_replay_state_snapshot_write(output, capacity);\n\
+}\n\
+static int32_t stasis_published_replay_state_restore(void *context, const uint8_t *input, int32_t bytes) {\n\
+    (void)context;\n\
+    return stasis_replay_state_snapshot_restore(input, bytes);\n\
+}\n",
+        );
+    }
+    source.push_str(
+        "\nconst StasisReplayCompatibility *stasis_published_replay_compatibility(void) {\n\
+    return &stasis_published_replay_compatibility_value;\n\
+}\n\
+const StasisReplayStateDescriptor *stasis_published_replay_state_descriptor(void) {\n\
+    return &stasis_published_replay_state_descriptor_value;\n\
+}\n\
+StasisReplayStateOps stasis_published_replay_state_ops(void) {\n",
+    );
+    if snapshot_supported {
+        source.push_str(
+            "    return (StasisReplayStateOps){NULL, stasis_published_replay_state_size,\n\
+        stasis_published_replay_state_write, stasis_published_replay_state_restore};\n",
+        );
+    } else {
+        source.push_str("    return (StasisReplayStateOps){0};\n");
+    }
+    source.push_str("}\n");
+
+    let header = "#pragma once\n\n#include \"stasis_replay_consumer.h\"\n\n\
+const StasisReplayCompatibility *stasis_published_replay_compatibility(void);\n\
+const StasisReplayStateDescriptor *stasis_published_replay_state_descriptor(void);\n\
+StasisReplayStateOps stasis_published_replay_state_ops(void);\n";
+    if let Some(parent) = header_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create replay identity header directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    if let Some(parent) = source_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "failed to create replay identity source directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(header_path, header).map_err(|error| {
+        format!(
+            "failed to write replay identity header {}: {error}",
+            header_path.display()
+        )
+    })?;
+    fs::write(source_path, source).map_err(|error| {
+        format!(
+            "failed to write replay identity source {}: {error}",
+            source_path.display()
+        )
+    })?;
+    Ok(())
+}

@@ -4181,7 +4181,7 @@
         if (!game.replayControllerUrl || !game.replayIdentity || !game.replayCompatibility?.state_snapshot) {
           throw new Error("this Web package does not contain replay compatibility metadata");
         }
-        replayModule = await import(game.replayControllerUrl);
+        replayModule = await import(new URL(game.replayControllerUrl, globalThis.location.href).href);
         replayBridge = replayModule.createWasmReplayBridge({
           exports: instance.exports,
           descriptor: game.replayCompatibility.state_snapshot,

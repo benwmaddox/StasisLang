@@ -302,7 +302,11 @@ static uint32_t it012_expected_frame_trace(void) {
 }
 
 int main(void) {
-    const StasisMobileRuntimeConfig config = {320, 180, "IT-012 generated mobile AOT"};
+    const StasisMobileRuntimeConfig config = {
+        .width = 320,
+        .height = 180,
+        .title = "IT-012 generated mobile AOT",
+    };
     const StasisMobileGameEntries entries = {
         bind_runtime_with_mode,
         stasis_mobile_main_entry,

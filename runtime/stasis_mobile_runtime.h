@@ -1,7 +1,10 @@
 #ifndef STASIS_MOBILE_RUNTIME_H
 #define STASIS_MOBILE_RUNTIME_H
 
+#include <stddef.h>
 #include <stdint.h>
+
+#include "stasis_replay_consumer.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,7 +19,9 @@ enum StasisMobileRuntimeResult {
     STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT = -1,
     STASIS_MOBILE_RUNTIME_NOT_INITIALIZED = -2,
     STASIS_MOBILE_RUNTIME_ALREADY_INITIALIZED = -3,
-    STASIS_MOBILE_RUNTIME_GRAPHICS_UNAVAILABLE = -4
+    STASIS_MOBILE_RUNTIME_GRAPHICS_UNAVAILABLE = -4,
+    STASIS_MOBILE_RUNTIME_REPLAY_DIVERGED = -5,
+    STASIS_MOBILE_RUNTIME_REPLAY_INCOMPLETE = -6
 };
 
 enum StasisMobileRuntimeEntry {
@@ -40,6 +45,11 @@ typedef struct StasisMobileRuntimeConfig {
     int32_t width;
     int32_t height;
     const char *title;
+    const uint8_t *replay_bytes;
+    size_t replay_byte_count;
+    const StasisReplayCompatibility *replay_expected;
+    const StasisReplayStateDescriptor *replay_state_descriptor;
+    StasisReplayStateOps replay_state_ops;
 } StasisMobileRuntimeConfig;
 
 typedef struct StasisMobileFramePacer {
@@ -93,6 +103,7 @@ int32_t stasis_mobile_runtime_is_initialized(void);
 int32_t stasis_mobile_runtime_last_entry_result(void);
 /* Entry associated with last_entry_result; read before shutdown resets state. */
 int32_t stasis_mobile_runtime_last_entry(void);
+const StasisReplayReceipt *stasis_mobile_runtime_replay_receipt(void);
 
 /* Releases graphics and audio state. Safe to call more than once. */
 void stasis_mobile_runtime_shutdown(void);

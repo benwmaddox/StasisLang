@@ -18,12 +18,13 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 #[cfg(test)]
 use stasis::escape_mobile_c_string_literal;
 use stasis::{
-    mobile_aot_function_for, replay_snapshot_bridge_can_emit,
+    mobile_aot_function_for, packaged_replay_compatibility, replay_snapshot_bridge_can_emit,
     run_jit_tests_in_directory_with_session,
     run_play_in_process_with_input_script_window_title_and_profile,
     run_play_in_process_with_replay, run_self_host_aot_cli_with_options, run_with_default_backend,
     run_with_real_backend, write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot,
-    PlayProfileConfig, PlayReplayConfig, RunnerConfig, StasisTestRunSession,
+    write_mobile_aot_replay_identity, PlayProfileConfig, PlayReplayConfig, RunnerConfig,
+    StasisTestRunSession,
 };
 use stasis_assets::{prepare_asset_bundle, DEFAULT_ASSET_MANIFEST_PATH};
 use stasis_compiler::backend::aot::AotProcess;
@@ -1902,11 +1903,12 @@ fn write_mobile_aot_engine_bundle(
         .map_err(|error| format!("failed to compile mobile AOT bundle: {error:?}"))?;
     let snapshot = process
         .program_snapshot()
+        .cloned()
         .ok_or_else(|| "mobile AOT compile produced no ProgramSnapshot".to_string())?;
     let replay_state_snapshot = snapshot.replay_compatibility().state_snapshot;
     let replay_state_snapshot =
         replay_snapshot_bridge_can_emit(&replay_state_snapshot).then_some(replay_state_snapshot);
-    let resolved = release_assets::resolve_snapshot_assets(project_dir, snapshot)?;
+    let resolved = release_assets::resolve_snapshot_assets(project_dir, &snapshot)?;
     let bundle = process.write_engine_bundle(&mobile_engine_entrypoints(), output_dir)?;
     let manifest = fs::read_to_string(&bundle.manifest_path).map_err(|error| {
         format!(
@@ -1933,17 +1935,44 @@ fn write_mobile_aot_engine_bundle(
         profile_sample_frames,
         replay_state_snapshot.as_ref(),
     )?;
+    let asset_dir = write_mobile_asset_bundle(target, output_dir, &resolved)?;
+    let asset_manifest_path = asset_dir
+        .join("stasis_game")
+        .join(DEFAULT_ASSET_MANIFEST_PATH);
+    let asset_manifest_sha256 = Some(stasis_assets::sha256_bytes(
+        &fs::read(&asset_manifest_path).map_err(|error| {
+            format!(
+                "failed to read packaged asset manifest {}: {error}",
+                asset_manifest_path.display()
+            )
+        })?,
+    ));
+    let portable_replay_compatibility =
+        packaged_replay_compatibility(&snapshot, asset_manifest_sha256)?;
+    let replay_identity_header = output_dir.join("published_replay_identity.h");
+    let replay_identity_source = output_dir.join("published_replay_identity.c");
+    write_mobile_aot_replay_identity(
+        &portable_replay_compatibility,
+        &snapshot.replay_compatibility().state_snapshot,
+        replay_state_snapshot.is_some(),
+        &replay_identity_header,
+        &replay_identity_source,
+    )?;
     let cmake_file = if matches!(
         target,
         MobileAotTarget::AndroidArm64 | MobileAotTarget::AndroidX86_64
     ) {
         let path = output_dir.join("published_aot_objects.cmake");
-        write_android_aot_cmake_file(&bundle.object_paths_by_function_id, &bindings_source, &path)?;
+        write_android_aot_cmake_file(
+            &bundle.object_paths_by_function_id,
+            &bindings_source,
+            &replay_identity_source,
+            &path,
+        )?;
         Some(path)
     } else {
         None
     };
-    let asset_dir = write_mobile_asset_bundle(target, output_dir, &resolved)?;
     let package_manifest = write_mobile_aot_package_manifest(
         target,
         &bundle.manifest_path,
@@ -1952,8 +1981,11 @@ fn write_mobile_aot_engine_bundle(
         &bundle.object_paths_by_function_id,
         &symbols_header,
         &bindings_source,
+        &replay_identity_header,
+        &replay_identity_source,
         cmake_file.as_deref(),
         replay_state_snapshot.is_some(),
+        portable_replay_compatibility,
         output_dir,
     )?;
     Ok(MobileAotBundleSummary {
@@ -2189,8 +2221,11 @@ fn write_mobile_aot_package_manifest(
     object_paths_by_function_id: &std::collections::BTreeMap<u32, PathBuf>,
     symbols_header: &Path,
     bindings_source: &Path,
+    replay_identity_header: &Path,
+    replay_identity_source: &Path,
     cmake_file: Option<&Path>,
     replay_state_snapshot_supported: bool,
+    portable_replay_compatibility: serde_json::Value,
     output_dir: &Path,
 ) -> Result<PathBuf, String> {
     let manifest_functions = engine_manifest["functions"]
@@ -2229,7 +2264,10 @@ fn write_mobile_aot_package_manifest(
         "engine_manifest": mobile_aot_relative_path(output_dir, engine_manifest_path)?,
         "symbols_header": mobile_aot_relative_path(output_dir, symbols_header)?,
         "bindings_source": mobile_aot_relative_path(output_dir, bindings_source)?,
+        "replay_identity_header": mobile_aot_relative_path(output_dir, replay_identity_header)?,
+        "replay_identity_source": mobile_aot_relative_path(output_dir, replay_identity_source)?,
         "replay_compatibility": replay_compatibility,
+        "portable_replay_compatibility": portable_replay_compatibility,
         "asset_root": mobile_aot_relative_path(output_dir, asset_dir)?,
         "asset_manifest": mobile_aot_relative_path(output_dir, &asset_manifest)?,
         "objects": objects,
@@ -2271,6 +2309,7 @@ fn mobile_aot_relative_path(output_dir: &Path, path: &Path) -> Result<String, St
 fn write_android_aot_cmake_file(
     object_paths_by_function_id: &std::collections::BTreeMap<u32, PathBuf>,
     bindings_source: &Path,
+    replay_identity_source: &Path,
     output_path: &Path,
 ) -> Result<(), String> {
     let output_dir = output_path.parent().ok_or_else(|| {
@@ -2288,6 +2327,10 @@ fn write_android_aot_cmake_file(
     let bindings_relative = mobile_aot_relative_path(output_dir, bindings_source)?;
     out.push_str(&format!(
         "  \"${{CMAKE_CURRENT_LIST_DIR}}/{bindings_relative}\"\n"
+    ));
+    let replay_identity_relative = mobile_aot_relative_path(output_dir, replay_identity_source)?;
+    out.push_str(&format!(
+        "  \"${{CMAKE_CURRENT_LIST_DIR}}/{replay_identity_relative}\"\n"
     ));
     out.push_str(")\n");
     fs::write(output_path, out).map_err(|error| {
@@ -3202,6 +3245,27 @@ mod tests {
         assert!(cmake.contains("${CMAKE_CURRENT_LIST_DIR}/"));
         assert!(!cmake.contains(&output_dir.to_string_lossy().replace('\\', "/")));
         assert!(cmake.contains("published_aot_bindings.c"));
+        assert!(cmake.contains("published_replay_identity.c"));
+        let replay_identity_header =
+            fs::read_to_string(output_dir.join("published_replay_identity.h"))
+                .expect("read replay identity header");
+        assert!(replay_identity_header.contains("stasis_published_replay_compatibility"));
+        let replay_identity_source =
+            fs::read_to_string(output_dir.join("published_replay_identity.c"))
+                .expect("read replay identity source");
+        assert!(replay_identity_source.contains("stasis_published_replay_state_descriptor"));
+        assert!(replay_identity_source.contains("stasis_published_replay_compatibility_value"));
+        assert!(replay_identity_source.contains("stasis_published_replay_state_descriptor_value"));
+        assert!(
+            replay_identity_source.contains("stasis_published_replay_state_size(void *context)")
+        );
+        assert!(replay_identity_source.contains(
+            "stasis_published_replay_state_write(void *context, uint8_t *output, int32_t capacity)"
+        ));
+        assert!(replay_identity_source.contains(
+            "stasis_published_replay_state_restore(void *context, const uint8_t *input, int32_t bytes)"
+        ));
+        assert!(replay_identity_source.contains("stasis_published_replay_input_usage_sha256"));
         let package_manifest: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(output_dir.join("mobile_aot_bundle_manifest.json"))
                 .expect("read package manifest"),
@@ -3219,6 +3283,15 @@ mod tests {
             package_manifest["bindings_source"],
             "published_aot_bindings.c"
         );
+        assert_eq!(
+            package_manifest["replay_identity_header"],
+            "published_replay_identity.h"
+        );
+        assert_eq!(
+            package_manifest["replay_identity_source"],
+            "published_replay_identity.c"
+        );
+        assert!(package_manifest["portable_replay_compatibility"].is_object());
         assert_eq!(package_manifest["asset_root"], "apk_assets");
         assert_eq!(
             package_manifest["asset_manifest"],
@@ -3639,6 +3712,23 @@ function frame_width(): i32 { return 360; }
             "stasis_mobile_main_entry(void) {{ return {main_symbol}(); }}"
         )));
         assert!(!header.contains("STASIS_AOT_ON_CODE_SWAP"));
+        let package_manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&summary.package_manifest).expect("read no-asset package manifest"),
+        )
+        .expect("parse no-asset package manifest");
+        let packaged_manifest = summary.asset_dir.join("stasis_game/assets/manifest.json");
+        let expected_asset_hash = stasis_assets::sha256_bytes(
+            &fs::read(&packaged_manifest).expect("read empty asset manifest"),
+        );
+        assert_eq!(
+            package_manifest["portable_replay_compatibility"]["asset_manifest_sha256"],
+            expected_asset_hash,
+            "empty packaged asset manifests must retain the JIT-visible asset identity"
+        );
+        let replay_identity_source =
+            fs::read_to_string(output_dir.join("published_replay_identity.c"))
+                .expect("read replay identity");
+        assert!(replay_identity_source.contains(&expected_asset_hash));
 
         std::fs::remove_dir_all(&project_dir).ok();
         std::fs::remove_dir_all(&output_dir).ok();

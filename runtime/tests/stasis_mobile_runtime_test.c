@@ -46,6 +46,8 @@ static int profile_start_logs;
 static int profile_row_logs;
 static int profile_done_logs;
 static char profile_row[256];
+static int replay_test_active;
+static int replay_order;
 static int32_t game_host_i32[768];
 static float game_host_f32[64];
 static int32_t game_gfx_cmd_i32[STASIS_RENDER_I32_COUNT];
@@ -199,6 +201,9 @@ void stasis_host_get_frame(int32_t *out_i32, float *out_f32) {
     assert(out_f32 != NULL);
     assert(out_i32 == game_host_i32);
     assert(out_f32 == game_host_f32);
+    out_i32[0] = 123;
+    out_f32[0] = 42.0f;
+    if (replay_test_active) replay_order = 1;
     host_frame_calls += 1;
 }
 
@@ -381,11 +386,23 @@ static void bind_runtime(void) {
 }
 
 static int32_t game_tick(void) {
+    if (replay_test_active) {
+        assert(replay_order == 1);
+        assert(game_host_i32[0] == 20);
+        assert(game_host_f32[0] == 1.0f);
+        assert(game_host_i32[1] == 0);
+        assert(game_host_f32[1] == 0.0f);
+        replay_order = 2;
+    }
     tick_calls += 1;
     return tick_result;
 }
 
 static int32_t game_render(void) {
+    if (replay_test_active) {
+        assert(replay_order == 3);
+        replay_order = 4;
+    }
     stasis_jit_profile_frame_enter(77);
     render_calls += 1;
     game_gfx_cmd_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_MAGIC;
@@ -394,8 +411,123 @@ static int32_t game_render(void) {
     return render_result;
 }
 
+static StasisMobileRuntimeConfig config(void);
+static StasisMobileGameEntries entries(void);
+static const StasisReplayInputDescriptor replay_observed_i32[] = {
+    {0, 0, "input.i32", "raw"},
+};
+static const StasisReplayInputDescriptor replay_observed_f32[] = {
+    {0, 0, "input.f32", "raw"},
+};
+
+static const char replay_fixture[] =
+    "{\"schema_version\":3,\"identity\":{\"compatibility\":{"
+    "\"stasis_version\":\"0.1.0\",\"release_id\":\"development\","
+    "\"source_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\","
+    "\"state_layout_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\","
+    "\"compiler_layout_sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\","
+    "\"asset_manifest_sha256\":null,\"host_schema_version\":4,\"host_i32_count\":768,"
+    "\"host_f32_count\":64,\"input_usage_sha256\":\"8c3cb54cea74d5416a5e5ee37700096a19bdc4e4631e9fe5a361b237e91c10ed\","
+    "\"tick_rate_hz\":60,\"hash_scope\":\"simulation_after_tick\","
+    "\"determinism_profile\":\"input_only_no_external_observations\","
+    "\"controller_schema_version\":null,"
+    "\"observed_i32\":[{\"slot\":0,\"index\":0,\"path\":\"input.i32\",\"family\":\"raw\"}],"
+    "\"observed_f32\":[{\"slot\":0,\"index\":0,\"path\":\"input.f32\",\"family\":\"raw\"}]},"
+    "\"producer\":{\"target\":\"jit-test\",\"runtime_sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\"}},"
+    "\"initial_state\":{\"values\":[],\"state_sha256\":\"1509bbe5b0b410b7a03af43d8fb37b6ec5f22b11e620e37ec126e46cdab18e64\"},"
+    "\"initial_input\":{\"i32_values\":[11],\"f32_bits\":[2143289345]},"
+    "\"segments\":[{\"tick_gap\":0,\"run_ticks\":1,"
+    "\"i32_changes\":[{\"slot\":0,\"value\":20}],"
+    "\"f32_changes\":[{\"slot\":0,\"bits\":1065353216}]}],"
+    "\"checkpoints\":[],\"total_ticks\":1,"
+    "\"final_state\":{\"tick\":1,\"state_sha256\":\"1509bbe5b0b410b7a03af43d8fb37b6ec5f22b11e620e37ec126e46cdab18e64\"}}";
+
+static int replay_snapshot_write_calls;
+
+static int32_t replay_snapshot_size(void *context) {
+    (void)context;
+    return 0;
+}
+
+static int32_t replay_snapshot_write(void *context, uint8_t *output, int32_t capacity) {
+    (void)context;
+    (void)output;
+    assert(capacity == 0);
+    replay_snapshot_write_calls += 1;
+    if (replay_test_active && replay_snapshot_write_calls == 2) {
+        assert(replay_order == 2);
+        replay_order = 3;
+    }
+    return 0;
+}
+
+static int32_t replay_snapshot_restore(void *context, const uint8_t *input, int32_t bytes) {
+    (void)context;
+    (void)input;
+    assert(bytes == 0);
+    return 0;
+}
+
+static StasisReplayCompatibility replay_expected_identity(void) {
+    return (StasisReplayCompatibility){
+        .stasis_version = "0.1.0",
+        .release_id = "development",
+        .source_sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
+        .state_layout_sha256 = "1111111111111111111111111111111111111111111111111111111111111111",
+        .compiler_layout_sha256 = "2222222222222222222222222222222222222222222222222222222222222222",
+        .host_schema_version = 4,
+        .host_i32_count = 768,
+        .host_f32_count = 64,
+        .input_usage_sha256 = "8c3cb54cea74d5416a5e5ee37700096a19bdc4e4631e9fe5a361b237e91c10ed",
+        .tick_rate_hz = 60,
+        .hash_scope = "simulation_after_tick",
+        .determinism_profile = "input_only_no_external_observations",
+        .observed_i32 = replay_observed_i32,
+        .observed_i32_count = 1,
+        .observed_f32 = replay_observed_f32,
+        .observed_f32_count = 1,
+    };
+}
+
+static void test_replay_orders_tick_verify_render_and_isolates_input(void) {
+    StasisMobileRuntimeConfig replay_config = config();
+    StasisMobileGameEntries valid_entries = entries();
+    const StasisReplayCompatibility expected = replay_expected_identity();
+    const StasisReplayStateDescriptor descriptor = {0};
+    const StasisReplayStateOps ops = {
+        .size = replay_snapshot_size,
+        .write = replay_snapshot_write,
+        .restore = replay_snapshot_restore,
+    };
+    replay_config.replay_bytes = (const uint8_t *)replay_fixture;
+    replay_config.replay_byte_count = sizeof(replay_fixture) - 1U;
+    replay_config.replay_expected = &expected;
+    replay_config.replay_state_descriptor = &descriptor;
+    replay_config.replay_state_ops = ops;
+    replay_test_active = 1;
+    replay_order = 1;
+    replay_snapshot_write_calls = 0;
+
+    assert(stasis_mobile_runtime_initialize(&replay_config, &valid_entries) ==
+        STASIS_MOBILE_RUNTIME_OK);
+    assert(stasis_mobile_runtime_step() == STASIS_MOBILE_RUNTIME_STOP_REQUESTED);
+    assert(host_frame_calls == 0);
+    assert(replay_order == 4);
+    const StasisReplayReceipt *receipt = stasis_mobile_runtime_replay_receipt();
+    assert(receipt != NULL && receipt->completed != 0);
+    assert(strcmp(receipt->code, "replay_complete") == 0);
+    stasis_mobile_runtime_shutdown();
+    receipt = stasis_mobile_runtime_replay_receipt();
+    assert(receipt != NULL && receipt->completed != 0);
+    replay_test_active = 0;
+}
+
 static StasisMobileRuntimeConfig config(void) {
-    StasisMobileRuntimeConfig value = {1280, 720, "Mobile test"};
+    StasisMobileRuntimeConfig value = {
+        .width = 1280,
+        .height = 720,
+        .title = "Mobile test",
+    };
     return value;
 }
 
@@ -444,6 +576,8 @@ static void reset_fakes(void) {
     profile_row_logs = 0;
     profile_done_logs = 0;
     profile_row[0] = '\0';
+    replay_test_active = 0;
+    replay_order = 0;
     memset(game_host_i32, 0, sizeof(game_host_i32));
     memset(game_host_f32, 0, sizeof(game_host_f32));
     memset(game_gfx_cmd_i32, 0, sizeof(game_gfx_cmd_i32));
@@ -670,6 +804,8 @@ int main(void) {
     reset_fakes();
     test_rejects_invalid_configuration();
     test_runs_mobile_lifecycle();
+    reset_fakes();
+    test_replay_orders_tick_verify_render_and_isolates_input();
     reset_fakes();
     test_skips_hidden_performance_hud_measurement();
     reset_fakes();

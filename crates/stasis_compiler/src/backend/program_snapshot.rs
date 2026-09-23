@@ -18,7 +18,7 @@ use crate::backend::input_usage::{
 };
 use crate::backend::reachability::compute_reachable_function_ids;
 use crate::backend::state_layout::{
-    build_state_layout, collection_field_element_count, is_command_buffer_path,
+    build_state_layout, collection_field_element_count, is_replay_host_or_presentation_path,
     state_layout_digest, typed_collection_layout_metadata, StateLayout,
 };
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
@@ -170,7 +170,7 @@ fn build_replay_state_snapshot(layout: &StateLayout) -> Result<ProgramReplayStat
     let mut unsupported_paths = layout
         .opaque
         .iter()
-        .filter(|value| !is_replay_host_or_presentation_path(&value.path))
+        .filter(|value| !is_replay_host_or_presentation_path(layout, &value.path))
         .map(|value| value.path.clone())
         .collect::<Vec<_>>();
     let mut offset = 0u64;
@@ -178,7 +178,7 @@ fn build_replay_state_snapshot(layout: &StateLayout) -> Result<ProgramReplayStat
     let mut scalars = layout.scalars.iter().collect::<Vec<_>>();
     scalars.sort_by(|left, right| left.path.cmp(&right.path));
     for scalar in scalars {
-        if is_replay_host_or_presentation_path(&scalar.path) {
+        if is_replay_host_or_presentation_path(layout, &scalar.path) {
             continue;
         }
         let Some(element_bytes) = replay_storage_width(scalar.storage_type_name()) else {
@@ -202,7 +202,7 @@ fn build_replay_state_snapshot(layout: &StateLayout) -> Result<ProgramReplayStat
     let mut collections = layout.collections.iter().collect::<Vec<_>>();
     collections.sort_by(|left, right| left.path.cmp(&right.path));
     for collection in collections {
-        if is_replay_host_or_presentation_path(&collection.path) {
+        if is_replay_host_or_presentation_path(layout, &collection.path) {
             continue;
         }
         let mut fields = collection.fields.iter().collect::<Vec<_>>();
@@ -267,15 +267,6 @@ fn replay_storage_width(type_name: &str) -> Option<u8> {
     }
 }
 
-fn is_replay_host_or_presentation_path(path: &str) -> bool {
-    path == "host_i32"
-        || path == "host_f32"
-        || path.starts_with("host_i32.")
-        || path.starts_with("host_f32.")
-        || path.starts_with("host_req_")
-        || is_command_buffer_path(path)
-}
-
 impl From<&FunctionMeta> for ProgramFunction {
     fn from(function: &FunctionMeta) -> Self {
         Self {
@@ -336,6 +327,13 @@ pub struct ProgramSnapshot {
     pub(crate) analysis: CompileAnalysisCache,
 }
 
+fn semantic_type_fact(types: &TypeTable, type_id: TypeId) -> String {
+    types.type_info(type_id).map_or_else(
+        || "unknown".to_string(),
+        |info| format!("{}:{:?}:{:?}", info.name, info.category, info.layout),
+    )
+}
+
 fn compiler_layout_digest(
     analysis: &CompileAnalysisCache,
     functions: &[FunctionMeta],
@@ -344,49 +342,68 @@ fn compiler_layout_digest(
     let mut facts = Vec::new();
     let mut pending_type_ids = Vec::new();
     for (type_id, fields) in &analysis.named_struct_field_types {
-        facts.push(format!("struct:{type_id}:{fields:?}"));
         pending_type_ids.push(*type_id);
         pending_type_ids.extend(fields.values().copied());
+        let mut fact = format!("struct:{}", semantic_type_fact(types, *type_id));
+        for (field, field_type) in fields {
+            fact.push_str(&format!(
+                ";{field}:{}",
+                semantic_type_fact(types, *field_type)
+            ));
+        }
+        facts.push(fact);
     }
     for (path, type_id) in &analysis.global_path_types {
-        facts.push(format!("global:{path}:{type_id}"));
         pending_type_ids.push(*type_id);
+        facts.push(format!(
+            "global:{path}:{}",
+            semantic_type_fact(types, *type_id)
+        ));
     }
     for (path, info) in &analysis.collection_infos {
-        facts.push(format!("collection:{path}:{info:?}"));
         pending_type_ids.extend(info.element_type);
         pending_type_ids.extend(info.field_types.values().copied());
+        let element = info.element_type.map_or_else(
+            || "none".to_string(),
+            |type_id| semantic_type_fact(types, type_id),
+        );
+        let mut fact = format!(
+            "collection:{path}:{}:{}:{}:{element}",
+            info.len, info.element_shape, info.fully_migratable
+        );
+        for (field, type_id) in &info.field_types {
+            fact.push_str(&format!(";{field}:{}", semantic_type_fact(types, *type_id)));
+        }
+        facts.push(fact);
     }
     for (path, descriptor) in &analysis.typed_collection_descriptors {
-        facts.push(format!(
-            "typed_collection:{path}:{}",
-            typed_collection_layout_metadata(descriptor, types)
-        ));
         pending_type_ids.extend(descriptor.element_type);
         pending_type_ids.extend(descriptor.key_type);
         pending_type_ids.extend(descriptor.value_type);
         pending_type_ids.extend(descriptor.lanes.iter().map(|lane| lane.type_id));
+        facts.push(format!(
+            "typed_collection:{path}:{}",
+            typed_collection_layout_metadata(descriptor, types)
+        ));
     }
     for function in functions {
         pending_type_ids.extend(function.params.iter().copied());
         pending_type_ids.push(function.return_type);
     }
-    for signature in &analysis.resolved_extern_signatures {
-        pending_type_ids.extend(signature.params.iter().copied());
-        pending_type_ids.push(signature.return_type);
-    }
     let mut seen_type_ids = BTreeSet::new();
+    let mut semantic_types = BTreeSet::new();
     while let Some(type_id) = pending_type_ids.pop() {
         if !seen_type_ids.insert(type_id) {
             continue;
         }
-        if let Some(info) = types.type_info(type_id) {
-            facts.push(format!("type:{type_id}:{info:?}"));
+        if types.type_info(type_id).is_some() {
+            semantic_types.insert(format!("type:{}", semantic_type_fact(types, type_id)));
         }
         if let Some(element_type) = types.indexed_element_type_id(type_id) {
             pending_type_ids.push(element_type);
         }
     }
+    facts.extend(semantic_types);
     facts.sort();
     let digest = Sha256::digest(facts.join("\n").as_bytes());
     let mut bytes = [0u8; 32];
@@ -1621,6 +1638,89 @@ function render(): void {
         );
     }
 
+    #[test]
+    fn multi_file_jit_and_wasm_snapshots_share_compiler_layout_identity() {
+        let main = r#"
+import "model.stasis";
+import "helpers.stasis";
+global score: i32;
+global state: model.State;
+global values: i32[4];
+function main(): i32 { return helpers.read(score) + values[0]; }
+function tick(): i32 { score += 1; return 0; }
+function render(): i32 { return 0; }
+"#;
+        let model = "struct State { value: i32; active: bool; }\n";
+        let helpers = r#"
+import "model.stasis";
+function read(value: i32): i32 { return value; }
+"#;
+        let roots = ["main".to_string(), "tick".to_string(), "render".to_string()];
+        let mut jit = JitProcess::new();
+        let mut wasm = crate::backend::wasm::WasmProcess::new();
+        for (path, text) in [
+            ("main.stasis", main),
+            ("model.stasis", model),
+            ("helpers.stasis", helpers),
+        ] {
+            jit.upsert_file(path, text);
+            wasm.upsert_file(path, text);
+        }
+        jit.set_required_emit_roots(&roots);
+        wasm.set_required_emit_roots(&roots);
+        jit.compile()
+            .expect("compile multi-file JIT replay fixture");
+        wasm.compile()
+            .expect("compile multi-file Web replay fixture");
+
+        let jit = jit.program_snapshot().expect("JIT snapshot");
+        let wasm = wasm.program_snapshot().expect("Web snapshot");
+        assert_eq!(jit.replay_source_sha256(), wasm.replay_source_sha256());
+        assert_eq!(
+            jit.compiler_layout_digest(),
+            wasm.compiler_layout_digest(),
+            "portable compiler layout identity must not depend on the backend",
+        );
+    }
+
+    #[test]
+    fn custom_named_host_frame_state_is_excluded_from_replay_snapshot() {
+        let mut jit = JitProcess::new();
+        jit.upsert_file(
+            "main.stasis",
+            r#"
+struct HostFrame { sequence: i32; buttons: i32[4]; }
+struct SpriteRunWriter { token: i32; runs: i32[2]; }
+global replay_host_frame: HostFrame;
+global custom_writer: SpriteRunWriter;
+global score: i32;
+function main(): i32 { return score; }
+function tick(): i32 { score += 1; return 0; }
+function render(): i32 { return 0; }
+"#,
+        );
+        jit.compile().expect("compile custom HostFrame fixture");
+        let snapshot = jit.program_snapshot().expect("HostFrame snapshot");
+        let replay_state = snapshot.replay_compatibility().state_snapshot;
+        assert!(replay_state
+            .entries
+            .iter()
+            .any(|entry| entry.path == "score"));
+        assert!(
+            !replay_state
+                .entries
+                .iter()
+                .any(|entry| entry.path.starts_with("replay_host_frame")),
+            "custom-named HostFrame fields must not enter the portable simulation snapshot"
+        );
+        assert!(
+            !replay_state
+                .entries
+                .iter()
+                .any(|entry| entry.path.starts_with("custom_writer")),
+            "custom-named SpriteRunWriter fields must not enter the portable simulation snapshot"
+        );
+    }
     #[test]
     fn replay_snapshot_distinguishes_primitive_collections_from_scalars() {
         let mut jit = JitProcess::new();
