@@ -619,14 +619,21 @@ fn recording_matches_visible_play_letterbox_and_input_timeline() {
     let replay_json: serde_json::Value =
         serde_json::from_slice(&fs::read(&replay_session).expect("read replay session"))
             .expect("parse replay session");
-    assert_eq!(replay_json["schema_version"], 2);
+    assert_eq!(replay_json["schema_version"], 3);
     assert_eq!(replay_json["total_ticks"], 3);
     assert_eq!(replay_json["final_state"]["tick"], 3);
     assert!(replay_json["segments"]
         .as_array()
         .is_some_and(|segments| !segments.is_empty() && segments.len() <= 3));
-    assert!(replay_json["identity"]["observed_i32"].is_array());
-    assert!(replay_json["identity"]["observed_f32"].is_array());
+    assert!(replay_json["identity"]["compatibility"]["observed_i32"].is_array());
+    assert!(replay_json["identity"]["compatibility"]["observed_f32"].is_array());
+    assert!(replay_json["identity"]["producer"]["target"].is_string());
+    assert_eq!(
+        replay_json["identity"]["producer"]["runtime_sha256"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
 
     let replayed = test_tree.0.join("replayed");
     let replay_run = launch(
@@ -955,7 +962,7 @@ fn headless_compact_replay_round_trip_verifies_final_state_and_mp4() {
     let replay_json: serde_json::Value =
         serde_json::from_slice(&fs::read(&replay_session).expect("read compact replay session"))
             .expect("parse compact replay session");
-    assert_eq!(replay_json["schema_version"], 2);
+    assert_eq!(replay_json["schema_version"], 3);
     assert_eq!(replay_json["total_ticks"].as_u64(), Some(frame_count));
     assert_eq!(
         replay_json["final_state"]["tick"].as_u64(),
@@ -970,8 +977,15 @@ fn headless_compact_replay_round_trip_verifies_final_state_and_mp4() {
     assert!(replay_json["segments"]
         .as_array()
         .is_some_and(|segments| !segments.is_empty()));
-    assert!(replay_json["identity"]["observed_i32"].is_array());
-    assert!(replay_json["identity"]["observed_f32"].is_array());
+    assert!(replay_json["identity"]["compatibility"]["observed_i32"].is_array());
+    assert!(replay_json["identity"]["compatibility"]["observed_f32"].is_array());
+    assert!(replay_json["identity"]["producer"]["target"].is_string());
+    assert_eq!(
+        replay_json["identity"]["producer"]["runtime_sha256"]
+            .as_str()
+            .map(str::len),
+        Some(64)
+    );
 
     let replayed = test_tree.0.join("replayed");
     let replay_run = launch(
