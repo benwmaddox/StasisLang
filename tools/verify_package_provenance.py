@@ -12,6 +12,8 @@ import re
 
 COMMAND_BUFFER_NAME = "gfx_cmd"
 CURRENT_COMMAND_BUFFER_VERSION = 8
+LEGACY_VENDOR_HASH_VERSION = 1
+CANONICAL_LF_VENDOR_HASH_VERSION = 2
 ASSET_PACKAGE_IDENTITY_NAME = "stasis_asset_package.json"
 ASSET_MANIFEST_RELATIVE_PATH = pathlib.PurePosixPath("assets/manifest.json")
 ASSET_PACKAGE_IDENTITY_SCHEMA = "stasis.asset_package"
@@ -196,8 +198,13 @@ def validate_desktop_project_receipt(
 
     vendor = value["vendor"]
     if vendor is not None:
-        vendor_keys = {"release_id", "recorded_sha256", "actual_sha256"}
-        if not isinstance(vendor, dict) or set(vendor) != vendor_keys \
+        legacy_vendor_keys = {"release_id", "recorded_sha256", "actual_sha256"}
+        versioned_vendor_keys = legacy_vendor_keys | {
+            "recorded_hash_version",
+            "actual_hash_version",
+        }
+        if not isinstance(vendor, dict) \
+                or set(vendor) not in (legacy_vendor_keys, versioned_vendor_keys) \
                 or not isinstance(vendor.get("release_id"), str) \
                 or not vendor["release_id"]:
             parser.error(f"desktop package provenance has malformed {label} vendor")
@@ -207,6 +214,22 @@ def validate_desktop_project_receipt(
         validate_receipt_sha256(
             parser, vendor["actual_sha256"], f"{label} actual vendor"
         )
+        if set(vendor) == versioned_vendor_keys:
+            recorded_hash_version = vendor["recorded_hash_version"]
+            if type(recorded_hash_version) is not int \
+                    or recorded_hash_version not in (
+                        LEGACY_VENDOR_HASH_VERSION,
+                        CANONICAL_LF_VENDOR_HASH_VERSION,
+                    ):
+                parser.error(
+                    f"desktop package provenance has invalid {label} recorded vendor hash version"
+                )
+            actual_hash_version = vendor["actual_hash_version"]
+            if type(actual_hash_version) is not int \
+                    or actual_hash_version != CANONICAL_LF_VENDOR_HASH_VERSION:
+                parser.error(
+                    f"desktop package provenance has unsupported {label} actual vendor hash version"
+                )
 
     captured = value["captured_inputs"]
     captured_keys = {"assets", "data", "entry_support"}

@@ -71,6 +71,89 @@ class ReleaseProvenanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "receipt is malformed"):
                 validate_desktop_package_receipt(Parser(), malformed, package)
 
+    def test_desktop_package_vendor_receipt_supports_versioned_hashes(self):
+        class Parser:
+            @staticmethod
+            def error(message):
+                raise ValueError(message)
+
+        legacy_hash = hashlib.sha256(b"legacy raw vendor snapshot").hexdigest()
+        canonical_hash = hashlib.sha256(b"canonical LF vendor snapshot").hexdigest()
+        legacy_fields = {
+            "release_id": "nightly-test",
+            "recorded_sha256": legacy_hash,
+            "actual_sha256": canonical_hash,
+        }
+        supported_vendor_receipts = (
+            legacy_fields,
+            {
+                **legacy_fields,
+                "recorded_hash_version": 1,
+                "actual_hash_version": 2,
+            },
+            {
+                **legacy_fields,
+                "recorded_sha256": canonical_hash,
+                "actual_sha256": canonical_hash,
+                "recorded_hash_version": 2,
+                "actual_hash_version": 2,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = pathlib.Path(temporary)
+            (package / "stasis.json").write_bytes(b"{}\n")
+            for vendor in supported_vendor_receipts:
+                with self.subTest(vendor=vendor):
+                    receipt = self.desktop_package_receipt()
+                    receipt["project"]["vendor"] = vendor
+                    validate_desktop_package_receipt(Parser(), receipt, package)
+
+            malformed_vendor_receipts = (
+                (
+                    {**legacy_fields, "recorded_hash_version": 2},
+                    "malformed project vendor",
+                ),
+                (
+                    {
+                        **legacy_fields,
+                        "recorded_hash_version": 2,
+                        "actual_hash_version": 2,
+                        "unrecognized": True,
+                    },
+                    "malformed project vendor",
+                ),
+                (
+                    {
+                        **legacy_fields,
+                        "recorded_hash_version": True,
+                        "actual_hash_version": 2,
+                    },
+                    "invalid project recorded vendor hash version",
+                ),
+                (
+                    {
+                        **legacy_fields,
+                        "recorded_hash_version": 3,
+                        "actual_hash_version": 2,
+                    },
+                    "invalid project recorded vendor hash version",
+                ),
+                (
+                    {
+                        **legacy_fields,
+                        "recorded_hash_version": 1,
+                        "actual_hash_version": 1,
+                    },
+                    "unsupported project actual vendor hash version",
+                ),
+            )
+            for vendor, error in malformed_vendor_receipts:
+                with self.subTest(vendor=vendor), self.assertRaisesRegex(ValueError, error):
+                    receipt = self.desktop_package_receipt()
+                    receipt["project"]["vendor"] = vendor
+                    validate_desktop_package_receipt(Parser(), receipt, package)
+
     def test_desktop_package_verifier_preserves_exact_release_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -91,6 +174,14 @@ class ReleaseProvenanceTests(unittest.TestCase):
             packaged["desktop_package"] = self.desktop_package_receipt(
                 packaged_manifest
             )
+            vendor_hash = hashlib.sha256(b"packaged vendor snapshot").hexdigest()
+            packaged["desktop_package"]["project"]["vendor"] = {
+                "release_id": "nightly-test",
+                "recorded_sha256": vendor_hash,
+                "recorded_hash_version": 2,
+                "actual_sha256": vendor_hash,
+                "actual_hash_version": 2,
+            }
             (package / "stasis_provenance.json").write_text(
                 json.dumps(packaged), encoding="utf-8"
             )
