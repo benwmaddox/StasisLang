@@ -192,6 +192,8 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         .arg(format!("/I{}", runtime.display()))
         .arg(runtime.join("tests/stasis_generated_mobile_integration.c"))
         .arg(runtime.join("stasis_mobile_runtime.c"))
+        .arg(runtime.join("stasis_replay_consumer.c"))
+        .arg(runtime.join("cJSON.c"))
         .arg(runtime.join("stasis_mobile_aot_runtime.c"))
         .arg(runtime.join("stasis_platform_services.c"))
         .arg(runtime.join("stasis_render_trace.c"))

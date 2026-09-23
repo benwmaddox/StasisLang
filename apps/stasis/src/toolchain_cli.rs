@@ -1470,6 +1470,9 @@ fn execute(
     workspace_arg: Option<PathBuf>,
     json_output: bool,
 ) -> Result<CommandResult, String> {
+    if let ToolchainCommand::Record { args } = &command {
+        let _ = record::validate_args(args)?;
+    }
     if command_requires_runtime(&command) {
         verify_installed_toolchain_identity()?;
     }

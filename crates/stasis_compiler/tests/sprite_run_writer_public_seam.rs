@@ -2,20 +2,16 @@
 
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::JitProcess;
-use stasis_compiler::backend::state_layout::{
-    aot_storage_symbol, AotStorageSymbolKind, StateLayout,
-};
+use stasis_compiler::backend::state_layout::{aot_storage_symbol, AotStorageSymbolKind};
 use stasis_dynload::{
     global_path_hash, register_global_f32_array, register_global_i32_array,
-    register_global_u8_array,
+    register_global_u8_array, AotProbeSession, AotProbeStorageDescriptor, AotProbeStorageKind,
 };
 use stasis_jit::{link_objects_to_dynamic_library, AotLinkConfig, AotTarget};
 use std::collections::BTreeSet;
-use std::ffi::{c_char, CString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::slice;
 
 const FIXTURE_PATH: &str = "tests/stasis/seams/sprite_run_writer_public_probe.stasis";
 const FIXTURE: &str =
@@ -66,70 +62,6 @@ struct AotTree(PathBuf);
 impl Drop for AotTree {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-struct AotRuntimeRegistry {
-    clear_string_literals: unsafe extern "C" fn(),
-    upsert_string_literal: unsafe extern "C" fn(i32, *const c_char),
-    register_i32_ptr: unsafe extern "C" fn(i32, *mut i32),
-    register_f32_ptr: unsafe extern "C" fn(i32, *mut f32),
-    register_f64_ptr: unsafe extern "C" fn(i32, *mut f64),
-    register_i32_array: unsafe extern "C" fn(i32, i32, *mut i32, i32),
-    register_f32_array: unsafe extern "C" fn(i32, i32, *mut f32, i32),
-    register_f64_array: unsafe extern "C" fn(i32, i32, *mut f64, i32),
-    register_u8_array: unsafe extern "C" fn(i32, i32, *mut u8, i32),
-    register_u16_array: unsafe extern "C" fn(i32, i32, *mut u16, i32),
-}
-
-impl AotRuntimeRegistry {
-    fn from_library(library: &stasis_dynload::Library) -> Self {
-        let symbol = |name: &str| {
-            library
-                .symbol_address(name)
-                .unwrap_or_else(|error| panic!("resolve runtime registry symbol {name}: {error}"))
-        };
-        Self {
-            clear_string_literals: unsafe {
-                std::mem::transmute(symbol("stasis_jit_clear_string_literal_table"))
-            },
-            upsert_string_literal: unsafe {
-                std::mem::transmute(symbol("stasis_jit_upsert_string_literal"))
-            },
-            register_i32_ptr: unsafe {
-                std::mem::transmute(symbol("stasis_jit_register_global_i32_ptr"))
-            },
-            register_f32_ptr: unsafe {
-                std::mem::transmute(symbol("stasis_jit_register_global_f32_ptr"))
-            },
-            register_f64_ptr: unsafe {
-                std::mem::transmute(symbol("stasis_jit_register_global_f64_ptr"))
-            },
-            register_i32_array: unsafe {
-                std::mem::transmute(symbol("stasis_jit_register_global_i32_array"))
-            },
-            register_f32_array: unsafe {
-                std::mem::transmute(symbol("stasis_jit_register_global_f32_array"))
-            },
-            register_f64_array: unsafe {
-                std::mem::transmute(symbol("stasis_jit_register_global_f64_array"))
-            },
-            register_u8_array: unsafe {
-                std::mem::transmute(symbol("stasis_jit_register_global_u8_array"))
-            },
-            register_u16_array: unsafe {
-                std::mem::transmute(symbol("stasis_jit_register_global_u16_array"))
-            },
-        }
-    }
-
-    unsafe fn clear_literals(&self) {
-        unsafe { (self.clear_string_literals)() };
-    }
-
-    unsafe fn upsert_literal(&self, id: i32, value: &str) {
-        let value = CString::new(value).expect("AOT literal contains an interior NUL");
-        unsafe { (self.upsert_string_literal)(id, value.as_ptr()) };
     }
 }
 
@@ -227,254 +159,76 @@ fn required_roots() -> Vec<String> {
     .collect()
 }
 
-fn aot_storage_exports(process: &AotProcess) -> Vec<String> {
-    let layout = process.state_layout();
-    let mut exports = BTreeSet::new();
-    for root in required_roots() {
-        exports.insert(aot_symbol(process, &root));
-    }
-    for scalar in &layout.scalars {
-        exports.insert(aot_storage_symbol(
-            AotStorageSymbolKind::Scalar,
-            &scalar.path,
-            "",
-        ));
-    }
-    for collection in &layout.collections {
-        for field in &collection.fields {
-            exports.insert(aot_storage_symbol(
-                AotStorageSymbolKind::Array,
-                &collection.path,
-                &field.field,
-            ));
-        }
-    }
-    exports.into_iter().collect()
-}
-
-fn aot_symbol_address(library: &stasis_dynload::Library, symbol: &str) -> usize {
-    let address = library
-        .symbol_address(symbol)
-        .unwrap_or_else(|error| panic!("resolve exported AOT storage {symbol}: {error}"));
-    assert_ne!(address, 0, "exported AOT storage address for {symbol}");
-    address
-}
-
-fn register_aot_scalar(
-    registry: &AotRuntimeRegistry,
-    path: &str,
-    storage_type: &str,
-    address: usize,
-) {
-    let path_hash = global_path_hash(path);
-    unsafe {
-        match storage_type {
-            "i32" | "bool" | "u32" => {
-                (registry.register_i32_ptr)(path_hash, address as *mut i32)
-            }
-            "f32" => (registry.register_f32_ptr)(path_hash, address as *mut f32),
-            "f64" => (registry.register_f64_ptr)(path_hash, address as *mut f64),
-            other => panic!(
-                "AOT scalar bootstrap has no existing runtime pointer lane for '{other}' at '{path}'"
-            ),
-        }
-    }
-}
-
-fn register_aot_array(
-    registry: &AotRuntimeRegistry,
-    collection_path: &str,
-    field: &str,
-    storage_type: &str,
-    capacity: i32,
-    address: usize,
-) {
-    assert!(
-        capacity >= 0,
-        "negative AOT collection capacity at '{collection_path}'"
-    );
-    let collection_hash = global_path_hash(collection_path);
-    let field_hash = if field.is_empty() {
-        0
-    } else {
-        global_path_hash(field)
-    };
-    unsafe {
-        match storage_type {
-            "i32" | "bool" | "u32" => (registry.register_i32_array)(
-                collection_hash,
-                field_hash,
-                address as *mut i32,
-                capacity,
-            ),
-            "f32" => (registry.register_f32_array)(
-                collection_hash,
-                field_hash,
-                address as *mut f32,
-                capacity,
-            ),
-            "f64" => (registry.register_f64_array)(
-                collection_hash,
-                field_hash,
-                address as *mut f64,
-                capacity,
-            ),
-            "u8" => (registry.register_u8_array)(
-                collection_hash,
-                field_hash,
-                address as *mut u8,
-                capacity,
-            ),
-            "u16" => (registry.register_u16_array)(
-                collection_hash,
-                field_hash,
-                address as *mut u16,
-                capacity,
-            ),
-            other => panic!(
-                "AOT collection bootstrap has no existing runtime lane for '{other}' at '{collection_path}.{field}'"
-            ),
-        }
-    }
-}
-
-fn bootstrap_aot_storage(
-    process: &AotProcess,
-    library: &stasis_dynload::Library,
-    registry: &AotRuntimeRegistry,
-) {
-    unsafe { registry.clear_literals() };
-    for (&id, value) in process.string_literals() {
-        unsafe { registry.upsert_literal(id, value) };
-    }
-
-    let layout = process.state_layout();
-    for scalar in &layout.scalars {
-        let symbol = aot_storage_symbol(AotStorageSymbolKind::Scalar, &scalar.path, "");
-        register_aot_scalar(
-            registry,
-            &scalar.path,
-            scalar.storage_type_name(),
-            aot_symbol_address(library, &symbol),
-        );
-    }
-    for collection in &layout.collections {
-        for field in &collection.fields {
-            let symbol =
-                aot_storage_symbol(AotStorageSymbolKind::Array, &collection.path, &field.field);
-            register_aot_array(
-                registry,
-                &collection.path,
-                &field.field,
-                field.storage_type_name(),
-                collection.capacity,
-                aot_symbol_address(library, &symbol),
-            );
-        }
-    }
-}
-
-fn aot_storage_kind(storage_type: &str) -> stasis_dynload::JitStorageKind {
+fn aot_storage_kind(storage_type: &str) -> AotProbeStorageKind {
     match storage_type {
-        "i32" | "bool" | "u32" => stasis_dynload::JitStorageKind::I32,
-        "f32" => stasis_dynload::JitStorageKind::F32,
-        "f64" => stasis_dynload::JitStorageKind::F64,
-        "u8" => stasis_dynload::JitStorageKind::U8,
-        "u16" => stasis_dynload::JitStorageKind::U16,
+        "i32" | "bool" | "u32" => AotProbeStorageKind::I32,
+        "f32" => AotProbeStorageKind::F32,
+        "f64" => AotProbeStorageKind::F64,
+        "u8" => AotProbeStorageKind::U8,
+        "u16" => AotProbeStorageKind::U16,
         other => panic!("unknown AOT storage lane '{other}'"),
     }
 }
 
-fn direct_storage_data_address(slot_address: usize) -> usize {
-    let address = unsafe {
-        std::ptr::read_unaligned(
-            (slot_address as *const u8).add(stasis_dynload::JitStorageSlot::DATA_OFFSET as usize)
-                as *const usize,
-        )
-    };
-    assert_ne!(address, 0, "host direct storage data address");
-    address
-}
-
-fn direct_storage_len(slot_address: usize) -> usize {
-    unsafe {
-        std::ptr::read_unaligned(
-            (slot_address as *const u8).add(stasis_dynload::JitStorageSlot::LEN_OFFSET as usize)
-                as *const usize,
-        )
-    }
-}
-
-fn restore_aot_registry(layout: &StateLayout, registry: &AotRuntimeRegistry) {
-    unsafe { registry.clear_literals() };
+fn aot_storage_descriptors(process: &AotProcess) -> Vec<AotProbeStorageDescriptor> {
+    let layout = process.state_layout();
+    let mut descriptors = Vec::new();
     for scalar in &layout.scalars {
-        let kind = aot_storage_kind(scalar.storage_type_name());
-        let path_hash = global_path_hash(&scalar.path);
-        let slot = stasis_dynload::direct_scalar_storage_slot_address(kind, path_hash)
-            .unwrap_or_else(|error| {
-                panic!("resolve host scalar storage '{}': {error}", scalar.path)
-            });
-        register_aot_scalar(
-            registry,
-            &scalar.path,
-            scalar.storage_type_name(),
-            direct_storage_data_address(slot),
-        );
+        descriptors.push(AotProbeStorageDescriptor::scalar(
+            aot_storage_symbol(AotStorageSymbolKind::Scalar, &scalar.path, ""),
+            global_path_hash(&scalar.path),
+            aot_storage_kind(scalar.storage_type_name()),
+        ));
     }
     for collection in &layout.collections {
+        let len = usize::try_from(collection.capacity).unwrap_or_else(|_| {
+            panic!("negative AOT collection capacity at '{}'", collection.path)
+        });
         let collection_hash = global_path_hash(&collection.path);
         for field in &collection.fields {
-            let kind = aot_storage_kind(field.storage_type_name());
             let field_hash = if field.field.is_empty() {
                 0
             } else {
                 global_path_hash(&field.field)
             };
-            let slot = stasis_dynload::direct_array_storage_slot_address(
-                kind,
+            descriptors.push(AotProbeStorageDescriptor::array(
+                aot_storage_symbol(AotStorageSymbolKind::Array, &collection.path, &field.field),
                 collection_hash,
                 field_hash,
-            )
-            .unwrap_or_else(|error| {
-                panic!(
-                    "resolve host collection storage '{}.{}': {error}",
-                    collection.path, field.field
-                )
-            });
-            let len = direct_storage_len(slot);
-            let len = i32::try_from(len).unwrap_or_else(|_| {
-                panic!(
-                    "host collection storage '{}.{}' length {len} exceeds i32 ABI",
-                    collection.path, field.field
-                )
-            });
-            register_aot_array(
-                registry,
-                &collection.path,
-                &field.field,
-                field.storage_type_name(),
+                aot_storage_kind(field.storage_type_name()),
                 len,
-                direct_storage_data_address(slot),
-            );
+            ));
         }
     }
+    descriptors
 }
 
-struct AotRegistryCleanup<'a> {
-    layout: StateLayout,
-    registry: &'a AotRuntimeRegistry,
-}
-
-impl<'a> AotRegistryCleanup<'a> {
-    fn new(layout: StateLayout, registry: &'a AotRuntimeRegistry) -> Self {
-        Self { layout, registry }
+fn aot_storage_exports(process: &AotProcess) -> Vec<String> {
+    let mut exports = BTreeSet::new();
+    for root in required_roots() {
+        exports.insert(aot_symbol(process, &root));
     }
+    for descriptor in aot_storage_descriptors(process) {
+        match descriptor {
+            AotProbeStorageDescriptor::Scalar { symbol, .. }
+            | AotProbeStorageDescriptor::Array { symbol, .. } => {
+                exports.insert(symbol);
+            }
+        }
+    }
+    exports.into_iter().collect()
 }
 
-impl Drop for AotRegistryCleanup<'_> {
-    fn drop(&mut self) {
-        restore_aot_registry(&self.layout, self.registry);
-    }
+fn invoke_aot_frame(
+    session: &mut AotProbeSession,
+    reset: &str,
+    root: &str,
+    finish: &str,
+    name: &str,
+) {
+    session
+        .invoke_frame(reset, root, finish)
+        .unwrap_or_else(|error| panic!("run linked AOT probe {name}: {error}"));
 }
 
 fn configured_jit(root: &Path) -> JitProcess {
@@ -685,27 +439,6 @@ fn link_aot_probe_library(
     library_path
 }
 
-fn read_aot_array<T: Copy>(library: &stasis_dynload::Library, symbol: &str, len: usize) -> Vec<T> {
-    let address = library
-        .symbol_address(symbol)
-        .unwrap_or_else(|error| panic!("resolve AOT storage {symbol}: {error}"));
-    assert_ne!(address, 0, "AOT storage address for {symbol}");
-    // The symbol is emitted as a directly exported fixed-size storage array by the
-    // standalone AOT storage object. Copy it before the next host-owned frame.
-    unsafe { slice::from_raw_parts(address as *const T, len).to_vec() }
-}
-
-fn invoke_aot_frame(reset: usize, root: usize, finish: usize, name: &str) {
-    stasis_dynload::invoke_noarg_void(reset)
-        .unwrap_or_else(|error| panic!("start AOT frame for {name}: {error}"));
-    let result = stasis_dynload::invoke_noarg_i32(root)
-        .unwrap_or_else(|error| panic!("execute AOT probe {name}: {error}"));
-    assert_eq!(result, 0, "AOT probe result for {name}");
-    let finished = stasis_dynload::invoke_i32_to_i32(finish, result)
-        .unwrap_or_else(|error| panic!("finish AOT frame for {name}: {error}"));
-    assert_eq!(finished, 0, "AOT frame finish for {name}");
-}
-
 #[test]
 fn public_sprite_run_writer_matches_jit_and_linked_aot() {
     let root = repository_root();
@@ -773,47 +506,60 @@ fn public_sprite_run_writer_matches_jit_and_linked_aot() {
     };
     let library_path = link_aot_probe_library(&mut aot, &output_dir.0, &config);
     sign_aot_library(&root, &library_path);
-    // Load the exact runtime DLL used for the import library before loading the
-    // probe.  The AOT bootstrap below calls registry exports through this handle,
-    // so it cannot accidentally update the statically linked test crate's
-    // separate registry instance or a copied DLL.
-    let runtime_library = stasis_dynload::Library::load(&runtime)
-        .expect("load exact linked-AOT runtime registry library");
-    let runtime_registry = AotRuntimeRegistry::from_library(&runtime_library);
-    let library = stasis_dynload::Library::load(&library_path)
-        .expect("load linked public writer AOT probe library");
-    bootstrap_aot_storage(&aot, &library, &runtime_registry);
-    let _registry_cleanup = AotRegistryCleanup::new(aot.state_layout(), &runtime_registry);
-    let reset = library
-        .symbol_address(&aot_symbol(&aot, RESET_ROOT))
-        .expect("resolve linked AOT reset");
-    let finish = library
-        .symbol_address(&aot_symbol(&aot, FINISH_ROOT))
-        .expect("resolve linked AOT finish");
-    let line = library
-        .symbol_address(&aot_symbol(&aot, LINE_ROOT))
-        .expect("resolve linked AOT line probe");
-    let geometry = library
-        .symbol_address(&aot_symbol(&aot, GEOMETRY_ROOT))
-        .expect("resolve linked AOT geometry probe");
-    let writer = library
-        .symbol_address(&aot_symbol(&aot, WRITER_ROOT))
-        .expect("resolve linked AOT writer probe");
-    let final_probe = library
-        .symbol_address(&aot_symbol(&aot, ROOT))
-        .expect("resolve linked AOT final probe");
+    // The session owns the exact runtime DLL and probe DLL while their typed
+    // compiler-owned storage descriptors are registered and copied.
+    let mut session = AotProbeSession::load(&runtime, &library_path)
+        .expect("open exclusive linked-AOT probe session");
+    let invalid = [AotProbeStorageDescriptor::array(
+        "invalid_storage_extent",
+        0,
+        0,
+        AotProbeStorageKind::I32,
+        i32::MAX as usize + 1,
+    )];
+    assert!(
+        session.bootstrap(&[], &invalid).is_err(),
+        "reject a malformed descriptor before registry mutation"
+    );
+    let literals = aot
+        .string_literals()
+        .iter()
+        .map(|(&id, value)| (id, value.clone()))
+        .collect::<Vec<_>>();
+    let descriptors = aot_storage_descriptors(&aot);
+    session
+        .bootstrap(&literals, &descriptors)
+        .expect("bootstrap linked AOT storage");
+    let reset = aot_symbol(&aot, RESET_ROOT);
+    let finish = aot_symbol(&aot, FINISH_ROOT);
+    let line = aot_symbol(&aot, LINE_ROOT);
+    let geometry = aot_symbol(&aot, GEOMETRY_ROOT);
+    let writer = aot_symbol(&aot, WRITER_ROOT);
+    let final_probe = aot_symbol(&aot, ROOT);
     let i32_symbol = aot_array_symbol("gfx_cmd_i32");
     let f32_symbol = aot_array_symbol("gfx_cmd_f32");
     let u8_symbol = aot_array_symbol("gfx_cmd_u8");
-    invoke_aot_frame(reset, line, finish, LINE_ROOT);
-    let aot_i32s: Vec<i32> = read_aot_array(&library, &i32_symbol, GFX_I32_COUNT);
-    let aot_f32s: Vec<f32> = read_aot_array(&library, &f32_symbol, GFX_F32_COUNT);
+    assert!(
+        session.read_f32(&i32_symbol).is_err(),
+        "reject a typed snapshot requested with the wrong lane"
+    );
+    invoke_aot_frame(&mut session, &reset, &line, &finish, LINE_ROOT);
+    let aot_i32s = session
+        .read_i32(&i32_symbol)
+        .expect("snapshot AOT i32 storage");
+    let aot_f32s = session
+        .read_f32(&f32_symbol)
+        .expect("snapshot AOT f32 storage");
     assert_line_capacity(&aot_i32s, &aot_f32s);
-    invoke_aot_frame(reset, geometry, finish, GEOMETRY_ROOT);
-    let aot_i32s: Vec<i32> = read_aot_array(&library, &i32_symbol, GFX_I32_COUNT);
+    invoke_aot_frame(&mut session, &reset, &geometry, &finish, GEOMETRY_ROOT);
+    let aot_i32s = session
+        .read_i32(&i32_symbol)
+        .expect("snapshot AOT i32 storage");
     assert_geometry_order(&aot_i32s);
-    invoke_aot_frame(reset, writer, finish, WRITER_ROOT);
-    let aot_i32s: Vec<i32> = read_aot_array(&library, &i32_symbol, GFX_I32_COUNT);
+    invoke_aot_frame(&mut session, &reset, &writer, &finish, WRITER_ROOT);
+    let aot_i32s = session
+        .read_i32(&i32_symbol)
+        .expect("snapshot AOT i32 storage");
     assert_eq!(
         aot_i32s[GFX_I_FLAGS], 2,
         "AOT writer lifecycle frame is published"
@@ -826,14 +572,32 @@ fn public_sprite_run_writer_matches_jit_and_linked_aot() {
         aot_i32s[GFX_I_ORDER_COUNT], 0,
         "AOT cancelled writer publishes no order"
     );
-    invoke_aot_frame(reset, final_probe, finish, ROOT);
-    let aot_i32s: Vec<i32> = read_aot_array(&library, &i32_symbol, GFX_I32_COUNT);
-    let aot_f32s: Vec<f32> = read_aot_array(&library, &f32_symbol, GFX_F32_COUNT);
-    let aot_u8s: Vec<u8> = read_aot_array(&library, &u8_symbol, GFX_U8_COUNT);
+    invoke_aot_frame(&mut session, &reset, &final_probe, &finish, ROOT);
+    let aot_i32s = session
+        .read_i32(&i32_symbol)
+        .expect("snapshot AOT i32 storage");
+    let aot_f32s = session
+        .read_f32(&f32_symbol)
+        .expect("snapshot AOT f32 storage");
+    let aot_u8s = session
+        .read_u8(&u8_symbol)
+        .expect("snapshot AOT u8 storage");
     assert_final_packet(&aot_i32s, &aot_f32s, &aot_u8s);
-    drop(_registry_cleanup);
-    drop(library);
-    drop(runtime_library);
+}
+
+#[test]
+fn aot_probe_session_rejects_an_occupied_registry_and_releases_it() {
+    let (_, runtime) = dynload_artifacts();
+    let session = AotProbeSession::load(&runtime, &runtime)
+        .expect("claim empty runtime registry for test session");
+    let occupied = AotProbeSession::load(&runtime, &runtime)
+        .err()
+        .expect("reject a second session while storage is owned");
+    assert!(occupied.contains("occupied"));
+    drop(session);
+    let reopened =
+        AotProbeSession::load(&runtime, &runtime).expect("allow a session after registry teardown");
+    drop(reopened);
 }
 
 #[test]

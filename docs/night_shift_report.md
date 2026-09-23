@@ -411,3 +411,29 @@ the required native desktop generation/import workflow.
 - Visual evidence: inspected `docs/evidence/task639-web-text/before.png` and `after.png`; text is sharper with identical logical bounds/baselines and no visible clipping for the captured strings. This is real Canvas2D/WebGL2 with a synthetic guest ABI and SwiftShader, not packaged-game or physical-device qualification.
 - Cross-platform #639 remains Active. `docs/validation/text_physical_raster_639.md` records native/Workshop cap and rounding gaps and unavailable Apple/physical-phone qualification. #547 retains consumer migration and desktop lifecycle acceptance.
 - Theory gained: text sampling must cover both actual backing axes independently of the bounded scalar sprite tier; unchanged text scale can safely reuse its resource when only the sprite tier changes.
+
+
+## 2026-09-23 - Restore baseline before Maddox #701
+
+- Moved the Windows sprite writer seam's DLL registry bootstrap and raw storage reads into an owning, audited `stasis_dynload::AotProbeSession`. Typed descriptors come from compiler `StateLayout`; snapshots copy registered lanes while both DLLs remain loaded. Occupied registries are rejected and session storage is cleared before unloading.
+- Kept unsafe compiler-test exemptions forbidden. Added coverage for occupied state preservation, foreign-thread literal mutations, teardown/reopening, malformed descriptors and mismatched snapshot types; retained linked JIT/AOT packet assertions.
+- Restored the local installer's missing cJSON and replay-consumer source entries to match release provenance and actual runtime build inputs.
+- Kept generated Windows replay bridges freestanding under `/X`: a bounded byte-copy helper handles signed-integer and floating-point snapshot bit copies without `<string.h>`. Snapshot forward declarations now carry the same export attribute as their later definitions. Mixed-lane and integer-only bridge tests compile the emitted C, and the no-default-library-directive check remains enforced.
+- Restored recording argument validation before installed-runtime provenance preflight; valid requests still pass through the unchanged provenance gate. The existing pinned-vendor regression covers invalid bounds without runtime startup.
+- Settled the desktop input fixture with one complete initial host frame before logical-coordinate injection, preserving the first guest tick and exact coordinate assertions.
+- Aligned the manifest asset fixture with the documented sibling-first runtime contract and kept its configured-path precedence check; direct graphics and JIT asset calls now use the same selected DLL.
+- Restored the generated mobile integration harness source list with the replay-consumer and cJSON compilation units already used by the canonical CMake mobile targets.
+- Validation: focused sprite JIT/AOT/session, installer, freestanding bridge, recording, desktop input/assets, and generated mobile checks pass; all 334 application library and 481 CLI unit tests pass. Final formatting and diff checks pass. The exact repository gate reached its 900-second bound in Windows launch tests and did not reach remaining compiler workspace targets. A bounded single-test rerun identified ignored `samples/windows_launch_smoke/dist` artifacts copied by the fixture as the launch failure: packaging correctly rejected an already-existing output directory. No artifact cleanup, additional repair, push, or PR was performed; full validation remains unpassed.
+- Visual evidence: not applicable; these changes repair native test boundaries and build inputs.
+- Theory gained: a separately loaded runtime DLL has a separate storage registry. Retaining both DLLs and clearing that registry before unloading avoids exporting borrowed host-registry lifetimes into it. The linked seam and session lifecycle assertions exercise that mapping; additional exported storage lanes should extend the same typed descriptor path.
+- Good: independent review found and closed a literal-table ownership race before publication.
+- Bad: the original unsafe audit hid further installer and freestanding-bridge baseline failures; shared Cargo artifacts also retained a deleted worktree path.
+- Adjustment: verify the full canonical-checkout gate with fresh package build scripts, and keep freestanding generated C independent of SDK headers.
+
+### Follow-up: source-only Windows launch fixture
+
+- Reused the existing copied-fixture cleanup for `build`, `dist`, `target`, and `.stasis_cache` in the failed launch matrix. The original sample artifacts remain untouched. The exact launch regression now passes (171 seconds).
+- The separate bounded remaining-workspace run passed compiler unit/integration coverage and all four sprite seam tests, then stopped at the existing native-window focus seam: the graphics runtime rejected its focus request. Eleven later dynload tests failed from the poisoned shared mutex (41 passed, 12 failed). No further source repairs were attempted. The complete repository gate remains unpassed; its prior aggregate run exceeded 900 seconds.
+- Visual evidence: not applicable; fixture isolation change, with existing pixel assertions exercised by the launch test.
+- Theory gained: copying a developer sample must exclude generated output before testing package creation; the package command correctly refuses pre-existing output.
+- Good: the exact failed launch test now completes successfully. Bad: local generated artifacts obscured the source-only fixture assumption. Adjustment: reuse source-only fixture setup and disclose independent baseline limits.

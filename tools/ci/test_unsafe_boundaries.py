@@ -44,6 +44,15 @@ class UnsafeBoundaryTests(unittest.TestCase):
                 ["crates/stasis_runner/src/lib.rs"],
             )
 
+    def test_compiler_seams_do_not_gain_platform_boundary_exemptions(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            relative = "crates/stasis_compiler/tests/sprite_run_writer_public_seam.rs"
+            source = root / relative
+            source.parent.mkdir(parents=True)
+            source.write_text("fn read_storage() { unsafe { raw(); } }", encoding="utf-8")
+            self.assertEqual(unexpected_unsafe_files(root), [relative])
+
     def test_allows_unsafe_rust_in_audited_boundary(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
