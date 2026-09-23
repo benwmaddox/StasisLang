@@ -131,8 +131,11 @@ alias is `nightly-20260919-337`, legacy SHA-256
 61 files in source tag commit `ad00c329a9d9cd9a3c328c7540034c3e30d5b457`, under `src/stdlib` and
 `docs/knowledge`, using the version 2 path framing and CRLF normalization. Other legacy pins whose
 raw tree differs and whose baseline is unavailable are reported as `legacy_pin_unverified`, not as
-confirmed local edits; run `stasis vendor update` to explicitly migrate them to version 2. `vendor
-status` never rewrites the manifest or snapshot.
+confirmed local edits. Read-only symbol queries also fail closed without modifying files. Mutating
+project commands retain automatic vendor synchronization and may replace a stale or unverified
+snapshot with the selected release; a clean, verified same-release v1 snapshot remains unchanged.
+`stasis vendor update` explicitly migrates even a clean v1 pin to version 2. `vendor status` never
+rewrites the manifest or snapshot.
 
 `vendor status` reports the recorded hash version/digest, the authenticated expected canonical digest
 when available, the actual canonical digest, and the raw digest for legacy pins. An unverified v1 pin

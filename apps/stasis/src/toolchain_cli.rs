@@ -2588,9 +2588,6 @@ fn reconcile_project_vendor(
         return Ok(());
     }
     let status = inspect_project_vendor(workspace_root, manifest)?;
-    if status.legacy_pin_unverified {
-        return Err("legacy vendor hash version 1 cannot be verified against a trusted release baseline; run 'stasis vendor status' then 'stasis vendor update'".to_string());
-    }
     if !status.update_available
         && !status.local_changes
         && status.actual_sha256.as_deref() == Some(status.installed.sha256.as_str())
@@ -13183,6 +13180,27 @@ mod tests {
             fs::read(root.join(MANIFEST_NAME)).unwrap(),
             migrated_manifest_bytes
         );
+
+        let mut reconciled_untrusted = untrusted.manifest.clone();
+        reconcile_project_vendor(&root, &mut reconciled_untrusted)
+            .expect("mutating reconcile replaces an unverified legacy pin");
+        let reconciled_vendor = &reconciled_untrusted.vendor.as_ref().unwrap().stasis;
+        assert_eq!(
+            reconciled_vendor.hash_version(),
+            VENDOR_HASH_VERSION_CANONICAL_LF
+        );
+        assert_eq!(
+            reconciled_vendor.sha256,
+            current_vendor_manifest().unwrap().stasis.sha256
+        );
+        let reconciled_status = inspect_project_vendor(&root, &reconciled_untrusted)
+            .expect("verify auto-synced vendor");
+        assert!(reconciled_status.pin_verified);
+        assert!(!reconciled_status.legacy_pin_unverified);
+        assert!(!reconciled_status.local_changes);
+        assert!(!reconciled_status.update_available);
+        validate_read_only_vendor(&root, &reconciled_untrusted)
+            .expect("read-only use accepts the synchronized v2 snapshot");
         remove_temp(&root);
     }
 
