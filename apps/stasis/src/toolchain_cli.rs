@@ -52,6 +52,7 @@ use stasis_runner::live::{
     compare_live_validation_values, live_session, LiveCommand, LiveRequest, LiveResponse,
     TerminalBuffer, TerminalInput,
 };
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
@@ -136,7 +137,58 @@ const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md"
 const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
-const PROJECT_GIT_ATTRIBUTES: &str = "*.[sS][vV][gG] text eol=lf\n";
+const PROJECT_GIT_ATTRIBUTES: &str = r#"* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.stasis text eol=lf
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.gif -text
+*.webp -text
+*.bmp -text
+*.ico -text
+*.tif -text
+*.tiff -text
+*.avif -text
+*.wav -text
+*.mp3 -text
+*.ogg -text
+*.flac -text
+*.aac -text
+*.m4a -text
+*.opus -text
+*.mp4 -text
+*.mov -text
+*.avi -text
+*.webm -text
+*.pdf -text
+*.ttf -text
+*.otf -text
+*.woff -text
+*.woff2 -text
+*.eot -text
+*.zip -text
+*.gz -text
+*.7z -text
+*.tar -text
+*.bin -text
+*.dat -text
+*.exe -text
+*.dll -text
+*.so -text
+*.dylib -text
+*.a -text
+*.lib -text
+*.obj -text
+*.o -text
+*.wasm -text
+*.class -text
+*.jar -text
+*.[sS][vV][gG] text eol=lf
+"#;
+const PROJECT_EDITOR_CONFIG: &str =
+    "root = true\n\n[*]\nend_of_line = lf\ninsert_final_newline = true\n";
 const PROJECT_GIT_IGNORE: &str = r#"# Track vendor/stasis/stdlib and vendor/stasis/docs together.
 .stasis/
 .stasis_cache/
@@ -893,7 +945,18 @@ struct VendorManifest {
 struct StasisVendorManifest {
     release_id: String,
     sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hash_version: Option<u32>,
 }
+
+impl StasisVendorManifest {
+    fn hash_version(&self) -> u32 {
+        self.hash_version.unwrap_or(VENDOR_HASH_VERSION_LEGACY_RAW)
+    }
+}
+
+const VENDOR_HASH_VERSION_LEGACY_RAW: u32 = 1;
+const VENDOR_HASH_VERSION_CANONICAL_LF: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct AndroidProjectManifest {
@@ -974,6 +1037,14 @@ impl ProjectManifest {
                     .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
             {
                 return Err("vendor.stasis.sha256 must be a lowercase SHA-256 digest".to_string());
+            }
+            if vendor.stasis.hash_version.is_some_and(|version| {
+                !matches!(
+                    version,
+                    VENDOR_HASH_VERSION_LEGACY_RAW | VENDOR_HASH_VERSION_CANONICAL_LF
+                )
+            }) {
+                return Err("vendor.stasis.hash_version must be 1 or 2".to_string());
             }
         }
         if let Some(android) = &self.android {
@@ -1730,6 +1801,7 @@ fn create_project_with_options(
     ];
     if initialize_git {
         reserved_paths.push(root.join(".gitattributes"));
+        reserved_paths.push(root.join(".editorconfig"));
         reserved_paths.push(root.join(".gitignore"));
         reserved_paths.push(root.join(".githooks/pre-commit"));
     }
@@ -1795,6 +1867,7 @@ fn create_project_with_options(
     )?;
     if initialize_git {
         write_new_file(&root.join(".gitattributes"), PROJECT_GIT_ATTRIBUTES)?;
+        write_new_file(&root.join(".editorconfig"), PROJECT_EDITOR_CONFIG)?;
         write_new_file(&root.join(".gitignore"), PROJECT_GIT_IGNORE)?;
     }
     if github_actions {
@@ -2138,6 +2211,23 @@ fn collect_mapped_files(
     Ok(())
 }
 
+fn canonical_vendor_text<'a>(relative: &Path, bytes: &'a [u8]) -> Cow<'a, [u8]> {
+    let is_text = relative
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "stasis" | "md" | "json" | "svg"));
+    if !is_text {
+        return Cow::Borrowed(bytes);
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Cow::Borrowed(bytes);
+    };
+    if bytes.contains(&0) || !bytes.windows(2).any(|pair| pair == b"\r\n") {
+        return Cow::Borrowed(bytes);
+    }
+    Cow::Owned(text.replace("\r\n", "\n").into_bytes())
+}
+
 fn mapped_files_sha256(mut files: Vec<(PathBuf, PathBuf)>) -> Result<String, String> {
     files.sort_by(|left, right| left.0.cmp(&right.0));
     let mut digest = Sha256::new();
@@ -2152,7 +2242,54 @@ fn mapped_files_sha256(mut files: Vec<(PathBuf, PathBuf)>) -> Result<String, Str
     Ok(format!("{:x}", digest.finalize()))
 }
 
+fn normalized_vendor_path(relative: &Path) -> Result<String, String> {
+    relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => name
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("vendor path is not valid UTF-8: {}", relative.display())),
+            _ => Err(format!(
+                "vendor path is not relative: {}",
+                relative.display()
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|components| components.join("/"))
+}
+
+fn vendor_mapped_files_sha256(files: Vec<(PathBuf, PathBuf)>) -> Result<String, String> {
+    let mut files = files
+        .into_iter()
+        .map(|(relative, physical)| Ok((normalized_vendor_path(&relative)?, relative, physical)))
+        .collect::<Result<Vec<_>, String>>()?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut digest = Sha256::new();
+    for (normalized_path, relative, physical) in files {
+        digest.update(normalized_path.as_bytes());
+        digest.update([0]);
+        let bytes = fs::read(&physical)
+            .map_err(|error| format!("failed to read {}: {error}", physical.display()))?;
+        digest.update(canonical_vendor_text(&relative, &bytes).as_ref());
+        digest.update([0]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 fn directory_sha256(root: &Path) -> Result<String, String> {
+    let mut files = Vec::new();
+    collect_mapped_files(root, root, Path::new(""), &mut files)?;
+    mapped_files_sha256(files)
+}
+
+fn vendor_directory_sha256(root: &Path) -> Result<String, String> {
+    let mut files = Vec::new();
+    collect_mapped_files(root, root, Path::new(""), &mut files)?;
+    vendor_mapped_files_sha256(files)
+}
+
+fn legacy_vendor_directory_sha256(root: &Path) -> Result<String, String> {
     let mut files = Vec::new();
     collect_mapped_files(root, root, Path::new(""), &mut files)?;
     mapped_files_sha256(files)
@@ -2163,7 +2300,49 @@ fn bundled_vendor_sha256() -> Result<String, String> {
     let mut files = Vec::new();
     collect_mapped_files(&stdlib, &stdlib, Path::new("stdlib"), &mut files)?;
     collect_mapped_files(&docs, &docs, Path::new("docs"), &mut files)?;
+    vendor_mapped_files_sha256(files)
+}
+
+fn bundled_legacy_vendor_sha256() -> Result<String, String> {
+    let (stdlib, docs) = bundled_vendor_directories()?;
+    let mut files = Vec::new();
+    collect_mapped_files(&stdlib, &stdlib, Path::new("stdlib"), &mut files)?;
+    collect_mapped_files(&docs, &docs, Path::new("docs"), &mut files)?;
     mapped_files_sha256(files)
+}
+
+// Audited from the published nightly-20260919-337 artifact and matching source
+// tag ad00c329a9d9cd9a3c328c7540034c3e30d5b457. The 61 files under src/stdlib
+// and docs/knowledge hash to the legacy Windows digest below; replacing CRLF
+// with LF in UTF-8 .stasis/.md/.json/.svg files and sorting slash-normalized
+// relative paths yields the canonical digest below.
+const LEGACY_VENDOR_HASH_ALIASES: &[(&str, &str, &str)] = &[(
+    "nightly-20260919-337",
+    "08c438cdff0536bf416c0717426dee7a68d986728bb941aee757e01543897af4",
+    "5c58b2908bcbfe113d942734a5a2a76ffaad98f874f7a5c920ce6fa9a972142d",
+)];
+
+fn verified_legacy_vendor_baseline(
+    recorded: &StasisVendorManifest,
+    installed: &StasisVendorManifest,
+) -> Result<Option<String>, String> {
+    if let Some((_, _, canonical_sha256)) =
+        LEGACY_VENDOR_HASH_ALIASES
+            .iter()
+            .find(|(release_id, legacy_sha256, _)| {
+                recorded.release_id == *release_id && recorded.sha256 == *legacy_sha256
+            })
+    {
+        return Ok(Some((*canonical_sha256).to_string()));
+    }
+
+    if recorded.release_id == installed.release_id
+        && installed.hash_version() == VENDOR_HASH_VERSION_CANONICAL_LF
+        && bundled_legacy_vendor_sha256()? == recorded.sha256
+    {
+        return Ok(Some(installed.sha256.clone()));
+    }
+    Ok(None)
 }
 
 fn current_release_id() -> &'static str {
@@ -2175,6 +2354,7 @@ fn current_vendor_manifest() -> Result<VendorManifest, String> {
         stasis: StasisVendorManifest {
             release_id: current_release_id().to_string(),
             sha256: bundled_vendor_sha256()?,
+            hash_version: Some(VENDOR_HASH_VERSION_CANONICAL_LF),
         },
     })
 }
@@ -2234,7 +2414,11 @@ fn validate_vendor_sources(source_root: &Path) -> Result<(), String> {
 struct VendorStatus {
     recorded: Option<StasisVendorManifest>,
     installed: StasisVendorManifest,
+    expected_sha256: Option<String>,
     actual_sha256: Option<String>,
+    actual_legacy_sha256: Option<String>,
+    pin_verified: bool,
+    legacy_pin_unverified: bool,
     local_changes: bool,
     update_available: bool,
 }
@@ -2255,20 +2439,68 @@ fn inspect_project_vendor(
                 vendor_package.display()
             ));
         }
-        Some(directory_sha256(&vendor_package)?)
+        Some(vendor_directory_sha256(&vendor_package)?)
     } else {
         None
     };
-    let local_changes = recorded
-        .as_ref()
-        .is_some_and(|recorded| actual_sha256.as_deref() != Some(recorded.sha256.as_str()));
-    let update_available = recorded
-        .as_ref()
-        .is_none_or(|recorded| recorded.sha256 != installed.sha256);
+    let legacy_actual_sha256 = if vendor_package.is_dir()
+        && recorded
+            .as_ref()
+            .is_some_and(|recorded| recorded.hash_version() == VENDOR_HASH_VERSION_LEGACY_RAW)
+    {
+        Some(legacy_vendor_directory_sha256(&vendor_package)?)
+    } else {
+        None
+    };
+    let (expected_sha256, pin_verified, legacy_pin_unverified, local_changes) =
+        match (recorded.as_ref(), actual_sha256.as_deref()) {
+            (None, _) => (None, false, false, false),
+            (Some(recorded), None) => {
+                let expected = if recorded.hash_version() == VENDOR_HASH_VERSION_CANONICAL_LF {
+                    Some(recorded.sha256.clone())
+                } else {
+                    verified_legacy_vendor_baseline(recorded, &installed)?
+                };
+                (expected, false, false, true)
+            }
+            (Some(recorded), Some(actual))
+                if recorded.hash_version() == VENDOR_HASH_VERSION_CANONICAL_LF =>
+            {
+                let matches = actual == recorded.sha256;
+                (Some(recorded.sha256.clone()), matches, false, !matches)
+            }
+            (Some(recorded), Some(actual)) => {
+                if legacy_actual_sha256.as_deref() == Some(recorded.sha256.as_str()) {
+                    (Some(actual.to_string()), true, false, false)
+                } else if let Some(baseline) =
+                    verified_legacy_vendor_baseline(recorded, &installed)?
+                {
+                    let matches = actual == baseline;
+                    (Some(baseline), matches, false, !matches)
+                } else {
+                    (None, false, true, false)
+                }
+            }
+        };
+    let update_available = match recorded.as_ref() {
+        None => true,
+        Some(recorded) if recorded.hash_version() == VENDOR_HASH_VERSION_CANONICAL_LF => {
+            recorded.sha256 != installed.sha256
+        }
+        Some(recorded) => {
+            verified_legacy_vendor_baseline(recorded, &installed)?.is_none_or(|baseline| {
+                recorded.release_id != installed.release_id || baseline != installed.sha256
+            })
+        }
+    };
     Ok(VendorStatus {
         recorded,
         installed,
+        expected_sha256,
         actual_sha256,
+        actual_legacy_sha256: legacy_actual_sha256,
+        pin_verified,
+        legacy_pin_unverified,
         local_changes,
         update_available,
     })
@@ -2282,28 +2514,75 @@ fn validate_read_only_vendor(
         return Ok(());
     }
     let status = inspect_project_vendor(workspace_root, manifest)?;
-    let Some(actual_sha256) = status.actual_sha256.as_deref() else {
+    let Some(_actual_sha256) = status.actual_sha256.as_deref() else {
         return Err("read-only symbol query did not update files: checked-in vendor snapshot is missing; run 'stasis vendor status' then 'stasis vendor update'".to_string());
     };
-    let recorded_sha256 = status
-        .recorded
-        .as_ref()
-        .map(|recorded| recorded.sha256.as_str())
-        .unwrap_or_default();
-    if actual_sha256 == recorded_sha256 && actual_sha256 == status.installed.sha256 {
+    if status.legacy_pin_unverified {
+        return Err("read-only symbol query did not update files: legacy vendor hash version 1 cannot be verified against a trusted release baseline; run 'stasis vendor status' then 'stasis vendor update'".to_string());
+    }
+    if status.local_changes
+        && status.actual_sha256.as_deref() == Some(status.installed.sha256.as_str())
+    {
+        return Err("read-only symbol query did not update files: checked-in vendor snapshot has an inconsistent manifest fingerprint; run 'stasis vendor status' then 'stasis vendor update'".to_string());
+    }
+    if status.local_changes {
+        return Err("read-only symbol query did not update files: checked-in vendor snapshot has local changes; run 'stasis vendor status' then 'stasis vendor update'".to_string());
+    }
+    if !status.update_available {
         return Ok(());
     }
-
-    let reason = if actual_sha256 != status.installed.sha256 && actual_sha256 == recorded_sha256 {
-        "is stale for the selected toolchain"
-    } else if actual_sha256 == status.installed.sha256 {
-        "has an inconsistent manifest fingerprint"
-    } else {
-        "has local changes"
-    };
     Err(format!(
-        "read-only symbol query did not update files: checked-in vendor snapshot {reason}; run 'stasis vendor status' then 'stasis vendor update'"
+        "read-only symbol query did not update files: checked-in vendor snapshot is stale for the selected toolchain; run 'stasis vendor status' then 'stasis vendor update'"
     ))
+}
+
+fn vendor_status_message(status: &VendorStatus, current: bool) -> String {
+    let selected = format!(
+        "selected release '{}' hash version {} SHA-256 {}",
+        status.installed.release_id,
+        status.installed.hash_version(),
+        status.installed.sha256
+    );
+    let recorded = status.recorded.as_ref().map_or_else(
+        || "no vendor pin is recorded".to_string(),
+        |recorded| {
+            format!(
+                "recorded release '{}' hash version {} SHA-256 {}",
+                recorded.release_id,
+                recorded.hash_version(),
+                recorded.sha256
+            )
+        },
+    );
+    let canonical_actual = status.actual_sha256.as_deref().unwrap_or("missing");
+    if current {
+        return format!(
+            "Stasis vendor is current (canonical hash version 2 SHA-256 {canonical_actual})"
+        );
+    }
+    if status.local_changes {
+        let expected = status.expected_sha256.as_deref().unwrap_or("unavailable");
+        if status.actual_sha256.is_none() {
+            return format!(
+                "Stasis vendor snapshot is missing: {recorded}; expected canonical hash version 2 SHA-256 {expected}, actual missing. Review the checkout, then run 'stasis vendor update' to restore the selected snapshot."
+            );
+        }
+        return format!(
+            "Stasis vendor has local changes: expected canonical hash version 2 SHA-256 {expected}, actual {canonical_actual}. Review tracked changes with 'git diff -- vendor/stasis stasis.json' and inspect ignored or untracked files with 'git status --ignored --short -- vendor/stasis'; run 'stasis vendor update' to replace it from the selected release."
+        );
+    }
+    if status.legacy_pin_unverified {
+        let raw_actual = status
+            .actual_legacy_sha256
+            .as_deref()
+            .unwrap_or("unavailable");
+        return format!(
+            "legacy Stasis vendor pin is unverified: {recorded}; actual raw hash version 1 SHA-256 {raw_actual}, actual canonical hash version 2 SHA-256 {canonical_actual}. Without a trusted release baseline, checkout conversion cannot be distinguished from real edits; review with 'git diff -- vendor/stasis stasis.json' and run 'stasis vendor update' to migrate explicitly."
+        );
+    }
+    format!(
+        "Stasis vendor update is available: {recorded}; {selected}. Run 'stasis vendor update' to adopt the selected snapshot."
+    )
 }
 
 fn reconcile_project_vendor(
@@ -2315,11 +2594,12 @@ fn reconcile_project_vendor(
     }
     let status = inspect_project_vendor(workspace_root, manifest)?;
     if !status.update_available
+        && !status.local_changes
         && status.actual_sha256.as_deref() == Some(status.installed.sha256.as_str())
     {
         return Ok(());
     }
-    update_vendor_snapshot(workspace_root, manifest)?;
+    update_vendor_snapshot(workspace_root, manifest, false)?;
     Ok(())
 }
 
@@ -2340,9 +2620,16 @@ fn serialized_manifest(manifest: &ProjectManifest) -> Result<String, String> {
 fn update_vendor_snapshot(
     workspace_root: &Path,
     manifest: &mut ProjectManifest,
+    migrate_legacy_hash: bool,
 ) -> Result<bool, String> {
     let status = inspect_project_vendor(workspace_root, manifest)?;
     if !status.update_available
+        && !status.local_changes
+        && !status.legacy_pin_unverified
+        && (!migrate_legacy_hash
+            || status.recorded.as_ref().is_some_and(|recorded| {
+                recorded.hash_version() == VENDOR_HASH_VERSION_CANONICAL_LF
+            }))
         && status.actual_sha256.as_deref() == Some(status.installed.sha256.as_str())
     {
         return Ok(false);
@@ -2375,7 +2662,7 @@ fn update_vendor_snapshot(
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
-    let staged_hash = directory_sha256(&staging)?;
+    let staged_hash = vendor_directory_sha256(&staging)?;
     if staged_hash != status.installed.sha256 {
         let _ = fs::remove_dir_all(&staging);
         return Err("staged Stasis vendor fingerprint does not match the toolchain".to_string());
@@ -2433,28 +2720,32 @@ fn vendor_command(workspace: &Workspace, command: VendorCommand) -> Result<Comma
     match command {
         VendorCommand::Status => {
             let status = inspect_project_vendor(&workspace.root, &workspace.manifest)?;
-            let current = !status.update_available && !status.local_changes;
+            let current =
+                !status.update_available && !status.local_changes && !status.legacy_pin_unverified;
+            let message = vendor_status_message(&status, current);
             Ok(CommandResult::success(
-                if current {
-                    "Stasis vendor is current".to_string()
-                } else if status.local_changes {
-                    "Stasis vendor has local changes".to_string()
-                } else {
-                    "Stasis vendor update is available".to_string()
-                },
+                message,
                 json!({
                     "current": current,
                     "update_available": status.update_available,
+                    "pin_verified": status.pin_verified,
+                    "legacy_pin_unverified": status.legacy_pin_unverified,
                     "local_changes": status.local_changes,
                     "recorded": status.recorded,
+                    "recorded_hash_version": status.recorded.as_ref().map(StasisVendorManifest::hash_version),
+                    "recorded_sha256": status.recorded.as_ref().map(|recorded| &recorded.sha256),
                     "installed": status.installed,
+                    "expected_sha256": status.expected_sha256,
+                    "expected_hash_version": VENDOR_HASH_VERSION_CANONICAL_LF,
                     "actual_sha256": status.actual_sha256,
+                    "actual_legacy_sha256": status.actual_legacy_sha256,
+                    "actual_hash_version": VENDOR_HASH_VERSION_CANONICAL_LF,
                 }),
             ))
         }
         VendorCommand::Update => {
             let mut manifest = workspace.manifest.clone();
-            let changed = update_vendor_snapshot(&workspace.root, &mut manifest)?;
+            let changed = update_vendor_snapshot(&workspace.root, &mut manifest, true)?;
             Ok(CommandResult::success(
                 if changed {
                     "updated vendor/stasis from the selected toolchain".to_string()
@@ -2465,6 +2756,7 @@ fn vendor_command(workspace: &Workspace, command: VendorCommand) -> Result<Comma
                     "changed": changed,
                     "release_id": manifest.vendor.as_ref().map(|vendor| &vendor.stasis.release_id),
                     "sha256": manifest.vendor.as_ref().map(|vendor| &vendor.stasis.sha256),
+                    "hash_version": manifest.vendor.as_ref().and_then(|vendor| vendor.stasis.hash_version),
                 }),
             ))
         }
@@ -5148,12 +5440,14 @@ fn package_project_provenance(
         .vendor
         .as_ref()
         .map(|vendor| {
-            let actual_sha256 = directory_sha256(&workspace.root.join("vendor/stasis"));
+            let actual_sha256 = vendor_directory_sha256(&workspace.root.join("vendor/stasis"));
             actual_sha256.map(|actual_sha256| {
                 json!({
                     "release_id": vendor.stasis.release_id,
                     "recorded_sha256": vendor.stasis.sha256,
+                    "recorded_hash_version": vendor.stasis.hash_version(),
                     "actual_sha256": actual_sha256,
+                    "actual_hash_version": VENDOR_HASH_VERSION_CANONICAL_LF,
                 })
             })
         })
@@ -5419,12 +5713,14 @@ fn package_web_workspace(
             .vendor
             .as_ref()
             .map(|vendor| {
-                let actual_sha256 = directory_sha256(&workspace.root.join("vendor/stasis"));
+                let actual_sha256 = vendor_directory_sha256(&workspace.root.join("vendor/stasis"));
                 actual_sha256.map(|actual_sha256| {
                     json!({
                         "release_id": vendor.stasis.release_id,
                         "recorded_sha256": vendor.stasis.sha256,
+                        "recorded_hash_version": vendor.stasis.hash_version(),
                         "actual_sha256": actual_sha256,
+                        "actual_hash_version": VENDOR_HASH_VERSION_CANONICAL_LF,
                     })
                 })
             })
@@ -12577,16 +12873,16 @@ mod tests {
             assert!(docs.join(file).is_file(), "{file}");
         }
         let source = fs::read(root.join("src/main.stasis")).expect("source");
-        let stdlib_hash = directory_sha256(&package.join("stdlib")).expect("stdlib hash");
+        let stdlib_hash = vendor_directory_sha256(&package.join("stdlib")).expect("stdlib hash");
         let mut workspace = load_workspace(Some(&root)).expect("workspace");
         let expected = workspace.manifest.vendor.clone();
         assert_eq!(
             expected.as_ref().unwrap().stasis.sha256,
-            directory_sha256(&package).expect("package hash")
+            vendor_directory_sha256(&package).expect("package hash")
         );
         fs::write(docs.join("README.md"), "old docs\n").expect("stale docs");
         workspace.manifest.vendor.as_mut().unwrap().stasis.sha256 =
-            directory_sha256(&package).expect("old hash");
+            vendor_directory_sha256(&package).expect("old hash");
         workspace
             .manifest
             .vendor
@@ -12602,15 +12898,343 @@ mod tests {
         let repaired = load_workspace(Some(&root)).expect("automatic docs repair");
         assert_eq!(repaired.manifest.vendor, expected);
         assert_eq!(
-            directory_sha256(&package).unwrap(),
+            vendor_directory_sha256(&package).unwrap(),
             expected.unwrap().stasis.sha256
         );
         assert_eq!(
-            directory_sha256(&package.join("stdlib")).unwrap(),
+            vendor_directory_sha256(&package.join("stdlib")).unwrap(),
             stdlib_hash
         );
         assert_eq!(fs::read(root.join("src/main.stasis")).unwrap(), source);
         remove_temp(&root);
+    }
+
+    #[test]
+    fn vendor_hash_canonicalizes_text_and_keeps_binary_bytes_raw() {
+        let root = temp_dir("vendor_hash_eol");
+        let files = [
+            ("stdlib/module.stasis", b"first\nsecond\n".as_slice()),
+            ("docs/readme.md", b"first\nsecond\n".as_slice()),
+            ("docs/example.json", b"{\n  \"ok\": true\n}\n".as_slice()),
+            ("docs/image.svg", b"<svg>\n</svg>\n".as_slice()),
+        ];
+        for (relative, bytes) in files {
+            let path = root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).expect("create vendor fixture directory");
+            fs::write(path, bytes).expect("write LF vendor text");
+        }
+        let binary = root.join("docs/audio.wav");
+        fs::write(&binary, b"RIFF\r\n\xff\x00").expect("write binary vendor fixture");
+        let binary_text_extension = root.join("docs/corrupt.svg");
+        fs::write(&binary_text_extension, b"\r\n\x00binary")
+            .expect("write binary data with a text extension");
+        let canonical = vendor_directory_sha256(&root).expect("canonical vendor hash");
+        let legacy_raw = legacy_vendor_directory_sha256(&root).expect("legacy raw hash");
+
+        for relative in [
+            "stdlib/module.stasis",
+            "docs/readme.md",
+            "docs/example.json",
+            "docs/image.svg",
+        ] {
+            let path = root.join(relative);
+            let text = fs::read_to_string(&path).expect("read text fixture");
+            fs::write(&path, text.replace('\n', "\r\n")).expect("write CRLF text");
+        }
+        assert_eq!(
+            vendor_directory_sha256(&root).expect("CRLF vendor hash"),
+            canonical,
+            "checkout conversion must not change the vendor identity"
+        );
+        assert_ne!(
+            legacy_vendor_directory_sha256(&root).expect("CRLF legacy raw hash"),
+            legacy_raw,
+            "the v1 raw hash contract must remain byte-sensitive"
+        );
+
+        fs::write(root.join("stdlib/module.stasis"), b"first\r\nchanged\r\n")
+            .expect("write real Stasis edit");
+        assert_ne!(
+            vendor_directory_sha256(&root).unwrap(),
+            canonical,
+            "a semantic text edit must change the vendor identity"
+        );
+        fs::write(root.join("stdlib/module.stasis"), b"first\r\nsecond\r\n")
+            .expect("restore canonical Stasis text");
+        fs::write(&binary, b"RIFF\n\xff\x00").expect("change binary bytes");
+        assert_ne!(
+            vendor_directory_sha256(&root).unwrap(),
+            canonical,
+            "binary bytes must remain part of the vendor identity"
+        );
+        fs::write(&binary, b"RIFF\r\n\xff\x00").expect("restore original binary bytes");
+        fs::write(&binary_text_extension, b"\n\x00binary").expect("change binary text bytes");
+        assert_ne!(
+            vendor_directory_sha256(&root).unwrap(),
+            canonical,
+            "binary payloads are never line-ending normalized, even with a text extension"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn vendor_hash_is_independent_of_file_enumeration_order_and_includes_paths() {
+        let root = temp_dir("vendor_hash_order");
+        fs::create_dir_all(&root).expect("create vendor hash root");
+        let first = root.join("first.stasis");
+        let second = root.join("second.md");
+        fs::write(&first, "first\n").expect("write first file");
+        fs::write(&second, "second\n").expect("write second file");
+        let files = vec![
+            (PathBuf::from("stdlib/first.stasis"), first),
+            (PathBuf::from("docs/second.md"), second),
+        ];
+        let forward = vendor_mapped_files_sha256(files.clone()).expect("hash forward order");
+        let reverse = vendor_mapped_files_sha256(files.iter().cloned().rev().collect())
+            .expect("hash reverse order");
+        assert_eq!(forward, reverse);
+
+        let mut renamed = files;
+        renamed[0].0 = PathBuf::from("stdlib/renamed.stasis");
+        assert_ne!(
+            vendor_mapped_files_sha256(renamed).expect("hash renamed path"),
+            forward,
+            "the logical relative path must remain part of snapshot identity"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn vendor_status_is_read_only_and_detects_extra_and_missing_files() {
+        let root = temp_dir("vendor_status_eol");
+        create_project(root.clone(), "vendor_status_eol".to_string()).expect("create project");
+        let workspace = load_workspace(Some(&root)).expect("load pinned project");
+        let source = root.join("vendor/stasis/stdlib/stdlib.stasis");
+        let text = fs::read_to_string(&source).expect("read vendored source");
+        fs::write(&source, text.replace("\r\n", "\n").replace('\n', "\r\n"))
+            .expect("convert vendor source to CRLF");
+        let crlf_bytes = fs::read(&source).expect("read converted source");
+        let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("read pinned manifest");
+
+        let current =
+            vendor_command(&workspace, VendorCommand::Status).expect("read vendor status");
+        assert_eq!(current.data["current"], true);
+        assert_eq!(current.data["local_changes"], false);
+        assert_eq!(
+            current.data["recorded_hash_version"],
+            VENDOR_HASH_VERSION_CANONICAL_LF
+        );
+        assert_eq!(
+            current.data["expected_sha256"],
+            workspace.manifest.vendor.as_ref().unwrap().stasis.sha256
+        );
+        assert_eq!(
+            current.data["actual_hash_version"],
+            VENDOR_HASH_VERSION_CANONICAL_LF
+        );
+        assert_eq!(
+            current.data["actual_sha256"],
+            workspace.manifest.vendor.as_ref().unwrap().stasis.sha256
+        );
+        validate_read_only_vendor(&root, &workspace.manifest)
+            .expect("read-only validation accepts CRLF checkout conversion");
+        assert_eq!(fs::read(&source).unwrap(), crlf_bytes);
+        assert_eq!(fs::read(root.join(MANIFEST_NAME)).unwrap(), manifest_bytes);
+
+        let extra = root.join("vendor/stasis/local-extra.md");
+        fs::write(&extra, "local file\n").expect("write extra vendor file");
+        let extra_status =
+            vendor_command(&workspace, VendorCommand::Status).expect("inspect extra vendor file");
+        assert_eq!(extra_status.data["current"], false);
+        assert_eq!(extra_status.data["local_changes"], true);
+        assert_eq!(
+            extra_status.data["expected_sha256"],
+            workspace.manifest.vendor.as_ref().unwrap().stasis.sha256
+        );
+        assert_ne!(
+            extra_status.data["actual_sha256"],
+            extra_status.data["expected_sha256"]
+        );
+        assert!(extra_status
+            .human
+            .contains("git diff -- vendor/stasis stasis.json"));
+        assert!(extra_status
+            .human
+            .contains("git status --ignored --short -- vendor/stasis"));
+        assert!(extra_status.human.contains("stasis vendor update"));
+        assert!(extra.is_file(), "status must not remove extra files");
+        assert_eq!(fs::read(root.join(MANIFEST_NAME)).unwrap(), manifest_bytes);
+        fs::remove_file(&extra).expect("remove test extra file");
+
+        let missing = root.join("vendor/stasis/docs/README.md");
+        fs::remove_file(&missing).expect("remove tracked vendor document");
+        let missing_status =
+            vendor_command(&workspace, VendorCommand::Status).expect("inspect missing vendor file");
+        assert_eq!(missing_status.data["current"], false);
+        assert_eq!(missing_status.data["local_changes"], true);
+        assert_ne!(
+            missing_status.data["actual_sha256"],
+            missing_status.data["expected_sha256"]
+        );
+        assert!(missing_status
+            .human
+            .contains("expected canonical hash version 2 SHA-256"));
+        assert!(missing_status.human.contains("actual "));
+        assert!(missing_status
+            .human
+            .contains("git status --ignored --short -- vendor/stasis"));
+        assert!(missing_status.human.contains("stasis vendor update"));
+        assert!(!missing.exists(), "status must not repair missing files");
+        assert_eq!(fs::read(root.join(MANIFEST_NAME)).unwrap(), manifest_bytes);
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn vendor_legacy_pin_uses_trusted_baselines_and_update_migrates_to_v2() {
+        let root = temp_dir("vendor_legacy_pin");
+        create_project(root.clone(), "vendor_legacy_pin".to_string()).expect("create project");
+        let mut workspace = load_workspace(Some(&root)).expect("load pinned project");
+        let vendor_dir = root.join("vendor/stasis");
+        let vendor = &mut workspace.manifest.vendor.as_mut().unwrap().stasis;
+        vendor.release_id = current_release_id().to_string();
+        vendor.sha256 = bundled_legacy_vendor_sha256().expect("legacy bundled baseline");
+        vendor.hash_version = None;
+        write_manifest(&root.join(MANIFEST_NAME), &workspace.manifest)
+            .expect("write legacy manifest");
+        let workspace = load_workspace_with_vendor_gate(Some(&root), VendorGate::Inspect)
+            .expect("inspect legacy project");
+
+        let source = vendor_dir.join("stdlib/stdlib.stasis");
+        let original = fs::read_to_string(&source).expect("read vendored source");
+        fs::write(
+            &source,
+            original.replace("\r\n", "\n").replace('\n', "\r\n"),
+        )
+        .expect("convert vendored text to CRLF");
+        let crlf_bytes = fs::read(&source).expect("read converted source");
+        let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("read manifest");
+
+        let status = inspect_project_vendor(&root, &workspace.manifest).expect("legacy status");
+        assert!(status.pin_verified);
+        assert!(!status.legacy_pin_unverified);
+        assert!(!status.local_changes);
+        assert!(!status.update_available);
+        validate_read_only_vendor(&root, &workspace.manifest)
+            .expect("trusted legacy pin accepts EOL conversion");
+
+        let result = vendor_command(&workspace, VendorCommand::Status).expect("vendor status");
+        assert_eq!(result.data["current"], true);
+        assert_eq!(result.data["pin_verified"], true);
+        assert_eq!(result.data["legacy_pin_unverified"], false);
+        assert_eq!(
+            result.data["actual_hash_version"],
+            VENDOR_HASH_VERSION_CANONICAL_LF
+        );
+        assert_eq!(fs::read(&source).unwrap(), crlf_bytes);
+        assert_eq!(fs::read(root.join(MANIFEST_NAME)).unwrap(), manifest_bytes);
+
+        let mut reconciled_manifest = workspace.manifest.clone();
+        reconcile_project_vendor(&root, &mut reconciled_manifest)
+            .expect("ordinary reconcile preserves a clean legacy pin");
+        assert_eq!(fs::read(root.join(MANIFEST_NAME)).unwrap(), manifest_bytes);
+        assert_eq!(fs::read(&source).unwrap(), crlf_bytes);
+
+        let updated = vendor_command(&workspace, VendorCommand::Update).expect("migrate vendor");
+        assert_eq!(updated.data["changed"], true);
+        let migrated = load_workspace(Some(&root)).expect("load migrated project");
+        let migrated_vendor = &migrated.manifest.vendor.as_ref().unwrap().stasis;
+        assert_eq!(
+            migrated_vendor.hash_version(),
+            VENDOR_HASH_VERSION_CANONICAL_LF
+        );
+        assert_eq!(
+            migrated_vendor.sha256,
+            vendor_directory_sha256(&vendor_dir).unwrap()
+        );
+        let migrated_manifest_bytes = fs::read(root.join(MANIFEST_NAME)).unwrap();
+
+        let mut untrusted = workspace.clone();
+        let pin = &mut untrusted.manifest.vendor.as_mut().unwrap().stasis;
+        pin.release_id = "unavailable-release".to_string();
+        pin.sha256 = "a".repeat(64);
+        pin.hash_version = None;
+        let untrusted_status =
+            inspect_project_vendor(&root, &untrusted.manifest).expect("untrusted legacy status");
+        assert!(!untrusted_status.local_changes);
+        assert!(untrusted_status.legacy_pin_unverified);
+        assert!(untrusted_status.update_available);
+        let untrusted_result = vendor_command(&untrusted, VendorCommand::Status)
+            .expect("untrusted legacy status result");
+        assert_eq!(untrusted_result.data["current"], false);
+        assert_eq!(untrusted_result.data["local_changes"], false);
+        assert_eq!(untrusted_result.data["legacy_pin_unverified"], true);
+        assert_eq!(
+            untrusted_result.data["recorded_hash_version"],
+            VENDOR_HASH_VERSION_LEGACY_RAW
+        );
+        assert!(untrusted_result.data["actual_legacy_sha256"].is_string());
+        assert!(untrusted_result.data["expected_sha256"].is_null());
+        assert!(untrusted_result
+            .human
+            .contains("cannot be distinguished from real edits"));
+        assert!(untrusted_result.human.contains("stasis vendor update"));
+        assert!(validate_read_only_vendor(&root, &untrusted.manifest)
+            .unwrap_err()
+            .contains("cannot be verified against a trusted release baseline"));
+        assert_eq!(
+            fs::read(root.join(MANIFEST_NAME)).unwrap(),
+            migrated_manifest_bytes
+        );
+
+        let mut reconciled_untrusted = untrusted.manifest.clone();
+        reconcile_project_vendor(&root, &mut reconciled_untrusted)
+            .expect("mutating reconcile replaces an unverified legacy pin");
+        let reconciled_vendor = &reconciled_untrusted.vendor.as_ref().unwrap().stasis;
+        assert_eq!(
+            reconciled_vendor.hash_version(),
+            VENDOR_HASH_VERSION_CANONICAL_LF
+        );
+        assert_eq!(
+            reconciled_vendor.sha256,
+            current_vendor_manifest().unwrap().stasis.sha256
+        );
+        let reconciled_status = inspect_project_vendor(&root, &reconciled_untrusted)
+            .expect("verify auto-synced vendor");
+        assert!(reconciled_status.pin_verified);
+        assert!(!reconciled_status.legacy_pin_unverified);
+        assert!(!reconciled_status.local_changes);
+        assert!(!reconciled_status.update_available);
+        validate_read_only_vendor(&root, &reconciled_untrusted)
+            .expect("read-only use accepts the synchronized v2 snapshot");
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn vendor_337_legacy_alias_is_exactly_scoped_to_the_verified_release_pin() {
+        let recorded = StasisVendorManifest {
+            release_id: "nightly-20260919-337".to_string(),
+            sha256: "08c438cdff0536bf416c0717426dee7a68d986728bb941aee757e01543897af4".to_string(),
+            hash_version: None,
+        };
+        let installed = StasisVendorManifest {
+            release_id: "newer-release".to_string(),
+            sha256: "b".repeat(64),
+            hash_version: Some(VENDOR_HASH_VERSION_CANONICAL_LF),
+        };
+        assert_eq!(
+            verified_legacy_vendor_baseline(&recorded, &installed).unwrap(),
+            Some("5c58b2908bcbfe113d942734a5a2a76ffaad98f874f7a5c920ce6fa9a972142d".to_string())
+        );
+        let mut altered_pin = recorded.clone();
+        altered_pin.sha256 = "c".repeat(64);
+        assert!(verified_legacy_vendor_baseline(&altered_pin, &installed)
+            .unwrap()
+            .is_none());
+        altered_pin = recorded;
+        altered_pin.release_id = "nearby-release".to_string();
+        assert!(verified_legacy_vendor_baseline(&altered_pin, &installed)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -12627,13 +13251,13 @@ mod tests {
             .stasis
             .release_id = "old-release".into();
         let before_manifest = serialized_manifest(&workspace.manifest).unwrap();
-        let before_package = directory_sha256(&root.join("vendor/stasis")).unwrap();
+        let before_package = vendor_directory_sha256(&root.join("vendor/stasis")).unwrap();
         // Fail manifest publication after the complete vendor package has been replaced.
         fs::remove_file(root.join(MANIFEST_NAME)).unwrap();
-        let error = update_vendor_snapshot(&root, &mut workspace.manifest).unwrap_err();
+        let error = update_vendor_snapshot(&root, &mut workspace.manifest, false).unwrap_err();
         assert!(error.contains("failed to stage stasis.json"), "{error}");
         assert_eq!(
-            directory_sha256(&root.join("vendor/stasis")).unwrap(),
+            vendor_directory_sha256(&root.join("vendor/stasis")).unwrap(),
             before_package
         );
         assert_eq!(
@@ -12704,15 +13328,15 @@ mod tests {
         older_contents.push_str("// older clean snapshot\r\n");
         fs::write(&older_source, older_contents).expect("write older clean snapshot");
         let vendor = manifest.vendor.as_mut().expect("tracked vendor");
-        vendor.stasis.sha256 =
-            directory_sha256(&root.join("vendor/stasis")).expect("hash older clean snapshot");
+        vendor.stasis.sha256 = vendor_directory_sha256(&root.join("vendor/stasis"))
+            .expect("hash older clean snapshot");
         write_manifest(&manifest_path, &manifest).expect("record older content hash");
         let workspace = load_workspace(Some(&root)).expect("content-hash update");
         let updated = workspace.manifest.vendor.expect("updated vendor").stasis;
         assert_eq!(updated.release_id, current_release_id());
         assert_eq!(
             updated.sha256,
-            directory_sha256(&root.join("vendor/stasis")).expect("hash updated vendor")
+            vendor_directory_sha256(&root.join("vendor/stasis")).expect("hash updated vendor")
         );
         remove_temp(&root);
     }
@@ -12755,7 +13379,7 @@ mod tests {
         )
         .unwrap();
         let original_manifest = fs::read(&manifest_path).unwrap();
-        let original_vendor = directory_sha256(&root.join("vendor/stasis")).unwrap();
+        let original_vendor = vendor_directory_sha256(&root.join("vendor/stasis")).unwrap();
         for check in [false, true] {
             execute(
                 ToolchainCommand::Fmt {
@@ -12769,7 +13393,7 @@ mod tests {
             .unwrap();
             assert_eq!(fs::read(&manifest_path).unwrap(), original_manifest);
             assert_eq!(
-                directory_sha256(&root.join("vendor/stasis")).unwrap(),
+                vendor_directory_sha256(&root.join("vendor/stasis")).unwrap(),
                 original_vendor
             );
         }
@@ -12792,7 +13416,7 @@ mod tests {
         .expect("write pinned vendor documentation");
         manifest["vendor"]["stasis"]["release_id"] = json!("nightly-20260909-299");
         manifest["vendor"]["stasis"]["sha256"] =
-            json!(directory_sha256(&root.join("vendor/stasis")).unwrap());
+            json!(vendor_directory_sha256(&root.join("vendor/stasis")).unwrap());
         fs::write(
             &manifest_path,
             serde_json::to_vec_pretty(&manifest).expect("serialize pinned manifest"),
@@ -12800,14 +13424,14 @@ mod tests {
         .expect("write pinned manifest");
 
         let original_manifest = fs::read(&manifest_path).expect("read pinned manifest");
-        let original_vendor = directory_sha256(&root.join("vendor/stasis")).unwrap();
+        let original_vendor = vendor_directory_sha256(&root.join("vendor/stasis")).unwrap();
         let assert_preserved = || {
             assert_eq!(
                 fs::read(&manifest_path).expect("read manifest after validation"),
                 original_manifest
             );
             assert_eq!(
-                directory_sha256(&root.join("vendor/stasis")).unwrap(),
+                vendor_directory_sha256(&root.join("vendor/stasis")).unwrap(),
                 original_vendor
             );
         };
@@ -14344,6 +14968,7 @@ mod tests {
             stasis: StasisVendorManifest {
                 release_id: "development".to_string(),
                 sha256: "a".repeat(64),
+                hash_version: None,
             },
         });
         assert!(manifest.validate().is_ok());
@@ -14726,6 +15351,42 @@ mod tests {
         assert!(resolver.contains("$release.draft"));
         assert!(resolver.contains("$matches.Count -ne 1"));
         assert!(resolver.contains("$LASTEXITCODE -ne 0"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn generated_git_projects_pin_vendor_text_to_lf() {
+        let root = temp_dir("generated_project_eol");
+        create_new_project(root.clone(), "generated_project_eol".to_string())
+            .expect("create generated Git project");
+        assert_eq!(
+            fs::read_to_string(root.join(".gitattributes")).expect("read generated attributes"),
+            PROJECT_GIT_ATTRIBUTES
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(".editorconfig")).expect("read generated editor config"),
+            PROJECT_EDITOR_CONFIG
+        );
+        let attributes = Command::new("git")
+            .args([
+                "check-attr",
+                "--all",
+                "--",
+                "src/main.stasis",
+                "assets/image.png",
+                "tools/build.bat",
+                "tools/build.cmd",
+            ])
+            .current_dir(&root)
+            .output()
+            .expect("inspect generated Git attributes");
+        assert!(attributes.status.success());
+        let attributes = String::from_utf8(attributes.stdout).expect("decode Git attributes");
+        assert!(attributes.contains("src/main.stasis: text: set"));
+        assert!(attributes.contains("src/main.stasis: eol: lf"));
+        assert!(attributes.contains("assets/image.png: text: unset"));
+        assert!(attributes.contains("tools/build.bat: eol: crlf"));
+        assert!(attributes.contains("tools/build.cmd: eol: crlf"));
         remove_temp(&root);
     }
 

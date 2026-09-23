@@ -94,7 +94,8 @@ game window.
   "vendor": {
     "stasis": {
       "release_id": "nightly-20260805-123",
-      "sha256": "<lowercase SHA-256>"
+      "sha256": "<lowercase SHA-256>",
+      "hash_version": 2
     }
   }
 }
@@ -110,7 +111,40 @@ starts. Both dimensions must be integers from 1 through 8192. A Sheep Herder bui
 uniformly fits and centers that 16:9 view. Projects without this setting keep the 640-by-360
 default.
 
-The vendor release and hash describe the exact checked-in `vendor/stasis` snapshot.
+`vendor.stasis.hash_version` versions the hash contract independently of `manifest_version` and
+the selected toolchain release. New projects and `stasis vendor update` write version 2. A version 2
+digest includes slash-normalized relative paths in deterministic order. Valid UTF-8 files without
+NUL bytes using `.stasis`, `.md`, `.json`, or `.svg` normalize CRLF to LF before hashing, so Git's
+LF/CRLF checkout conversion does not create a local vendor edit. Other text changes, path
+additions/removals, and every binary byte remain significant. Generated and repository
+`.gitattributes` use LF by default, keep `.bat`/`.cmd` files CRLF, and mark common binary assets as
+non-text; `.editorconfig` requests LF and a final newline.
+
+For backwards compatibility, an absent `hash_version` means version 1: the original raw-byte
+digest. Version 1 pins are first checked against the exact raw tree. If line-ending conversion makes
+that differ, status accepts the tree only when it has a trusted canonical baseline: either the
+selected release has the same release ID and its bundled raw digest matches the recorded pin, or an
+audited release-specific alias matches both the release ID and legacy digest. The initial audited
+alias is `nightly-20260919-337`, legacy SHA-256
+`08c438cdff0536bf416c0717426dee7a68d986728bb941aee757e01543897af4`, canonical-LF SHA-256
+`5c58b2908bcbfe113d942734a5a2a76ffaad98f874f7a5c920ce6fa9a972142d`. It was derived from the
+61 files in source tag commit `ad00c329a9d9cd9a3c328c7540034c3e30d5b457`, under `src/stdlib` and
+`docs/knowledge`, using the version 2 path framing and CRLF normalization. Other legacy pins whose
+raw tree differs and whose baseline is unavailable are reported as `legacy_pin_unverified`, not as
+confirmed local edits. Read-only symbol queries also fail closed without modifying files. Mutating
+project commands retain automatic vendor synchronization and may replace a stale or unverified
+snapshot with the selected release; a clean, verified same-release v1 snapshot remains unchanged.
+`stasis vendor update` explicitly migrates even a clean v1 pin to version 2. `vendor status` never
+rewrites the manifest or snapshot.
+
+`vendor status` reports the recorded hash version/digest, the authenticated expected canonical digest
+when available, the actual canonical digest, and the raw digest for legacy pins. An unverified v1 pin
+has no expected canonical digest; status keeps `local_changes` false and sets
+`legacy_pin_unverified` instead of comparing unlike hash contracts. These are package-level SHA-256
+diagnostics, not a file-by-file diff. Review tracked paths with `git diff -- vendor/stasis stasis.json`
+and inspect ignored or untracked vendor files with `git status --ignored --short -- vendor/stasis`
+before choosing whether to replace the snapshot.
+
 `manifest_version` versions the JSON schema and is independent of the selected toolchain release.
 Mutating project commands verify the on-disk tree against the selected executable. A content mismatch
 stages its matching public stdlib and internal host-ABI modules together and publishes the vendor tree

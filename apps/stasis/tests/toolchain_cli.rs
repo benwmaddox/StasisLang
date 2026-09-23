@@ -872,10 +872,25 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         .expect("read generated pre-commit hook");
     assert!(pre_commit.contains("stasis format"));
     assert!(!pre_commit.contains("stasis format --check"));
-    assert_eq!(
-        fs::read(project.join(".gitattributes")).expect("read generated Git attributes"),
-        b"*.[sS][vV][gG] text eol=lf\n"
-    );
+    let generated_attributes =
+        fs::read_to_string(project.join(".gitattributes")).expect("read generated Git attributes");
+    for required_rule in [
+        "* text=auto eol=lf",
+        "*.bat text eol=crlf",
+        "*.cmd text eol=crlf",
+        "*.stasis text eol=lf",
+        "*.png -text",
+        "*.dll -text",
+        "*.[sS][vV][gG] text eol=lf",
+    ] {
+        assert!(
+            generated_attributes
+                .lines()
+                .any(|line| line == required_rule),
+            "generated .gitattributes is missing required rule {required_rule:?}"
+        );
+    }
+    assert!(generated_attributes.ends_with('\n'));
     assert_eq!(
         fs::read(project.join(".gitignore")).expect("read generated Git ignore"),
         b"# Track vendor/stasis/stdlib and vendor/stasis/docs together.\n.stasis/\n.stasis_cache/\nartifacts/\nbuild/\ndist/\n"

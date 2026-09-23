@@ -1,5 +1,51 @@
-* text=auto
-*.stasis text eol=crlf
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.stasis text eol=lf
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.gif -text
+*.webp -text
+*.bmp -text
+*.ico -text
+*.tif -text
+*.tiff -text
+*.avif -text
+*.wav -text
+*.mp3 -text
+*.ogg -text
+*.flac -text
+*.aac -text
+*.m4a -text
+*.opus -text
+*.mp4 -text
+*.mov -text
+*.avi -text
+*.webm -text
+*.pdf -text
+*.ttf -text
+*.otf -text
+*.woff -text
+*.woff2 -text
+*.eot -text
+*.zip -text
+*.gz -text
+*.7z -text
+*.tar -text
+*.bin -text
+*.dat -text
+*.exe -text
+*.dll -text
+*.so -text
+*.dylib -text
+*.a -text
+*.lib -text
+*.obj -text
+*.o -text
+*.wasm -text
+*.class -text
+*.jar -text
 .gitattributes text eol=lf
 *.cs text eol=lf
 *.csproj text eol=lf

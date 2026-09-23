@@ -1005,7 +1005,7 @@ mod tests {
         fs::write(&older_source, older_contents).expect("write older vendor source");
         manifest["vendor"]["stasis"]["release_id"] = Value::String("older-toolchain".into());
         manifest["vendor"]["stasis"]["sha256"] = Value::String(
-            super::super::directory_sha256(&root.join("vendor/stasis"))
+            super::super::vendor_directory_sha256(&root.join("vendor/stasis"))
                 .expect("hash older vendor snapshot"),
         );
         write_json(&manifest_path, &manifest).expect("record older toolchain");
