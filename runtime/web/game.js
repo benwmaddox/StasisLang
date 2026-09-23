@@ -157,6 +157,7 @@
     scaleY: 1,
     contentScale: 1,
     rasterScale: 1,
+    textRasterScale: 1,
     densityTier: 1,
     displayGeneration: 1,
     densityGeneration: 1,
@@ -168,6 +169,7 @@
   let resizeGenerationPending = true;
   let logicalExtentPending = false;
   let onDensityChange = () => {};
+  let onTextRasterScaleChange = () => {};
   let spriteTierCache = new Map();
   let spriteCacheHits = 0;
   let spriteRasterCount = 0;
@@ -597,6 +599,7 @@
     data.effectiveDpr = displayNumber(display.effectiveDpr);
     data.contentScale = displayNumber(display.contentScale);
     data.rasterScale = displayNumber(display.rasterScale);
+    data.textRasterScale = displayNumber(display.textRasterScale);
     data.densityTier = displayNumber(display.densityTier);
     data.displayGeneration = String(display.displayGeneration);
     data.densityGeneration = String(display.densityGeneration);
@@ -742,6 +745,12 @@
     const contentScale = Math.min(scaleX, scaleY);
     const rasterScale = Math.max(1, Math.min(8, contentScale));
     const densityTier = densityTierFor(rasterScale);
+    // Text must cover both axes of the actual framebuffer transform. Asset
+    // density tiers are bounded; they cannot cap glyph resolution. Round up
+    // to a reusable tier where possible, then use the true scale above it.
+    const textScale = Math.max(1, scaleX, scaleY);
+    const textRasterScale = Math.max(textScale, densityTierFor(textScale));
+    const textRasterScaleChanged = display.textRasterScale !== textRasterScale;
     const fallback = [
       requestedDpr !== backingDpr ? "dpr" : "",
       dimensionScale < 1 ? "dimension" : "",
@@ -770,6 +779,7 @@
     display.scaleY = scaleY;
     display.contentScale = contentScale;
     display.rasterScale = rasterScale;
+    display.textRasterScale = textRasterScale;
     display.densityTier = densityTier;
     display.backingBytes = backingWidth * backingHeight * 4;
     display.fallback = fallback || "none";
@@ -788,6 +798,7 @@
       display.densityKey = String(densityTier);
       onDensityChange();
     }
+    if (textRasterScaleChanged) onTextRasterScaleChange();
     if (canvas.width !== backingWidth) canvas.width = backingWidth;
     if (canvas.height !== backingHeight) canvas.height = backingHeight;
     logicalExtentPending = false;
@@ -1805,17 +1816,18 @@
       font.densityTier = display.densityTier;
       font.densityGeneration = display.densityGeneration;
       font.cacheKey = [font.source, font.size, display.densityTier, RASTER_OPTIONS].join(":");
-      invalidatePreparedTextForFont(font.handle);
     }
-    // Legacy direct text uses the implicit fallback font handle zero. Its
-    // prepared canvas must follow the same tier lifetime as owned fonts.
-    invalidatePreparedTextForFont(0);
     if (document.body?.dataset) {
       document.body.dataset.assetDensityInvalidations = String(invalidated);
       document.body.dataset.assetDensityGeneration = String(display.densityGeneration);
     }
   };
   onDensityChange = invalidateDensityResources;
+  onTextRasterScaleChange = () => {
+    for (const font of fonts.values()) invalidatePreparedTextForFont(font.handle);
+    // Direct fallback text follows the same sampling lifetime as owned fonts.
+    invalidatePreparedTextForFont(0);
+  };
   const setPreparationFont = (context, font, size = font.renderSize) => {
     context.font = `${size}px ${font.family}`;
     context.textBaseline = "alphabetic";
@@ -3227,9 +3239,8 @@
       family: "ui-monospace, Consolas, monospace", size: 18, renderSize: 18, baseline: 18,
       densityTier: display.densityTier, calibrationGeneration: 0
     };
-    const rasterTier = Number.isFinite(font.densityTier) && font.densityTier > 0
-      ? font.densityTier : display.densityTier;
-    const key = `${fontHandle}|${rasterTier}|${font.calibrationGeneration || 0}|${text}`;
+    const rasterScale = display.textRasterScale;
+    const key = `${fontHandle}|${rasterScale}|${font.calibrationGeneration || 0}|${text}`;
     const existing = preparedText.get(key);
     if (existing) {
       // Map iteration order is the LRU order used by the bounded cache.
@@ -3252,8 +3263,8 @@
     const logicalHeight = Math.max(1, Math.ceil(font.baseline + descent));
     // Keep layout and the submitted quad in logical units, while the Canvas
     // surface and atlas entry carry pixels at the active physical density.
-    const width = Math.max(1, Math.ceil(logicalWidth * rasterTier));
-    const height = Math.max(1, Math.ceil(logicalHeight * rasterTier));
+    const width = Math.max(1, Math.ceil(logicalWidth * rasterScale));
+    const height = Math.max(1, Math.ceil(logicalHeight * rasterScale));
     const byteLength = width * height * 4;
     const rendererMaxTextureSize = Number(gpuBatcher?.maxTextureSize);
     // Check the renderer extent before assigning the physical Canvas size.
@@ -3276,7 +3287,9 @@
       if (typeof preparation.setTransform !== "function") {
         throw new Error("Canvas2D text raster scaling unavailable");
       }
-      preparation.setTransform(rasterTier, 0, 0, rasterTier, 0, 0);
+      // The atlas maps the entire rounded surface back to the logical quad.
+      // Match that mapping so fractional extent rounding cannot shift baselines.
+      preparation.setTransform(width / logicalWidth, 0, 0, height / logicalHeight, 0, 0);
       setPreparationFont(preparation, font);
       preparation.clearRect(0, 0, logicalWidth, logicalHeight);
       preparation.fillStyle = "white";
@@ -3286,7 +3299,7 @@
     }
     const resource = {
       ready: true, drawable: surface, width, height, logicalWidth, logicalHeight,
-      rasterTier, generation: 1, baseline: font.baseline, text, fontHandle, byteLength,
+      rasterScale, generation: 1, baseline: font.baseline, text, fontHandle, byteLength,
       transient: false
     };
     if (resource.byteLength > PREPARED_TEXT_MAX_BYTES) {
