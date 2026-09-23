@@ -14,7 +14,7 @@ use crate::backend::state_layout::{
     aot_storage_symbol, collection_field_element_count, is_named_scalar_state_path,
     AotStorageSymbolKind, StateLayout,
 };
-use crate::backend::{AotOptimizationProfile, EngineEntrypoints};
+use crate::backend::{AotOptimizationProfile, EngineEntrypoints, ReachabilityPolicy};
 use crate::compiler::{CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta};
 use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
@@ -48,6 +48,7 @@ pub struct AotArtifact {
 #[derive(Debug, Clone, Default)]
 pub struct AotProcess {
     compiler: Compiler,
+    reachability_policy: ReachabilityPolicy,
     optimization_profile: AotOptimizationProfile,
     target: stasis_jit::AotTarget,
     next_object_index: u32,
@@ -94,6 +95,7 @@ impl AotProcess {
     pub fn with_optimization_profile(optimization_profile: AotOptimizationProfile) -> Self {
         Self {
             compiler: Compiler::new(),
+            reachability_policy: ReachabilityPolicy::Development,
             optimization_profile,
             target: stasis_jit::AotTarget::default(),
             next_object_index: 0,
@@ -123,6 +125,10 @@ impl AotProcess {
 
     pub fn set_target(&mut self, target: stasis_jit::AotTarget) {
         self.target = target;
+    }
+
+    pub fn set_reachability_policy(&mut self, policy: ReachabilityPolicy) {
+        self.reachability_policy = policy;
     }
 
     pub fn set_required_emit_roots(&mut self, roots: &[String]) {
@@ -197,18 +203,20 @@ impl AotProcess {
             .map_err(crate::compiler::CompileError::Backend)?;
         let mut analysis_type_table = self.compiler.types().clone();
         let files_fingerprint = compute_files_fingerprint(self.compiler.files());
-        let snapshot_revision =
-            crate::backend::program_snapshot::semantic_revision_with_required_roots(
-                files_fingerprint,
-                &self.required_emit_roots,
-            );
+        let snapshot_revision = crate::backend::program_snapshot::semantic_revision_with_policy(
+            files_fingerprint,
+            &self.required_emit_roots,
+            self.reachability_policy,
+        );
         let snapshot_miss = self
             .program_snapshot
             .as_ref()
             .is_none_or(|snapshot| snapshot.source_revision() != snapshot_revision);
         let mut force_reemit_reachable = false;
         if snapshot_miss {
-            let function_hirs = self.compiler.analysis_hirs(&self.required_emit_roots)?;
+            let function_hirs = self
+                .compiler
+                .analysis_hirs_with_policy(&self.required_emit_roots, self.reachability_policy)?;
             let next_cache = build_compile_analysis_cache(
                 self.compiler.files(),
                 self.compiler.functions(),
@@ -223,6 +231,7 @@ impl AotProcess {
             }
             self.program_snapshot = Some(
                 ProgramSnapshot::build(
+                    self.reachability_policy,
                     snapshot_revision,
                     self.compiler.files(),
                     self.compiler.module_graph(),
@@ -262,7 +271,7 @@ impl AotProcess {
             .collect();
         let emit_function_ids = select_emit_function_ids(
             self.compiler.functions(),
-            &self.required_emit_roots,
+            snapshot.reachable_function_ids(),
             &compiled_body_hashes,
             force_reemit_reachable,
         );
@@ -339,6 +348,15 @@ impl AotProcess {
         let reachable = snapshot.reachable_function_ids().clone();
         artifacts.retain(|artifact| reachable.contains(&artifact.function_id));
         referenced_string_literals.retain(|function_id, _| reachable.contains(function_id));
+        if self.reachability_policy == ReachabilityPolicy::Release {
+            let literal_ids: BTreeSet<i32> = referenced_string_literals
+                .values()
+                .flatten()
+                .copied()
+                .collect();
+            self.string_literals
+                .retain(|id, _| literal_ids.contains(id));
+        }
         compact_active_artifact_storage(artifacts, object_bytes);
         self.next_object_index = u32::try_from(self.object_bytes.len()).unwrap_or(u32::MAX);
         if let Some(snapshot) = self.program_snapshot.as_mut() {
@@ -504,6 +522,9 @@ impl AotProcess {
             .chain(self.required_emit_roots.iter().map(String::as_str))
             .collect();
         for name in required {
+            if self.reachability_policy == ReachabilityPolicy::Release && name == "on_code_swap" {
+                continue;
+            }
             let count = self
                 .compiler
                 .functions()

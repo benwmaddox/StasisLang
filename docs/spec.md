@@ -20,8 +20,11 @@ Core direction:
 - Cranelift AOT for production builds.
 - File-level incremental compilation.
 - Symbol-level reachability pruning before lowering (functions + struct metadata).
-- Reachability roots: lifecycle entries present in the program (`main`, `tick`, `render`,
-  `on_code_swap`) and host-required exported entries.
+- Reachability roots: lifecycle entries present in the program (`main`, `tick`, `render`)
+  and host-required exported entries. Development compilation additionally roots the
+  zero-argument `on_code_swap(): void` callback. Packaged releases neither implicitly
+  root nor export this callback; ordinary explicit calls retain their resolved function
+  and dependencies. Graphics construction and platform restoration remain host lifecycle work.
 - Hot swap only between ticks.
 - Rust host/runtime with a Rust-implemented compiler pipeline.
 

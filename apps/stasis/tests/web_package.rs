@@ -11,6 +11,76 @@ const CONTINUE_LOOP_PARITY: &str =
     include_str!("../../../tests/stasis/seams/continue_loop_parity.stasis");
 const ROOTED_WEB_ASSET: &str = "/assets/smoke.svg";
 
+#[test]
+fn release_package_excludes_swap_export_and_reload_only_import() {
+    let workspace = repo_root()
+        .join("build")
+        .join(format!("release-swap-{}", stamp()));
+    fs::create_dir_all(workspace.join("src")).expect("create fixture");
+    fs::create_dir_all(workspace.join("assets")).expect("create assets");
+    for name in ["shared", "reload"] {
+        fs::write(workspace.join(format!("assets/{name}.svg")), r#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="red"/></svg>"#).expect("write asset");
+    }
+    fs::write(workspace.join("stasis.json"), r#"{"manifest_version":1,"name":"release_swap","entry":"src/main.stasis","tests":"tests","output":"build"}"#).expect("write manifest");
+    fs::write(
+        workspace.join("src/main.stasis"),
+        include_str!("../../../tests/stasis/seams/release_swap_roots.stasis.fixture"),
+    )
+    .expect("write fixture");
+    for development in [false, true] {
+        let output = package_with_mode(
+            &workspace,
+            Path::new(if development {
+                "build/development"
+            } else {
+                "build/release"
+            }),
+            development,
+        );
+        assert!(
+            output.join("assets/shared.svg").is_file(),
+            "startup/shared asset missing"
+        );
+        assert_eq!(
+            output.join("assets/reload.svg").is_file(),
+            development,
+            "reload-only package asset"
+        );
+        let execution = Command::new("node").arg("-e").arg(r#"
+const fs = require('node:fs');
+const bytes = fs.readFileSync(process.argv[1]);
+const development = process.argv[2] === 'true';
+const module = new WebAssembly.Module(bytes);
+const exports = WebAssembly.Module.exports(module).map(entry => entry.name);
+const imports = WebAssembly.Module.imports(module).map(entry => entry.name);
+if (exports.includes('on_code_swap') !== development) throw new Error('wrong swap export policy');
+if (imports.includes('print_i32') !== development) throw new Error('wrong reload-only import policy');
+const instance = new WebAssembly.Instance(module, {env: {print_i32: () => {}}});
+if (instance.exports.main() !== 7 || instance.exports.render() !== 7) throw new Error('shared dependency lost');
+if (instance.exports.tick() !== 0) throw new Error('startup invoked swap');
+if (development) {
+  instance.exports.on_code_swap();
+  if (instance.exports.tick() !== 7) throw new Error('development reload failed');
+}
+"#).arg(output.join("game.wasm")).arg(development.to_string()).output().expect("inspect final Wasm");
+        assert!(
+            execution.status.success(),
+            "{}",
+            String::from_utf8_lossy(&execution.stderr)
+        );
+    }
+    fs::write(workspace.join("src/main.stasis"), "function on_code_swap(value: i32): i32 { return value + 1; } function on_code_swap(): void { print_i32(654); } function main(): i32 { return on_code_swap(6); } function tick(): i32 { return 0; } function render(): i32 { return 0; }").unwrap();
+    let explicit = package(&workspace, Path::new("build/explicit"));
+    let run = execute_web_main(&explicit.join("game.wasm"));
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "7");
+    fs::remove_dir_all(workspace).expect("clean fixture");
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

@@ -495,3 +495,34 @@ Bad: the baseline initially paired a freshly built CLI with mismatched installed
 runtime provenance, and two test-only metadata constructors required updating.
 Adjustment: establish the matching signed CLI/runtime pair before aggregate
 gates and compile metadata-owning library tests early in schema changes.
+
+
+## 2026-09-23 - Maddox #654 release callback reachability
+
+Packaged AOT and release Web compilation use an explicit release reachability
+policy. Development JIT/live AOT retain the zero-argument void swap callback.
+Resolved FunctionIds preserve ordinary same-name calls and shared dependencies;
+release snapshots, active objects, imports, string literals and asset staging
+exclude the reload-only closure. Policy participates in snapshot/cache identity.
+Desktop/mobile implicit swap aliases and mobile manifest/header entries are gone.
+Graphics construction roots and platform resource restoration are unchanged.
+
+Validation and platform limits are recorded in `docs/release_swap_validation.md`.
+Visual evidence: inspected local `build/654-desktop-startup.png` and
+`build/654-android/android_resource_restore/e/stable-frame.png`; sprites and
+text render after standalone startup and Android resource lifecycle actions.
+Android IT-020 also checks initial, resumed and recreated resource pixels.
+
+Theory gained: packaging must use the same policy for compilation and asset
+preflight/staging. A release compiler alone cannot remove a reload-only asset
+when the no-manifest staging fallback copies the complete asset directory.
+The paired final Web packages and all three mobile object targets demonstrate
+that snapshot-owned asset roots remove it while retaining the shared asset.
+An adjacent package target should select the policy before snapshot construction.
+
+Good: final Wasm interfaces, AOT objects, staged assets and real hosts validate
+the policy across the compiler/package boundary.
+Bad: installed and sibling build DLLs initially overrode matching runtime paths;
+an empty inferred asset set also initially published an unnecessary identity file.
+Adjustment: stage a fresh matching CLI/runtime pair and test both inferred assets
+and assetless packages before interpreting package-size or host-smoke results.
