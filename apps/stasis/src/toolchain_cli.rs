@@ -2520,6 +2520,11 @@ fn validate_read_only_vendor(
     if status.legacy_pin_unverified {
         return Err("read-only symbol query did not update files: legacy vendor hash version 1 cannot be verified against a trusted release baseline; run 'stasis vendor status' then 'stasis vendor update'".to_string());
     }
+    if status.local_changes
+        && status.actual_sha256.as_deref() == Some(status.installed.sha256.as_str())
+    {
+        return Err("read-only symbol query did not update files: checked-in vendor snapshot has an inconsistent manifest fingerprint; run 'stasis vendor status' then 'stasis vendor update'".to_string());
+    }
     if status.local_changes {
         return Err("read-only symbol query did not update files: checked-in vendor snapshot has local changes; run 'stasis vendor status' then 'stasis vendor update'".to_string());
     }
