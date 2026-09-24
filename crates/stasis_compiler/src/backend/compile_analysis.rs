@@ -436,14 +436,10 @@ pub(crate) fn compile_analysis_requires_reemit(
 
 pub(crate) fn select_emit_function_ids(
     functions: &[FunctionMeta],
-    required_emit_roots: &[String],
+    reachable: &std::collections::BTreeSet<FunctionId>,
     compiled_body_hashes: &HashMap<FunctionId, u64>,
     force_reemit_reachable: bool,
 ) -> Vec<FunctionId> {
-    let reachable = crate::backend::reachability::compute_reachable_function_ids(
-        functions,
-        required_emit_roots,
-    );
     functions
         .iter()
         .filter(|function| reachable.contains(&function.id))

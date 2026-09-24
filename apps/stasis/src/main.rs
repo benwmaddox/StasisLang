@@ -28,7 +28,7 @@ use stasis::{
 };
 use stasis_assets::{prepare_asset_bundle, DEFAULT_ASSET_MANIFEST_PATH};
 use stasis_compiler::backend::aot::AotProcess;
-use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
+use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints, ReachabilityPolicy};
 use stasis_compiler::compiler::{source_function_items, source_struct_items};
 use stasis_jit::AotTarget;
 use stasis_runner::swap::contracts::TargetMode;
@@ -1891,6 +1891,7 @@ fn write_mobile_aot_engine_bundle(
     profile_sample_frames: u32,
 ) -> Result<MobileAotBundleSummary, String> {
     let mut process = AotProcess::with_optimization_profile(AotOptimizationProfile::SpeedAndSize);
+    process.set_reachability_policy(ReachabilityPolicy::Release);
     process.set_import_base_dir(project_dir);
     process.set_target(target.aot_target());
     process.set_profile_functions(profile_functions.iter().cloned())?;
@@ -2154,7 +2155,6 @@ fn write_mobile_aot_symbols_header(
     mobile_aot_function_for(manifest, "main")?;
     mobile_aot_function_for(manifest, "tick")?;
     mobile_aot_function_for(manifest, "render")?;
-    let on_code_swap = mobile_aot_symbol_for(manifest, "on_code_swap").ok();
     let mut out = String::new();
     out.push_str("#pragma once\n\n#include <stdint.h>\n\n");
     out.push_str("extern void stasis_aot_bind_runtime_globals(void);\n");
@@ -2170,17 +2170,11 @@ fn write_mobile_aot_symbols_header(
             "extern int32_t stasis_replay_state_snapshot_restore(const uint8_t *input, int32_t bytes);\n",
         );
     }
-    if let Some(symbol) = on_code_swap.as_ref() {
-        out.push_str(&format!("extern void {symbol}(void);\n"));
-    }
     out.push_str("\n");
     out.push_str("#define STASIS_AOT_BIND_RUNTIME_GLOBALS stasis_aot_bind_runtime_globals\n");
     out.push_str("#define STASIS_AOT_MAIN stasis_mobile_main_entry\n");
     out.push_str("#define STASIS_AOT_TICK stasis_mobile_tick_entry\n");
     out.push_str("#define STASIS_AOT_RENDER stasis_mobile_render_entry\n");
-    if let Some(symbol) = on_code_swap.as_ref() {
-        out.push_str(&format!("#define STASIS_AOT_ON_CODE_SWAP {symbol}\n"));
-    }
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -2195,22 +2189,6 @@ fn write_mobile_aot_symbols_header(
             output_path.display()
         )
     })
-}
-
-fn mobile_aot_symbol_for(
-    manifest: &serde_json::Value,
-    function_name: &str,
-) -> Result<String, String> {
-    let functions = manifest
-        .get("functions")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "Android AOT manifest missing functions array".to_string())?;
-    functions
-        .iter()
-        .find(|entry| entry.get("name").and_then(serde_json::Value::as_str) == Some(function_name))
-        .and_then(|entry| entry.get("symbol").and_then(serde_json::Value::as_str))
-        .map(str::to_string)
-        .ok_or_else(|| format!("mobile AOT manifest missing symbol for function '{function_name}'"))
 }
 
 fn write_mobile_aot_package_manifest(
@@ -2276,8 +2254,7 @@ fn write_mobile_aot_package_manifest(
         "entrypoints": {
             "main": "main",
             "tick": "tick",
-            "render": "render",
-            "on_code_swap": "on_code_swap"
+            "render": "render"
         }
     });
     if let Some(cmake_file) = cmake_file {
@@ -3661,6 +3638,79 @@ function frame_width(): i32 { return 360; }
 
         std::fs::remove_dir_all(&project_dir).ok();
         std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    #[test]
+    fn mobile_release_bundles_prune_reload_objects_bindings_and_assets() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let project = std::env::temp_dir().join(format!("stasis_release_swap_{stamp}"));
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::create_dir_all(project.join("assets")).unwrap();
+        fs::write(
+            project.join("src/main.stasis"),
+            include_str!("../../../tests/stasis/seams/release_swap_roots.stasis.fixture"),
+        )
+        .unwrap();
+        for name in ["shared", "reload"] {
+            fs::write(project.join(format!("assets/{name}.svg")), r#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="red"/></svg>"#).unwrap();
+        }
+        for target in [
+            MobileAotTarget::AndroidArm64,
+            MobileAotTarget::AndroidX86_64,
+            MobileAotTarget::IosArm64,
+        ] {
+            let output = project.join(target.as_str());
+            let summary = write_mobile_aot_engine_bundle(
+                target,
+                &project,
+                Some(Path::new("src/main.stasis")),
+                &output,
+                &[],
+                0,
+                0,
+            )
+            .expect("release mobile bundle");
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &fs::read(output.join("engine_bundle_manifest.json")).unwrap(),
+            )
+            .unwrap();
+            let functions = manifest["functions"].as_array().unwrap();
+            assert!(functions
+                .iter()
+                .any(|function| function["name"] == "shared"));
+            assert!(!functions
+                .iter()
+                .any(|function| function["name"] == "on_code_swap"
+                    || function["name"] == "reload_only"));
+            for function in functions {
+                let bytes = fs::read(output.join(function["object"].as_str().unwrap())).unwrap();
+                assert!(
+                    !bytes
+                        .windows(b"stasis_jit_print_i32".len())
+                        .any(|part| part == b"stasis_jit_print_i32"),
+                    "reload-only import in emitted object"
+                );
+            }
+            let header = fs::read_to_string(&summary.symbols_header).unwrap();
+            assert!(!header.contains("ON_CODE_SWAP"));
+            let package: serde_json::Value =
+                serde_json::from_slice(&fs::read(summary.package_manifest).unwrap()).unwrap();
+            assert!(package["entrypoints"].get("on_code_swap").is_none());
+            assert!(summary
+                .asset_dir
+                .join("stasis_game/assets/shared.svg")
+                .is_file());
+            assert!(!summary
+                .asset_dir
+                .join("stasis_game/assets/reload.svg")
+                .exists());
+            let bindings = fs::read_to_string(summary.bindings_source).unwrap();
+            assert!(!bindings.contains("assets/reload.svg"));
+        }
+        fs::remove_dir_all(project).unwrap();
     }
 
     #[test]

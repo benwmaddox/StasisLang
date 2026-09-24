@@ -495,3 +495,56 @@ Bad: the baseline initially paired a freshly built CLI with mismatched installed
 runtime provenance, and two test-only metadata constructors required updating.
 Adjustment: establish the matching signed CLI/runtime pair before aggregate
 gates and compile metadata-owning library tests early in schema changes.
+
+
+## 2026-09-23 - Maddox #654 release callback reachability
+
+Packaged AOT and release Web compilation use an explicit release reachability
+policy. Development JIT/live AOT retain the zero-argument void swap callback.
+Resolved FunctionIds preserve ordinary same-name calls and shared dependencies;
+release snapshots, active objects, imports, string literals and asset staging
+exclude the reload-only closure. Policy participates in snapshot/cache identity.
+Desktop/mobile implicit swap aliases and mobile manifest/header entries are gone.
+Graphics construction roots and platform resource restoration are unchanged.
+
+Validation and platform limits are recorded in `docs/release_swap_validation.md`.
+Visual evidence: inspected local `build/654-desktop-startup.png` and
+`build/654-android/android_resource_restore/e/stable-frame.png`; sprites and
+text render after standalone startup and Android resource lifecycle actions.
+Android IT-020 also checks initial, resumed and recreated resource pixels.
+
+Theory gained: packaging must use the same policy for compilation and asset
+preflight/staging. A release compiler alone cannot remove a reload-only asset
+when the no-manifest staging fallback copies the complete asset directory.
+The paired final Web packages and all three mobile object targets demonstrate
+that snapshot-owned asset roots remove it while retaining the shared asset.
+An adjacent package target should select the policy before snapshot construction.
+
+Good: final Wasm interfaces, AOT objects, staged assets and real hosts validate
+the policy across the compiler/package boundary.
+Bad: installed and sibling build DLLs initially overrode matching runtime paths;
+an empty inferred asset set also initially published an unnecessary identity file.
+Adjustment: stage a fresh matching CLI/runtime pair and test both inferred assets
+and assetless packages before interpreting package-size or host-smoke results.
+
+
+## 2026-09-23 - Maddox #654 PR CI timeout follow-up
+
+PR #833 job 107427103256 exhausted the integration step's 15-minute budget
+while Web package assertions were still passing. Compilation took 2m40s;
+Web started 6m26s into the step after the earlier integrations. Web packaging
+now runs in its own 15-minute step in the same required job, reusing the Cargo
+build. The broad target loop excludes it so each suite still runs once.
+No timeout was increased and no test was disabled.
+
+Validation: existing Cargo/placement policy tests (19) and action-version policy
+passed. `python tools/cargo_cache.py run -- cargo test -p stasis --test
+web_package -- --test-threads=1` passed all 17 tests locally in 46.74s;
+`git diff --check` passed. Hosted Linux timing remains for CI verification.
+Visual evidence: not applicable (workflow-only follow-up).
+Theory gained: the timeout budget must match the owning suite, including compile
+cost; passing suites can exceed a combined step budget without a failed assertion.
+Good: retained the same required job and shared compilation.
+Bad: the previous combined budget hid the Web suite's independent runtime cost.
+Adjustment: preserve separate bounded steps and guard single ownership in the
+existing CI placement tests.

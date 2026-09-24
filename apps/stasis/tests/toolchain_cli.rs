@@ -8,6 +8,38 @@ use std::time::{Duration, SystemTime};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
 
+#[test]
+fn native_release_executes_explicit_same_name_call_without_swap_hook() {
+    let project = temp_dir("release_swap_call");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("stasis.json"), r#"{"manifest_version":1,"name":"release_swap_call","entry":"src/main.stasis","tests":"tests","output":"build"}"#).unwrap();
+    fs::write(project.join("src/main.stasis"), "function on_code_swap(value: i32): i32 { return value + 1; } function on_code_swap(): void { print_i32(654); } function main(): i32 { return on_code_swap(6); }").unwrap();
+    let result = stasis(&["build", "--mode", "release", "--json"], &project);
+    assert!(
+        result.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let executable = receipt["result"]["output"].as_str().unwrap();
+    let run = Command::new(executable)
+        .current_dir(&project)
+        .output()
+        .expect("run final native executable");
+    assert_eq!(
+        run.status.code(),
+        Some(7),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        run.stdout.is_empty(),
+        "release invoked the unused reload callback"
+    );
+    fs::remove_dir_all(project).unwrap();
+}
+
 fn temp_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "stasis_cli_integration_{name}_{}_{}",

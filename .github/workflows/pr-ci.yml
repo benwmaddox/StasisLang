@@ -296,10 +296,16 @@ jobs:
             test_name="$(basename "${test_file}" .rs)"
             # The replay browser acceptance runs in the packaged-generics lane with a matching native runtime.
             if [[ "$test_name" == "web_replay_acceptance" ]]; then continue; fi
+            # Web packaging has its own bounded step below; retain the shared Cargo build.
+            if [[ "$test_name" == "web_package" ]]; then continue; fi
             test_args+=(--test "$test_name")
           done < <(find apps/stasis/tests -maxdepth 1 -type f -name '*.rs' | sort)
           test "${#test_args[@]}" -gt 0
           python tools/cargo_cache.py run -- cargo test -p stasis "${test_args[@]}" -- --test-threads=1
+
+      - name: Run Stasis Web package Cargo tests
+        timeout-minutes: 15
+        run: python tools/cargo_cache.py run -- cargo test -p stasis --test web_package -- --test-threads=1
 
   pr-ci-generics-cross-platform:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}

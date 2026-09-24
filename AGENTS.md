@@ -96,7 +96,7 @@
 - Keep the frontend parser hardcoded with explicit precedence handling and shared matcher helpers; avoid adding new ad-hoc token offset chains.
 - Prefer one-pass compiler flow by default (`parse/check/lower` in one forward path per function); only allow explicit exceptions for required pre-scan metadata and jump backpatch resolution.
 - Treat function/struct reachability pruning as the primary dead-code mechanism for this phase.
-- Reachability roots are `main`, `tick`, and `on_code_swap` when present, plus host-required exported entry symbols.
+- Reachability roots are `main`, `tick`, and `render` when present, plus host-required exported entry symbols and graphics construction reset/finish. Development compilation additionally roots `on_code_swap(): void`; packaged releases preserve it only through ordinary explicit source calls.
 - Build and maintain a simple call graph and type-reference graph; lower only reachable functions and reachable struct metadata.
 - Do not add new parser-shape fallback detectors; replace/delete detector-driven paths instead of expanding them.
 - Do not add temporary compiler fallbacks that fake behavior (for example hash-stub returns, hardcoded placeholder values, or "temporary" alternate compile paths).

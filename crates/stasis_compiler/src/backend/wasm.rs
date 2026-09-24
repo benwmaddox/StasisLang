@@ -16,6 +16,7 @@ use crate::backend::state_layout::{
     build_state_layout, collection_field_element_count, is_replay_host_or_presentation_path,
     StateCollectionLayout, StateScalarLayout,
 };
+use crate::backend::ReachabilityPolicy;
 use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
 use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
@@ -52,6 +53,7 @@ pub struct WasmStringLiteralMetadata {
 #[derive(Debug, Clone, Default)]
 pub struct WasmProcess {
     compiler: Compiler,
+    reachability_policy: ReachabilityPolicy,
     required_roots: Vec<String>,
     module: Vec<u8>,
     string_literals: BTreeMap<i32, String>,
@@ -77,6 +79,10 @@ impl WasmProcess {
     pub fn set_required_emit_roots(&mut self, roots: &[String]) {
         self.required_roots = roots.to_vec();
         self.compiler.set_analysis_required_roots(roots);
+    }
+
+    pub fn set_reachability_policy(&mut self, policy: ReachabilityPolicy) {
+        self.reachability_policy = policy;
     }
 
     pub fn set_debug_symbols(&mut self, enabled: bool) {
@@ -134,11 +140,11 @@ impl WasmProcess {
     pub fn compile(&mut self) -> CompileResult<CompileReport> {
         let index = self.compiler.check()?;
         let mut types = self.compiler.types().clone();
-        let source_revision =
-            crate::backend::program_snapshot::semantic_revision_with_required_roots(
-                compute_files_fingerprint(self.compiler.files()),
-                &self.required_roots,
-            );
+        let source_revision = crate::backend::program_snapshot::semantic_revision_with_policy(
+            compute_files_fingerprint(self.compiler.files()),
+            &self.required_roots,
+            self.reachability_policy,
+        );
         let analysis = build_compile_analysis_cache(
             self.compiler.files(),
             self.compiler.functions(),
@@ -151,9 +157,10 @@ impl WasmProcess {
         .map_err(CompileError::Backend)?;
         *self.compiler.types_mut() = types.clone();
 
-        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+        let reachable = crate::backend::reachability::compute_reachable_function_ids_with_policy(
             self.compiler.functions(),
             &self.required_roots,
+            self.reachability_policy,
         );
         let function_ids = self
             .compiler
@@ -239,11 +246,15 @@ impl WasmProcess {
             &types,
             &self.string_literals,
             self.debug_symbols,
+            self.reachability_policy,
         )
         .map_err(CompileError::Backend)?;
-        let function_hirs = self.compiler.analysis_hirs(&self.required_roots)?;
+        let function_hirs = self
+            .compiler
+            .analysis_hirs_with_policy(&self.required_roots, self.reachability_policy)?;
         self.program_snapshot = Some(
             ProgramSnapshot::build(
+                self.reachability_policy,
                 source_revision,
                 self.compiler.files(),
                 self.compiler.module_graph(),
@@ -412,16 +423,13 @@ fn physical_param_count(
         .sum()
 }
 
-fn is_host_export(function: &FunctionMeta) -> bool {
+fn is_host_export(function: &FunctionMeta, policy: ReachabilityPolicy) -> bool {
     function.host_export.is_some()
         || matches!(
             function.name.as_str(),
-            "main"
-                | "render"
-                | "on_code_swap"
-                | "gfx_cmd_construction_reset"
-                | "gfx_cmd_construction_finish"
+            "main" | "render" | "gfx_cmd_construction_reset" | "gfx_cmd_construction_finish"
         )
+        || (policy == ReachabilityPolicy::Development && matches_root(function, "on_code_swap"))
         || matches_root(function, "tick")
 }
 
@@ -1104,6 +1112,7 @@ fn encode_module(
     types: &TypeTable,
     string_literals: &BTreeMap<i32, String>,
     debug_symbols: bool,
+    reachability_policy: ReachabilityPolicy,
 ) -> Result<
     (
         Vec<u8>,
@@ -1138,7 +1147,7 @@ fn encode_module(
     }
     for (function, _) in functions
         .iter()
-        .filter(|(function, _)| is_host_export(function))
+        .filter(|(function, _)| is_host_export(function, reachability_policy))
     {
         if function.params.iter().any(|type_id| {
             is_named_struct_array_type(*type_id, types, &analysis.named_struct_field_types)
@@ -1415,7 +1424,7 @@ fn encode_module(
     uleb(
         functions
             .iter()
-            .filter(|(function, _)| is_host_export(function))
+            .filter(|(function, _)| is_host_export(function, reachability_policy))
             .count() as u32
             + if debug_symbols {
                 globals.len() as u32
@@ -1429,7 +1438,7 @@ fn encode_module(
         &mut export_section,
     );
     for (index, (function, _)) in functions.iter().enumerate() {
-        if !is_host_export(function) {
+        if !is_host_export(function, reachability_policy) {
             continue;
         }
         string(&crate::host_exports::symbol(function), &mut export_section);
@@ -1619,7 +1628,7 @@ fn encode_module(
         functions
             .iter()
             .enumerate()
-            .filter(|(_, (function, _))| is_host_export(function))
+            .filter(|(_, (function, _))| is_host_export(function, reachability_policy))
             .map(|(index, (function, _))| ((imports.len() + index) as u32, function.name.clone()))
             .collect()
     };

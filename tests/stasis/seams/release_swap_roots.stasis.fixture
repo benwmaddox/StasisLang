@@ -1,0 +1,9 @@
+extern function print_i32(value: i32): void;
+global swaps: i32;
+function @asset_path(path) use_asset(path: string): i32 { return 0; }
+function shared(): i32 { return 7; }
+function reload_only(): void { print_i32(654); }
+function on_code_swap(): void { use_asset("assets/reload.svg"); swaps += shared(); reload_only(); }
+function main(): i32 { use_asset("assets/shared.svg"); return shared(); }
+function tick(): i32 { return swaps; }
+function render(): i32 { return shared(); }
