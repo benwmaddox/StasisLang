@@ -15,6 +15,8 @@
 		100000000000000000000012 /* stasis_image_writer.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* stasis_image_writer.c */; };
 		100000000000000000000008 /* stasis_audio_assets.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* stasis_audio_assets.c */; };
 		100000000000000000000013 /* stasis_platform_services.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* stasis_platform_services.c */; };
+		100000000000000000000015 /* published_replay_identity.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* published_replay_identity.c */; };
+		100000000000000000000016 /* stasis_replay_consumer.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* stasis_replay_consumer.c */; };
 		100000000000000000000006 /* published_aot_bindings.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* published_aot_bindings.c */; };
 		100000000000000000000007 /* stasis_game in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* stasis_game */; };
 		110000000000000000000001 /* stasis_svg.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000001 /* stasis_svg.cpp */; };
@@ -69,6 +71,8 @@
 				100000000000000000000012 /* stasis_image_writer.c in Sources */,
 				100000000000000000000008 /* stasis_audio_assets.c in Sources */,
 				100000000000000000000013 /* stasis_platform_services.c in Sources */,
+				100000000000000000000015 /* published_replay_identity.c in Sources */,
+				100000000000000000000016 /* stasis_replay_consumer.c in Sources */,
 				110000000000000000000001 /* stasis_svg.cpp in Sources */,
 				110000000000000000000002 /* tvgCompressor.cpp in Sources */,
 				110000000000000000000003 /* tvgMath.cpp in Sources */,
@@ -125,7 +129,7 @@
 			outputPaths = ();
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\nfor name in SDL3 SDL3_image; do\n  source=\"${STASIS_SDL_FRAMEWORKS}/${name}.xcframework/ios-arm64/${name}.framework\"\n  test -d \"${source}\" || { echo \"missing ${source}\" >&2; exit 1; }\n  destination=\"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\n  mkdir -p \"${destination}\"\n  ditto \"${source}\" \"${destination}/${name}.framework\"\n  if test -n \"${EXPANDED_CODE_SIGN_IDENTITY:-}\"; then\n    codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" \"${destination}/${name}.framework\"\n  fi\ndone\n";
+			shellScript = "set -eu\nplatform=\"${STASIS_SDL_PLATFORM:-ios-arm64}\"\nfor name in SDL3 SDL3_image; do\n  source=\"${STASIS_SDL_FRAMEWORKS}/${name}.xcframework/${platform}/${name}.framework\"\n  test -d \"${source}\" || { echo \"missing ${source}\" >&2; exit 1; }\n  destination=\"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}\"\n  mkdir -p \"${destination}\"\n  ditto \"${source}\" \"${destination}/${name}.framework\"\n  if test -n \"${EXPANDED_CODE_SIGN_IDENTITY:-}\"; then\n    codesign --force --sign \"${EXPANDED_CODE_SIGN_IDENTITY}\" \"${destination}/${name}.framework\"\n  fi\ndone\n";
 		};
 
 		200000000000000000000001 /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StasisMobile/main.m; sourceTree = "<group>"; };
@@ -140,6 +144,8 @@
 		200000000000000000000009 /* StasisMobile.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = StasisMobile.xcconfig; sourceTree = "<group>"; };
 		200000000000000000000010 /* stasis_audio_assets.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_audio_assets.c; sourceTree = "<group>"; };
 		200000000000000000000013 /* stasis_platform_services.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_platform_services.c; sourceTree = "<group>"; };
+		200000000000000000000015 /* published_replay_identity.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../aot/published_replay_identity.c; sourceTree = "<group>"; };
+		200000000000000000000016 /* stasis_replay_consumer.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_replay_consumer.c; sourceTree = "<group>"; };
 		200000000000000000000011 /* stasis_ios_network.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StasisMobile/stasis_ios_network.m; sourceTree = "<group>"; };
 		200000000000000000000014 /* stasis_ios_external_url.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StasisMobile/stasis_ios_external_url.m; sourceTree = "<group>"; };
 		210000000000000000000001 /* stasis_svg.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/stasis_svg.cpp; sourceTree = "<group>"; };
@@ -231,6 +237,8 @@
 				210000000000000000000036 /* tvgXmlParser.cpp */,
 				210000000000000000000037 /* tvgCapi.cpp */,
 				200000000000000000000006 /* published_aot_bindings.c */,
+				200000000000000000000015 /* published_replay_identity.c */,
+				200000000000000000000016 /* stasis_replay_consumer.c */,
 				200000000000000000000007 /* stasis_game */,
 				200000000000000000000009 /* StasisMobile.xcconfig */,
 				400000000000000000000002 /* Products */,

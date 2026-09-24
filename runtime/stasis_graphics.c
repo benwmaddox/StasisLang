@@ -3811,6 +3811,44 @@ STASIS_EXPORT void stasis_get_display_metrics(
 }
 
 /*
+ * Test-only physical presentation receipt. The environment gate matches the
+ * existing display/input injection seam, so packaged applications cannot use
+ * it to observe or alter presentation state.
+ */
+STASIS_EXPORT int stasis_test_get_display_presentation(
+    float *out_f32,
+    int32_t capacity
+) {
+    const char *enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!out_f32 || capacity < 14 || !enabled ||
+        enabled[0] != '1' || enabled[1] != '\0') {
+        return 0;
+    }
+    out_f32[0] = g_display_metrics.native_viewport.x;
+    out_f32[1] = g_display_metrics.native_viewport.y;
+    out_f32[2] = g_display_metrics.native_viewport.w;
+    out_f32[3] = g_display_metrics.native_viewport.h;
+    out_f32[4] = g_display_metrics.drawable_viewport.x;
+    out_f32[5] = g_display_metrics.drawable_viewport.y;
+    out_f32[6] = g_display_metrics.drawable_viewport.w;
+    out_f32[7] = g_display_metrics.drawable_viewport.h;
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    out_f32[8] = g_mobile_safe_drawable.x;
+    out_f32[9] = g_mobile_safe_drawable.y;
+    out_f32[10] = g_mobile_safe_drawable.w;
+    out_f32[11] = g_mobile_safe_drawable.h;
+#else
+    out_f32[8] = 0.0f;
+    out_f32[9] = 0.0f;
+    out_f32[10] = (float)g_display_metrics.drawable_w;
+    out_f32[11] = (float)g_display_metrics.drawable_h;
+#endif
+    out_f32[12] = g_display_metrics.content_scale;
+    out_f32[13] = g_display_metrics.raster_scale;
+    return 1;
+}
+
+/*
  * Get current desktop usable dimensions (excluding taskbar/docks when available).
  * Writes width and height to provided pointers.
  *

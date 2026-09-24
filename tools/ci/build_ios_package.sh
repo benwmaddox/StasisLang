@@ -14,6 +14,8 @@ build_root="${STASIS_IOS_BUILD_ROOT:-${repo_root}/target/ios-package-link}"
 framework_root="${build_root}/frameworks"
 download_root="${build_root}/downloads"
 derived_data="${build_root}/derived-data"
+simulator_derived_data="${build_root}/simulator-derived-data"
+simulator_udid=""
 
 if [[ "${package_output}" = /* || "${package_output}" = *..* ]]; then
   echo "package output must be a confined workspace-relative path" >&2
@@ -29,6 +31,10 @@ active_mount=""
 package_created=0
 cleanup() {
   local status=$?
+  if [[ -n "${simulator_udid}" ]]; then
+    xcrun simctl shutdown "${simulator_udid}" >/dev/null 2>&1 || true
+    xcrun simctl delete "${simulator_udid}" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${active_mount}" ]]; then
     hdiutil detach "${active_mount}" >/dev/null 2>&1 || true
   fi
@@ -153,3 +159,112 @@ fi
 } > "${build_root}/evidence.txt"
 
 cat "${build_root}/evidence.txt"
+
+simulator_package="${build_root}/simulator-package"
+ditto "${package_root}" "${simulator_package}"
+simulator_project="${simulator_package}/ios"
+cp "${repo_root}/tools/ci/ios_aspect_fit_bindings.c" "${simulator_package}/aot/published_aot_bindings.c"
+printf '%s\n' '/* Intentionally empty simulator replacement object. */' > "${build_root}/simulator_placeholder.c"
+while IFS= read -r object; do
+  xcrun --sdk iphonesimulator clang -target arm64-apple-ios15.0-simulator -c "${build_root}/simulator_placeholder.c" -o "${object}"
+done < <(find "${simulator_package}/aot" -type f -name '*.o' -print)
+
+xcodebuild -project "${simulator_project}/StasisMobile.xcodeproj" -scheme StasisMobile -configuration Debug -sdk iphonesimulator -arch arm64 -destination 'generic/platform=iOS Simulator' -derivedDataPath "${simulator_derived_data}" STASIS_SDL_FRAMEWORKS="${framework_root}" STASIS_SDL_PLATFORM=ios-arm64_x86_64-simulator SDKROOT=iphonesimulator SUPPORTED_PLATFORMS=iphonesimulator CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build | tee "${build_root}/simulator-xcodebuild.log"
+
+simulator_app="${simulator_derived_data}/Build/Products/Debug-iphonesimulator/StasisMobile.app"
+simulator_executable="${simulator_app}/StasisMobile"
+test -f "${simulator_executable}"
+lipo "${simulator_executable}" -verify_arch arm64
+for framework in SDL3 SDL3_image; do
+  codesign --force --sign - "${simulator_app}/Frameworks/${framework}.framework"
+done
+codesign --force --deep --sign - "${simulator_app}"
+
+runtime_id="$(python3 - <<'PY'
+import json
+import subprocess
+
+payload = json.loads(subprocess.check_output(
+    ["xcrun", "simctl", "list", "runtimes", "--json"], text=True))
+candidates = [
+    runtime for runtime in payload["runtimes"]
+    if runtime.get("isAvailable") and runtime.get("platform") == "iOS"
+]
+if not candidates:
+    raise SystemExit("no available iOS simulator runtime")
+candidates.sort(
+    key=lambda runtime: tuple(
+        int(part) for part in runtime.get("version", "0").split(".")
+    ),
+    reverse=True,
+)
+print(candidates[0]["identifier"])
+PY
+)"
+device_type_id="$(python3 - <<'PY'
+import json
+import subprocess
+
+payload = json.loads(subprocess.check_output(
+    ["xcrun", "simctl", "list", "devicetypes", "--json"], text=True))
+preferred = ["iPhone 16 Pro", "iPhone 15 Pro", "iPhone 14 Pro"]
+by_name = {device["name"]: device["identifier"] for device in payload["devicetypes"]}
+for name in preferred:
+    if name in by_name:
+        print(by_name[name])
+        break
+else:
+    raise SystemExit("no supported cutout iPhone simulator type")
+PY
+)"
+simulator_name="StasisAspectFit-${GITHUB_RUN_ID:-local}-$$"
+simulator_udid="$(xcrun simctl create "${simulator_name}" "${device_type_id}" "${runtime_id}")"
+xcrun simctl boot "${simulator_udid}"
+xcrun simctl bootstatus "${simulator_udid}" -b
+xcrun simctl install "${simulator_udid}" "${simulator_app}"
+bundle_id="$(/usr/libexec/PlistBuddy -c 'Print:CFBundleIdentifier' "${simulator_app}/Info.plist")"
+data_container="$(xcrun simctl get_app_container "${simulator_udid}" "${bundle_id}" data)"
+SIMCTL_CHILD_STASIS_ENABLE_TEST_INPUT=1 xcrun simctl launch --terminate-running-process "${simulator_udid}" "${bundle_id}" | tee "${build_root}/simulator-launch.txt"
+
+wait_for_receipt() {
+  local path="$1"
+  for _ in $(seq 1 160); do
+    if [[ -s "${path}" ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "timed out waiting for simulator receipt: ${path}" >&2
+  return 1
+}
+
+actual_receipt="${data_container}/Documents/stasis-ios-aspect-fit-actual.json"
+left_receipt="${data_container}/Documents/stasis-ios-aspect-fit-landscape-left.json"
+pointer_receipt="${data_container}/Documents/stasis-ios-aspect-fit-pointer.json"
+right_receipt="${data_container}/Documents/stasis-ios-aspect-fit-landscape-right.json"
+wait_for_receipt "${actual_receipt}"
+wait_for_receipt "${left_receipt}"
+cp "${actual_receipt}" "${build_root}/simulator-actual.json"
+cp "${left_receipt}" "${build_root}/simulator-landscape-left.json"
+xcrun simctl io "${simulator_udid}" screenshot "${build_root}/simulator-landscape-left.png"
+wait_for_receipt "${pointer_receipt}"
+wait_for_receipt "${right_receipt}"
+cp "${pointer_receipt}" "${build_root}/simulator-pointer.json"
+cp "${right_receipt}" "${build_root}/simulator-landscape-right.json"
+xcrun simctl io "${simulator_udid}" screenshot "${build_root}/simulator-landscape-right.png"
+xcrun simctl spawn "${simulator_udid}" log show --style compact --last 5m --predicate 'process == "StasisMobile"' > "${build_root}/simulator.log"
+
+python3 "${repo_root}/tools/ci/verify_ios_aspect_fit.py" --actual "${build_root}/simulator-actual.json" --left "${build_root}/simulator-landscape-left.json" --pointer "${build_root}/simulator-pointer.json" --right "${build_root}/simulator-landscape-right.json" --left-screenshot "${build_root}/simulator-landscape-left.png" --right-screenshot "${build_root}/simulator-landscape-right.png" --output "${build_root}/simulator-evidence.json"
+
+{
+  printf 'simulator_name=%s\n' "${simulator_name}"
+  printf 'simulator_udid=%s\n' "${simulator_udid}"
+  printf 'runtime=%s\n' "${runtime_id}"
+  printf 'device_type=%s\n' "${device_type_id}"
+  printf 'bundle_id=%s\n' "${bundle_id}"
+  printf 'app=%s\n' "${simulator_app}"
+  printf 'architectures=%s\n' "$(lipo "${simulator_executable}" -archs)"
+  printf 'logical=1600x720\n'
+  printf 'physical_device_qualified=false\n'
+} > "${build_root}/simulator-evidence.txt"
+cat "${build_root}/simulator-evidence.txt"

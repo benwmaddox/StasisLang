@@ -34,3 +34,14 @@ the published DMG hashes, packages `samples/mobile_storage_link`, performs an
 unsigned `iphoneos` arm64 Xcode build, and inspects the resulting app's
 architecture, embedded SDL frameworks, game assets, provenance, and source
 exclusion. Signing and installation remain a developer-owned Xcode handoff.
+
+The optional slow PR seam also makes a CI-only copy of that generated package,
+replaces its device-only AOT objects with a simulator qualification fixture,
+and builds the same shared SDL/mobile runtime for an arm64 iOS simulator. The
+fixture fixes the logical canvas at 1600x720 and records the live safe-area fit,
+an injected resize/orientation-safe-area transition, and logical pointer
+round-trip receipts. The job uploads both landscape screenshots, exact
+Xcode/runtime/device identifiers, logs, and the machine-checked receipt.
+This does not add a public simulator package target, and it does not qualify
+signing, thermal behavior, touch hardware, or cutout behavior on a physical
+phone.
