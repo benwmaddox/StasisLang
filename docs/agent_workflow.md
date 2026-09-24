@@ -6,6 +6,45 @@ for normal project work.
 Read `PROJECT_ARCHITECTURE.md` before structuring game code. Use its input, tick, state, and
 rendering boundaries as the default unless the project documents a concrete reason to differ.
 
+## Quick task loop
+
+1. If the target is unknown, start with `stasis --json symbol list`. If its file is known,
+   start with a file-scoped list; if the exact target is established, read it directly.
+   Inspect references before changing behavior.
+2. Use semantic edits with complete declarations. For an update or delete, copy the current
+   `source_hash`; for a schema-v2 batch, copy both `symbol_id` and `name` from `symbol read`.
+3. Review the plan and retain the successful receipt. Run `stasis fmt --check`,
+   `stasis check`, and `stasis test`; add fresh runtime validation when observable
+   behavior changes.
+
+For related edits, use `stasis symbol apply --request REQUEST.json`. This v2 example uses
+the `symbol_id` and hash returned by `symbol read tick --kind function --file src/main.stasis`.
+Adapt the full replacement to preserve the existing declaration, including attached comments and
+attributes:
+
+```json
+{
+  "schema_version": 2,
+  "edits": [
+    {
+      "operation": "update",
+      "target": {
+        "kind": "function",
+        "file": "src/main.stasis",
+        "name": "tick",
+        "symbol_id": "SYMBOL_ID_FROM_READ"
+      },
+      "expected_source_hash": "HASH_FROM_SYMBOL_READ",
+      "new_source": "function tick(): i32 {\n    return 2;\n}"
+    }
+  ]
+}
+```
+
+For an add with no known ID, explicitly use schema v1 for the whole batch and select by `name`,
+`kind`, and `file`; never invent an ID. An omitted `schema_version` defaults to v2.
+Use `--no-tests` only when the user explicitly asks for it.
+
 ## Offline vendor documentation
 
 Generated projects keep the selected toolchain's documentation beside its standard library at
@@ -46,26 +85,33 @@ status remains stable if another checkout converts text to CRLF.
 
 Semantic symbol queries (`list`, `find`, `read`, and `references`) are read-only and never
 reconcile the checked-in vendor snapshot or materialize the toolchain cache. If a project tracks
-`vendor/stasis`, use `stasis vendor status` to inspect it and the explicit `stasis vendor update`
-command to prepare a missing, locally changed, or stale snapshot. If a project uses
-`"stdlib": "toolchain"`, use the explicit `stasis prepare` command to materialize its cache.
-A failed query leaves the project, vendor, and cache bytes unchanged.
+`vendor/stasis`, use `stasis vendor status` and the explicit `stasis vendor update` command to
+prepare a missing or stale snapshot. If a project uses `"stdlib": "toolchain"`, use the explicit
+`stasis prepare` command. A failed query leaves project, vendor, and cache bytes unchanged.
 
-1. Start a code task with `stasis --json symbol list`. Without `--file`, this returns a compact,
-   source-free index for the manifest entry file and its direct imports, plus their import map.
-2. If that page is truncated or dominated by unrelated imports, use the import map to select the
-   likely implementation file. Prefer one file-scoped function inventory, for example
-   `stasis --json symbol list --file src/main.stasis --kind function`, over a series of one-word
-   queries. Request globals separately with the exact kind `--kind globals` only when state fields
-   matter. The accepted kinds are `imports`, `globals`, `struct`, `function`, and `test`.
-3. Otherwise, narrow follow-up discovery with `--query`, `--kind`, `--owner`, and repeated `--file`
-   options. Do not enumerate every project symbol or read whole source files by default.
-4. Read only likely targets with `stasis --json symbol read NAME` and disambiguate with `--file`,
-   `--kind`, `--owner`, or `--signature`. Batch independent reads when the agent environment
-   supports parallel tool calls; up to 50 deliberate reads in one turn is reasonable.
-5. Before changing behavior, run `stasis --json symbol references SYMBOL` for the relevant
-   function, global, or qualified field such as `PlayerState.health`. Inspect related callers,
-   reads, and writes before editing.
+1. Start with a file-scoped list when the file is known, or read an established target directly.
+   Otherwise, use `stasis --json symbol list`. The default list results cover the manifest entry file and its direct
+   imports, with an `result.imports` map for selected files. An explicit `--file` selects
+   that file without expanding its imports; follow the map with additional file selections when
+   discovery needs to go deeper.
+2. If results are truncated or dominated by unrelated imports, use the map to choose a likely
+   implementation file. Prefer a file-scoped inventory such as
+   `stasis --json symbol list --file src/main.stasis --kind function` over one-word searches.
+   `--query` matches a substring of name or signature. `--page` is zero-based and defaults to 0;
+   `--limit` defaults to 32 and is capped at 200. List results omit `imports` and empty
+   `globals` items; read those groups directly with `symbol read imports --kind imports --file FILE`
+   or `symbol read globals --kind globals --file FILE`. Kinds are `imports`, `globals`,
+   `struct`, `function`, and `test`.
+3. Use `stasis --json symbol find NAME` for an exact name across the loaded workspace and
+   `stasis --json symbol read NAME` when one exact item is required. `find` and `read` accept
+   one `--file`; use `--kind`, `--owner`, and `--signature` as needed. Batch a small set of
+   relevant independent reads when parallel calls are available. Avoid reading whole source files
+   or enumerating every project symbol by default.
+4. Before changing behavior, run `stasis --json symbol references SYMBOL` for the relevant
+   function, global, or qualified field such as `PlayerState.health`. It defaults to 128
+   results, caps at 256, and has no file filter or paging. Treat a response at the cap as
+   potentially truncated and supplement it with targeted `rg` searches. Inspect related callers,
+   reads, and writes.
 
 For geometry or collision work, treat the rendered rectangle as the observable contract. Read the
 render, movement, collision, scoring/reset, and existing test symbols together. Test the exact
@@ -99,28 +145,32 @@ side so `<` versus `<=` behavior is explicit.
 
 ## Edit semantically
 
-Prefer `stasis symbol add`, `update`, `delete`, or `apply` over text-range edits. `symbol read`
-returns `source_hash`; echo it as `--expected-source-hash` so a concurrent change fails instead of
-being overwritten. Use the complete declaration as the replacement source.
+Prefer semantic add/update/delete/apply operations over text-range edits. Replace the complete
+item returned by `symbol read`, retaining attached comments and attributes. JSON reads return
+`result.item`; copy its `source_hash` to `--expected-source-hash` for direct update/delete commands
+or `expected_source_hash` in a batch. Use `--source-file PATH` for a complete replacement saved
+outside `src/` and `tests/`, or `--source SOURCE` for an inline declaration. Schema-v2 batch
+selectors require both `target.symbol_id` and `target.name`, copied from `symbol read`. If an add has no known ID, set
+`schema_version` to 1 for the whole batch and use tuple selectors; do not invent an ID. Direct
+symbol commands still require the versioned `stasis.json` workspace, even though their generated
+requests use schema v1.
 
-For related changes, submit one atomic batch with `stasis symbol apply --request REQUEST.json`:
+Use `--dry-run` when target scope, imports, or changed-file scope is uncertain; for a clear
+single-item change, apply once and inspect the returned plan. Dry-run compiler-validates without
+writing the proposed project source or running tests. Normal setup may still synchronize vendor
+files or cache data. A normal apply runs tests. Candidate compile failure leaves source unchanged;
+test or receipt failure rolls back touched files. If rollback is incomplete, inspect current file contents and hashes before retrying.
+Keep the successful receipt for hash-guarded revert. Re-read affected items after apply or
+formatting before later edits; use fresh IDs and hashes. Receipt revert checks whole-file
+post-edit hashes, so later changes such as formatting make it refuse rather than overwrite them.
 
-```json
-{
-  "schema_version": 1,
-  "edits": [
-    {
-      "operation": "update",
-      "target": {"kind": "function", "file": "src/main.stasis", "name": "tick"},
-      "expected_source_hash": "HASH_FROM_SYMBOL_READ",
-      "new_source": "function tick(): i32 { return 0; }"
-    }
-  ]
-}
-```
+Use direct text edits only for unsupported units, new files or configuration, or correcting a
+parse error that prevents symbol discovery. Then resume semantic edits and the same validation
+gates. A failed semantic edit is not a reason to bypass compiler or source-hash checks. Use
+`--no-tests` only when the user explicitly asks for it.
 
-The compiler plans the entire batch, reconciles imports, compiles it, runs project tests, and
-rolls every touched file back on failure. Do not use `--no-tests` unless the user explicitly asks.
+See `vendor/stasis/docs/semantic-edit-and-validation.md` for detailed discovery limits,
+schema examples, and recovery behavior.
 
 ## Testing standard
 

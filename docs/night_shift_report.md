@@ -577,3 +577,24 @@ physical-device evidence, and a fresh native screenshot was not captured.
 Adjustment: run the same focused contracts before platform-lane visual capture,
 then qualify Apple and phone font backends without weakening the shared source
 guarantees.
+
+## 2026-09-24 - Agent symbol CLI workflow
+
+Generated game guidance now starts with a compact discovery/edit/validation loop,
+uses read-sourced v2 selectors, and explains v1 batches for dependent additions.
+The CLI and offline references agree on discovery scope, hash guards, dry runs,
+supported text-edit exceptions, test policy, and receipt recovery.
+
+Validation: a fresh Cargo CLI/test build and the signed test harness passed all
+7 semantic-symbol tests and 2 generated-project documentation tests. All 5 JSON
+request examples were also applied in fresh temporary projects with a real
+`tick() == 2` regression test. Release-provenance tests (29), Android shell
+guidance checks, Rust formatting, and diff checks passed.
+
+The Windows Cargo build stages an optional graphics DLL without embedding a
+matching CLI fingerprint. The first Cargo test run therefore rejected runtime
+startup in two headless tests. Running the freshly built harness in supported
+source-development layout (temporarily unstaging that DLL after the build)
+passed; the original staged DLL was restored and its SHA-256 verified.
+
+Visual evidence: not applicable (documentation and executable-example coverage).

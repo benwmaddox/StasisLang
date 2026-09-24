@@ -401,26 +401,36 @@ exit code. Guest program output may precede the final JSON object for `run`.
 
 ### Symbol lookup and references
 
-`stasis --json symbol list` returns compact declaration items in deterministic source order. Its
-default scope is the manifest entry and that file's direct imports; use repeated `--file`, `--kind`,
-`--owner`, `--query`, `--page`, and `--limit` options to narrow or page the catalog.
+`stasis --json symbol list` returns compact items in deterministic source order. Default results
+cover the manifest entry and its direct imports. The result's `result.imports` map reports dependencies for
+each selected file. An explicit `--file` selects that file without expanding its imports; follow the
+map with additional file selections when needed.
 
-`symbol find NAME` and `symbol read NAME` select declaration items by exact semantic name, with
-optional kind, file, owner, and signature disambiguation. `find` returns metadata for every match;
-`read` requires exactly one match and also returns that declaration's source and source spans.
-Global declarations are currently represented by their editable `globals` group rather than as
-individually readable declaration items.
+Use repeated `--file` on `list`, plus `--kind`, `--owner`, and `--query` to scope
+results. `--query` matches a substring of name or signature. `--page` is zero-based and defaults
+to 0; `--limit` defaults to 32 and is capped at 200. List output omits `imports` and empty
+`globals` items. Read those groups directly, for example
+`symbol read imports --kind imports --file src/main.stasis`.
 
-`symbol references SYMBOL` has a different contract: it accepts one to eight dot-separated Stasis
-identifiers and compiler-lexes the loaded module graph, including checked-in vendor imports, for
-matching occurrences. Each result has
-an exact UTF-8 byte span and is classified as `definition`, `read`, `write`, or `call`, together with
-its containing declaration. Function, struct, and test declaration occurrences are classified as
-definitions. Qualified typed field paths—including indexed receivers such as
-`state.enemies[0].speed` queried as `state.enemies.speed`—return the declaring struct field plus
-their executable reads and writes. The VS Code extension projects this command directly:
-**Go to Definition** uses `definition` results, while **Find All References**
-uses the full result set and honors VS Code's include-declaration request.
+`symbol find NAME` matches the exact name across the loaded workspace and returns every match.
+`symbol read NAME` requires exactly one match and returns its full source, source spans,
+`symbol_id`, and `source_hash`. Both accept one `--file`, with `--kind`, `--owner`,
+and `--signature` available for disambiguation. Global declarations are represented by their
+editable `globals` group.
+
+`symbol references SYMBOL` accepts one to eight dot-separated Stasis identifiers. It defaults to
+128 results and is capped at 256; there is no file filter or paging. Treat a response at the cap as
+potentially truncated and supplement it with targeted `rg` searches. Each result has an exact UTF-8
+byte span and is classified as `definition`, `read`, `write`, or `call`. Qualified typed
+field paths—including indexed receivers such as `state.enemies[0].speed`—return the declaring
+struct field and its executable reads and writes; query them without indexes, such as
+`state.enemies.speed`.
+
+The VS Code extension projects this command directly: **Go to Definition** uses `definition`
+results, while **Find All References** uses the full result set and honors VS Code's
+include-declaration request. For edit schema, dry-run, receipt, and recovery behavior, see
+[Semantic Edit Protocol](semantic_edit_protocol.md) and
+[Semantic edit and validation](knowledge/semantic-edit-and-validation.md).
 
 ## Source formatting
 

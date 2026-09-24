@@ -38,7 +38,58 @@ available in the loaded workspace are retained because the compiler cannot prove
 Imports that supply `main`, `tick`, `render`, or `on_code_swap` are also retained because those
 host roots can be reachable without a textual call in the importing file.
 
-## JSON request
+## JSON request and schema compatibility
+
+A schema-v2 request requires `target.symbol_id` on every edit. Include `target.name` too; it is
+required by the request shape even when the canonical ID selects the item. For an update or delete,
+copy both fields and `source_hash` from `stasis --json symbol read NAME`. An omitted request
+version defaults to v2.
+
+Schema v1 remains supported for tuple selectors using `name`, `kind`, `file`, and optional
+`owner` and `signature`. If a new add has no ID from `symbol read`, explicitly set
+`schema_version` to 1 for the whole batch and use tuple selectors for its edits; do not fabricate an
+ID. Direct `symbol add`, `update`, and `delete` commands currently construct v1 requests.
+This request compatibility does not enable a legacy-project fallback: symbol commands still
+require the versioned `stasis.json` workspace. Accepted v1 requests produce a plan using the
+current schema version.
+
+### Existing-symbol v2 example
+
+For a fixture where `src/main.stasis` contains:
+
+```stasis
+function main(): i32 { return tick(); }
+function tick(): i32 { return 1; }
+```
+
+Read `tick` and copy both its `symbol_id` and `source_hash`:
+
+```json
+{
+  "schema_version": 2,
+  "edits": [
+    {
+      "operation": "update",
+      "target": {
+        "kind": "function",
+        "file": "src/main.stasis",
+        "name": "tick",
+        "symbol_id": "SYMBOL_ID_FROM_READ"
+      },
+      "expected_source_hash": "HASH_FROM_SYMBOL_READ",
+      "new_source": "function tick(): i32 {\n    return 2;\n}"
+    }
+  ]
+}
+```
+
+Adapt the complete replacement to the existing item, retaining attached comments and attributes.
+
+### New add in a mixed v1 batch
+
+The request version applies to the whole batch. When a new item has no ID to copy from a read, use
+v1 tuple selectors for that add and related edits. This update depends on the helper added in the
+same batch:
 
 ```json
 {
@@ -49,45 +100,76 @@ host roots can be reachable without a textual call in the importing file.
       "target": {
         "kind": "function",
         "file": "src/main.stasis",
-        "name": "tick",
-        "signature": "tick(): i32"
+        "name": "tick"
       },
-      "expected_source_hash": "cd966a7b3b8d7e7bb02f7049e46b90493a6621f83de2a94f311618aa4bc24529",
-      "new_source": "function tick(): i32 { return 2; }"
+      "expected_source_hash": "HASH_FROM_SYMBOL_READ",
+      "new_source": "function tick(): i32 {\n    return helper();\n}"
+    },
+    {
+      "operation": "add",
+      "target": {
+        "kind": "function",
+        "file": "src/main.stasis",
+        "name": "helper"
+      },
+      "new_source": "function helper(): i32 {\n    return 2;\n}"
     }
   ]
 }
 ```
 
-`operation` is `add`, `update`, or `delete`. A batch is planned entirely in memory, parsed again,
-and compiler-validated before any write. Apply writes all changed files, runs tests unless skipped,
-and restores every changed file if validation fails. Successful applies write a receipt under
-`build/semantic-edits/`; source files and receipts use flushed atomic replacement so interrupted
-writes retain either the old or complete new contents. Revert verifies the post-edit hashes before
-restoring the recorded source.
+A batch is planned and compiler-validated before source writes. Apply then runs project tests unless
+the user explicitly asks for `--no-tests`. Candidate compilation failure leaves sources unchanged;
+test or receipt failure rolls touched sources back. If rollback is reported incomplete, inspect
+current file contents and hashes before retrying. Successful applies write a receipt under
+`<output>/semantic-edits/` (`build/semantic-edits/` by default). Each source file and receipt uses flushed atomic replacement.
+
+Revert verifies whole-file post-edit hashes before restoring source. A later change, including
+formatting, makes it refuse rather than overwrite that change. Re-read affected items after apply
+or formatting before later edits and use fresh IDs and hashes. If tests fail during revert, the
+edited sources are reapplied.
+
+Use `--dry-run` when target, imports, or changed-file scope is uncertain. It returns the
+compiler-validated plan without writing the proposed project source or running tests. Normal
+command setup may still synchronize vendor files or cache data. For a clear single-item change,
+apply once and inspect the returned plan instead of compiling the same candidate twice. Do not
+remove hash guards or bypass compiler validation after a failed edit.
 
 ## CLI
 
 ```text
-stasis symbol list [--kind KIND] [--file FILE] [--owner OWNER]
-stasis symbol find NAME [--kind KIND] [--file FILE] [--owner OWNER] [--signature SIGNATURE]
-stasis symbol read NAME [selection options]
-stasis symbol add NAME --kind KIND --file FILE (--source SOURCE | --source-file PATH) [--dry-run] [--no-tests]
-stasis symbol update NAME [selection options] (--source SOURCE | --source-file PATH) [--expected-source-hash HASH] [--dry-run] [--no-tests]
-stasis symbol delete NAME [selection options] [--expected-source-hash HASH] [--dry-run] [--no-tests]
-stasis symbol apply --request PATH [--dry-run] [--no-tests]
-stasis symbol revert --receipt PATH [--dry-run] [--no-tests]
+stasis --json symbol list [--kind KIND] [--file FILE ...] [--owner OWNER] [--query TEXT] [--page N] [--limit N]
+stasis --json symbol find NAME [--kind KIND] [--file FILE] [--owner OWNER] [--signature SIGNATURE]
+stasis --json symbol read NAME [--kind KIND] [--file FILE] [--owner OWNER] [--signature SIGNATURE]
+stasis --json symbol references SYMBOL [--limit N]
+stasis --json symbol add NAME --kind KIND --file FILE (--source SOURCE | --source-file PATH) [--dry-run] [--no-tests]
+stasis --json symbol update NAME [selection options] (--source SOURCE | --source-file PATH) [--expected-source-hash HASH] [--dry-run] [--no-tests]
+stasis --json symbol delete NAME [selection options] [--expected-source-hash HASH] [--dry-run] [--no-tests]
+stasis --json symbol apply --request PATH [--dry-run] [--no-tests]
+stasis --json symbol revert --receipt PATH [--dry-run] [--no-tests]
 ```
 
-`KIND` is `imports`, `globals`, `struct`, `function`, or `test`. `--json` returns the same typed
-items, selectors, edit plan, hashes, reload classification, and receipt contract used by Android.
-`--source` accepts the complete replacement definition inline and is the preferred scripted path;
-`--source-file` remains available for large definitions. Exactly one is required for add/update.
+`KIND` is `imports`, `globals`, `struct`, `function`, or `test`.
+`--query` is a substring match on name or signature. List pages are zero-based; `--page`
+defaults to 0 and `--limit` defaults to 32 (maximum 200). `list` defaults to the manifest entry
+and its direct imports. Its `result.imports` map reports dependencies for every selected file. Passing
+`--file` selects the named file without expanding its imports; repeated `--file` values are supported
+for `list`. List results omit `imports` and empty `globals` items, which can be read directly
+using those names with their matching kinds. `find NAME` matches an exact name across the loaded
+workspace; `read NAME` requires exactly one item. `find` and `read` accept one `--file`.
 
-Symbol commands deliberately have no legacy-project fallback. They require the versioned
-`stasis.json` workspace contract; run `stasis init` in an older source tree before editing it.
-Existing legacy compiler/runner entrypoints remain separate and are never selected implicitly by
-`stasis symbol`.
+`references` defaults to 128 results and is capped at 256. It has no file filter or paging; a
+response at the cap may be truncated, so supplement it with targeted `rg` searches. A successful
+`read` returns `result.item` with `symbol_id`, `name`, and `source_hash`. Inspect
+`symbol apply`'s `result.plan`, `result.validation`, and `result.receipt`.
+
+`--source` accepts the complete replacement inline; `--source-file` is available for larger
+definitions. Exactly one is required for add/update. The CLI flags list `--no-tests`, but agents
+must use it only when the user explicitly asks.
+
+Symbol commands require the versioned `stasis.json` workspace contract. Run `stasis init` in
+an older source tree before using them. Existing legacy compiler/runner entrypoints remain
+separate and are never selected implicitly by `stasis symbol`.
 
 ## Android capability audit
 
