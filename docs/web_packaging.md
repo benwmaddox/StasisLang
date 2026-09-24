@@ -60,12 +60,12 @@ assets external so hosted output remains compact and follows the same asset prep
 Android and desktop packages.
 
 The browser shell owns page fitting and the guest owns its logical canvas. Projects may seed the
-authored size with `web.viewport`; for example, a Sheep Herder build authored at 1600 by 900 uses:
+authored size with `web.viewport`; for example, a Sheep Herder build authored at 1600 by 720 uses:
 
 ```json
 {
   "web": {
-    "viewport": { "width": 1600, "height": 900 }
+    "viewport": { "width": 1600, "height": 720 }
   }
 }
 ```

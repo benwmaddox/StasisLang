@@ -1663,6 +1663,55 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 },
             )
 
+    def test_android_insets_union_ignores_hidden_and_unrequested_sources(self):
+        dump = """WindowInsetsStateController
+  InsetsState
+    mDisplayFrame=Rect(0, 0 - 1441, 2561)
+    InsetsSource id=1 type=statusBars frame=[0,0][1441,136] visible=true flags= sideHint=TOP
+    InsetsSource id=2 type=systemGestures frame=[0,0][78,2561] visible=true flags= sideHint=LEFT
+    InsetsSource id=3 type=mandatorySystemGestures frame=[0,0][1441,168] visible=true flags= sideHint=TOP
+    InsetsSource id=4 type=navigationBars frame=[0,2477][1441,2561] visible=true flags= sideHint=BOTTOM
+    InsetsSource id=5 type=ime frame=[0,1000][1441,2561] visible=true flags= sideHint=BOTTOM
+    InsetsSource id=6 type=displayCutout frame=[0,0][1441,200] visible=false flags= sideHint=TOP
+  Control map:
+"""
+        self.assertEqual(
+            (78, 168, 1363, 2309),
+            seam.parse_android_safe_surface(dump, (1441, 2561)),
+        )
+        with self.assertRaisesRegex(seam.SeamError, "differs from capture"):
+            seam.parse_android_safe_surface(dump, (1441, 2500))
+
+    def test_android_authored_rect_requires_maximal_safe_fit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            capture = Path(temporary) / "frame.png"
+            rows = [[(0, 0, 0) for _ in range(40)] for _ in range(80)]
+            for y in range(13, 67):
+                for x in range(8, 32):
+                    rows[y][x] = (25, 31, 41)
+            write_rgb_png(capture, 40, 80, rows)
+            viewport = seam.fit_safe_surface([10, 20], (5, 10, 30, 60))
+            self.assertEqual((5.0, 10.0, 30, 60), viewport)
+            authored = {
+                "rect": [1, 1, 8, 18],
+                "rgb": [25, 31, 41],
+                "tolerance": 0,
+            }
+            result = seam.validate_orientation_fit_pixels(
+                capture, [10, 20], viewport, authored
+            )
+            self.assertEqual([8, 13, 32, 67], result["pixel_bounds"])
+            for y in range(13, 67):
+                rows[y][8] = (0, 0, 0)
+                rows[y][9] = (0, 0, 0)
+                rows[y][10] = (0, 0, 0)
+                rows[y][11] = (0, 0, 0)
+            write_rgb_png(capture, 40, 80, rows)
+            with self.assertRaisesRegex(seam.SeamError, "not maximal"):
+                seam.validate_orientation_fit_pixels(
+                    capture, [10, 20], viewport, authored
+                )
+
     def test_validates_ordered_orientation_metrics_and_pointer_mapping(self):
         stages = [
             (1, 1, 40, 1, 1441, 2561, 0x101),
@@ -1723,6 +1772,13 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 ],
             },
         }
+        safe_surfaces = {
+            name: (0, 0, *size) for name, size in {
+                "portrait": (1441, 2561),
+                "landscape": (2561, 1441),
+                "restored_portrait": (1441, 2561),
+            }.items()
+        }
         observed = seam.validate_orientation_markers(
             markers,
             expectations,
@@ -1731,9 +1787,37 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 "landscape": (2561, 1441),
                 "restored_portrait": (1441, 2561),
             },
+            safe_surfaces,
         )
         self.assertEqual([1, 2, 3], [item["probe_sequence"] for item in observed])
-        self.assertEqual([1281, 2561], observed[0]["fitted_content_extent"])
+        self.assertEqual([1280, 2561], observed[0]["fitted_content_extent"])
+        inset_surfaces = dict(safe_surfaces)
+        inset_surfaces["portrait"] = (0, 100, 1441, 2300)
+        with self.assertRaisesRegex(seam.SeamError, "content_scale mismatch"):
+            seam.validate_orientation_markers(
+                markers, expectations,
+                {
+                    "portrait": (1441, 2561),
+                    "landscape": (2561, 1441),
+                    "restored_portrait": (1441, 2561),
+                },
+                inset_surfaces,
+            )
+        inset_markers = [dict(item) for item in markers]
+        inset_markers[0]["content_scale"] = 1150 / 360
+        inset_markers[0]["raster_scale"] = 1150 / 360
+        self.assertEqual(
+            [1150, 2300],
+            seam.validate_orientation_markers(
+                inset_markers, expectations,
+                {
+                    "portrait": (1441, 2561),
+                    "landscape": (2561, 1441),
+                    "restored_portrait": (1441, 2561),
+                },
+                inset_surfaces,
+            )[0]["fitted_content_extent"],
+        )
         fitted_drawable_markers = [dict(item) for item in markers]
         fitted_drawable_markers[0]["drawable_w"] = 801
         with self.assertRaisesRegex(seam.SeamError, "drawable size mismatch"):
@@ -1745,6 +1829,7 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                     "landscape": (2561, 1441),
                     "restored_portrait": (1441, 2561),
                 },
+                safe_surfaces,
             )
         with self.assertRaisesRegex(seam.SeamError, "configured size mismatch"):
             seam.validate_orientation_markers(
@@ -1755,6 +1840,7 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                     "landscape": (1599, 999),
                     "restored_portrait": (999, 1599),
                 },
+                safe_surfaces,
             )
         markers[1]["frame_display_generation"] = 1
         with self.assertRaisesRegex(seam.SeamError, "frame_display_generation"):
@@ -1766,6 +1852,7 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                     "landscape": (2561, 1441),
                     "restored_portrait": (1441, 2561),
                 },
+                safe_surfaces,
             )
 
     def test_rejects_regressing_orientation_generation(self):
@@ -1826,6 +1913,7 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 markers,
                 expectations,
                 {"portrait": (1441, 2561), "restored": (1441, 2561)},
+                {"portrait": (0, 0, 1441, 2561), "restored": (0, 0, 1441, 2561)},
             )
 
     def test_parses_only_an_explicit_wm_size_override(self):
