@@ -882,3 +882,10 @@ jobs:
             target/ios-package-link/xcode-version.txt
             target/ios-package-link/xcodebuild.log
             target/ios-package-link/linked-libraries.txt
+            target/ios-package-link/simulator-evidence.json
+            target/ios-package-link/simulator-evidence.txt
+            target/ios-package-link/simulator-xcodebuild.log
+            target/ios-package-link/simulator-launch.txt
+            target/ios-package-link/simulator.log
+            target/ios-package-link/simulator-*.json
+            target/ios-package-link/simulator-*.png

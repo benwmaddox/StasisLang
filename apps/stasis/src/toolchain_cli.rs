@@ -8313,7 +8313,7 @@ fn write_ios_object_config(
     fs::write(
         output,
         format!(
-            "GCC_PREPROCESSOR_DEFINITIONS = $(inherited){network_flags}\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64 $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/ios-arm64/SDL3.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/ios-arm64/SDL3_image.framework/Headers{network_headers}\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework SDL3 -framework SDL3_image{network_library} {object_flags}\n",
+            "STASIS_SDL_PLATFORM = ios-arm64\nGCC_PREPROCESSOR_DEFINITIONS = $(inherited){network_flags}\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/$(STASIS_SDL_PLATFORM) $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/$(STASIS_SDL_PLATFORM)\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/$(STASIS_SDL_PLATFORM)/SDL3.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/$(STASIS_SDL_PLATFORM)/SDL3_image.framework/Headers{network_headers}\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework UIKit -framework SDL3 -framework SDL3_image{network_library} {object_flags}\n",
             network_flags = network_flags,
             network_headers = network_headers,
             network_library = network_library,
@@ -13013,8 +13013,18 @@ mod tests {
         );
         assert!(project.contains("stasis_mobile_runtime.c in Sources"));
         assert!(project.contains("stasis_platform_services.c in Sources"));
+        assert!(project.contains("published_replay_identity.c in Sources"));
+        assert!(project.contains("stasis_replay_consumer.c in Sources"));
+        assert!(project.contains("cJSON.c in Sources"));
         assert!(!project.contains("stasis_platform_storage.c in Sources"));
         assert!(config.contains("$(PROJECT_DIR)/../aot/game.o"));
+        assert!(config.contains("STASIS_SDL_PLATFORM = ios-arm64"));
+        assert!(config.contains("SDL3.xcframework/$(STASIS_SDL_PLATFORM)"));
+        assert!(config.contains(
+            "OTHER_LDFLAGS = $(inherited) -framework UIKit -framework SDL3 -framework SDL3_image"
+        ));
+        assert!(project.contains("STASIS_SDL_PLATFORM:-ios-arm64"));
+        assert!(project.contains(".xcframework/${platform}/"));
         assert!(ios.join("runtime/stasis_display_scale.h").is_file());
         assert!(ios.join("runtime/stasis_asset_path.h").is_file());
         assert!(ios.join("runtime/stasis_render_contract.h").is_file());

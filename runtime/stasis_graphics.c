@@ -6,6 +6,12 @@
 #include <SDL3/SDL.h>
 #include <SDL3_image/SDL_image.h>
 
+/* SDL3's public platform contract covers both device and simulator builds.
+ * Keep the legacy compiler spelling as a fallback for older Apple toolchains. */
+#if defined(SDL_PLATFORM_IOS) || defined(__IPHONEOS__)
+#define STASIS_PLATFORM_IOS 1
+#endif
+
 #include <stdbool.h>
 #include <string.h>
 #include "stasis_asset_path.h"
@@ -31,7 +37,7 @@
 #include "stasis_platform_services.h"
 #include "stasis_image_writer.h"
 #include "stasis_sprite_atlas_policy.h"
-#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
+#if !defined(__ANDROID__) && !defined(STASIS_PLATFORM_IOS)
 #define STASIS_DESKTOP_ATLAS_PLANNING 1
 #endif
 #if defined(STASIS_NETWORK_CLIENT_ENABLED)
@@ -175,7 +181,7 @@ static SDL_SpinLock g_runtime_error_lock;
 static char g_runtime_error[512];
 static SDL_Window* g_window = NULL;
 static SDL_Renderer* g_renderer = NULL;
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
 #define STASIS_MOBILE_SAFE_TARGET_MAX_BYTES (64u * 1024u * 1024u)
 static SDL_Texture* g_mobile_safe_target = NULL;
 static int g_mobile_safe_target_w = 0;
@@ -320,7 +326,7 @@ static float g_prev_x_px[STASIS_MAX_POINTERS];
 static float g_prev_y_px[STASIS_MAX_POINTERS];
 static SDL_FingerID g_finger_ids[STASIS_MAX_POINTERS - 1];
 static int g_finger_active[STASIS_MAX_POINTERS - 1];
-#if defined(__IPHONEOS__)
+#if defined(STASIS_PLATFORM_IOS)
 static bool g_ios_three_finger_latched = false;
 #endif
 
@@ -373,7 +379,7 @@ static int stasis_draw_mixed_order_span(
 /* Forward decls for helpers referenced early in the file (MSVC C mode does not allow implicit declarations). */
 static uint64_t stasis_perf_elapsed_us(uint64_t started_counter, uint64_t finished_counter);
 
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
 int stasis_platform_open_external_url(const char *url, int32_t length);
 #else
 static int stasis_platform_open_external_url(const char *url, int32_t length) {
@@ -691,7 +697,7 @@ static void stasis_invalidate_renderer_resources(int discard_gpu_handles) {
     g_resource_frame_ready = false;
 }
 
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
 static void stasis_mobile_release_presentation(int discard_gpu_handles) {
     if (g_mobile_safe_target) {
         if (!discard_gpu_handles) {
@@ -823,7 +829,7 @@ static void stasis_present_gpu_loading(void) {
     const int origin_y = (g_window_height - rows * cell) / 2;
 
     if (g_renderer) {
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
         if (!stasis_mobile_prepare_presentation()) return;
 #else
         SDL_SetRenderTarget(g_renderer, NULL);
@@ -1003,7 +1009,7 @@ static StasisDisplayViewport stasis_query_safe_native_viewport(void) {
     }
 #endif
 
-#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
+#if !defined(__ANDROID__) && !defined(STASIS_PLATFORM_IOS)
     /* Desktop work-area bounds still protect windows overlapping system UI. */
     const SDL_DisplayID display = SDL_GetDisplayForWindow(g_window);
     SDL_Rect usable;
@@ -1065,7 +1071,7 @@ static void stasis_sync_display_metrics(void) {
                 SDL_LOGICAL_PRESENTATION_LETTERBOX);
         }
     } else if (g_renderer) {
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
         /* Query the complete window backing, even after an inset target frame. */
         SDL_SetRenderTarget(g_renderer, NULL);
 #endif
@@ -1090,7 +1096,7 @@ static void stasis_sync_display_metrics(void) {
     if (g_test_display_override.active) {
         available_w = g_test_display_override.available_w;
         available_h = g_test_display_override.available_h;
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     } else {
         available_w = (int)safe_native.w;
         available_h = (int)safe_native.h;
@@ -1101,7 +1107,7 @@ static void stasis_sync_display_metrics(void) {
             &available_w, &available_h);
 #endif
     }
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     const StasisDisplayMetrics next = stasis_display_metrics_safe_fit(
         g_window_width, g_window_height,
         g_native_window_width, g_native_window_height,
@@ -1256,7 +1262,7 @@ STASIS_EXPORT int stasis_test_push_input_event(
     } else if (kind >= 3 && kind <= 5) {
         StasisDisplayMetrics input_metrics = g_display_metrics;
         if (g_test_display_override.active) {
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
             input_metrics = stasis_display_metrics_safe_fit(
 #else
             input_metrics = stasis_display_metrics(
@@ -1329,7 +1335,7 @@ static void stasis_set_pointer_pos_px(int idx, float x, float y) {
 static void stasis_update_safe_viewport(void) {
     if (!g_window) return;
     const StasisDisplayViewport safe_native = stasis_query_safe_native_viewport();
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     const StasisDisplayMetrics next = stasis_display_metrics_safe_fit(
         g_window_width, g_window_height,
         g_native_window_width, g_native_window_height,
@@ -1344,7 +1350,7 @@ static void stasis_update_safe_viewport(void) {
         g_drawable_width, g_drawable_height, safe_native);
 #endif
     int safe_changed = stasis_presentation_viewport_changed(g_display_metrics, next);
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     if (!g_test_display_override.active) {
         const int available_w = (int)safe_native.w;
         const int available_h = (int)safe_native.h;
@@ -1395,7 +1401,7 @@ static void stasis_release_finger_slot(SDL_FingerID fingerId) {
     }
 }
 
-#if defined(__IPHONEOS__)
+#if defined(STASIS_PLATFORM_IOS)
 static int stasis_ios_active_finger_count(void) {
     int active_fingers = 0;
     for (int finger = 0; finger < STASIS_MAX_POINTERS - 1; finger++) {
@@ -1553,7 +1559,7 @@ static void stasis_pump_events(void) {
                         event.tfinger.y * (float)g_native_window_height,
                         &logical_x, &logical_y);
                     stasis_set_pointer_pos_px(idx, logical_x, logical_y);
-#if defined(__IPHONEOS__)
+#if defined(STASIS_PLATFORM_IOS)
                     if (stasis_ios_active_finger_count() >= 3 && !g_ios_three_finger_latched) {
                         g_ios_three_finger_latched = true;
                         g_force_debug_overlay = !g_force_debug_overlay;
@@ -1588,7 +1594,7 @@ static void stasis_pump_events(void) {
                     g_input_frame.pointers[idx].is_down = 0;
                     g_input_frame.pointers[idx].went_up = 1;
                     stasis_release_finger_slot(event.tfinger.fingerID);
-#if defined(__IPHONEOS__)
+#if defined(STASIS_PLATFORM_IOS)
                     if (stasis_ios_active_finger_count() < 3) g_ios_three_finger_latched = false;
 #endif
                     float logical_x = 0.0f;
@@ -1751,7 +1757,7 @@ STASIS_EXPORT void stasis_host_bulk_apply_requests(
     {
         if (host_req_window_w_px && host_req_window_h_px)
         {
-#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
+#if !defined(__ANDROID__) && !defined(STASIS_PLATFORM_IOS)
             (void)stasis_set_fullscreen(0);
 #endif
             stasis_set_window_size(*host_req_window_w_px, *host_req_window_h_px);
@@ -3124,7 +3130,7 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
 
     int ok = 0;
     if (!g_renderer) return 0;
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     const int restore_mobile_target =
         g_mobile_safe_target && SDL_GetRenderTarget(g_renderer) == g_mobile_safe_target;
     SDL_BlendMode saved_blend_mode = SDL_BLENDMODE_BLEND;
@@ -3150,7 +3156,7 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
         g_line_count = 0;
     }
 
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     if (!stasis_mobile_composite_presentation()) {
         if (restore_mobile_target) {
             SDL_SetRenderTarget(g_renderer, g_mobile_safe_target);
@@ -3207,7 +3213,7 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
             g_renderer, g_window_width, g_window_height,
             SDL_LOGICAL_PRESENTATION_LETTERBOX);
     }
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     if (restore_mobile_target) {
         if (!SDL_SetRenderTarget(g_renderer, g_mobile_safe_target) ||
             !SDL_SetRenderLogicalPresentation(
@@ -3244,7 +3250,7 @@ STASIS_EXPORT int stasis_host_schedule_screenshot(const char* path) {
 /* Host-only request. Call from the main tick boundary that owns the SDL window. */
 STASIS_EXPORT int stasis_host_focus_game_window(void) {
     if (!g_window || g_recording_presentation) return 0;
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     return 0;
 #else
     if ((SDL_GetWindowFlags(g_window) & SDL_WINDOW_MINIMIZED) != 0) {
@@ -3620,7 +3626,7 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     if (force_hidden && strcmp(force_hidden, "0") != 0) {
         window_flags |= SDL_WINDOW_HIDDEN;
     }
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     const SDL_DisplayMode* display_mode =
         SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
     if (display_mode && display_mode->w > 0 && display_mode->h > 0) {
@@ -3811,6 +3817,44 @@ STASIS_EXPORT void stasis_get_display_metrics(
 }
 
 /*
+ * Test-only physical presentation receipt. The environment gate matches the
+ * existing display/input injection seam, so packaged applications cannot use
+ * it to observe or alter presentation state.
+ */
+STASIS_EXPORT int stasis_test_get_display_presentation(
+    float *out_f32,
+    int32_t capacity
+) {
+    const char *enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!out_f32 || capacity < 14 || !enabled ||
+        enabled[0] != '1' || enabled[1] != '\0') {
+        return 0;
+    }
+    out_f32[0] = g_display_metrics.native_viewport.x;
+    out_f32[1] = g_display_metrics.native_viewport.y;
+    out_f32[2] = g_display_metrics.native_viewport.w;
+    out_f32[3] = g_display_metrics.native_viewport.h;
+    out_f32[4] = g_display_metrics.drawable_viewport.x;
+    out_f32[5] = g_display_metrics.drawable_viewport.y;
+    out_f32[6] = g_display_metrics.drawable_viewport.w;
+    out_f32[7] = g_display_metrics.drawable_viewport.h;
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
+    out_f32[8] = g_mobile_safe_drawable.x;
+    out_f32[9] = g_mobile_safe_drawable.y;
+    out_f32[10] = g_mobile_safe_drawable.w;
+    out_f32[11] = g_mobile_safe_drawable.h;
+#else
+    out_f32[8] = 0.0f;
+    out_f32[9] = 0.0f;
+    out_f32[10] = (float)g_display_metrics.drawable_w;
+    out_f32[11] = (float)g_display_metrics.drawable_h;
+#endif
+    out_f32[12] = g_display_metrics.content_scale;
+    out_f32[13] = g_display_metrics.raster_scale;
+    return 1;
+}
+
+/*
  * Get current desktop usable dimensions (excluding taskbar/docks when available).
  * Writes width and height to provided pointers.
  *
@@ -3842,7 +3886,7 @@ STASIS_EXPORT int stasis_host_get_window_placement(
         g_recording_presentation) {
         return 0;
     }
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     return 0;
 #else
     int x = 0;
@@ -3896,7 +3940,7 @@ STASIS_EXPORT int stasis_host_get_window_placement(
 STASIS_EXPORT int stasis_host_apply_window_placement(
     int32_t x, int32_t y, int32_t width, int32_t height, int32_t raise) {
     if (!g_window || width < 1 || height < 1 || g_recording_presentation) return 0;
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     (void)x;
     (void)y;
     (void)raise;
@@ -3952,7 +3996,7 @@ STASIS_EXPORT int stasis_host_apply_window_placement(
 /* Raise and focus without changing a visible window's presentation state. */
 STASIS_EXPORT int stasis_host_focus_window(void) {
     if (!g_window || g_recording_presentation) return 0;
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     return 0;
 #else
     const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
@@ -3974,7 +4018,7 @@ STASIS_EXPORT int stasis_host_get_monitor_usable_bounds(
         g_recording_presentation) {
         return 0;
     }
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     (void)x;
     (void)y;
     return 0;
@@ -4020,7 +4064,7 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
     }
 
     stasis_set_logical_size(width, height);
-#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
+#if !defined(__ANDROID__) && !defined(STASIS_PLATFORM_IOS)
     if (g_recording_presentation) {
         if (g_renderer) {
             SDL_SetRenderLogicalPresentation(
@@ -4040,7 +4084,7 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
 #endif
     stasis_sync_display_metrics();
 
-#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
+#if !defined(__ANDROID__) && !defined(STASIS_PLATFORM_IOS)
     SDL_Log(
         "Stasis window presentation: mode=windowed logical=%dx%d native=%dx%d drawable=%dx%d display_scale=%.3f display_generation=%d density_generation=%d",
         g_window_width, g_window_height,
@@ -4071,7 +4115,7 @@ STASIS_EXPORT int stasis_set_maximized(int maximized) {
         return 1;
     }
 
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     (void)maximized;
     stasis_sync_display_metrics();
     return 1;
@@ -4140,7 +4184,7 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
     if (result) {
         stasis_sync_display_metrics();
 
-#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
+#if !defined(__ANDROID__) && !defined(STASIS_PLATFORM_IOS)
         SDL_Log("Stasis window presentation: mode=%s", fullscreen ? "fullscreen" : "windowed");
 #endif
 
@@ -4153,7 +4197,7 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
  * Begin a new frame
  */
 STASIS_EXPORT void stasis_begin_frame(void) {
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
     if (g_renderer) SDL_SetRenderTarget(g_renderer, NULL);
 #endif
     gfx_debug_hash_reset_if_enabled();
