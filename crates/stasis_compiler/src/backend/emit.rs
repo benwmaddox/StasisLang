@@ -1,8 +1,9 @@
 use crate::backend::compile_analysis::{
     is_collection_handle_type, is_i32_abi_compatible_type, is_i32_numeric_type,
-    is_i32_scalar_lane_type, is_struct_view_type, resolve_call_signature, CallSignature,
-    CallSignatureMap, CollectionInfoMap, ConstantValue, ConstantValueMap, ExternImportKey,
-    ForeachCollectionInfo, GlobalPathTypeMap, NamedStructFieldTypeMap,
+    is_i32_scalar_lane_type, is_struct_view_type, resolve_call_signature,
+    validate_owned_local_fixed_array_contract, CallSignature, CallSignatureMap, CollectionInfoMap,
+    ConstantValue, ConstantValueMap, ExternImportKey, ForeachCollectionInfo, GlobalPathTypeMap,
+    NamedStructFieldTypeMap,
 };
 use crate::compiler::{FunctionId, FunctionMeta};
 use crate::data_flow::{FunctionDataFlowSummary, ParameterStorageKind};
@@ -17,7 +18,8 @@ use crate::ir::hir::{
 use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
     immediates::{Ieee32, Ieee64},
-    types, AbiParam, Block, FuncRef, InstBuilder, MemFlags, TrapCode, Value,
+    types, AbiParam, Block, FuncRef, InstBuilder, MemFlags, StackSlot, StackSlotData,
+    StackSlotKind, TrapCode, Type, Value,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
@@ -549,7 +551,17 @@ pub(crate) struct LocalBinding {
     pub(crate) var: Variable,
     pub(crate) type_id: TypeId,
     pub(crate) struct_view: Option<StructViewBinding>,
+    pub(crate) owned_fixed: Option<OwnedFixedArrayBinding>,
     pub(crate) proven_index_upper: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct OwnedFixedArrayBinding {
+    pub(crate) slot: StackSlot,
+    pub(crate) element_type: TypeId,
+    pub(crate) len: i32,
+    pub(crate) stride: i32,
+    pub(crate) pointer_type: Type,
 }
 
 #[derive(Clone, Copy)]
@@ -590,6 +602,8 @@ where
     OnFunctionBuilt: FnOnce(&FunctionMeta, &cranelift_codegen::ir::Function),
     Finalize: FnOnce(M, FuncId, cranelift_codegen::Context) -> Result<T, String>,
 {
+    validate_owned_local_fixed_array_contract(hir, type_table)?;
+    let native_pointer_type = module.target_config().pointer_type();
     let mut context = module.make_context();
     context.func.signature = module.make_signature();
     for param_type in &meta.params {
@@ -786,6 +800,7 @@ where
                     var: variable,
                     type_id: param_type,
                     struct_view,
+                    owned_fixed: None,
                     proven_index_upper: None,
                 },
             );
@@ -849,6 +864,7 @@ where
                 &mut internal_calls,
                 call_signatures,
                 type_table,
+                native_pointer_type,
                 global_path_types,
                 constant_values,
                 collection_infos,
@@ -2202,6 +2218,7 @@ pub(crate) fn emit_simple_statements(
     internal_calls: &mut InternalCallMode<'_>,
     call_signatures: &CallSignatureMap,
     type_table: &TypeTable,
+    native_pointer_type: Type,
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
@@ -2242,6 +2259,65 @@ pub(crate) fn emit_simple_statements(
                     foreach_bindings,
                     "let binding",
                 )?;
+
+                if let (Some(declared_type), SimpleExpr::DefaultValue(default_type)) =
+                    (*type_id, expression)
+                {
+                    if declared_type == *default_type {
+                        if let Some((element_type, len, stride, lane_type)) =
+                            owned_fixed_array_layout(declared_type, type_table)?
+                        {
+                            let byte_size = u32::try_from(len)
+                                .ok()
+                                .and_then(|len| len.checked_mul(stride as u32))
+                                .ok_or_else(|| {
+                                    format!(
+                                        "local fixed array '{name}' storage size exceeds native limits"
+                                    )
+                                })?
+                                .max(stride as u32);
+                            let align_shift = (stride as u32).trailing_zeros() as u8;
+                            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                                StackSlotKind::ExplicitSlot,
+                                byte_size,
+                                align_shift,
+                            ));
+                            let zero = match lane_type {
+                                types::F32 => builder.ins().f32const(Ieee32::with_float(0.0)),
+                                types::F64 => builder.ins().f64const(Ieee64::with_float(0.0)),
+                                _ => builder.ins().iconst(types::I32, 0),
+                            };
+                            for index in 0..len {
+                                builder.ins().stack_store(zero, slot, index * stride);
+                            }
+                            let placeholder = builder.ins().iconst(types::I32, 0);
+                            let variable = declare_new_variable(
+                                builder,
+                                next_variable,
+                                placeholder,
+                                declared_type,
+                                type_table,
+                            )?;
+                            values_by_name.insert(
+                                name.clone(),
+                                LocalBinding {
+                                    var: variable,
+                                    type_id: declared_type,
+                                    struct_view: None,
+                                    owned_fixed: Some(OwnedFixedArrayBinding {
+                                        slot,
+                                        element_type,
+                                        len,
+                                        stride,
+                                        pointer_type: native_pointer_type,
+                                    }),
+                                    proven_index_upper: None,
+                                },
+                            );
+                            continue;
+                        }
+                    }
+                }
 
                 if let Some(struct_view) = try_emit_struct_view_value(
                     builder,
@@ -2315,6 +2391,7 @@ pub(crate) fn emit_simple_statements(
                                 known_collection_hash: struct_view.known_collection_hash,
                                 bounds_proven: view_bounds_proven,
                             }),
+                            owned_fixed: None,
                             proven_index_upper: None,
                         },
                     );
@@ -2377,6 +2454,7 @@ pub(crate) fn emit_simple_statements(
                         var: variable,
                         type_id: local_type_id,
                         struct_view: None,
+                        owned_fixed: None,
                         proven_index_upper: None,
                     },
                 );
@@ -2436,6 +2514,24 @@ pub(crate) fn emit_simple_statements(
                     continue;
                 }
                 if try_emit_struct_copy_from_global_to_indexed(
+                    builder,
+                    runtime_call_refs,
+                    internal_calls,
+                    type_table,
+                    target,
+                    *op,
+                    expression,
+                    values_by_name,
+                    call_signatures,
+                    global_path_types,
+                    constant_values,
+                    collection_infos,
+                    named_struct_field_types,
+                    foreach_bindings,
+                )? {
+                    continue;
+                }
+                if try_emit_owned_fixed_array_compound_assignment(
                     builder,
                     runtime_call_refs,
                     internal_calls,
@@ -3642,6 +3738,7 @@ pub(crate) fn emit_simple_statements(
                     internal_calls,
                     call_signatures,
                     type_table,
+                    native_pointer_type,
                     global_path_types,
                     constant_values,
                     collection_infos,
@@ -3674,6 +3771,7 @@ pub(crate) fn emit_simple_statements(
                         internal_calls,
                         call_signatures,
                         type_table,
+                        native_pointer_type,
                         global_path_types,
                         constant_values,
                         collection_infos,
@@ -3717,6 +3815,7 @@ pub(crate) fn emit_simple_statements(
                     internal_calls,
                     call_signatures,
                     type_table,
+                    native_pointer_type,
                     global_path_types,
                     constant_values,
                     collection_infos,
@@ -3779,6 +3878,7 @@ pub(crate) fn emit_simple_statements(
                     internal_calls,
                     call_signatures,
                     type_table,
+                    native_pointer_type,
                     global_path_types,
                     constant_values,
                     collection_infos,
@@ -3803,6 +3903,7 @@ pub(crate) fn emit_simple_statements(
                     internal_calls,
                     call_signatures,
                     type_table,
+                    native_pointer_type,
                     global_path_types,
                     constant_values,
                     collection_infos,
@@ -3846,7 +3947,7 @@ pub(crate) fn emit_simple_statements(
                         "foreach index binding",
                     )?;
                 }
-                let (collection_info, collection_handle, collection_struct_type_id) =
+                let (collection_info, collection_handle, collection_struct_type_id, owned_fixed) =
                     if let Some(local_collection) = values_by_name.get(collection_path).copied() {
                         let info = build_local_foreach_collection_info(
                             collection_path,
@@ -3862,6 +3963,7 @@ pub(crate) fn emit_simple_statements(
                             info,
                             ForeachCollectionHandle::LocalVar(local_collection.var),
                             struct_type_id,
+                            local_collection.owned_fixed,
                         )
                     } else {
                         let Some(collection_info) = collection_infos.get(collection_path) else {
@@ -3886,6 +3988,7 @@ pub(crate) fn emit_simple_statements(
                             collection_info.clone(),
                             ForeachCollectionHandle::PathHash(hash_global_path(collection_path)),
                             struct_type_id,
+                            None,
                         )
                     };
                 let initial_index_value = builder.ins().iconst(types::I32, 0);
@@ -3912,8 +4015,8 @@ pub(crate) fn emit_simple_statements(
                 let mut f64_array_base_ptrs: BTreeMap<String, Value> = BTreeMap::new();
                 if collection_info.element_type.is_some_and(|type_id| {
                     is_i32_abi_compatible_type(type_id, type_table)
-                        && !is_u8_lane(type_table, type_id)
-                        && type_id != TYPE_ID_U16
+                        && (owned_fixed.is_some()
+                            || (!is_u8_lane(type_table, type_id) && type_id != TYPE_ID_U16))
                 }) {
                     let direct = matches!(collection_handle, ForeachCollectionHandle::PathHash(_))
                         .then(|| runtime_call_refs.direct_storage.as_ref())
@@ -3924,7 +4027,9 @@ pub(crate) fn emit_simple_statements(
                                 .get(&(collection_path.clone(), String::new()))
                         })
                         .copied();
-                    let base = if let Some(direct) = direct {
+                    let base = if let Some(owned) = owned_fixed {
+                        builder.ins().stack_addr(owned.pointer_type, owned.slot, 0)
+                    } else if let Some(direct) = direct {
                         loop_len_value =
                             emit_bounded_direct_array_len(builder, direct, loop_len_value);
                         emit_direct_slot_data_ptr(builder, direct.slot)
@@ -3991,7 +4096,9 @@ pub(crate) fn emit_simple_statements(
                                 .get(&(collection_path.clone(), String::new()))
                         })
                         .copied();
-                    let base = if let Some(direct) = direct {
+                    let base = if let Some(owned) = owned_fixed {
+                        builder.ins().stack_addr(owned.pointer_type, owned.slot, 0)
+                    } else if let Some(direct) = direct {
                         loop_len_value =
                             emit_bounded_direct_array_len(builder, direct, loop_len_value);
                         emit_direct_slot_data_ptr(builder, direct.slot)
@@ -4015,7 +4122,9 @@ pub(crate) fn emit_simple_statements(
                                 .get(&(collection_path.clone(), String::new()))
                         })
                         .copied();
-                    let base = if let Some(direct) = direct {
+                    let base = if let Some(owned) = owned_fixed {
+                        builder.ins().stack_addr(owned.pointer_type, owned.slot, 0)
+                    } else if let Some(direct) = direct {
                         loop_len_value =
                             emit_bounded_direct_array_len(builder, direct, loop_len_value);
                         emit_direct_slot_data_ptr(builder, direct.slot)
@@ -4112,6 +4221,7 @@ pub(crate) fn emit_simple_statements(
                             var: index_var,
                             type_id: TYPE_ID_I32,
                             struct_view: None,
+                            owned_fixed: None,
                             proven_index_upper: Some(collection_info.len as usize),
                         },
                     );
@@ -4167,6 +4277,7 @@ pub(crate) fn emit_simple_statements(
                     internal_calls,
                     call_signatures,
                     type_table,
+                    native_pointer_type,
                     global_path_types,
                     constant_values,
                     collection_infos,
@@ -4194,6 +4305,146 @@ pub(crate) fn emit_simple_statements(
         }
     }
     Ok(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_emit_owned_fixed_array_compound_assignment(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    type_table: &TypeTable,
+    target: &AssignTarget,
+    op: AssignOp,
+    expression: &SimpleExpr,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    call_signatures: &CallSignatureMap,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<bool, String> {
+    if op == AssignOp::Set {
+        return Ok(false);
+    }
+    let AssignTarget::IndexedPath {
+        collection_path,
+        index,
+        suffix,
+    } = target
+    else {
+        return Ok(false);
+    };
+    if !suffix.is_empty() {
+        return Ok(false);
+    }
+    let Some(owned) = values_by_name
+        .get(collection_path)
+        .and_then(|binding| binding.owned_fixed)
+    else {
+        return Ok(false);
+    };
+
+    // Compound assignment evaluates the target index and old element exactly
+    // once before evaluating the right-hand side on every backend.
+    let index_binding = emit_simple_expression(
+        builder,
+        index,
+        Some(TYPE_ID_I32),
+        values_by_name,
+        runtime_call_refs,
+        internal_calls,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        foreach_bindings,
+    )?;
+    let index_binding = normalize_index_binding(index_binding, type_table)?;
+    let address = emit_owned_fixed_array_address(builder, owned, index_binding.value);
+    let lane_type = clif_type_for_type_id(owned.element_type, type_table)?;
+    let lhs = builder.ins().load(lane_type, MemFlags::new(), address, 0);
+    let rhs = emit_simple_expression(
+        builder,
+        expression,
+        Some(owned.element_type),
+        values_by_name,
+        runtime_call_refs,
+        internal_calls,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        foreach_bindings,
+    )?;
+    if !are_assignment_types_compatible(owned.element_type, rhs.type_id, type_table) {
+        return Err(format!(
+            "local fixed-array assignment type mismatch for '{collection_path}[...]': target type {}, expression type {}",
+            owned.element_type, rhs.type_id
+        ));
+    }
+    let value = if owned.element_type == TYPE_ID_BOOL {
+        return Err(format!(
+            "bool local fixed-array element '{collection_path}[...]' only supports '=' assignment"
+        ));
+    } else if type_table.is_integer(owned.element_type) {
+        emit_integer_assignment_value(
+            builder,
+            Some(lhs),
+            rhs.value,
+            op,
+            type_table,
+            owned.element_type,
+        )
+    } else if owned.element_type == TYPE_ID_F32 || owned.element_type == TYPE_ID_F64 {
+        match op {
+            AssignOp::Add => builder.ins().fadd(lhs, rhs.value),
+            AssignOp::Sub => builder.ins().fsub(lhs, rhs.value),
+            AssignOp::Mul => builder.ins().fmul(lhs, rhs.value),
+            AssignOp::Div => builder.ins().fdiv(lhs, rhs.value),
+            AssignOp::Mod => {
+                return Err(format!(
+                    "'%=' is unsupported for local fixed-array element '{collection_path}[...]'"
+                ));
+            }
+            AssignOp::Set => unreachable!("set was handled before target evaluation"),
+        }
+    } else {
+        return Err(format!(
+            "unsupported local fixed-array element type {} for compound assignment",
+            owned.element_type
+        ));
+    };
+    builder.ins().store(MemFlags::new(), value, address, 0);
+    Ok(true)
+}
+
+fn owned_fixed_array_layout(
+    type_id: TypeId,
+    type_table: &TypeTable,
+) -> Result<Option<(TypeId, i32, i32, Type)>, String> {
+    if type_table.type_info(type_id).map(|info| info.category) != Some(TypeCategory::ArrayFixed) {
+        return Ok(None);
+    }
+    let Some(element_type) = type_table.indexed_element_type_id(type_id) else {
+        return Ok(None);
+    };
+    let Some(len) = type_table.fixed_collection_len(type_id) else {
+        return Ok(None);
+    };
+    let lane_type = clif_type_for_type_id(element_type, type_table)?;
+    if !matches!(lane_type, types::I32 | types::F32 | types::F64) {
+        return Err(format!(
+            "local fixed array element type {element_type} has unsupported native lane {lane_type}"
+        ));
+    }
+    let stride = i32::try_from(lane_type.bytes())
+        .map_err(|_| format!("local fixed array element type {element_type} is too wide"))?;
+    Ok(Some((element_type, len, stride, lane_type)))
 }
 
 pub(crate) fn emit_conversion_assignment_value(
@@ -4279,6 +4530,7 @@ pub(crate) fn emit_for_control_statement(
     internal_calls: &mut InternalCallMode<'_>,
     call_signatures: &CallSignatureMap,
     type_table: &TypeTable,
+    native_pointer_type: Type,
     global_path_types: &GlobalPathTypeMap,
     constant_values: &ConstantValueMap,
     collection_infos: &CollectionInfoMap,
@@ -4304,6 +4556,7 @@ pub(crate) fn emit_for_control_statement(
                 internal_calls,
                 call_signatures,
                 type_table,
+                native_pointer_type,
                 global_path_types,
                 constant_values,
                 collection_infos,
@@ -10907,6 +11160,17 @@ pub(crate) fn emit_simple_expression(
             if let Some((base, suffix)) = name.split_once('.') {
                 if let Some(local) = values_by_name.get(base).copied() {
                     if let Some(kind) = collection_meta_kind_from_suffix(suffix) {
+                        if let Some(owned) = local.owned_fixed {
+                            if kind != CollectionMetaKind::MaxLength {
+                                return Err(format!(
+                                    "local fixed array metadata '{suffix}' is unsupported; use '.max_length'"
+                                ));
+                            }
+                            return Ok(ValueBinding {
+                                value: builder.ins().iconst(types::I32, i64::from(owned.len)),
+                                type_id: TYPE_ID_I32,
+                            });
+                        }
                         if is_collection_handle_type(local.type_id, type_table) {
                             let base_value = builder.use_var(local.var);
                             let kind_value =
@@ -12896,6 +13160,21 @@ pub(crate) fn emit_local_indexed_collection_load(
     suffix: &str,
     index_binding: ValueBinding,
 ) -> Result<ValueBinding, String> {
+    if let Some(owned) = collection_binding.owned_fixed {
+        if !suffix.is_empty() {
+            return Err(format!(
+                "local fixed array '{collection_name}' does not support element field path '{suffix}'"
+            ));
+        }
+        let index_binding = normalize_index_binding(index_binding, type_table)?;
+        let address = emit_owned_fixed_array_address(builder, owned, index_binding.value);
+        let lane_type = clif_type_for_type_id(owned.element_type, type_table)?;
+        let value = builder.ins().load(lane_type, MemFlags::new(), address, 0);
+        return Ok(ValueBinding {
+            value,
+            type_id: owned.element_type,
+        });
+    }
     let collection_handle = builder.use_var(collection_binding.var);
     let index_binding = normalize_index_binding(index_binding, type_table)?;
     if let Some(view) = collection_binding.struct_view {
@@ -13014,6 +13293,61 @@ pub(crate) fn emit_local_indexed_collection_assignment(
     op: AssignOp,
     rhs: ValueBinding,
 ) -> Result<(), String> {
+    if let Some(owned) = collection_binding.owned_fixed {
+        if !suffix.is_empty() {
+            return Err(format!(
+                "local fixed array '{collection_name}' does not support element field path '{suffix}'"
+            ));
+        }
+        if !are_assignment_types_compatible(owned.element_type, rhs.type_id, type_table) {
+            return Err(format!(
+                "local fixed-array assignment type mismatch for '{collection_name}[...]': target type {}, expression type {}",
+                owned.element_type, rhs.type_id
+            ));
+        }
+        let index_binding = normalize_index_binding(index_binding, type_table)?;
+        let address = emit_owned_fixed_array_address(builder, owned, index_binding.value);
+        let lane_type = clif_type_for_type_id(owned.element_type, type_table)?;
+        let lhs = (op != AssignOp::Set)
+            .then(|| builder.ins().load(lane_type, MemFlags::new(), address, 0));
+        let value = if owned.element_type == TYPE_ID_BOOL {
+            if op != AssignOp::Set {
+                return Err(format!(
+                    "bool local fixed-array element '{collection_name}[...]' only supports '=' assignment"
+                ));
+            }
+            rhs.value
+        } else if type_table.is_integer(owned.element_type) {
+            emit_integer_assignment_value(
+                builder,
+                lhs,
+                rhs.value,
+                op,
+                type_table,
+                owned.element_type,
+            )
+        } else if owned.element_type == TYPE_ID_F32 || owned.element_type == TYPE_ID_F64 {
+            match op {
+                AssignOp::Set => rhs.value,
+                AssignOp::Add => builder.ins().fadd(lhs.expect("compound lhs"), rhs.value),
+                AssignOp::Sub => builder.ins().fsub(lhs.expect("compound lhs"), rhs.value),
+                AssignOp::Mul => builder.ins().fmul(lhs.expect("compound lhs"), rhs.value),
+                AssignOp::Div => builder.ins().fdiv(lhs.expect("compound lhs"), rhs.value),
+                AssignOp::Mod => {
+                    return Err(format!(
+                        "'%=' is unsupported for local fixed-array element '{collection_name}[...]'"
+                    ))
+                }
+            }
+        } else {
+            return Err(format!(
+                "unsupported local fixed-array element type {} for '{collection_name}'",
+                owned.element_type
+            ));
+        };
+        builder.ins().store(MemFlags::new(), value, address, 0);
+        return Ok(());
+    }
     let collection_handle = builder.use_var(collection_binding.var);
     let index_binding = normalize_index_binding(index_binding, type_table)?;
     if let Some(view) = collection_binding.struct_view {
@@ -13036,6 +13370,23 @@ pub(crate) fn emit_local_indexed_collection_assignment(
         rhs,
         collection_binding.struct_view.is_some(),
     )
+}
+
+fn emit_owned_fixed_array_address(
+    builder: &mut FunctionBuilder<'_>,
+    owned: OwnedFixedArrayBinding,
+    index: Value,
+) -> Value {
+    let len = builder.ins().iconst(types::I32, i64::from(owned.len));
+    emit_array_bounds_trap(builder, index, len, true);
+    let base = builder.ins().stack_addr(owned.pointer_type, owned.slot, 0);
+    let index = if owned.pointer_type == types::I32 {
+        index
+    } else {
+        builder.ins().uextend(owned.pointer_type, index)
+    };
+    let offset = builder.ins().imul_imm(index, i64::from(owned.stride));
+    builder.ins().iadd(base, offset)
 }
 
 #[allow(clippy::too_many_arguments)]

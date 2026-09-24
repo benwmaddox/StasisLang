@@ -89,6 +89,33 @@ String-like storage is fixed-layout and deterministic.
 - header `max_length: i32`
 - payload `elements[N]`
 
+A function-local primitive-scalar declaration without an initializer, such as
+`let samples: i32[9];`, owns its fixed storage. The supported element types are
+`i32`, `bool`, `u8`, `u16`, `u32`, `f32`, and `f64`. Named-struct and other
+composite local fixed arrays remain compile errors. The declaration allocates
+a new payload for that invocation and zero-initializes every element each time
+execution reaches the declaration. Recursive calls, nested calls, and later
+invocations therefore cannot alias or retain that storage. The storage lives
+until its declaring invocation returns; it is not process-global scratch and
+does not escape as a durable address.
+
+Owned local fixed storage is direct-only in this language version. The local
+array name cannot be returned, assigned or initialized as another collection,
+or passed to a fixed-array or `Type[]` parameter. Such uses are compile errors
+on every backend. Use caller-backed global or field storage when a function
+must receive a `Type[]` view; fixed-to-view compatibility for that existing
+backed storage is unchanged.
+
+This ownership rule does not change borrowed collections. A `Type[]`
+parameter or local view continues to refer to caller-provided fixed storage,
+and an initialized collection binding retains the source collection's view
+semantics. Direct indexing and `foreach` over owned local fixed arrays use the
+same fatal bounds contract as global and borrowed fixed storage.
+
+For `array[index] op= rhs`, the index and prior element value are evaluated
+exactly once before `rhs`; the resulting value is then stored at that original
+index. Side effects in `rhs` cannot retarget the write.
+
 Ordinary arrays expose `.max_length` as their declared capacity. `.length` reads and
 writes are rejected for both fixed arrays and array views: logical array lengths
 are not supported yet. Programs that track a used prefix must maintain a separate
