@@ -24,6 +24,7 @@ use crate::backend::state_layout::{
     build_state_layout, collection_field_element_count, is_replay_host_or_presentation_path,
     state_layout_digest, typed_collection_layout_metadata, StateLayout,
 };
+use crate::backend::text_coverage::{analyze_text_coverage, TextCoverageProof};
 use crate::backend::ReachabilityPolicy;
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::data_flow::FunctionDataFlowSummary;
@@ -317,6 +318,7 @@ pub struct ProgramSnapshot {
     hot_render_images: Vec<HotRenderImageMetadata>,
     hot_render_transitions: Vec<HotRenderTransitionMetadata>,
     hot_render_transition_analysis: HotRenderTransitionAnalysis,
+    text_coverage: TextCoverageProof,
     state_layout: StateLayout,
     replay_state_snapshot: ProgramReplayStateSnapshot,
     layout_digest: [u8; 32],
@@ -529,6 +531,14 @@ impl ProgramSnapshot {
             &collection_capacities,
             &analysis.constant_values,
         );
+        let text_coverage = analyze_text_coverage(
+            functions,
+            function_hirs,
+            &reachable_function_ids,
+            files,
+            &analysis,
+            types,
+        );
         Ok(Self {
             reachability_policy,
             source_revision,
@@ -542,6 +552,7 @@ impl ProgramSnapshot {
             hot_render_images: hot_render.images,
             hot_render_transitions: hot_render.transitions,
             hot_render_transition_analysis: hot_render.transition_analysis,
+            text_coverage,
             state_layout,
             replay_state_snapshot,
             layout_digest,
@@ -646,6 +657,11 @@ impl ProgramSnapshot {
     }
     pub fn hot_render_transition_analysis(&self) -> &HotRenderTransitionAnalysis {
         &self.hot_render_transition_analysis
+    }
+    /// Conservative compiler proof consumed by later release font tooling.
+    /// `Unknown` always means the complete font must be retained.
+    pub fn text_coverage(&self) -> &TextCoverageProof {
+        &self.text_coverage
     }
     pub fn state_layout(&self) -> &StateLayout {
         &self.state_layout
@@ -887,6 +903,7 @@ mod tests {
     use super::*;
     use crate::backend::aot::AotProcess;
     use crate::backend::jit::JitProcess;
+    use crate::backend::text_coverage::TextCoverageProof;
     use std::fs;
 
     const SOURCE: &str = "global score: i32;\nfunction main(): i32 { return score; }\n";
@@ -897,6 +914,450 @@ global hero: Sprite;
 function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function @extern("stasis_jit_sprite_draw") draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
 "#;
+
+    const TEXT_COVERAGE_EXTERN_PRELUDE: &str = r#"
+extern function load_font(path: string, size: i32): i32;
+extern function measure_text(font: i32, text: string): f32;
+"#;
+
+    fn compile_text_coverage_pair(source: &str) -> (ProgramSnapshot, ProgramSnapshot) {
+        let source = format!("{TEXT_COVERAGE_EXTERN_PRELUDE}\n{source}");
+        let path = "tests/stasis/text_coverage_graphics_seam.stasis";
+        let mut jit = JitProcess::new();
+        jit.upsert_file(path, source.clone());
+        jit.compile().expect("compile JIT text coverage fixture");
+        let mut aot = AotProcess::new();
+        aot.upsert_file(path, source);
+        aot.compile().expect("compile AOT text coverage fixture");
+        (
+            jit.program_snapshot().expect("JIT snapshot").clone(),
+            aot.program_snapshot().expect("AOT snapshot").clone(),
+        )
+    }
+
+    #[test]
+    fn text_coverage_proves_literal_constant_and_finite_helper_union_with_backend_parity() {
+        let (jit, aot) = compile_text_coverage_pair(
+            r#"
+const TITLE: string = "Café";
+function choose_label(show_symbol: bool, fallback: string): string {
+    if (show_symbol) { return "Ω"; }
+    return fallback;
+}
+function main(): i32 {
+    let font: i32 = load_font("assets/ui.ttf", 18);
+    let label: string = choose_label(true, TITLE);
+    let width: f32 = measure_text(font, label);
+    return 0;
+}
+"#,
+        );
+        assert_eq!(jit.text_coverage(), aot.text_coverage());
+        let TextCoverageProof::Finite {
+            unicode_scalars,
+            fonts,
+            sinks,
+        } = aot.text_coverage()
+        else {
+            panic!("expected finite text coverage: {:?}", aot.text_coverage());
+        };
+        assert_eq!(unicode_scalars, &[67, 97, 102, 233, 937]);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].path, "assets/ui.ttf");
+        assert_eq!(sinks.len(), 1);
+        assert_eq!(sinks[0].sink_identity, "stasis_jit_measure_text");
+    }
+
+    #[test]
+    fn text_coverage_excludes_unreachable_dynamic_helper_under_release_reachability() {
+        let (_, aot) = compile_text_coverage_pair(
+            r#"
+function recursive_label(): string { return recursive_label(); }
+function unused_dynamic(): i32 {
+    let font: i32 = load_font("assets/unused.ttf", 18);
+    let width: f32 = measure_text(font, recursive_label());
+    return 0;
+}
+function main(): i32 {
+    let font: i32 = load_font("assets/ui.ttf", 18);
+    let width: f32 = measure_text(font, "READY");
+    return 0;
+}
+"#,
+        );
+        let TextCoverageProof::Finite {
+            unicode_scalars,
+            fonts,
+            ..
+        } = aot.text_coverage()
+        else {
+            panic!("unreachable dynamic helper must not poison release proof");
+        };
+        assert_eq!(unicode_scalars, &[65, 68, 69, 82, 89]);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].path, "assets/ui.ttf");
+    }
+
+    #[test]
+    fn text_coverage_reports_sorted_unknown_reasons_for_recursive_text_and_font_handle() {
+        let (_, aot) = compile_text_coverage_pair(
+            r#"
+global external_font: i32;
+function recursive_label(): string { return recursive_label(); }
+function main(): i32 {
+    let width: f32 = measure_text(external_font, recursive_label());
+    return 0;
+}
+"#,
+        );
+        let TextCoverageProof::Unknown { reasons, .. } = aot.text_coverage() else {
+            panic!("expected conservative unknown proof");
+        };
+        assert_eq!(
+            reasons
+                .iter()
+                .map(|reason| reason.code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["recursive_call", "unknown_font", "unknown_text_value"]
+        );
+        assert!(reasons.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
+    fn text_coverage_forwards_finite_font_and_text_into_sink_helper() {
+        let (_, aot) = compile_text_coverage_pair(
+            r#"
+function label_width(font: i32, text: string): f32 {
+    return measure_text(font, text);
+}
+function main(): i32 {
+    let font: i32 = load_font("assets/helper.ttf", 18);
+    let width: f32 = label_width(font, "HELP");
+    return 0;
+}
+"#,
+        );
+        let TextCoverageProof::Finite {
+            unicode_scalars,
+            fonts,
+            sinks,
+        } = aot.text_coverage()
+        else {
+            panic!("finite call-site arguments should flow into the sink helper");
+        };
+        assert_eq!(unicode_scalars, &[69, 72, 76, 80]);
+        assert_eq!(fonts[0].path, "assets/helper.ttf");
+        assert_eq!(sinks.len(), 1);
+    }
+
+    #[test]
+    fn text_coverage_marks_loop_carried_values_unknown_before_a_sink() {
+        let (_, aot) = compile_text_coverage_pair(
+            r#"
+function main(): i32 {
+    let font: i32 = load_font("assets/loop.ttf", 18);
+    let label: string = "A";
+    for (let i: i32 = 0; i < 2; i += 1) {
+        let width: f32 = measure_text(font, label);
+        label = "B";
+    }
+    return 0;
+}
+"#,
+        );
+        let TextCoverageProof::Unknown {
+            reasons,
+            fonts,
+            sinks,
+        } = aot.text_coverage()
+        else {
+            panic!("loop-carried text and font state must remain conservative");
+        };
+        assert!(reasons.iter().any(|reason| reason.code == "unknown_font"));
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.code == "unknown_text_value"));
+        assert!(fonts.is_empty());
+        assert!(sinks.is_empty());
+    }
+
+    #[test]
+    fn text_coverage_preserves_font_and_sink_evidence_when_buffer_mutation_is_unknown() {
+        let main = r#"
+import "src/stdlib/stdlib.stasis";
+import "tests/stasis/text_coverage_graphics_seam.stasis";
+global score_ascii: ascii[16];
+global score_utf8: utf8[16];
+global score_run: TextRun;
+function scramble(value: ascii[]): void { value[0] = 65; }
+function main(): i32 {
+    let font: i32 = load_font("assets/score.ttf", 24);
+    ascii_clear(score_ascii);
+    ascii_push_i32(score_ascii, 7);
+    scramble(score_ascii);
+    utf8_from_ascii(score_utf8, score_ascii, 16);
+    if (!score_run.replace_text_from(font, score_utf8)) { return 1; }
+    return 0;
+}
+"#;
+        let seam = r#"
+struct TextRun { handle: i32; }
+extern function load_font(path: string, size: i32): i32;
+function @extern("stasis_jit_text_run_replace_from") replace_text_from(self: TextRun, font: i32, text: utf8[]): bool;
+"#;
+        let stdlib = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/stdlib.stasis"
+        ));
+        let memory = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/memory.stasis"
+        ));
+        let mut aot = AotProcess::new();
+        aot.upsert_file("main.stasis", main);
+        aot.upsert_file("src/stdlib/stdlib.stasis", stdlib);
+        aot.upsert_file("src/stdlib/memory.stasis", memory);
+        aot.upsert_file("tests/stasis/text_coverage_graphics_seam.stasis", seam);
+        aot.compile().expect("compile buffer mutation fixture");
+        let TextCoverageProof::Unknown {
+            reasons,
+            fonts,
+            sinks,
+        } = aot.program_snapshot().expect("snapshot").text_coverage()
+        else {
+            panic!("arbitrary output-buffer mutation must remain unknown");
+        };
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.code == "unknown_text_value"));
+        assert_eq!(fonts[0].path, "assets/score.ttf");
+        assert_eq!(sinks.len(), 1);
+    }
+
+    fn compile_text_buffer_snapshot(main: &str) -> ProgramSnapshot {
+        let seam = r#"
+struct TextRun { handle: i32; }
+extern function load_font(path: string, size: i32): i32;
+function @extern("stasis_jit_text_run_replace_from") replace_text_from(self: TextRun, font: i32, text: utf8[]): bool;
+"#;
+        let stdlib = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/stdlib.stasis"
+        ));
+        let memory = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/memory.stasis"
+        ));
+        let mut aot = AotProcess::new();
+        aot.upsert_file("main.stasis", main);
+        aot.upsert_file("src/stdlib/stdlib.stasis", stdlib);
+        aot.upsert_file("src/stdlib/memory.stasis", memory);
+        aot.upsert_file("tests/stasis/text_coverage_graphics_seam.stasis", seam);
+        aot.compile().expect("compile text buffer fixture");
+        aot.program_snapshot().expect("snapshot").clone()
+    }
+
+    #[test]
+    fn text_coverage_poison_globals_across_zero_argument_helpers() {
+        let snapshot = compile_text_buffer_snapshot(
+            r#"
+import "src/stdlib/stdlib.stasis";
+import "tests/stasis/text_coverage_graphics_seam.stasis";
+global score_ascii: ascii[16];
+global score_utf8: utf8[16];
+global score_run: TextRun;
+function corrupt_score(): void { score_ascii[0] = 65; }
+function main(): i32 {
+    let font: i32 = load_font("assets/score.ttf", 24);
+    ascii_clear(score_ascii);
+    ascii_push_i32(score_ascii, 7);
+    corrupt_score();
+    utf8_from_ascii(score_utf8, score_ascii, 16);
+    if (!score_run.replace_text_from(font, score_utf8)) { return 1; }
+    return 0;
+}
+"#,
+        );
+        let TextCoverageProof::Unknown { reasons, .. } = snapshot.text_coverage() else {
+            panic!("zero-argument helper may mutate tracked global text");
+        };
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.code == "unknown_text_value"));
+    }
+
+    #[test]
+    fn text_coverage_rejects_buffer_view_aliases_before_later_mutation() {
+        let snapshot = compile_text_buffer_snapshot(
+            r#"
+import "src/stdlib/stdlib.stasis";
+import "tests/stasis/text_coverage_graphics_seam.stasis";
+global score_ascii: ascii[16];
+global score_utf8: utf8[16];
+global score_run: TextRun;
+function main(): i32 {
+    let font: i32 = load_font("assets/score.ttf", 24);
+    ascii_clear(score_ascii);
+    ascii_push_i32(score_ascii, 7);
+    let alias: ascii[] = score_ascii;
+    score_ascii[0] = 65;
+    utf8_from_ascii(score_utf8, alias, 16);
+    if (!score_run.replace_text_from(font, score_utf8)) { return 1; }
+    return 0;
+}
+"#,
+        );
+        let TextCoverageProof::Unknown { reasons, .. } = snapshot.text_coverage() else {
+            panic!("buffer aliases must not retain stale finite coverage");
+        };
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.code == "unknown_text_value"));
+    }
+
+    #[test]
+    fn text_coverage_marks_unresolved_indexed_sink_arguments_unknown() {
+        let seam_path = "tests/stasis/text_coverage_graphics_seam.stasis";
+        let seam = r#"
+struct TextRun { handle: i32; }
+extern function load_font(path: string, size: i32): i32;
+function @extern("stasis_jit_text_run_replace_from") replace_text_from(self: TextRun, font: i32, text: utf8[]): bool;
+"#;
+        let mut aot = AotProcess::new();
+        aot.upsert_file(
+            "main.stasis",
+            format!(
+                r#"
+import "{seam_path}";
+struct Label {{ value: utf8[16]; }}
+global labels: Label[2];
+global run: TextRun;
+function main(): i32 {{
+    let font: i32 = load_font("assets/labels.ttf", 18);
+    if (!run.replace_text_from(font, labels[0].value)) {{ return 1; }}
+    return 0;
+}}
+"#
+            ),
+        );
+        aot.upsert_file(seam_path, seam);
+        aot.compile().expect("compile indexed text fixture");
+        let TextCoverageProof::Unknown { reasons, .. } =
+            aot.program_snapshot().expect("snapshot").text_coverage()
+        else {
+            panic!("unresolved indexed sink argument must be unknown");
+        };
+        assert!(reasons
+            .iter()
+            .any(|reason| reason.code == "unresolved_indexed_text_call"));
+    }
+
+    #[test]
+    fn text_coverage_does_not_accept_a_user_draw_text_name_as_a_sink() {
+        let seam_path = "tests/stasis/text_coverage_graphics_seam.stasis";
+        let spoof_path = "src/stdlib/graphics.stasis";
+        let mut aot = AotProcess::new();
+        aot.upsert_file(
+            "main.stasis",
+            format!(
+                r#"
+import "{seam_path}";
+import "{spoof_path}";
+function main(): i32 {{
+    let font: i32 = load_font("assets/spoof.ttf", 18);
+    draw_text(font, "SPOOF");
+    return 0;
+}}
+"#
+            ),
+        );
+        aot.upsert_file(seam_path, TEXT_COVERAGE_EXTERN_PRELUDE);
+        aot.upsert_file(
+            spoof_path,
+            "function draw_text(font: i32, text: string): void { return; }",
+        );
+        aot.compile().expect("compile sink spoof fixture");
+        let TextCoverageProof::Finite {
+            unicode_scalars,
+            sinks,
+            ..
+        } = aot.program_snapshot().expect("snapshot").text_coverage()
+        else {
+            panic!("a non-sink helper does not create unknown display text");
+        };
+        assert!(unicode_scalars.is_empty());
+        assert!(sinks.is_empty());
+    }
+
+    #[test]
+    fn text_coverage_serde_contract_is_stable_and_sorted() {
+        let proof = TextCoverageProof::Finite {
+            unicode_scalars: vec![65, 937],
+            fonts: vec![crate::backend::text_coverage::TextCoverageFontEvidence {
+                path: "assets/ui.ttf".to_string(),
+            }],
+            sinks: vec![crate::backend::text_coverage::TextCoverageSinkEvidence {
+                caller_function_id: 7,
+                sink_identity: "stasis_jit_measure_text".to_string(),
+                font_path: "assets/ui.ttf".to_string(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&proof).expect("serialize text coverage proof"),
+            r#"{"status":"finite","unicode_scalars":[65,937],"fonts":[{"path":"assets/ui.ttf"}],"sinks":[{"caller_function_id":7,"sink_identity":"stasis_jit_measure_text","font_path":"assets/ui.ttf"}]}"#
+        );
+    }
+
+    #[test]
+    fn text_coverage_recognizes_only_the_compiler_owned_decimal_buffer_chain() {
+        let main = r#"
+import "src/stdlib/stdlib.stasis";
+import "tests/stasis/text_coverage_graphics_seam.stasis";
+global score_ascii: ascii[16];
+global score_utf8: utf8[16];
+global score_run: TextRun;
+function main(): i32 {
+    let font: i32 = load_font("assets/score.ttf", 24);
+    ascii_clear(score_ascii);
+    ascii_push_i32(score_ascii, -42);
+    utf8_from_ascii(score_utf8, score_ascii, 16);
+    if (!score_run.replace_text_from(font, score_utf8)) { return 1; }
+    return 0;
+}
+"#;
+        let seam = r#"
+struct TextRun { handle: i32; }
+extern function load_font(path: string, size: i32): i32;
+function @extern("stasis_jit_text_run_replace_from") replace_text_from(self: TextRun, font: i32, text: utf8[]): bool;
+"#;
+        let stdlib = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/stdlib.stasis"
+        ));
+        let memory = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../src/stdlib/memory.stasis"
+        ));
+        let mut aot = AotProcess::new();
+        aot.upsert_file("main.stasis", main);
+        aot.upsert_file("src/stdlib/stdlib.stasis", stdlib);
+        aot.upsert_file("src/stdlib/memory.stasis", memory);
+        aot.upsert_file("tests/stasis/text_coverage_graphics_seam.stasis", seam);
+        aot.compile().expect("compile decimal chain fixture");
+        let TextCoverageProof::Finite {
+            unicode_scalars,
+            fonts,
+            ..
+        } = aot.program_snapshot().expect("snapshot").text_coverage()
+        else {
+            panic!("compiler-owned decimal chain should be finite");
+        };
+        assert_eq!(
+            unicode_scalars,
+            &[45, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57]
+        );
+        assert_eq!(fonts[0].path, "assets/score.ttf");
+    }
 
     fn hot_render_snapshot(body: &str) -> ProgramSnapshot {
         let mut aot = AotProcess::new();

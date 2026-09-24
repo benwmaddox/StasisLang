@@ -13,6 +13,7 @@ mod runtime_exports;
 pub mod state_layout;
 pub mod state_migration;
 mod state_query;
+pub mod text_coverage;
 pub mod wasm;
 
 /// Host lifecycle policy, independent of backend and optimization level.

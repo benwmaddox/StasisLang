@@ -6485,6 +6485,50 @@ function on_code_swap(): void { return; }
 
     #[cfg(windows)]
     #[test]
+    fn finite_text_coverage_snapshot_survives_linked_aot_execution() {
+        let Some(link_config) = resolve_link_config_for_smoke() else {
+            return;
+        };
+        let mut process = AotProcess::new();
+        process.upsert_file(
+            "tests/stasis/text_coverage_linked_aot.stasis",
+            r#"
+extern function load_font(path: string, size: i32): i32;
+extern function measure_text(font: i32, text: string): f32;
+function main(): i32 {
+    if (false) {
+        let font: i32 = load_font("assets/linked.ttf", 18);
+        let width: f32 = measure_text(font, "LINKED");
+    }
+    return 23;
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("compile linked text coverage fixture");
+        let crate::backend::text_coverage::TextCoverageProof::Finite {
+            unicode_scalars,
+            fonts,
+            sinks,
+        } = process
+            .program_snapshot()
+            .expect("linked text coverage snapshot")
+            .text_coverage()
+        else {
+            panic!("linked AOT fixture must retain a finite proof");
+        };
+        assert_eq!(unicode_scalars, &[68, 69, 73, 75, 76, 78]);
+        assert_eq!(fonts[0].path, "assets/linked.ttf");
+        assert_eq!(sinks.len(), 1);
+        let exit_code =
+            run_linked_i32_noarg_fixture(&process, "main", "text_coverage", &link_config)
+                .expect("linked text coverage AOT fixture");
+        assert_eq!(exit_code, 23);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn aot_fixed_and_view_max_length_link_and_execute() {
         let Some(link_config) = resolve_link_config_for_smoke() else {
             return;
