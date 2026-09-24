@@ -4117,6 +4117,32 @@ fn encode_named_struct_array_view_expr(
     Err(format!("unknown web named-struct array view '{name}'"))
 }
 
+fn struct_view_source_index_is_prevalidated(
+    source: &SimpleExpr,
+    context: &EncodeContext<'_>,
+) -> Result<bool, String> {
+    let SimpleExpr::IndexedPath {
+        collection_path,
+        suffix,
+        ..
+    } = source
+    else {
+        return Ok(false);
+    };
+    if !suffix.is_empty()
+        || local_named_struct_array_binding(context, collection_path)?.is_some()
+        || receiver_struct_collection_candidates(collection_path, context)?.is_some()
+    {
+        return Ok(false);
+    }
+
+    // Mirror encode_struct_view_expr's final source-resolution branch. Its
+    // unsigned check against the fixed collection length proves the absolute
+    // element index used for every field load. Dynamic local and receiver views
+    // may have an unvalidated start, so they deliberately keep field checks.
+    Ok(context.struct_collections.contains_key(collection_path))
+}
+
 fn encode_struct_view_expr(
     value: &SimpleExpr,
     context: &EncodeContext<'_>,
@@ -4318,6 +4344,7 @@ fn encode_struct_collection_copy(
         .struct_collections
         .get(collection_path)
         .ok_or_else(|| format!("unknown web struct collection '{collection_path}'"))?;
+    let source_index_is_prevalidated = struct_view_source_index_is_prevalidated(source, context)?;
     let source_type = encode_struct_view_expr(source, context, out)?;
     require_same_struct_type(collection.type_id, source_type, "collection assignment")?;
     for local in [
@@ -4352,7 +4379,13 @@ fn encode_struct_collection_copy(
         out.push(0x41);
         sleb(target_field.stride as i32, out);
         out.extend([0x6c, 0x6a]);
-        let source_field_type = encode_struct_field_load(&source_binding, suffix, context, out)?;
+        let source_field_type = encode_struct_field_load_with_prevalidated_index(
+            &source_binding,
+            suffix,
+            context,
+            source_index_is_prevalidated,
+            out,
+        )?;
         require_same_type(
             target_field.type_id,
             source_field_type,
@@ -4372,6 +4405,7 @@ fn encode_local_struct_collection_copy(
 ) -> Result<(), String> {
     let target = local_named_struct_array_binding(context, collection_path)?
         .ok_or_else(|| format!("unknown web named-struct array view '{collection_path}'"))?;
+    let source_index_is_prevalidated = struct_view_source_index_is_prevalidated(source, context)?;
     let source_type = encode_struct_view_expr(source, context, out)?;
     require_same_struct_type(target.element_type, source_type, "collection assignment")?;
     for local in [
@@ -4419,7 +4453,13 @@ fn encode_local_struct_collection_copy(
             context,
             out,
         )?;
-        let source_field_type = encode_struct_field_load(&source_binding, suffix, context, out)?;
+        let source_field_type = encode_struct_field_load_with_prevalidated_index(
+            &source_binding,
+            suffix,
+            context,
+            source_index_is_prevalidated,
+            out,
+        )?;
         require_same_type(
             target_field.type_id,
             source_field_type,
@@ -4445,6 +4485,7 @@ fn encode_receiver_struct_collection_copy(
         ));
     };
     let target_type = candidates[0].collection.type_id;
+    let source_index_is_prevalidated = struct_view_source_index_is_prevalidated(source, context)?;
     let source_type = encode_struct_view_expr(source, context, out)?;
     require_same_struct_type(target_type, source_type, "collection assignment")?;
     for local in [
@@ -4482,7 +4523,13 @@ fn encode_receiver_struct_collection_copy(
             context.scratch_index,
             out,
         )?;
-        let source_field_type = encode_struct_field_load(&source_binding, suffix, context, out)?;
+        let source_field_type = encode_struct_field_load_with_prevalidated_index(
+            &source_binding,
+            suffix,
+            context,
+            source_index_is_prevalidated,
+            out,
+        )?;
         require_same_type(
             target_field,
             source_field_type,
@@ -4567,19 +4614,22 @@ fn encode_struct_field_address(
     binding: &LocalBinding,
     suffix: &str,
     context: &EncodeContext<'_>,
+    view_index_prevalidated: bool,
     out: &mut Vec<u8>,
 ) -> Result<MemoryBinding, String> {
     let view = binding
         .struct_view
         .ok_or_else(|| "web struct binding has no view metadata".to_string())?;
-    out.push(0x20);
-    uleb(view.index, out);
-    out.extend([0x41, 0, 0x48, 0x04, 0x40, 0x00, 0x0b]);
-    out.push(0x20);
-    uleb(view.index, out);
-    out.push(0x20);
-    uleb(view.len, out);
-    out.extend([0x4e, 0x04, 0x40, 0x00, 0x0b]);
+    if !view_index_prevalidated {
+        out.push(0x20);
+        uleb(view.index, out);
+        out.extend([0x41, 0, 0x48, 0x04, 0x40, 0x00, 0x0b]);
+        out.push(0x20);
+        uleb(view.index, out);
+        out.push(0x20);
+        uleb(view.len, out);
+        out.extend([0x4e, 0x04, 0x40, 0x00, 0x0b]);
+    }
     let candidates = struct_field_binding(context, binding.type_id, suffix)?;
     if candidates.is_empty() {
         let field_type = context.named_structs[&binding.type_id][suffix];
@@ -4647,6 +4697,16 @@ fn encode_struct_field_load(
     context: &EncodeContext<'_>,
     out: &mut Vec<u8>,
 ) -> Result<TypeId, String> {
+    encode_struct_field_load_with_prevalidated_index(binding, suffix, context, false, out)
+}
+
+fn encode_struct_field_load_with_prevalidated_index(
+    binding: &LocalBinding,
+    suffix: &str,
+    context: &EncodeContext<'_>,
+    view_index_prevalidated: bool,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
     let field_type = context.named_structs[&binding.type_id][suffix];
     let view = binding
         .struct_view
@@ -4657,7 +4717,8 @@ fn encode_struct_field_load(
     let scalar_candidates = scalar_field_candidates(binding, suffix, context);
     encode_scalar_field_load(binding.index, suffix, &scalar_candidates, out)?;
     out.push(0x05);
-    let field = encode_struct_field_address(binding, suffix, context, out)?;
+    let field =
+        encode_struct_field_address(binding, suffix, context, view_index_prevalidated, out)?;
     encode_memory_load(field.type_id, out)?;
     out.push(0x0b);
     Ok(field_type)
@@ -4706,7 +4767,7 @@ fn encode_struct_field_store_from_local(
     let scalar_candidates = scalar_field_candidates(binding, suffix, context);
     encode_scalar_field_store(binding.index, suffix, value_local, &scalar_candidates, out)?;
     out.push(0x05);
-    let field = encode_struct_field_address(binding, suffix, context, out)?;
+    let field = encode_struct_field_address(binding, suffix, context, false, out)?;
     out.push(0x20);
     uleb(value_local, out);
     encode_memory_store(field.type_id, out)?;
