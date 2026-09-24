@@ -1,0 +1,25 @@
+global composite: u8[100000];
+
+extern function print_i32(value: i32): void;
+
+function main(): i32 {
+    let count: i32 = 0;
+    for (let pass: i32 = 0; pass < 300; pass += 1) {
+        for (let i: i32 = 0; i < 100000; i += 1) {
+            composite[i] = 0;
+        }
+        count = 0;
+        for (let p: i32 = 2; p < 100000; p += 1) {
+            if (composite[p] == 0) {
+                count += 1;
+                if (p <= 316) {
+                    for (let multiple: i32 = p * p; multiple < 100000; multiple += p) {
+                        composite[multiple] = 1;
+                    }
+                }
+            }
+        }
+    }
+    print_i32(count);
+    return 0;
+}

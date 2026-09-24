@@ -1,0 +1,1 @@
+{"manifest_version":1,"name":"bench_nqueens","entry":"main.stasis","tests":"tests","output":"build"}

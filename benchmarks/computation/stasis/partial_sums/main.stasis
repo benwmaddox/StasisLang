@@ -1,0 +1,17 @@
+extern function print_i32(value: i32): void;
+
+function main(): i32 {
+    let total: f64 = 0.0;
+    let weighted: f64 = 0.0;
+    for (let i: i32 = 1; i <= 100000000; i += 1) {
+        let term: f64 = 1.0 /((i + 0.0) *(i + 0.0));
+        total += term;
+        weighted += total;
+    }
+    if (total > 1.6449 && total < 1.6450 && weighted > 164000000.0 && weighted < 165000000.0) {
+        print_i32(1);
+    } else {
+        print_i32(0);
+    }
+    return 0;
+}

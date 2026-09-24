@@ -1,0 +1,1 @@
+{"manifest_version":1,"name":"bench_partial_sums","entry":"main.stasis","tests":"tests","output":"build"}
