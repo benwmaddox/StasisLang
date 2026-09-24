@@ -20,7 +20,21 @@ extern function @effects(graphics) gfx_poll_reload(sprite_ref: SpriteRef): bool;
 extern function @effects(graphics, storage) gfx_dump_bmp(path: string): i32;
 extern function @effects(graphics, storage) gfx_dump_png(path: string): i32;
 extern function @effects(graphics)@asset_path(path) load_font(path: string, size: i32): i32;
+
+function @internal @effects(graphics)@extern("stasis_jit_gfx_release_font") gfx_release_font(font: i32): void;
+function @internal @effects(graphics)@extern("stasis_jit_font_status") gfx_font_status(font: i32): AssetState;
+
 extern function @effects(graphics) measure_text(font: i32, text: string): f32;
+
+function font_status(font: i32): AssetState {
+    return gfx_font_status(font);
+}
+
+function release_font(font: i32): void {
+    if (font > 0) {
+        gfx_release_font(font);
+    }
+}
 
 struct TextRun {
     font: i32;
@@ -250,8 +264,8 @@ function draw(self: LineBatch): void {
 }
 
 // Caller-owned storage for one direct canonical sprite run. The writer must be
-// global-backed and its storage may persist. Its token is frame-local and must
-// not cross begin_frame/code-swap; reserve and finalize/cancel in one frame.
+// global-backed and its storage may persist. Its token is construction-local and
+// must not cross a render entry/code-swap; reserve and finalize/cancel in one frame.
 struct SpriteRunWriter {
     token: i32;
 }
@@ -506,6 +520,13 @@ function finished(self: AnimationClip, elapsed_ticks: i32): bool {
 function @effects(graphics)@extern("stasis_jit_text_run_load_from") load_text_from(self: TextRun, font: i32, text: string): bool;
 function @effects(graphics)@extern("stasis_jit_text_run_replace_from") replace_text_from(self: TextRun, font: i32, text: utf8[]): bool;
 
+// Runtime-owned display text, such as a localized store price, uses the same cached
+// UTF-8 path as string literals. The named wrapper makes the bounded-buffer contract
+// explicit at call sites while preserving the existing source-compatible API.
+function load_utf8_from(self: TextRun, font: i32, text: utf8[]): bool {
+    return self.load_text_from(font, text);
+}
+
 function draw(self: TextRun, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void {
     if (self.font <= 0 || self.handle <= 0) {
         return;
@@ -535,15 +556,6 @@ function set_maximized(enabled: i32): i32 {
 function set_maximized_canvas(width: i32, height: i32): i32 {
     host_request_maximized_canvas(width, height);
     return 0;
-}
-
-// Legacy-ish names retained as pure wrappers (no host calls).
-function begin_frame(): void {
-    gfx_cmd_manual_begin();
-}
-
-function end_frame(): void {
-    gfx_cmd_mark_present();
 }
 
 function clear(r: f32, g: f32, b: f32, a: f32): void {

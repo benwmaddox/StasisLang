@@ -150,34 +150,28 @@ function @inline gfx_cmd_begin(): void {
 }
 
 // Generated host entries use these helpers around exactly one render call.
-// The public begin_frame wrapper remains available for legacy/manual builders.
 function @internal gfx_cmd_construction_reset(): void {
+    if (gfx_frame_construction_active) {
+        // A host may not replace an in-flight construction. Finish will abort
+        // the partial packet and make the next reset establish a new one.
+        gfx_frame_construction_invalid = true;
+        return;
+    }
     gfx_cmd_begin();
     gfx_frame_construction_invalid = false;
     gfx_frame_construction_active = true;
 }
 
-function @internal gfx_cmd_manual_begin(): void {
-    if (gfx_frame_construction_active) {
-        gfx_frame_construction_invalid = true;
-        return;
-    }
-    gfx_cmd_begin();
-}
-
 function @internal gfx_cmd_construction_finish(render_result: i32): i32 {
-    if (
-        !gfx_frame_construction_active
-        || gfx_frame_construction_invalid
-        || render_result != 0
-        || gfx_sprite_writer_token != 0
-        || gfx_cmd_i32[GFX_I_FLAGS] < GFX_FLAG_PRESENT
-    ) {
+    if (!gfx_frame_construction_active || gfx_frame_construction_invalid || render_result != 0 || gfx_sprite_writer_token != 0) {
         gfx_frame_construction_active = false;
         // Abort makes every partial command unreachable and invalidates writers.
         gfx_cmd_begin();
         return render_result;
     }
+    // Publication belongs to the host lifecycle. Guest render code only emits
+    // commands; a valid finish sets the existing packet PRESENT bit.
+    gfx_cmd_submit();
     gfx_frame_construction_active = false;
     return 0;
 }
