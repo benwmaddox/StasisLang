@@ -172,6 +172,22 @@ class RuntimeAbiContractTests(unittest.TestCase):
                     self.assertEqual("runtime/stasis_render_contract.h", failure.producer)
                     self.assertEqual(path.as_posix(), failure.consumer)
 
+    def test_sample_vendor_rejects_public_frame_wrappers(self):
+        for path in (*contract.SAMPLE_VENDOR_GRAPHICS, contract.SAMPLE_VENDOR_LOADING):
+            for wrapper in ("begin_frame", "end_frame"):
+                with self.subTest(path=path, wrapper=wrapper):
+                    failures, _ = self.run_with(
+                        path,
+                        self.sources[path],
+                        self.sources[path]
+                        + f"\nfunction {wrapper}(): void {{ return; }}\n",
+                    )
+                    failure = next(
+                        failure for failure in failures
+                        if failure.field == "sample_vendor.public_graphics_lifecycle"
+                    )
+                    self.assertEqual(path.as_posix(), failure.consumer)
+
     def test_it012_public_fixture_rejects_private_graphics_storage(self):
         failures, _ = self.run_with(
             contract.GENERATED_MOBILE_AOT_FIXTURE,

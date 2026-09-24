@@ -6,8 +6,9 @@
   "output": "build",
   "vendor": {
     "stasis": {
-      "release_id": "local-generics-585",
-      "sha256": "4a096f7816d8070e57097e0b438f8848d7bfb01fa0f91010af01f67a5f71db33"
+      "release_id": "nightly-20260923-344",
+      "sha256": "1c91faa3e6baac7f72faecd11da75c781d688be7f0e817f9ea23e16a44b29623",
+      "hash_version": 2
     }
   },
   "ai": {
