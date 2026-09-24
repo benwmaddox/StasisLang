@@ -92,9 +92,9 @@ public class WorkshopTestRunnerAcceptanceTest {
         Files.write(source.toPath(), ("const IT028_TICK_REVISION: i32 = 1;\n"
                 + "function tick(): i32 { return IT028_TICK_REVISION; }\n")
                 .getBytes(StandardCharsets.UTF_8));
-        WorkshopAiProjectTransaction.Snapshot packaged =
-                WorkshopAiProjectTransaction.capture(project);
-        String packagedFingerprint = WorkshopAiProjectTransaction.fingerprint(packaged);
+        WorkshopProjectSnapshot.Snapshot packaged =
+                WorkshopProjectSnapshot.capture(project);
+        String packagedFingerprint = WorkshopProjectSnapshot.fingerprint(packaged);
 
         Files.write(source.toPath(), WorkshopTestRunnerAcceptance.acceptedSource(
                 new String(Files.readAllBytes(source.toPath()), StandardCharsets.UTF_8))
@@ -105,9 +105,9 @@ public class WorkshopTestRunnerAcceptanceTest {
                 .getBytes(StandardCharsets.UTF_8));
         assertTrue(test.isFile());
 
-        WorkshopAiProjectTransaction.restore(project, packaged);
+        WorkshopProjectSnapshot.restore(project, packaged);
         assertFalse(test.exists());
-        assertEquals(packagedFingerprint, WorkshopAiProjectTransaction.fingerprint(
-                WorkshopAiProjectTransaction.capture(project)));
+        assertEquals(packagedFingerprint, WorkshopProjectSnapshot.fingerprint(
+                WorkshopProjectSnapshot.capture(project)));
     }
 }

@@ -48,8 +48,7 @@ fi
 "$PYTHON" -m unittest tools.ci.test_unsafe_boundaries
 "$PYTHON" -m unittest tools.ci.test_desktop_network_diagnostics
 "$PYTHON" -m unittest tools.ci.test_nightly_network_support
-"$PYTHON" -m unittest tools.ci.test_nightly_freshness
-"$PYTHON" -m unittest tools.ci.test_stasis_ai_efficiency_matrix
+"$PYTHON" -m unittest tools.ci.test_nightly_freshness tools.ci.test_removed_ai_surface
 "$PYTHON" -m unittest tools.ci.test_release_provenance
 "$PYTHON" -m unittest tools.ci.test_audio_stream_native_acceptance
 "$PYTHON" -m unittest tools.ci.test_local_toolchain_install

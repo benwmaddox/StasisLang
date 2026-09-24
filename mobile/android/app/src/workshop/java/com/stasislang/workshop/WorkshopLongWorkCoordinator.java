@@ -5,32 +5,25 @@ import android.content.Intent;
 import android.os.Build;
 
 final class WorkshopLongWorkCoordinator {
-    static final String KIND_AI = "ai";
     static final String KIND_GITHUB = "github";
     static final String KIND_PROJECT_IO = "project_io";
     private static final Object LOCK = new Object();
     private static String activeKind = "";
-    private static Runnable activeCancel;
 
     private WorkshopLongWorkCoordinator() {}
 
-    static boolean beginAi(Context context, String detail, Runnable cancel) {
-        return begin(context, KIND_AI, detail, cancel);
-    }
-
     static boolean beginGitHub(Context context, String detail) {
-        return begin(context, KIND_GITHUB, detail, null);
+        return begin(context, KIND_GITHUB, detail);
     }
 
     static boolean beginProjectIo(Context context, String detail) {
-        return begin(context, KIND_PROJECT_IO, detail, null);
+        return begin(context, KIND_PROJECT_IO, detail);
     }
 
-    private static boolean begin(Context context, String kind, String detail, Runnable cancel) {
+    private static boolean begin(Context context, String kind, String detail) {
         synchronized (LOCK) {
             if (!activeKind.isEmpty()) return false;
             activeKind = kind;
-            activeCancel = cancel;
         }
         Intent intent = new Intent(context, WorkshopLongWorkService.class)
                 .setAction(WorkshopLongWorkService.ACTION_START)
@@ -46,14 +39,9 @@ final class WorkshopLongWorkCoordinator {
         } catch (RuntimeException error) {
             synchronized (LOCK) {
                 activeKind = "";
-                activeCancel = null;
             }
             return false;
         }
-    }
-
-    static void finishAi(Context context) {
-        finish(context, KIND_AI);
     }
 
     static void finishGitHub(Context context) {
@@ -68,13 +56,8 @@ final class WorkshopLongWorkCoordinator {
         synchronized (LOCK) {
             if (!kind.equals(activeKind)) return;
             activeKind = "";
-            activeCancel = null;
         }
         context.stopService(new Intent(context, WorkshopLongWorkService.class));
-    }
-
-    static boolean isAiActive() {
-        return isActive(KIND_AI);
     }
 
     static boolean isGitHubActive() {
@@ -97,16 +80,8 @@ final class WorkshopLongWorkCoordinator {
         }
     }
 
-    static void requestAiCancellation() {
-        Runnable cancel;
-        synchronized (LOCK) {
-            cancel = KIND_AI.equals(activeKind) ? activeCancel : null;
-        }
-        if (cancel != null) cancel.run();
-    }
-
     private static String boundedDetail(String detail) {
-        if (detail == null || detail.trim().isEmpty()) return "Working on a queued game change";
+        if (detail == null || detail.trim().isEmpty()) return "Processing project files";
         String normalized = detail.replace('\n', ' ').replace('\r', ' ').trim();
         return normalized.length() <= 120 ? normalized : normalized.substring(0, 120);
     }

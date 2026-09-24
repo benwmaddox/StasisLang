@@ -8,12 +8,10 @@ use oxc_span::SourceType;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use stasis::run_staged_project_tests_bounded;
 use stasis::{
     load_and_apply_play_data_bindings_for_test, packaged_replay_compatibility,
-    provision_local_certificate, resolve_play_data_binding_paths, run_live_in_process,
-    run_live_in_process_with_data, run_play_in_process_with_replay,
-    run_play_in_process_with_window_title, run_project_tests_bounded_with_receipt,
+    provision_local_certificate, resolve_play_data_binding_paths, run_live_in_process_with_data,
+    run_play_in_process_with_replay, run_play_in_process_with_window_title,
     run_self_host_aot_cli_with_desktop_network,
     run_self_host_aot_cli_with_desktop_network_and_artifact_root,
     run_self_host_aot_cli_with_options, run_self_host_aot_cli_with_options_and_artifact_root,
@@ -39,12 +37,12 @@ use stasis_compiler::frontend::parser::{
 };
 use stasis_compiler::frontend::types::{TYPE_ID_F32, TYPE_ID_I32};
 use stasis_compiler::frontend::workshop::{
-    classify_workshop_reload, find_workshop_references, find_workshop_symbols,
-    load_workshop_edit_workspace, plan_workshop_semantic_edits, workshop_direct_import_files,
-    workshop_reachable_files, workshop_source_hash, workshop_source_items,
-    write_workshop_semantic_plan, write_workshop_semantic_receipt, WorkshopExposure,
-    WorkshopSemanticEdit, WorkshopSemanticEditBatch, WorkshopSemanticEditOperation,
-    WorkshopSemanticEditPlan, WorkshopSourceFile, WorkshopSourceItemKind, WorkshopSymbolSelector,
+    find_workshop_references, find_workshop_symbols, load_workshop_edit_workspace,
+    plan_workshop_semantic_edits, workshop_direct_import_files, workshop_reachable_files,
+    workshop_source_hash, workshop_source_items, write_workshop_semantic_plan,
+    write_workshop_semantic_receipt, WorkshopSemanticEdit, WorkshopSemanticEditBatch,
+    WorkshopSemanticEditOperation, WorkshopSemanticEditPlan, WorkshopSourceFile,
+    WorkshopSourceItemKind, WorkshopSymbolSelector,
 };
 use stasis_compiler::SourceDiagnostic;
 use stasis_jit::AotTarget;
@@ -61,24 +59,15 @@ use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod dap;
-mod desktop_editor;
-mod desktop_image;
-mod gauntlet;
 mod headless;
-mod live_tui;
 mod record;
-mod source_catalog;
 
 const MANIFEST_NAME: &str = "stasis.json";
 const MANIFEST_VERSION: u32 = 1;
-const MAX_DESKTOP_FILE_WRITES: usize = 8;
-const MAX_DESKTOP_FILE_WRITE_BYTES: usize = 1024 * 1024;
 const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
 const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
 const COMPILER_DIAGNOSTIC_PREFIX: &str = "__STASIS_COMPILER_DIAGNOSTIC__:";
@@ -333,15 +322,12 @@ const COMMANDS: &[&str] = &[
     "format",
     "check",
     "test",
-    "ai",
-    "gauntlet",
     "validate",
     "run",
     "record",
     "lsp",
     "dap",
-    "tui",
-    "editor",
+    "live",
     "build",
     "package",
     "package-mobile",
@@ -420,16 +406,6 @@ enum ToolchainCommand {
         #[arg(value_name = "PATH")]
         path: Option<PathBuf>,
     },
-    /// Run one subscription-backed AI change against the live workspace.
-    Ai {
-        #[arg(value_name = "PROMPT")]
-        prompt: String,
-    },
-    /// Create, run, observe, and recover an autonomous live-game Gauntlet.
-    Gauntlet {
-        #[command(subcommand)]
-        command: gauntlet::GauntletCommand,
-    },
     /// Boot a fresh isolated runtime and validate one scalar requirement.
     Validate {
         path: String,
@@ -489,8 +465,8 @@ enum ToolchainCommand {
         #[arg(long)]
         stdio: bool,
     },
-    /// Run one graphical entry with hot swap and the live-workspace TUI.
-    Tui {
+    /// Run a graphical live workspace over scripted commands or standard input.
+    Live {
         /// Override the entry declared in stasis.json.
         #[arg(value_name = "ENTRY")]
         entry: Option<PathBuf>,
@@ -500,8 +476,8 @@ enum ToolchainCommand {
         /// Override the project data and struct-metadata files.
         #[arg(long, num_args = 2, value_names = ["DATA_PATH", "STRUCT_META_PATH"])]
         data_bind: Vec<PathBuf>,
-        /// Read live commands from a deterministic script instead of opening the TUI.
-        #[arg(long, value_name = "PATH")]
+        /// Read live commands from a deterministic script.
+        #[arg(long, value_name = "PATH", required_unless_present = "live_stdio")]
         live_script: Option<PathBuf>,
         /// Emit versioned live response envelopes as JSON lines.
         #[arg(long)]
@@ -513,14 +489,6 @@ enum ToolchainCommand {
         tick_sleep_us: u64,
         #[arg(long)]
         ticks: Option<u64>,
-    },
-    /// Open the keyboard-first graphical AI editor beside the live game.
-    Editor {
-        /// Override the entry declared in stasis.json.
-        #[arg(value_name = "ENTRY")]
-        entry: Option<PathBuf>,
-        #[arg(long, default_value_t = 16_000)]
-        tick_sleep_us: u64,
     },
     /// Build the project for development or as a release executable.
     Build {
@@ -897,8 +865,6 @@ struct ProjectManifest {
     android: Option<AndroidProjectManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     capabilities: Option<ProjectCapabilities>,
-    #[serde(default)]
-    ai: stasis_ai::ProjectAiConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     web: Option<WebProjectManifest>,
 }
@@ -984,7 +950,6 @@ impl ProjectManifest {
             vendor: None,
             android: None,
             capabilities: None,
-            ai: stasis_ai::ProjectAiConfig::default(),
             web: None,
         }
     }
@@ -997,7 +962,6 @@ impl ProjectManifest {
             ));
         }
         validate_project_name(&self.name)?;
-        self.ai.validate()?;
         for (field, value) in [
             ("entry", self.entry.as_str()),
             ("tests", self.tests.as_str()),
@@ -1357,6 +1321,8 @@ fn is_toolchain_invocation(args: &[OsString]) -> bool {
         || first == "--json"
         || first == "--workspace"
         || COMMANDS.contains(&first)
+        // Retired commands must reach Clap rejection, never the legacy runtime.
+        || matches!(first, "ai" | "editor" | "tui" | "gauntlet")
 }
 
 fn command_name(command: &ToolchainCommand) -> &'static str {
@@ -1366,16 +1332,13 @@ fn command_name(command: &ToolchainCommand) -> &'static str {
         ToolchainCommand::Fmt { .. } => "fmt",
         ToolchainCommand::Check => "check",
         ToolchainCommand::Test { .. } => "test",
-        ToolchainCommand::Ai { .. } => "ai",
-        ToolchainCommand::Gauntlet { .. } => "gauntlet",
         ToolchainCommand::Validate { .. } => "validate",
         ToolchainCommand::ValidateRuntime { .. } => "__validate-runtime",
         ToolchainCommand::Run { .. } => "run",
         ToolchainCommand::Record { .. } => "record",
         ToolchainCommand::Lsp { .. } => "lsp",
         ToolchainCommand::Dap { .. } => "dap",
-        ToolchainCommand::Tui { .. } => "tui",
-        ToolchainCommand::Editor { .. } => "editor",
+        ToolchainCommand::Live { .. } => "live",
         ToolchainCommand::Build { .. } => "build",
         ToolchainCommand::Package { .. } => "package",
         ToolchainCommand::PackageMobile { .. } => "package-mobile",
@@ -1490,9 +1453,6 @@ fn execute(
                 .to_string();
             create_project(root, name.unwrap_or(inferred))
         }
-        ToolchainCommand::Gauntlet { command } => {
-            gauntlet::execute(command, workspace_arg.as_deref(), json_output)
-        }
         ToolchainCommand::Version => Ok(version_result()),
         ToolchainCommand::EditorInfo => editor_info_result(),
         ToolchainCommand::Env => env_result(workspace_arg.as_deref()),
@@ -1534,7 +1494,7 @@ fn execute(
         }
         other => {
             let workspace_path = workspace_arg.as_deref().or(match &other {
-                ToolchainCommand::Tui { entry, .. } | ToolchainCommand::Editor { entry, .. } => entry.as_deref(),
+                ToolchainCommand::Live { entry, .. } => entry.as_deref(),
                 _ => None,
             });
             let vendor_gate = match &other {
@@ -1556,10 +1516,6 @@ fn execute(
                 ToolchainCommand::Test { path } => {
                     validate_optional_workspace_path(&workspace, "test path", path.as_deref())?;
                     test_workspace(&workspace, path.as_deref())
-                }
-                ToolchainCommand::Ai { prompt } => run_workspace_ai(&workspace, &prompt),
-                ToolchainCommand::Gauntlet { .. } => {
-                    unreachable!("gauntlet commands route before workspace discovery")
                 }
                 ToolchainCommand::Validate {
                     path,
@@ -1637,7 +1593,7 @@ fn execute(
                         Ok(CommandResult::success(String::new(), json!({})))
                     }
                 }
-                ToolchainCommand::Tui {
+                ToolchainCommand::Live {
                     entry,
                     watch_dir,
                     data_bind,
@@ -1648,12 +1604,12 @@ fn execute(
                     ticks,
                 } => {
                     if json_output {
-                        Err("--json cannot be combined with tui; use --live-json for the response stream".to_string())
+                        Err("--json cannot be combined with live; use --live-json for the response stream".to_string())
                     } else {
                         let entry = entry
                             .as_deref()
                             .unwrap_or_else(|| Path::new(&workspace.manifest.entry));
-                        run_workspace_tui(
+                        run_workspace_live(
                             &workspace,
                             entry,
                             watch_dir.as_deref(),
@@ -1664,17 +1620,6 @@ fn execute(
                             tick_sleep_us,
                             ticks,
                         )
-                    }
-                }
-                ToolchainCommand::Editor {
-                    entry,
-                    tick_sleep_us,
-                } => {
-                    if json_output {
-                        Err("--json cannot be combined with editor; the editor owns a desktop window".to_string())
-                    } else {
-                        let entry = entry.as_deref().unwrap_or_else(|| Path::new(&workspace.manifest.entry));
-                        run_workspace_editor(&workspace, entry, tick_sleep_us)
                     }
                 }
                 ToolchainCommand::Build { mode, out, signing } => {
@@ -1739,16 +1684,13 @@ fn execute(
 
 fn command_requires_runtime(command: &ToolchainCommand) -> bool {
     match command {
-        ToolchainCommand::Ai { .. }
-        | ToolchainCommand::Gauntlet { .. }
-        | ToolchainCommand::Validate { .. }
+        ToolchainCommand::Validate { .. }
         | ToolchainCommand::ValidateRuntime { .. }
         | ToolchainCommand::Record { .. }
         | ToolchainCommand::Replay { .. }
         | ToolchainCommand::Lsp { .. }
         | ToolchainCommand::Dap { .. }
-        | ToolchainCommand::Tui { .. }
-        | ToolchainCommand::Editor { .. }
+        | ToolchainCommand::Live { .. }
         | ToolchainCommand::Build { .. }
         | ToolchainCommand::Package { .. }
         | ToolchainCommand::PackageMobile { .. } => true,
@@ -1772,10 +1714,6 @@ fn command_requires_runtime(command: &ToolchainCommand) -> bool {
 
 fn create_new_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
     create_project_with_options(path, name, true, true)
-}
-
-fn create_internal_git_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
-    create_project_with_options(path, name, true, false)
 }
 
 fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
@@ -3203,22 +3141,6 @@ fn execute_noarg_entry(jit: &JitProcess, name: &str) -> Result<(), String> {
 }
 
 fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandResult, String> {
-    test_workspace_with_progress(workspace, path, &mut |_| {})
-}
-
-fn report_toolchain_progress(
-    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
-    stage: stasis_ai::task_controller::ProgressStage,
-) {
-    // Progress is observational and must not interrupt a source transaction.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| progress(stage)));
-}
-
-fn test_workspace_with_progress(
-    workspace: &Workspace,
-    path: Option<&Path>,
-    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
-) -> Result<CommandResult, String> {
     let directory = path
         .map(|value| workspace.root.join(value))
         .unwrap_or_else(|| workspace.root.join(&workspace.manifest.tests));
@@ -3238,11 +3160,6 @@ fn test_workspace_with_progress(
         None,
     )?;
     let mut session = StasisTestRunSession::new();
-    report_toolchain_progress(
-        progress,
-        stasis_ai::task_controller::ProgressStage::Compiling,
-    );
-    let mut running_tests_reported = false;
     let summary = stasis::run_jit_tests_in_directory_with_project_root_session_and_validator(
         &directory,
         &workspace.root,
@@ -3257,22 +3174,9 @@ fn test_workspace_with_progress(
                 manifest.as_ref(),
             )?;
             load_and_apply_play_data_bindings_for_test(&data_binding_paths, jit)?;
-            if !running_tests_reported {
-                report_toolchain_progress(
-                    progress,
-                    stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
-                );
-                running_tests_reported = true;
-            }
             Ok(())
         },
     )?;
-    if !running_tests_reported {
-        report_toolchain_progress(
-            progress,
-            stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
-        );
-    }
     let scenarios = headless::run_scenarios(workspace, &directory)?;
     let data = json!({
         "files_discovered": summary.files_discovered,
@@ -3397,120 +3301,8 @@ fn replay_workspace(
     ))
 }
 
-fn run_workspace_ai(workspace: &Workspace, prompt: &str) -> Result<CommandResult, String> {
-    if prompt.trim().is_empty() {
-        return Err("AI prompt must not be empty".to_string());
-    }
-    let configured_provider = stasis_ai::ProviderConfig::from_workspace(&workspace.root)?
-        .provider_name()
-        .to_string();
-    let entry = workspace.root.join(&workspace.manifest.entry);
-    let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
-    let ai_root = workspace.root.clone();
-    let prompt = prompt.to_string();
-    let canceled = Arc::new(AtomicBool::new(false));
-    let ai_canceled = Arc::clone(&canceled);
-    let ai = thread::spawn(move || {
-        let result =
-            live_tui::run_scripted_project_ai_with_cancel(&client, &ai_root, &prompt, &ai_canceled);
-        let _ = client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
-        result
-    });
-    let config = LiveRunConfig::new(
-        workspace.root.clone(),
-        PathBuf::from(&workspace.manifest.entry),
-        PathBuf::from(&workspace.manifest.output),
-    )
-    .with_window_title(&workspace.manifest.name);
-    let run_result =
-        run_live_in_process(&entry, Some(&workspace.root), 16_000, None, server, config);
-    if let Err(error) = run_result {
-        canceled.store(true, Ordering::Release);
-        let _ = ai.join();
-        return Err(error);
-    }
-    let (summary, trace, usage_trace) = ai
-        .join()
-        .map_err(|_| "live AI thread panicked".to_string())??;
-    Ok(CommandResult::success(
-        format!(
-            "AI complete: {summary}\nAI trace: {}\nAI usage: {}",
-            trace.display(),
-            usage_trace.display()
-        ),
-        json!({
-            "backend": "jit",
-            "provider": configured_provider,
-            "summary": summary,
-            "trace": trace,
-            "usage_trace": usage_trace,
-        }),
-    ))
-}
-
-fn run_workspace_editor(
-    workspace: &Workspace,
-    entry: &Path,
-    tick_sleep_micros: u64,
-) -> Result<CommandResult, String> {
-    let (entry_path, entry_relative) = resolve_tui_entry(workspace, entry)?;
-    let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
-    let editor_root = workspace.root.clone();
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let config = LiveRunConfig::new(
-        workspace.root.clone(),
-        entry_relative,
-        PathBuf::from(&workspace.manifest.output),
-    )
-    .with_window_title(&workspace.manifest.name);
-    let runtime_shutdown = Arc::clone(&shutdown);
-    let runtime = thread::spawn(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_live_in_process_with_data(
-                &entry_path,
-                None,
-                None,
-                None,
-                tick_sleep_micros,
-                None,
-                server,
-                config,
-            )
-        }))
-        .map_err(|_| "live runtime thread panicked".to_string())
-        .and_then(|result| result);
-        runtime_shutdown.store(true, Ordering::Release);
-        result
-    });
-    let quit_client = client.clone();
-    let editor_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        desktop_editor::run(client, editor_root, Arc::clone(&shutdown))
-    }))
-    .map_err(|_| "desktop editor panicked".to_string())
-    .and_then(|result| result);
-    shutdown.store(true, Ordering::Release);
-    let _ = quit_client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
-    drop(quit_client);
-    let runtime_result = runtime
-        .join()
-        .map_err(|_| "live runtime thread panicked".to_string())
-        .and_then(|result| result);
-    match (runtime_result, editor_result) {
-        (Err(runtime), Err(editor)) => {
-            return Err(format!("{runtime}; editor shutdown also failed: {editor}"));
-        }
-        (Err(runtime), Ok(())) => return Err(runtime),
-        (Ok(()), Err(editor)) => return Err(editor),
-        (Ok(()), Ok(())) => {}
-    }
-    Ok(CommandResult::success(
-        "desktop editor session ended",
-        json!({"backend": "jit", "headless": false, "editor": "desktop", "task_scoped": true}),
-    ))
-}
-
 #[allow(clippy::too_many_arguments)]
-fn run_workspace_tui(
+fn run_workspace_live(
     workspace: &Workspace,
     entry: &Path,
     watch_dir: Option<&Path>,
@@ -3524,7 +3316,7 @@ fn run_workspace_tui(
     if !data_bind.is_empty() && data_bind.len() != 2 {
         return Err("--data-bind requires DATA_PATH and STRUCT_META_PATH".to_string());
     }
-    let (entry_path, entry_relative) = resolve_tui_entry(workspace, entry)?;
+    let (entry_path, entry_relative) = resolve_live_entry(workspace, entry)?;
     validate_optional_workspace_path(workspace, "watch directory", watch_dir)?;
     validate_optional_workspace_path(workspace, "live script", script)?;
     for path in data_bind {
@@ -3535,18 +3327,10 @@ fn run_workspace_tui(
     let data_meta = data_bind.get(1).map(|path| workspace.root.join(path));
     let watch_dir = watch_dir.map(|path| workspace.root.join(path));
     let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
-    let transport = if stdio {
-        "stdio"
-    } else if script.is_some() {
-        "script"
-    } else {
-        "terminal"
-    };
+    let transport = if stdio { "stdio" } else { "script" };
     let script = script.map(|path| workspace.root.join(path));
-    let terminal_root = workspace.root.clone();
-    let terminal = thread::spawn(move || {
-        run_live_terminal(client, script.as_deref(), json_lines, stdio, &terminal_root)
-    });
+    let terminal =
+        thread::spawn(move || run_live_terminal(client, script.as_deref(), json_lines, stdio));
     let config = LiveRunConfig::new(
         workspace.root.clone(),
         entry_relative,
@@ -3589,9 +3373,9 @@ fn run_workspace_tui(
     ))
 }
 
-fn resolve_tui_entry(workspace: &Workspace, entry: &Path) -> Result<(PathBuf, PathBuf), String> {
+fn resolve_live_entry(workspace: &Workspace, entry: &Path) -> Result<(PathBuf, PathBuf), String> {
     if entry.as_os_str().is_empty() {
-        return Err("TUI entry must not be empty".to_string());
+        return Err("live transport entry must not be empty".to_string());
     }
     let workspace_candidate = if entry.is_absolute() {
         entry.to_path_buf()
@@ -3604,9 +3388,12 @@ fn resolve_tui_entry(workspace: &Workspace, entry: &Path) -> Result<(PathBuf, Pa
     } else {
         launch_candidate
     };
-    validate_workspace_destination(workspace, "TUI entry", &entry_path)?;
+    validate_workspace_destination(workspace, "live transport entry", &entry_path)?;
     if !entry_path.is_file() {
-        return Err(format!("TUI entry is not a file: {}", entry_path.display()));
+        return Err(format!(
+            "live transport entry is not a file: {}",
+            entry_path.display()
+        ));
     }
     let root = workspace
         .root
@@ -3614,10 +3401,10 @@ fn resolve_tui_entry(workspace: &Workspace, entry: &Path) -> Result<(PathBuf, Pa
         .map_err(|error| format!("failed to resolve workspace root: {error}"))?;
     let entry_path = entry_path
         .canonicalize()
-        .map_err(|error| format!("failed to resolve TUI entry: {error}"))?;
+        .map_err(|error| format!("failed to resolve live transport entry: {error}"))?;
     let entry_relative = entry_path
         .strip_prefix(&root)
-        .map_err(|_| "TUI entry resolves outside the workspace".to_string())?
+        .map_err(|_| "live transport entry resolves outside the workspace".to_string())?
         .to_path_buf();
     Ok((entry_path, entry_relative))
 }
@@ -3627,9 +3414,8 @@ fn run_live_terminal(
     script: Option<&Path>,
     json_lines: bool,
     stdio: bool,
-    project_root: &Path,
 ) -> Result<(), String> {
-    let result = run_live_terminal_inner(&client, script, json_lines, stdio, project_root);
+    let result = run_live_terminal_inner(&client, script, json_lines, stdio);
     if result.is_err() {
         let _ = client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
     }
@@ -3641,7 +3427,6 @@ fn run_live_terminal_inner(
     script: Option<&Path>,
     json_lines: bool,
     stdio: bool,
-    project_root: &Path,
 ) -> Result<(), String> {
     let mut terminal = TerminalBuffer::new();
     let mut saw_quit = false;
@@ -3672,31 +3457,6 @@ fn run_live_terminal_inner(
             .map_err(|error| format!("failed to open live script {}: {error}", script.display()))?;
         for line in io::BufReader::new(file).lines() {
             let line = line.map_err(|error| format!("failed reading live script: {error}"))?;
-            if let Some(prompt) = line.trim().strip_prefix(":ai ") {
-                let (summary, trace, usage_trace) =
-                    live_tui::run_scripted_ai(client, project_root, prompt)?;
-                if json_lines {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "schema_version": 1,
-                            "kind": "ai_completed",
-                            "ok": true,
-                            "summary": summary,
-                            "trace": trace,
-                            "usage_trace": usage_trace,
-                        })
-                    );
-                } else {
-                    println!("AI complete: {summary}");
-                    println!("AI trace: {}", trace.display());
-                    println!("AI usage: {}", usage_trace.display());
-                }
-                continue;
-            }
-            if line.trim() == ":ai" {
-                return Err("live script :ai requires a prompt".to_string());
-            }
             if let TerminalInput::Request(request) = terminal.feed_line(&line)? {
                 saw_quit |= matches!(&request.command, LiveCommand::Quit);
                 let request_id = request.request_id;
@@ -3713,7 +3473,7 @@ fn run_live_terminal_inner(
             );
         }
     } else {
-        saw_quit = live_tui::run(client, project_root)?;
+        return Err("live requires --live-script or --live-stdio".to_string());
     }
     if !saw_quit {
         submit_and_print_live_response(
@@ -8544,25 +8304,6 @@ fn apply_symbol_plan(
     plan: WorkshopSemanticEditPlan,
     options: SymbolEditOptions,
 ) -> Result<CommandResult, String> {
-    apply_symbol_plan_with_progress(workspace, plan, options, &mut |_| {})
-}
-
-fn apply_symbol_plan_with_progress(
-    workspace: &Workspace,
-    plan: WorkshopSemanticEditPlan,
-    options: SymbolEditOptions,
-    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
-) -> Result<CommandResult, String> {
-    apply_symbol_plan_with_validation_and_progress(workspace, plan, options, None, progress)
-}
-
-fn apply_symbol_plan_with_validation_and_progress(
-    workspace: &Workspace,
-    plan: WorkshopSemanticEditPlan,
-    options: SymbolEditOptions,
-    prevalidated_test_result: Option<Value>,
-    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
-) -> Result<CommandResult, String> {
     if options.dry_run {
         return Ok(CommandResult::success(
             format!(
@@ -8579,27 +8320,17 @@ fn apply_symbol_plan_with_validation_and_progress(
         ));
     }
 
-    report_toolchain_progress(
-        progress,
-        stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
-    );
     write_workshop_semantic_plan(&workspace.root, &plan, false)?;
-    let validation = if let Some(test_result) = prevalidated_test_result {
-        Ok(json!({"compiler": "passed", "tests": "passed", "test_result": test_result}))
-    } else if options.no_tests {
+    let validation = if options.no_tests {
         Ok(json!({"compiler": "passed", "tests": "skipped"}))
     } else {
-        test_workspace_with_progress(workspace, None, progress).map(
+        test_workspace(workspace, None).map(
             |result| json!({"compiler": "passed", "tests": "passed", "test_result": result.data}),
         )
     };
     let validation = match validation {
         Ok(validation) => validation,
         Err(error) => {
-            report_toolchain_progress(
-                progress,
-                stasis_ai::task_controller::ProgressStage::RollingBack,
-            );
             write_workshop_semantic_plan(&workspace.root, &plan, true).map_err(|rollback| {
                 format!(
                     "semantic edit validation failed: {error}; rollback also failed: {rollback}"
@@ -8618,10 +8349,6 @@ fn apply_symbol_plan_with_validation_and_progress(
     let receipt = match write_symbol_receipt(workspace, &plan) {
         Ok(receipt) => receipt,
         Err(error) => {
-            report_toolchain_progress(
-                progress,
-                stasis_ai::task_controller::ProgressStage::RollingBack,
-            );
             write_workshop_semantic_plan(&workspace.root, &plan, true).map_err(|rollback| {
                 format!("semantic receipt failed: {error}; rollback also failed: {rollback}")
             })?;
@@ -8648,1006 +8375,6 @@ fn apply_symbol_plan_with_validation_and_progress(
             "receipt": relative_display(&workspace.root, &receipt),
         }),
     ))
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct DesktopSemanticPreview {
-    pub(super) payload: Value,
-    pub(super) source_fingerprint: String,
-    pub(super) plan: WorkshopSemanticEditPlan,
-}
-
-fn desktop_preview_semantic_batch(
-    root: &Path,
-    payload: Value,
-) -> Result<DesktopSemanticPreview, String> {
-    let workspace = load_workspace(Some(root))?;
-    if let Some(transaction) = desktop_file_transaction(&workspace.root, &payload)? {
-        let source_fingerprint = desktop_file_fingerprint(&workspace.root, &transaction)?;
-        let changes = transaction.changes();
-        let mut reload = classify_workshop_reload(&[], &[])?;
-        reload.reason = "Non-source project files are updated atomically after review.".into();
-        return Ok(DesktopSemanticPreview {
-            payload,
-            source_fingerprint,
-            plan: WorkshopSemanticEditPlan {
-                schema_version: 1,
-                edits: Vec::new(),
-                changed_files: changes,
-                reload,
-            },
-        });
-    }
-    let source_fingerprint = desktop_source_fingerprint(root, &[])?;
-    let files =
-        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
-    let editable_files = files
-        .iter()
-        .filter(|file| is_editable_workshop_path(&file.path))
-        .cloned()
-        .collect::<Vec<_>>();
-    let batch = serde_json::from_value::<WorkshopSemanticEditBatch>(payload.clone())
-        .map_err(|error| format!("invalid proposed semantic edit: {error}"))?;
-    let plan = plan_symbol_batch(&workspace, &editable_files, &files, batch)?;
-    if desktop_source_fingerprint(root, &[])? != source_fingerprint {
-        return Err(
-            "stale semantic preview: project sources changed while generating the preview".into(),
-        );
-    }
-    Ok(DesktopSemanticPreview {
-        payload,
-        source_fingerprint,
-        plan,
-    })
-}
-
-#[derive(Clone, Debug)]
-struct DesktopFileWrite {
-    relative: String,
-    target: PathBuf,
-    before: String,
-    before_exists: bool,
-    content: String,
-}
-
-#[derive(Clone, Debug)]
-struct DesktopFileTransaction {
-    writes: Vec<DesktopFileWrite>,
-}
-
-struct AppliedDesktopFileTransaction {
-    backups: Vec<(PathBuf, Option<Vec<u8>>)>,
-}
-
-impl DesktopFileTransaction {
-    fn changes(&self) -> Vec<stasis_compiler::frontend::workshop::WorkshopSemanticFileChange> {
-        self.writes
-            .iter()
-            .map(
-                |write| stasis_compiler::frontend::workshop::WorkshopSemanticFileChange {
-                    file: write.relative.clone(),
-                    before_hash: workshop_source_hash(&write.before),
-                    after_hash: workshop_source_hash(&write.content),
-                    before_source: write.before.clone(),
-                    after_source: write.content.clone(),
-                },
-            )
-            .collect()
-    }
-
-    fn apply(&self, root: &Path) -> Result<AppliedDesktopFileTransaction, String> {
-        let mut backups = Vec::with_capacity(self.writes.len() * 2);
-        for write in &self.writes {
-            if let Err(error) = validate_desktop_file_target(root, &write.relative) {
-                restore_desktop_file_writes(&backups)?;
-                return Err(error);
-            }
-            let prior = match fs::read(&write.target) {
-                Ok(bytes) => Some(bytes),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                Err(error) => {
-                    restore_desktop_file_writes(&backups)?;
-                    return Err(format!(
-                        "failed reading {}: {error}",
-                        write.target.display()
-                    ));
-                }
-            };
-            let expected = write.before_exists.then_some(write.before.as_bytes());
-            if prior.as_deref() != expected {
-                restore_desktop_file_writes(&backups)?;
-                return Err(format!(
-                    "file-write target changed after preview: {}",
-                    write.relative
-                ));
-            }
-            if let Some(parent) = write.target.parent() {
-                if let Err(error) = fs::create_dir_all(parent) {
-                    restore_desktop_file_writes(&backups)?;
-                    return Err(format!("failed creating {}: {error}", parent.display()));
-                }
-            }
-            backups.push((write.target.clone(), prior));
-            if let Err(error) = fs::write(&write.target, write.content.as_bytes()) {
-                restore_desktop_file_writes(&backups)?;
-                return Err(format!(
-                    "failed writing {}: {error}",
-                    write.target.display()
-                ));
-            }
-        }
-        if let Err(error) = validate_desktop_file_transaction(root, self) {
-            restore_desktop_file_writes(&backups)?;
-            return Err(error);
-        }
-        if let Err(error) = sync_desktop_file_assets(root, self, &mut backups) {
-            restore_desktop_file_writes(&backups)?;
-            return Err(error);
-        }
-        Ok(AppliedDesktopFileTransaction { backups })
-    }
-}
-
-impl AppliedDesktopFileTransaction {
-    fn rollback(self) -> Result<(), String> {
-        restore_desktop_file_writes(&self.backups)
-    }
-}
-
-fn desktop_file_transaction(
-    root: &Path,
-    payload: &Value,
-) -> Result<Option<DesktopFileTransaction>, String> {
-    let Some(object) = payload.as_object() else {
-        return Ok(None);
-    };
-    let Some(file_writes) = object.get("file_writes") else {
-        return Ok(None);
-    };
-    if object.len() != 2 || !object.contains_key("schema_version") {
-        return Err(
-            "proposed file-write payload accepts only schema_version and file_writes".into(),
-        );
-    }
-    if payload.get("schema_version").and_then(Value::as_u64) != Some(1) {
-        return Err("invalid proposed file-write schema version".into());
-    }
-    let mut writes = file_writes
-        .as_array()
-        .filter(|writes| !writes.is_empty() && writes.len() <= MAX_DESKTOP_FILE_WRITES)
-        .ok_or_else(|| {
-            format!(
-                "proposed file edit must contain 1..={} writes",
-                MAX_DESKTOP_FILE_WRITES
-            )
-        })?
-        .iter()
-        .map(|write| desktop_file_write(root, write))
-        .collect::<Result<Vec<_>, _>>()?;
-    writes.sort_by(|left, right| left.relative.cmp(&right.relative));
-    if writes
-        .windows(2)
-        .any(|pair| pair[0].relative.eq_ignore_ascii_case(&pair[1].relative))
-    {
-        return Err("proposed file edit contains a duplicate path".into());
-    }
-    derive_asset_manifest_write(root, &mut writes)?;
-    Ok(Some(DesktopFileTransaction { writes }))
-}
-
-fn desktop_file_write(root: &Path, value: &Value) -> Result<DesktopFileWrite, String> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| "each proposed file write must be an object".to_string())?;
-    if object.len() != 2 || !object.contains_key("path") || !object.contains_key("content") {
-        return Err("each proposed file write accepts only path and content".into());
-    }
-    let relative = object["path"]
-        .as_str()
-        .ok_or_else(|| "file-write path must be a string".to_string())?
-        .replace('\\', "/");
-    let content = object["content"]
-        .as_str()
-        .ok_or_else(|| "file-write content must be a string".to_string())?;
-    if content.len() > MAX_DESKTOP_FILE_WRITE_BYTES {
-        return Err(format!(
-            "file-write content exceeds {} UTF-8 bytes",
-            MAX_DESKTOP_FILE_WRITE_BYTES
-        ));
-    }
-    let target = validate_desktop_file_target(root, &relative)?;
-    if target
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
-    {
-        gauntlet::assets::validate_svg(content)?;
-    }
-    let (before, before_exists) = match fs::read(&target) {
-        Ok(bytes) => (
-            String::from_utf8(bytes)
-                .map_err(|_| format!("file-write preview requires UTF-8 text: {relative}"))?,
-            true,
-        ),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => (String::new(), false),
-        Err(error) => return Err(format!("failed reading {}: {error}", target.display())),
-    };
-    if before == content {
-        return Err(format!("file write made no change: {relative}"));
-    }
-    Ok(DesktopFileWrite {
-        relative,
-        target,
-        before,
-        before_exists,
-        content: content.to_string(),
-    })
-}
-
-fn validate_desktop_file_target(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    if relative.is_empty() || relative.len() > 512 || relative.contains(':') {
-        return Err("file-write path must be a bounded project-relative path".into());
-    }
-    let path = Path::new(relative);
-    let components = path.components().collect::<Vec<_>>();
-    if components.is_empty()
-        || components
-            .iter()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(format!("file-write path escapes the project: {relative}"));
-    }
-    let names = components
-        .iter()
-        .filter_map(|component| match component {
-            Component::Normal(name) => Some(name.to_string_lossy().to_ascii_lowercase()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if names
-        .iter()
-        .any(|name| matches!(name.as_str(), ".git" | ".stasis_cache" | ".codex" | ".env"))
-        || names
-            .first()
-            .is_some_and(|name| matches!(name.as_str(), "build" | "target"))
-    {
-        return Err(format!("file-write path is host-controlled: {relative}"));
-    }
-    if path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("stasis"))
-    {
-        return Err("use propose_semantic_edit for Stasis source files".into());
-    }
-    let target = root.join(path);
-    let mut cursor = root.to_path_buf();
-    for (index, component) in components.iter().enumerate() {
-        let Component::Normal(name) = component else {
-            unreachable!("validated normal component")
-        };
-        cursor.push(name);
-        match fs::symlink_metadata(&cursor) {
-            Ok(metadata) if desktop_path_is_link_or_reparse(&metadata) => {
-                return Err(format!(
-                    "file-write path crosses a link or reparse point: {relative}"
-                ));
-            }
-            Ok(metadata) if index + 1 < components.len() && !metadata.is_dir() => {
-                return Err(format!(
-                    "file-write path crosses a non-directory: {relative}"
-                ));
-            }
-            Ok(metadata) if index + 1 == components.len() && !metadata.is_file() => {
-                return Err(format!(
-                    "file-write target is not a regular file: {relative}"
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-            Err(error) => return Err(format!("failed inspecting {}: {error}", cursor.display())),
-        }
-    }
-    Ok(target)
-}
-
-fn derive_asset_manifest_write(
-    root: &Path,
-    writes: &mut Vec<DesktopFileWrite>,
-) -> Result<(), String> {
-    if !writes
-        .iter()
-        .any(|write| is_desktop_asset_path(&write.relative))
-    {
-        return Ok(());
-    }
-    if writes.iter().any(|write| {
-        write
-            .relative
-            .eq_ignore_ascii_case(DEFAULT_ASSET_MANIFEST_PATH)
-    }) {
-        return Ok(());
-    }
-    let manifest_path = root.join(DEFAULT_ASSET_MANIFEST_PATH);
-    let before = match fs::read_to_string(&manifest_path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("failed reading asset manifest: {error}")),
-    };
-    let mut manifest: Value = serde_json::from_str(&before)
-        .map_err(|error| format!("invalid asset manifest: {error}"))?;
-    let Some(assets) = manifest.get_mut("assets").and_then(Value::as_array_mut) else {
-        return Ok(());
-    };
-    let mut changed = false;
-    for write in writes.iter() {
-        for asset in assets.iter_mut().filter(|asset| {
-            asset.get("path").and_then(Value::as_str) == Some(write.relative.as_str())
-        }) {
-            asset["content_sha256"] =
-                json!(format!("{:x}", Sha256::digest(write.content.as_bytes())));
-            changed = true;
-        }
-    }
-    if !changed {
-        return Ok(());
-    }
-    let mut content = serde_json::to_string_pretty(&manifest)
-        .map_err(|error| format!("failed encoding asset manifest: {error}"))?;
-    content.push('\n');
-    writes.push(DesktopFileWrite {
-        relative: DEFAULT_ASSET_MANIFEST_PATH.replace('\\', "/"),
-        target: manifest_path,
-        before,
-        before_exists: true,
-        content,
-    });
-    writes.sort_by(|left, right| left.relative.cmp(&right.relative));
-    Ok(())
-}
-
-fn desktop_file_fingerprint(
-    root: &Path,
-    transaction: &DesktopFileTransaction,
-) -> Result<String, String> {
-    let mut inputs = desktop_validation_inputs(root, &[])?;
-    for write in &transaction.writes {
-        inputs.insert(
-            write.relative.clone(),
-            if write.before_exists {
-                workshop_source_hash(&write.before)
-            } else {
-                "missing".into()
-            },
-        );
-    }
-    Ok(desktop_inputs_fingerprint(&inputs))
-}
-
-fn desktop_file_committed_fingerprint(
-    root: &Path,
-    transaction: &DesktopFileTransaction,
-) -> Result<String, String> {
-    let mut inputs = desktop_validation_inputs(root, &[])?;
-    for write in &transaction.writes {
-        inputs.insert(write.relative.clone(), workshop_source_hash(&write.content));
-    }
-    Ok(desktop_inputs_fingerprint(&inputs))
-}
-
-fn validate_desktop_file_transaction(
-    root: &Path,
-    transaction: &DesktopFileTransaction,
-) -> Result<(), String> {
-    load_workspace(Some(root))?;
-    let touches_assets = transaction
-        .writes
-        .iter()
-        .any(|write| is_desktop_asset_path(&write.relative));
-    if touches_assets && root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
-        load_project_asset_manifest(root, AssetLimits::default())
-            .map_err(|error| format!("file-write asset validation failed: {error}"))?;
-    }
-    Ok(())
-}
-
-fn sync_desktop_file_assets(
-    root: &Path,
-    transaction: &DesktopFileTransaction,
-    backups: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
-) -> Result<(), String> {
-    let asset_writes = transaction
-        .writes
-        .iter()
-        .filter(|write| {
-            is_desktop_asset_path(&write.relative)
-                && !write
-                    .relative
-                    .eq_ignore_ascii_case(DEFAULT_ASSET_MANIFEST_PATH)
-        })
-        .collect::<Vec<_>>();
-    if asset_writes.is_empty() {
-        return Ok(());
-    }
-    let cache_root = root.join(".stasis_cache");
-    match fs::symlink_metadata(&cache_root) {
-        Ok(metadata) if desktop_path_is_link_or_reparse(&metadata) => {
-            return Err(format!(
-                "asset cache root is a link or reparse point: {}",
-                cache_root.display()
-            ));
-        }
-        Ok(metadata) if !metadata.is_dir() => {
-            return Err(format!(
-                "asset cache root is not a directory: {}",
-                cache_root.display()
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(format!(
-                "failed inspecting asset cache root {}: {error}",
-                cache_root.display()
-            ));
-        }
-    }
-    let prepared_root = root.join(".stasis_cache/play-assets");
-    match fs::symlink_metadata(&prepared_root) {
-        Ok(metadata) if desktop_path_is_link_or_reparse(&metadata) => {
-            return Err(format!(
-                "prepared asset root is a link or reparse point: {}",
-                prepared_root.display()
-            ));
-        }
-        Ok(metadata) if !metadata.is_dir() => {
-            return Err(format!(
-                "prepared asset root is not a directory: {}",
-                prepared_root.display()
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(format!(
-                "failed inspecting prepared asset root {}: {error}",
-                prepared_root.display()
-            ));
-        }
-    }
-    for write in asset_writes {
-        let target = validate_desktop_prepared_asset_target(&prepared_root, &write.relative)?;
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("failed creating prepared asset directory: {error}"))?;
-        }
-        let prior = match fs::read(&target) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => {
-                return Err(format!(
-                    "failed reading prepared asset {}: {error}",
-                    target.display()
-                ));
-            }
-        };
-        backups.push((target.clone(), prior));
-        fs::write(&target, write.content.as_bytes()).map_err(|error| {
-            format!(
-                "failed syncing prepared asset {}: {error}",
-                target.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
-fn is_desktop_asset_path(relative: &str) -> bool {
-    let relative = relative.to_ascii_lowercase();
-    relative == "assets" || relative.starts_with("assets/")
-}
-
-fn desktop_path_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-    }
-    #[cfg(not(windows))]
-    false
-}
-
-fn validate_desktop_prepared_asset_target(
-    prepared_root: &Path,
-    relative: &str,
-) -> Result<PathBuf, String> {
-    let target = prepared_root.join(relative);
-    let mut cursor = prepared_root.to_path_buf();
-    let components = Path::new(relative).components().collect::<Vec<_>>();
-    for (index, component) in components.iter().enumerate() {
-        let Component::Normal(name) = component else {
-            return Err(format!(
-                "prepared asset path is not project-relative: {relative}"
-            ));
-        };
-        cursor.push(name);
-        match fs::symlink_metadata(&cursor) {
-            Ok(metadata) if desktop_path_is_link_or_reparse(&metadata) => {
-                return Err(format!(
-                    "prepared asset path crosses a link or reparse point: {relative}"
-                ));
-            }
-            Ok(metadata) if index + 1 < components.len() && !metadata.is_dir() => {
-                return Err(format!(
-                    "prepared asset path crosses a non-directory: {relative}"
-                ));
-            }
-            Ok(metadata) if index + 1 == components.len() && !metadata.is_file() => {
-                return Err(format!(
-                    "prepared asset target is not a regular file: {relative}"
-                ));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-            Err(error) => {
-                return Err(format!(
-                    "failed inspecting prepared asset path {}: {error}",
-                    cursor.display()
-                ));
-            }
-        }
-    }
-    Ok(target)
-}
-
-fn restore_desktop_file_writes(backups: &[(PathBuf, Option<Vec<u8>>)]) -> Result<(), String> {
-    for (path, prior) in backups.iter().rev() {
-        match prior {
-            Some(bytes) => fs::write(path, bytes)
-                .map_err(|error| format!("failed restoring {}: {error}", path.display()))?,
-            None if path.exists() => fs::remove_file(path)
-                .map_err(|error| format!("failed removing {}: {error}", path.display()))?,
-            None => {}
-        }
-    }
-    Ok(())
-}
-
-fn desktop_validate_semantic_preview(
-    root: &Path,
-    preview: &DesktopSemanticPreview,
-) -> Result<Value, String> {
-    let workspace = load_workspace(Some(root))?;
-    let files =
-        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
-    let edited_files = preview
-        .plan
-        .changed_files
-        .iter()
-        .map(|change| WorkshopSourceFile {
-            path: change.file.clone(),
-            source: change.after_source.clone(),
-        })
-        .collect::<Vec<_>>();
-    let candidate_files = overlay_workshop_files(&files, &edited_files);
-    let test_result = run_staged_project_tests_bounded(
-        &workspace.root,
-        Path::new(&workspace.manifest.entry),
-        &candidate_files,
-        &AtomicBool::new(false),
-    )
-    .map_err(|error| format!("candidate compile or tests failed: {error}"))?;
-    desktop_require_executed_tests(&test_result)?;
-    if desktop_preview_fingerprint(root, &preview.payload)? != preview.source_fingerprint {
-        return Err("project sources changed during candidate validation".into());
-    }
-    Ok(test_result)
-}
-
-#[cfg(test)]
-fn desktop_apply_semantic_preview(
-    root: &Path,
-    preview: &DesktopSemanticPreview,
-) -> Result<(String, Value), String> {
-    desktop_apply_semantic_preview_with_progress(root, preview, &mut |_| {})
-}
-
-#[cfg(test)]
-fn desktop_apply_semantic_preview_with_progress(
-    root: &Path,
-    preview: &DesktopSemanticPreview,
-    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
-) -> Result<(String, Value), String> {
-    report_toolchain_progress(
-        progress,
-        stasis_ai::task_controller::ProgressStage::InspectingSymbols,
-    );
-    let file_transaction = desktop_file_transaction(root, &preview.payload)?;
-    let current_fingerprint = match &file_transaction {
-        Some(transaction) => desktop_file_fingerprint(root, transaction)?,
-        None => desktop_source_fingerprint(root, &[])?,
-    };
-    if current_fingerprint != preview.source_fingerprint {
-        return Err("stale semantic preview: project sources changed; generate a new preview before applying".into());
-    }
-
-    let replanned = desktop_preview_semantic_batch(root, preview.payload.clone())?;
-    if replanned.source_fingerprint != preview.source_fingerprint || replanned.plan != preview.plan
-    {
-        return Err("semantic preview identity mismatch: the exact payload no longer produces the reviewed compiler plan".into());
-    }
-
-    if let Some(transaction) = file_transaction {
-        report_toolchain_progress(
-            progress,
-            stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
-        );
-        let applied = transaction.apply(root)?;
-        let committed_fingerprint = desktop_file_committed_fingerprint(root, &transaction);
-        let committed_fingerprint = match committed_fingerprint {
-            Ok(fingerprint) => fingerprint,
-            Err(error) => {
-                report_toolchain_progress(
-                    progress,
-                    stasis_ai::task_controller::ProgressStage::RollingBack,
-                );
-                applied.rollback().map_err(|rollback| {
-                    format!("file-write fingerprint failed: {error}; rollback failed: {rollback}")
-                })?;
-                return Err(format!(
-                    "file-write fingerprint failed and all writes were rolled back: {error}"
-                ));
-            }
-        };
-        return Ok((
-            format!(
-                "applied {} project file change(s)",
-                preview.plan.changed_files.len()
-            ),
-            json!({
-                "status": "files_applied",
-                "changed_files": preview.plan.changed_files.iter().map(|change| &change.file).collect::<Vec<_>>(),
-                "source_fingerprint": committed_fingerprint,
-            }),
-        ));
-    }
-
-    let workspace = load_workspace(Some(root))?;
-    let files =
-        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
-    let edited_files = preview
-        .plan
-        .changed_files
-        .iter()
-        .map(|change| WorkshopSourceFile {
-            path: change.file.clone(),
-            source: change.after_source.clone(),
-        })
-        .collect::<Vec<_>>();
-    let candidate_files = overlay_workshop_files(&files, &edited_files);
-    let mut validated_inputs = desktop_validation_inputs(root, &[])?;
-    if desktop_inputs_fingerprint(&validated_inputs) != preview.source_fingerprint {
-        return Err("stale semantic preview: project sources changed before apply".into());
-    }
-    for change in &preview.plan.changed_files {
-        validated_inputs.insert(change.file.clone(), change.after_hash.clone());
-    }
-    // Bind the receipt to the validated inputs overlaid with the exact reviewed plan.
-    let committed_fingerprint = desktop_inputs_fingerprint(&validated_inputs);
-    let apply_started = Instant::now();
-    let test_started = Instant::now();
-    report_toolchain_progress(
-        progress,
-        stasis_ai::task_controller::ProgressStage::Compiling,
-    );
-    report_toolchain_progress(
-        progress,
-        stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
-    );
-    let test_result = run_staged_project_tests_bounded(
-        &workspace.root,
-        Path::new(&workspace.manifest.entry),
-        &candidate_files,
-        &AtomicBool::new(false),
-    )
-    .map_err(|error| {
-        report_toolchain_progress(
-            progress,
-            stasis_ai::task_controller::ProgressStage::RollingBack,
-        );
-        format!(
-            "semantic edit validation failed; candidate was discarded and all source changes were rolled back before publication: {error}"
-        )
-    })?;
-    let compile_and_tests_micros = test_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
-    desktop_require_executed_tests(&test_result)?;
-    if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
-        return Err(
-            "stale semantic preview: project sources changed during validation; live sources remained unchanged"
-                .into(),
-        );
-    }
-    let mut result = apply_symbol_plan_with_validation_and_progress(
-        &workspace,
-        preview.plan.clone(),
-        SymbolEditOptions {
-            dry_run: false,
-            no_tests: false,
-        },
-        Some(test_result),
-        progress,
-    )?;
-    result.data["source_fingerprint"] = json!(committed_fingerprint);
-    result.data["timing_micros"] = json!({
-        "compile_and_tests_child": compile_and_tests_micros,
-        "apply_total": apply_started.elapsed().as_micros().min(u64::MAX as u128) as u64,
-    });
-    Ok((result.human, result.data))
-}
-
-fn desktop_publish_semantic_preview_with_progress(
-    root: &Path,
-    preview: &DesktopSemanticPreview,
-    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
-) -> Result<(String, Value), String> {
-    report_toolchain_progress(
-        progress,
-        stasis_ai::task_controller::ProgressStage::InspectingSymbols,
-    );
-    let workspace = load_workspace(Some(root))?;
-    if let Some(transaction) = desktop_file_transaction(&workspace.root, &preview.payload)? {
-        let current_fingerprint = desktop_file_fingerprint(&workspace.root, &transaction)?;
-        if current_fingerprint != preview.source_fingerprint {
-            return Err(
-                "stale semantic preview: project sources changed; generate a new preview before applying"
-                    .into(),
-            );
-        }
-        let replanned = desktop_preview_semantic_batch(root, preview.payload.clone())?;
-        if replanned.source_fingerprint != preview.source_fingerprint
-            || replanned.plan != preview.plan
-        {
-            return Err("semantic preview identity mismatch: the exact payload no longer produces the reviewed compiler plan".into());
-        }
-        report_toolchain_progress(
-            progress,
-            stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
-        );
-        let applied = transaction.apply(&workspace.root)?;
-        let committed_fingerprint =
-            desktop_file_committed_fingerprint(&workspace.root, &transaction);
-        let committed_fingerprint = match committed_fingerprint {
-            Ok(fingerprint) => fingerprint,
-            Err(error) => {
-                report_toolchain_progress(
-                    progress,
-                    stasis_ai::task_controller::ProgressStage::RollingBack,
-                );
-                applied.rollback().map_err(|rollback| {
-                    format!("file-write fingerprint failed: {error}; rollback failed: {rollback}")
-                })?;
-                return Err(format!(
-                    "file-write fingerprint failed and all writes were rolled back: {error}"
-                ));
-            }
-        };
-        return Ok((
-            format!(
-                "applied {} project file change(s)",
-                preview.plan.changed_files.len()
-            ),
-            json!({
-                "status": "files_applied",
-                "changed_files": preview.plan.changed_files.iter().map(|change| &change.file).collect::<Vec<_>>(),
-                "source_fingerprint": committed_fingerprint,
-            }),
-        ));
-    }
-    if desktop_source_fingerprint(root, &[])? != preview.source_fingerprint {
-        return Err(
-            "stale semantic preview: project sources changed; generate a new preview before applying"
-                .into(),
-        );
-    }
-    let replanned = desktop_preview_semantic_batch(root, preview.payload.clone())?;
-    if replanned.source_fingerprint != preview.source_fingerprint || replanned.plan != preview.plan
-    {
-        return Err("semantic preview identity mismatch: the exact payload no longer produces the reviewed compiler plan".into());
-    }
-    let workspace = load_workspace(Some(root))?;
-    let mut result = apply_symbol_plan_with_progress(
-        &workspace,
-        preview.plan.clone(),
-        SymbolEditOptions {
-            dry_run: false,
-            no_tests: true,
-        },
-        progress,
-    )?;
-    result.data["source_fingerprint"] = json!(desktop_source_fingerprint(root, &[])?);
-    Ok((result.human, result.data))
-}
-
-fn desktop_revert_semantic_receipts(root: &Path, receipts: &[String]) -> Result<(), String> {
-    let workspace = load_workspace(Some(root))?;
-    for receipt in receipts.iter().rev() {
-        revert_symbol_plan(&workspace, Path::new(receipt), false, true)?;
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn desktop_apply_semantic_batch(root: &Path, payload: Value) -> Result<(String, Value), String> {
-    let preview = desktop_preview_semantic_batch(root, payload)?;
-    desktop_apply_semantic_preview(root, &preview)
-}
-
-#[cfg(test)]
-fn desktop_run_focused_tests(
-    root: &Path,
-    relevant_tests: &[String],
-) -> Result<(String, Value), String> {
-    desktop_run_focused_tests_with_progress(root, relevant_tests, &mut |_| {})
-}
-
-fn desktop_run_focused_tests_with_progress(
-    root: &Path,
-    relevant_tests: &[String],
-    progress: &mut dyn FnMut(stasis_ai::task_controller::ProgressStage),
-) -> Result<(String, Value), String> {
-    if relevant_tests.is_empty() {
-        report_toolchain_progress(
-            progress,
-            stasis_ai::task_controller::ProgressStage::Compiling,
-        );
-        report_toolchain_progress(
-            progress,
-            stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
-        );
-        let receipt = run_project_tests_bounded_with_receipt(root, None, &AtomicBool::new(false))?;
-        desktop_require_executed_tests(&receipt)?;
-        return Ok(("focused tests passed".to_string(), receipt));
-    }
-    let mut receipts = Vec::with_capacity(relevant_tests.len());
-    for relative in relevant_tests {
-        report_toolchain_progress(
-            progress,
-            stasis_ai::task_controller::ProgressStage::Compiling,
-        );
-        report_toolchain_progress(
-            progress,
-            stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
-        );
-        let receipt = run_project_tests_bounded_with_receipt(
-            root,
-            Some(Path::new(relative)),
-            &AtomicBool::new(false),
-        )?;
-        desktop_require_executed_tests(&receipt)?;
-        receipts.push(receipt);
-    }
-    Ok((
-        format!("{} focused test path(s) passed", relevant_tests.len()),
-        json!({"focused_paths": relevant_tests, "receipts": receipts}),
-    ))
-}
-
-fn desktop_source_fingerprint(root: &Path, relevant_tests: &[String]) -> Result<String, String> {
-    Ok(desktop_inputs_fingerprint(&desktop_validation_inputs(
-        root,
-        relevant_tests,
-    )?))
-}
-
-fn desktop_preview_fingerprint(root: &Path, payload: &Value) -> Result<String, String> {
-    let workspace = load_workspace(Some(root))?;
-    match desktop_file_transaction(&workspace.root, payload)? {
-        Some(transaction) => desktop_file_fingerprint(&workspace.root, &transaction),
-        None => desktop_source_fingerprint(&workspace.root, &[]),
-    }
-}
-
-fn desktop_require_executed_tests(receipt: &Value) -> Result<(), String> {
-    let count = receipt["tests_run"].as_u64().unwrap_or(0)
-        + receipt["scenario_cases_run"].as_u64().unwrap_or(0);
-    if count == 0 {
-        return Err(
-            "No focused tests matched; select a test file or add a test before marking Done."
-                .into(),
-        );
-    }
-    Ok(())
-}
-
-fn desktop_inputs_fingerprint(inputs: &BTreeMap<String, String>) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(inputs).expect("string map serializes"))
-    )
-}
-
-fn desktop_validation_inputs(
-    root: &Path,
-    relevant_tests: &[String],
-) -> Result<BTreeMap<String, String>, String> {
-    let workspace = load_workspace(Some(root))?;
-    let files =
-        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
-    let mut mapped = files
-        .iter()
-        .map(|file| (PathBuf::from(&file.path), workspace.root.join(&file.path)))
-        .collect::<Vec<_>>();
-    mapped.push((
-        PathBuf::from(MANIFEST_NAME),
-        workspace.root.join(MANIFEST_NAME),
-    ));
-    for (data, metadata) in resolve_play_data_binding_paths(
-        &workspace.root.join(&workspace.manifest.entry),
-        &workspace.root,
-        None,
-        None,
-    )? {
-        for physical in [data, metadata] {
-            let relative = physical
-                .strip_prefix(&workspace.root)
-                .map_err(|_| format!("data binding escaped workspace: {}", physical.display()))?;
-            mapped.push((relative.to_path_buf(), physical));
-        }
-    }
-    let mut test_roots = if relevant_tests.is_empty() {
-        vec![workspace.root.join(&workspace.manifest.tests)]
-    } else {
-        relevant_tests
-            .iter()
-            .map(|path| workspace.root.join(path))
-            .collect()
-    };
-    for path in test_roots.drain(..) {
-        validate_workspace_destination(&workspace, "focused test path", &path)?;
-        if path.is_dir() {
-            collect_mapped_files(&workspace.root, &path, Path::new(""), &mut mapped)?;
-        } else if path.is_file() {
-            let relative = path
-                .strip_prefix(&workspace.root)
-                .map_err(|_| format!("test path escaped workspace: {}", path.display()))?;
-            mapped.push((relative.to_path_buf(), path));
-        }
-    }
-    mapped.sort_by(|left, right| left.0.cmp(&right.0));
-    mapped.dedup_by(|left, right| left.0 == right.0);
-    mapped
-        .into_iter()
-        .map(|(relative, physical)| {
-            Ok((
-                relative.to_string_lossy().replace('\\', "/"),
-                sha256_file(&physical)?,
-            ))
-        })
-        .collect()
-}
-
-fn desktop_source_context(root: &Path) -> Result<Vec<Value>, String> {
-    let workspace = load_workspace(Some(root))?;
-    let files =
-        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
-    let items = workshop_source_items(&files)?;
-    let context = items
-        .into_iter()
-        .filter(|item| {
-            is_editable_workshop_path(&item.file) && item.exposure == WorkshopExposure::Public
-        })
-        .map(|item| {
-            json!({
-                "target": {"file": item.file, "kind": item.kind, "name": item.name,
-                    "owner": item.owner, "signature": item.signature,
-                    "symbol_id": item.symbol_id},
-                "source": item.source,
-            })
-        })
-        .collect::<Vec<_>>();
-    Ok(context)
 }
 
 fn overlay_workshop_files(
@@ -10662,6 +9389,22 @@ fn source_diagnostic_json(diagnostic: &SourceDiagnostic) -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn removed_ai_commands_are_rejected() {
+        for command in ["ai", "editor", "tui", "gauntlet"] {
+            assert!(
+                ToolchainCli::try_parse_from(["stasis", command]).is_err(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_project_manifest_has_no_desktop_ai_settings() {
+        let manifest = serde_json::to_value(ProjectManifest::new("demo".into())).unwrap();
+        assert!(manifest.get("ai").is_none());
+    }
+
     use super::*;
 
     #[test]
@@ -11032,7 +9775,6 @@ mod tests {
         check_workspace(&workspace).expect("generated project checks");
         remove_temp(&root);
     }
-    use stasis_ai::live_tool_specs;
     use stasis_compiler::frontend::types::TYPE_ID_U8;
     use std::collections::BTreeMap;
 
@@ -11793,41 +10535,6 @@ mod tests {
     }
 
     #[test]
-    fn every_live_ai_tool_has_a_human_command_surface() {
-        let mappings = BTreeMap::from([
-            ("list_symbols", "stasis symbol list / :symbols"),
-            (
-                "get_stdlib_api",
-                "stasis symbol list --file / :symbols --file",
-            ),
-            ("find_references", "stasis symbol references / :references"),
-            ("read_symbol", "stasis symbol read / :read"),
-            ("inspect_source", "stasis symbol list/read / :symbols/:read"),
-            ("read_imports", "stasis symbol read imports / :read imports"),
-            ("write_symbol", "stasis symbol update / :update"),
-            ("add_symbol", "stasis symbol add"),
-            ("finish_task", "host completion gate / desktop Mark Done"),
-            (
-                "write_imports",
-                "stasis symbol update imports / :update imports",
-            ),
-            ("delete_symbol", "stasis symbol delete / :delete"),
-            ("get_capability", "stasis ai / :inspect / controlled assets"),
-            ("inspect_runtime_state", ":inspect"),
-            ("run_frame", ":step / stasis validate --frames"),
-            ("run_tests", "stasis test"),
-        ]);
-
-        for tool in live_tool_specs() {
-            assert!(
-                mappings.contains_key(tool.tool.as_str()),
-                "live AI tool '{}' needs a useful CLI/TUI mapping",
-                tool.tool
-            );
-        }
-    }
-
-    #[test]
     fn human_live_output_summarizes_plans_without_source_or_receipt_json() {
         let response = LiveResponse::success(
             8,
@@ -11976,624 +10683,6 @@ mod tests {
 
     pub(super) fn remove_temp(path: &Path) {
         let _ = fs::remove_dir_all(path);
-    }
-
-    pub(super) fn desktop_editor_fixture(name: &str) -> PathBuf {
-        let root = temp_dir(name);
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::create_dir_all(root.join("tests")).unwrap();
-        fs::write(root.join(MANIFEST_NAME), r#"{"manifest_version":1,"name":"editor_fixture","entry":"src/main.stasis","tests":"tests","output":"build"}"#).unwrap();
-        fs::write(
-            root.join("src/main.stasis"),
-            "function main(): i32 { return 0; }\nfunction value(): i32 { return 1; }\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("tests/main.test.stasis"),
-            "import \"../src/main.stasis\";\ntest `positive`(): bool { return value() > 0; }\n",
-        )
-        .unwrap();
-        root
-    }
-
-    fn desktop_semantic_update(root: &Path, name: &str, new_source: &str) -> Value {
-        let item = desktop_source_context(root)
-            .unwrap()
-            .into_iter()
-            .find(|item| item["target"]["name"] == name)
-            .unwrap();
-        json!({"schema_version": 1, "edits": [{
-            "operation": "update",
-            "target": item["target"],
-            "expected_source_hash": item["expected_source_hash"],
-            "new_source": new_source,
-        }]})
-    }
-
-    fn desktop_semantic_delete(root: &Path, name: &str) -> Value {
-        let item = desktop_source_context(root)
-            .unwrap()
-            .into_iter()
-            .find(|item| item["target"]["name"] == name)
-            .unwrap();
-        json!({"schema_version": 1, "edits": [{
-            "operation": "delete",
-            "target": item["target"],
-            "expected_source_hash": item["expected_source_hash"],
-        }]})
-    }
-
-    #[test]
-    fn desktop_semantic_preview_plans_add_update_delete_and_multifile_deterministically() {
-        let root = desktop_editor_fixture("semantic_preview_operations");
-        let update = desktop_semantic_update(&root, "value", "function value(): i32 { return 2; }");
-        let first = desktop_preview_semantic_batch(&root, update.clone()).unwrap();
-        let second = desktop_preview_semantic_batch(&root, update).unwrap();
-        assert_eq!(first.source_fingerprint, second.source_fingerprint);
-        assert_eq!(first.plan, second.plan);
-        assert_eq!(first.plan.changed_files.len(), 1);
-        assert!(first.plan.changed_files[0]
-            .after_source
-            .contains("return 2"));
-
-        let add = json!({"schema_version": 1, "edits": [{
-            "operation": "add",
-            "target": {"file": "src/main.stasis", "kind": "function", "name": "added"},
-            "new_source": "function added(): i32 { return 3; }",
-        }]});
-        let added = desktop_preview_semantic_batch(&root, add).unwrap();
-        assert_eq!(added.plan.changed_files.len(), 1);
-        assert!(added.plan.changed_files[0]
-            .after_source
-            .contains("function added"));
-
-        let deleted =
-            desktop_preview_semantic_batch(&root, desktop_semantic_delete(&root, "value")).unwrap();
-        assert_eq!(deleted.plan.changed_files.len(), 1);
-        assert!(!deleted.plan.changed_files[0]
-            .after_source
-            .contains("function value"));
-
-        fs::write(
-            root.join("src/main.stasis"),
-            "import \"values.stasis\";\nfunction main(): i32 { return value(); }\nfunction local(): i32 { return 1; }\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("src/values.stasis"),
-            "function value(): i32 { return 1; }\n",
-        )
-        .unwrap();
-        let local = desktop_source_context(&root)
-            .unwrap()
-            .into_iter()
-            .find(|item| item["target"]["name"] == "local")
-            .unwrap();
-        let value = desktop_source_context(&root)
-            .unwrap()
-            .into_iter()
-            .find(|item| item["target"]["name"] == "value")
-            .unwrap();
-        let multifile = json!({"schema_version": 1, "edits": [
-            {"operation": "update", "target": local["target"],
-             "expected_source_hash": local["expected_source_hash"],
-             "new_source": "function local(): i32 { return 2; }"},
-            {"operation": "update", "target": value["target"],
-             "expected_source_hash": value["expected_source_hash"],
-             "new_source": "function value(): i32 { return 3; }"},
-        ]});
-        let multifile = desktop_preview_semantic_batch(&root, multifile).unwrap();
-        assert_eq!(
-            multifile
-                .plan
-                .changed_files
-                .iter()
-                .map(|change| change.file.as_str())
-                .collect::<Vec<_>>(),
-            ["src/main.stasis", "src/values.stasis"]
-        );
-        remove_temp(&root);
-    }
-
-    #[test]
-    fn desktop_file_write_preview_is_non_mutating_and_updates_tracked_asset() {
-        let root = desktop_editor_fixture("file_write_preview_apply");
-        fs::create_dir_all(root.join("assets/generated")).unwrap();
-        let svg_path = root.join("assets/generated/brown-background.svg");
-        let original = "<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><rect width='64' height='64' fill='#246'/></svg>";
-        fs::write(&svg_path, original).unwrap();
-        let original_hash = format!("{:x}", Sha256::digest(original.as_bytes()));
-        fs::write(
-            root.join(DEFAULT_ASSET_MANIFEST_PATH),
-            format!(r#"{{"schema":"stasis-assets","version":2,"display":null,"dynamic_assets":[],"assets":[{{"id":"brown-background","path":"assets/generated/brown-background.svg","content_sha256":"{original_hash}","format":{{"kind":"sprite","encoding":"svg","width":64,"height":64}},"dependencies":[]}}]}}"#),
-        )
-        .unwrap();
-        let prepared_svg_path =
-            root.join(".stasis_cache/play-assets/assets/generated/brown-background.svg");
-        fs::create_dir_all(prepared_svg_path.parent().unwrap()).unwrap();
-        fs::write(&prepared_svg_path, original).unwrap();
-        let payload = json!({
-            "schema_version": 1,
-            "file_writes": [{
-                    "path": "assets/generated/brown-background.svg",
-                    "content": "<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><rect width='64' height='64' fill='#5b3825'/></svg>"
-            }]
-        });
-
-        let preview = desktop_preview_semantic_batch(&root, payload).unwrap();
-        assert_eq!(fs::read_to_string(&svg_path).unwrap(), original);
-        assert_eq!(preview.plan.edits, Vec::new());
-        assert_eq!(preview.plan.changed_files.len(), 2);
-        assert!(preview
-            .plan
-            .changed_files
-            .iter()
-            .any(|change| change.file == "assets/generated/brown-background.svg"));
-
-        let (_, receipt) = desktop_apply_semantic_preview(&root, &preview).unwrap();
-        assert_eq!(receipt["status"], "files_applied");
-        assert!(fs::read_to_string(&svg_path)
-            .unwrap()
-            .contains("fill='#5b3825'"));
-        assert!(fs::read_to_string(&prepared_svg_path)
-            .unwrap()
-            .contains("fill='#5b3825'"));
-        let manifest = load_project_asset_manifest(&root, AssetLimits::default()).unwrap();
-        let asset = manifest
-            .assets
-            .iter()
-            .find(|asset| asset.entry.id == "brown-background")
-            .unwrap();
-        assert_eq!(asset.entry.content_sha256, sha256_file(&svg_path).unwrap());
-        remove_temp(&root);
-    }
-
-    #[test]
-    fn desktop_file_write_rejects_source_internal_escape_and_active_svg() {
-        let root = desktop_editor_fixture("file_write_rejections");
-        for (path, content, message) in [
-            ("../outside.txt", "no", "escapes the project"),
-            (".stasis_cache/state.json", "no", "host-controlled"),
-            (
-                "src/main.stasis",
-                "function main(): i32 { return 2; }",
-                "propose_semantic_edit",
-            ),
-            (
-                "assets/generated/unsafe.svg",
-                "<svg><script>alert(1)</script></svg>",
-                "forbidden",
-            ),
-        ] {
-            let error = desktop_preview_semantic_batch(
-                &root,
-                json!({"schema_version": 1, "file_writes": [{"path": path, "content": content}]}),
-            )
-            .unwrap_err();
-            assert!(error.contains(message), "{error}");
-        }
-        remove_temp(&root);
-    }
-
-    #[test]
-    fn desktop_file_write_rejects_stale_preview_and_rolls_back_invalid_manifest() {
-        let root = desktop_editor_fixture("file_write_stale_rollback");
-        let note = root.join("notes.txt");
-        fs::write(&note, "before\n").unwrap();
-        let preview = desktop_preview_semantic_batch(
-            &root,
-            json!({"schema_version": 1, "file_writes": [{"path": "notes.txt", "content": "after\n"}]}),
-        )
-        .unwrap();
-        fs::write(&note, "changed elsewhere\n").unwrap();
-        assert!(desktop_apply_semantic_preview(&root, &preview)
-            .unwrap_err()
-            .contains("stale semantic preview"));
-        assert_eq!(fs::read_to_string(&note).unwrap(), "changed elsewhere\n");
-
-        let missing = desktop_preview_semantic_batch(
-            &root,
-            json!({"schema_version": 1, "file_writes": [{"path": "new.txt", "content": "created\n"}]}),
-        )
-        .unwrap();
-        fs::write(root.join("new.txt"), "").unwrap();
-        assert!(desktop_apply_semantic_preview(&root, &missing)
-            .unwrap_err()
-            .contains("stale semantic preview"));
-        assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), "");
-
-        let original_manifest = fs::read_to_string(root.join(MANIFEST_NAME)).unwrap();
-        let invalid = desktop_preview_semantic_batch(
-            &root,
-            json!({"schema_version": 1, "file_writes": [
-                {"path": "notes.txt", "content": "transactional\n"},
-                {"path": MANIFEST_NAME, "content": "{}"}
-            ]}),
-        )
-        .unwrap();
-        assert!(desktop_apply_semantic_preview(&root, &invalid).is_err());
-        assert_eq!(fs::read_to_string(&note).unwrap(), "changed elsewhere\n");
-        assert_eq!(
-            fs::read_to_string(root.join(MANIFEST_NAME)).unwrap(),
-            original_manifest
-        );
-        remove_temp(&root);
-    }
-
-    #[test]
-    fn desktop_semantic_preview_validation_compiles_staged_candidate_without_writing() {
-        let root = desktop_editor_fixture("semantic_preview_validation");
-        let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
-        let valid = desktop_preview_semantic_batch(
-            &root,
-            desktop_semantic_update(&root, "value", "function value(): i32 { return 2; }"),
-        )
-        .unwrap();
-        assert!(desktop_validate_semantic_preview(&root, &valid).is_ok());
-        assert_eq!(
-            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
-            before
-        );
-
-        let invalid = desktop_preview_semantic_batch(
-            &root,
-            json!({"schema_version": 1, "edits": [{
-                "operation": "add",
-                "target": {
-                    "file": "tests/main.test.stasis",
-                    "kind": "test",
-                    "name": "unsupported array"
-                },
-                "new_source": "test `unsupported array`(): bool { let values = [1, 2]; return values[0] == 1; }"
-            }]}),
-        )
-        .unwrap();
-        assert!(desktop_validate_semantic_preview(&root, &invalid)
-            .unwrap_err()
-            .contains("unexpected token LBracket"));
-        assert_eq!(
-            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
-            before
-        );
-        remove_temp(&root);
-    }
-
-    #[test]
-    fn desktop_semantic_preview_rejects_noop_conflict_stale_and_identity_mismatch() {
-        let root = desktop_editor_fixture("semantic_preview_rejections");
-        let unchanged = desktop_source_context(&root)
-            .unwrap()
-            .into_iter()
-            .find(|item| item["target"]["name"] == "value")
-            .unwrap();
-        let noop = json!({"schema_version": 1, "edits": [{
-            "operation": "update", "target": unchanged["target"],
-            "expected_source_hash": unchanged["expected_source_hash"],
-            "new_source": unchanged["source"],
-        }]});
-        assert!(desktop_preview_semantic_batch(&root, noop)
-            .unwrap_err()
-            .contains("made no changes"));
-
-        let conflict = json!({"schema_version": 1, "edits": [{
-            "operation": "update", "target": unchanged["target"],
-            "expected_source_hash": "wrong-hash",
-            "new_source": "function value(): i32 { return 2; }",
-        }]});
-        assert!(desktop_preview_semantic_batch(&root, conflict)
-            .unwrap_err()
-            .contains("stale semantic"));
-
-        let payload =
-            desktop_semantic_update(&root, "value", "function value(): i32 { return 2; }");
-        let preview = desktop_preview_semantic_batch(&root, payload).unwrap();
-        let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
-        fs::write(
-            root.join("tests/main.test.stasis"),
-            "import \"../src/main.stasis\";\n// changed after preview\ntest `positive`(): bool { return value() > 0; }\n",
-        )
-        .unwrap();
-        assert!(desktop_apply_semantic_preview(&root, &preview)
-            .unwrap_err()
-            .contains("stale semantic preview"));
-        assert_eq!(
-            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
-            before
-        );
-
-        let mut mismatched = desktop_preview_semantic_batch(
-            &root,
-            desktop_semantic_update(&root, "value", "function value(): i32 { return 4; }"),
-        )
-        .unwrap();
-        mismatched.plan.changed_files[0]
-            .after_source
-            .push_str("// tampered\n");
-        assert!(desktop_apply_semantic_preview(&root, &mismatched)
-            .unwrap_err()
-            .contains("identity mismatch"));
-        assert_eq!(
-            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
-            before
-        );
-        remove_temp(&root);
-    }
-
-    #[test]
-    fn desktop_semantic_preview_applies_the_exact_reviewed_plan() {
-        let root = desktop_editor_fixture("semantic_preview_identity");
-        let payload =
-            desktop_semantic_update(&root, "value", "function value(): i32 { return 7; }");
-        let preview = desktop_preview_semantic_batch(&root, payload.clone()).unwrap();
-        assert_eq!(preview.payload, payload);
-        let reviewed_plan = preview.plan.clone();
-        let mut progress = Vec::new();
-        let (_, receipt) =
-            desktop_apply_semantic_preview_with_progress(&root, &preview, &mut |stage| {
-                progress.push(stage)
-            })
-            .unwrap();
-        assert_eq!(
-            progress,
-            [
-                stasis_ai::task_controller::ProgressStage::InspectingSymbols,
-                stasis_ai::task_controller::ProgressStage::Compiling,
-                stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
-                stasis_ai::task_controller::ProgressStage::ApplyingAtomically,
-            ]
-        );
-        assert!(
-            !progress.contains(&stasis_ai::task_controller::ProgressStage::CommittingBetweenTicks)
-        );
-        assert_eq!(receipt["plan"], json!(reviewed_plan));
-        assert_eq!(
-            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
-            preview.plan.changed_files[0].after_source
-        );
-        assert_eq!(
-            receipt["source_fingerprint"],
-            desktop_source_fingerprint(&root, &[]).unwrap()
-        );
-        remove_temp(&root);
-    }
-
-    #[test]
-    fn desktop_publish_exposes_source_before_tests_and_receipt_can_restore_it() {
-        let root = desktop_editor_fixture("semantic_publish_then_test");
-        let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
-        let payload =
-            desktop_semantic_update(&root, "value", "function value(): i32 { return -1; }");
-        let preview = desktop_preview_semantic_batch(&root, payload).unwrap();
-        let (_, receipt) =
-            desktop_publish_semantic_preview_with_progress(&root, &preview, &mut |_| {}).unwrap();
-
-        assert_eq!(receipt["validation"]["tests"], "skipped");
-        assert_eq!(
-            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
-            preview.plan.changed_files[0].after_source
-        );
-        assert!(desktop_run_focused_tests(&root, &[]).is_err());
-
-        desktop_revert_semantic_receipts(
-            &root,
-            &[receipt["receipt"].as_str().unwrap().to_string()],
-        )
-        .unwrap();
-        assert_eq!(
-            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
-            before
-        );
-        remove_temp(&root);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn desktop_apply_and_focused_tests_isolate_runtime_globals_and_stage_sidecars() {
-        fn global_hash(path: &str) -> i32 {
-            path.bytes().fold(2166136261u32, |hash, byte| {
-                (hash ^ u32::from(byte)).wrapping_mul(16777619)
-            }) as i32
-        }
-
-        let root = desktop_editor_fixture("editor_isolated_tests");
-        fs::write(
-            root.join("src/main.stasis"),
-            concat!(
-                "global desktop_isolation_probe: i32;\n",
-                "function main(): i32 { return 0; }\n",
-                "function tick(): void {}\n",
-                "function value(): i32 { return 1; }\n",
-            ),
-        )
-        .unwrap();
-        fs::write(
-            root.join("tests/main.test.stasis"),
-            concat!(
-                "import \"../src/main.stasis\";\n",
-                "test `overwrites isolation probe`(): bool {\n",
-                "    desktop_isolation_probe = 99;\n",
-                "    return value() > 0;\n",
-                "}\n",
-            ),
-        )
-        .unwrap();
-        fs::write(
-            root.join("tests/isolation.scenario.json"),
-            r#"{"schema_version":1,"name":"sidecar isolation","ticks":1,"state":{"desktop_isolation_probe":99},"invariants":[{"path":"desktop_isolation_probe","op":"eq","value":99}]}"#,
-        )
-        .unwrap();
-
-        let probe = global_hash("desktop_isolation_probe");
-        let prior = stasis_dynload::stasis_jit_global_i32_load(probe);
-        stasis_dynload::stasis_jit_global_i32_store(probe, 314_159);
-
-        let payload =
-            desktop_semantic_update(&root, "value", "function value(): i32 { return 7; }");
-        let (_, applied) = desktop_apply_semantic_batch(&root, payload).unwrap();
-        assert!(
-            applied["validation"]["test_result"]["tests_run"]
-                .as_u64()
-                .unwrap_or(0)
-                > 0
-        );
-        assert!(
-            applied["validation"]["test_result"]["scenario_cases_run"]
-                .as_u64()
-                .unwrap_or(0)
-                > 0
-        );
-        assert!(applied["timing_micros"]["compile_and_tests_child"]
-            .as_u64()
-            .is_some_and(|value| value > 0));
-        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(probe), 314_159);
-
-        let (_, focused) =
-            desktop_run_focused_tests(&root, &["tests/main.test.stasis".to_string()]).unwrap();
-        assert!(focused["receipts"][0]["tests_run"].as_u64().unwrap_or(0) > 0);
-        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(probe), 314_159);
-
-        let before_failure = fs::read_to_string(root.join("src/main.stasis")).unwrap();
-        let failing = desktop_preview_semantic_batch(
-            &root,
-            desktop_semantic_update(&root, "value", "function value(): i32 { return -1; }"),
-        )
-        .unwrap();
-        let error = desktop_apply_semantic_preview(&root, &failing).unwrap_err();
-        assert!(error.contains("before publication"), "{error}");
-        assert_eq!(
-            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
-            before_failure
-        );
-        assert_eq!(stasis_dynload::stasis_jit_global_i32_load(probe), 314_159);
-
-        stasis_dynload::stasis_jit_global_i32_store(probe, prior);
-        remove_temp(&root);
-    }
-
-    #[test]
-    fn desktop_editor_context_drives_apply_without_model_hash_and_receipt() {
-        let root = desktop_editor_fixture("editor_receipt");
-        let item = desktop_source_context(&root)
-            .unwrap()
-            .into_iter()
-            .find(|item| item["target"]["name"] == "value")
-            .unwrap();
-        assert!(item["target"]["symbol_id"]
-            .as_str()
-            .is_some_and(|id| !id.is_empty()));
-        let batch = json!({"schema_version": 2, "edits": [{
-            "operation": "update", "target": item["target"],
-            "new_source": "function value(): i32 { return 2; }"
-        }]});
-        let (_, receipt) = desktop_apply_semantic_batch(&root, batch).unwrap();
-        assert_eq!(
-            receipt["source_fingerprint"],
-            desktop_source_fingerprint(&root, &[]).unwrap()
-        );
-        assert!(root.join(receipt["receipt"].as_str().unwrap()).is_file());
-        assert_eq!(receipt["validation"]["test_result"]["tests_passed"], 1);
-        let committed = fs::read_to_string(root.join("src/main.stasis")).unwrap();
-        assert!(item.get("expected_source_hash").is_none());
-        assert!(committed.contains("function value(): i32 { return 2; }"));
-        remove_temp(&root);
-    }
-
-    #[test]
-    fn desktop_editor_fingerprints_selected_tests_and_rejects_empty_selection() {
-        let root = desktop_editor_fixture("editor_fingerprint");
-        let mut progress = Vec::new();
-        desktop_run_focused_tests_with_progress(&root, &[], &mut |stage| progress.push(stage))
-            .unwrap();
-        assert_eq!(
-            progress,
-            [
-                stasis_ai::task_controller::ProgressStage::Compiling,
-                stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
-            ]
-        );
-        assert!(
-            !progress.contains(&stasis_ai::task_controller::ProgressStage::CommittingBetweenTicks)
-        );
-        fs::create_dir_all(root.join("checks")).unwrap();
-        fs::write(
-            root.join("checks/selected.stasis"),
-            "function helper(): i32 { return 1; }",
-        )
-        .unwrap();
-        let paths = vec!["checks/selected.stasis".into()];
-        let before = desktop_source_fingerprint(&root, &paths).unwrap();
-        fs::write(
-            root.join("checks/selected.stasis"),
-            "function helper(): i32 { return 2; }",
-        )
-        .unwrap();
-        assert_ne!(before, desktop_source_fingerprint(&root, &paths).unwrap());
-        assert!(desktop_run_focused_tests(&root, &paths)
-            .unwrap_err()
-            .contains("No focused tests matched"));
-        remove_temp(&root);
-    }
-
-    #[test]
-    fn desktop_editor_apply_rejects_invalid_delete_without_model_hash() {
-        let root = desktop_editor_fixture("editor_missing_hash");
-        let before = fs::read_to_string(root.join("src/main.stasis")).unwrap();
-        let error = desktop_apply_semantic_batch(&root, json!({"schema_version": 1, "edits": [{
-            "operation": "delete", "target": {"file": "src/main.stasis", "kind": "function", "name": "value"}
-        }]})).unwrap_err();
-        assert!(!error.contains("expected_source_hash"));
-        assert_eq!(
-            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
-            before
-        );
-        remove_temp(&root);
-    }
-
-    #[test]
-    fn desktop_editor_failed_apply_rolls_back_and_keeps_prior_accepted_work() {
-        let root = desktop_editor_fixture("editor_rollback");
-        let propose = |value: i32| {
-            let item = desktop_source_context(&root)
-                .unwrap()
-                .into_iter()
-                .find(|item| item["target"]["name"] == "value")
-                .unwrap();
-            json!({"schema_version": 1, "edits": [{
-                "operation": "update", "target": item["target"],
-                "expected_source_hash": item["expected_source_hash"],
-                "new_source": format!("function value(): i32 {{ return {value}; }}")
-            }]})
-        };
-        let (_, accepted_receipt) = desktop_apply_semantic_batch(&root, propose(2)).unwrap();
-        let accepted_source = fs::read_to_string(root.join("src/main.stasis")).unwrap();
-        let preview = desktop_preview_semantic_batch(&root, propose(-1)).unwrap();
-        let mut progress = Vec::new();
-        let error = desktop_apply_semantic_preview_with_progress(&root, &preview, &mut |stage| {
-            progress.push(stage)
-        })
-        .unwrap_err();
-        assert!(error.contains("rolled back"), "{error}");
-        assert_eq!(
-            progress,
-            [
-                stasis_ai::task_controller::ProgressStage::InspectingSymbols,
-                stasis_ai::task_controller::ProgressStage::Compiling,
-                stasis_ai::task_controller::ProgressStage::RunningFocusedTests,
-                stasis_ai::task_controller::ProgressStage::RollingBack,
-            ]
-        );
-        assert!(
-            !progress.contains(&stasis_ai::task_controller::ProgressStage::CommittingBetweenTicks)
-        );
-        assert_eq!(
-            fs::read_to_string(root.join("src/main.stasis")).unwrap(),
-            accepted_source
-        );
-        assert!(root
-            .join(accepted_receipt["receipt"].as_str().unwrap())
-            .is_file());
-        desktop_apply_semantic_batch(&root, propose(3)).unwrap();
-        remove_temp(&root);
     }
 
     #[test]
@@ -12778,37 +10867,6 @@ mod tests {
         );
         let workspace = load_workspace(Some(&root)).expect("workspace");
         test_workspace(&workspace, None).expect("bound test project");
-        remove_temp(&root);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn desktop_focused_tests_stage_project_data_bindings() {
-        let root = temp_dir("desktop_test_data_binding");
-        write_data_binding_test_project(
-            &root,
-            Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9]}}"#),
-            Some(DATA_BINDING_META),
-        );
-        let fingerprint = desktop_source_fingerprint(&root, &[]).unwrap();
-        let candidate_files =
-            load_workshop_edit_workspace(&root, Path::new("src/main.stasis")).unwrap();
-        let receipt = run_staged_project_tests_bounded(
-            &root,
-            Path::new("src/main.stasis"),
-            &candidate_files,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        assert!(receipt["tests_run"].as_u64().unwrap_or(0) > 0);
-        assert!(receipt["tests_passed"].as_u64().unwrap_or(0) > 0);
-        assert_eq!(receipt["tests_failed"], 0);
-        fs::write(
-            root.join("data/gameplay.json"),
-            r#"{"config":{"loaded":true,"scalar":18,"values":[4,9]}}"#,
-        )
-        .unwrap();
-        assert_ne!(fingerprint, desktop_source_fingerprint(&root, &[]).unwrap());
         remove_temp(&root);
     }
 
@@ -13688,49 +11746,28 @@ mod tests {
     }
 
     #[test]
-    fn tui_entry_is_optional_and_accepts_an_override() {
-        let manifest_entry =
-            ToolchainCli::try_parse_from(["stasis", "tui"]).expect("parse manifest TUI entry");
+    fn live_entry_is_optional_and_accepts_an_override() {
+        let manifest_entry = ToolchainCli::try_parse_from(["stasis", "live", "--live-stdio"])
+            .expect("parse manifest live transport entry");
         assert!(matches!(
             manifest_entry.command,
-            ToolchainCommand::Tui { entry: None, .. }
+            ToolchainCommand::Live { entry: None, .. }
         ));
 
         let explicit_entry = ToolchainCli::try_parse_from([
             "stasis",
-            "tui",
+            "live",
             "samples/state_inspection/src/main.stasis",
+            "--live-stdio",
         ])
-        .expect("parse explicit TUI entry");
+        .expect("parse explicit live transport entry");
         assert!(matches!(
             explicit_entry.command,
-            ToolchainCommand::Tui {
+            ToolchainCommand::Live {
                 entry: Some(ref entry),
                 ..
             } if entry == Path::new("samples/state_inspection/src/main.stasis")
         ));
-    }
-
-    #[test]
-    fn editor_entry_is_optional_and_accepts_runtime_pacing() {
-        let default = ToolchainCli::try_parse_from(["stasis", "editor"])
-            .expect("parse manifest editor entry");
-        assert!(matches!(
-            default.command,
-            ToolchainCommand::Editor { entry: None, .. }
-        ));
-
-        let explicit = ToolchainCli::try_parse_from([
-            "stasis",
-            "editor",
-            "src/game.stasis",
-            "--tick-sleep-us",
-            "0",
-        ])
-        .expect("parse explicit editor entry");
-        assert!(matches!(explicit.command, ToolchainCommand::Editor {
-            entry: Some(entry), tick_sleep_us: 0
-        } if entry == PathBuf::from("src/game.stasis")));
     }
 
     #[test]
@@ -13751,11 +11788,11 @@ mod tests {
         );
         assert!(ToolchainCli::try_parse_from(["stasis", "format", "--stdin", "--check"]).is_err());
 
-        let live = ToolchainCli::try_parse_from(["stasis", "tui", "--live-stdio"])
+        let live = ToolchainCli::try_parse_from(["stasis", "live", "--live-stdio"])
             .expect("parse live stdio");
         assert!(matches!(
             live.command,
-            ToolchainCommand::Tui {
+            ToolchainCommand::Live {
                 live_stdio: true,
                 live_script: None,
                 ..
@@ -13763,29 +11800,12 @@ mod tests {
         ));
         assert!(ToolchainCli::try_parse_from([
             "stasis",
-            "tui",
+            "live",
             "--live-stdio",
             "--live-script",
             "commands.txt",
         ])
         .is_err());
-    }
-
-    #[test]
-    fn ai_command_accepts_one_prompt() {
-        let parsed = ToolchainCli::try_parse_from([
-            "stasis",
-            "--workspace",
-            "demo",
-            "ai",
-            "make the paddle twice as long",
-        ])
-        .expect("parse AI command");
-        assert!(matches!(
-            parsed.command,
-            ToolchainCommand::Ai { ref prompt }
-                if prompt == "make the paddle twice as long"
-        ));
     }
 
     #[test]
@@ -14877,54 +12897,6 @@ mod tests {
             ..ProjectManifest::new("demo".to_string())
         };
         assert!(manifest.validate().is_err());
-    }
-
-    #[test]
-    fn manifest_defaults_and_serializes_approved_ai_routing_policy() {
-        let manifest = ProjectManifest::new("demo".to_string());
-        assert_eq!(
-            manifest.ai.openrouter.approved_models,
-            [stasis_ai::DEFAULT_OPENROUTER_MODEL]
-        );
-        assert_eq!(manifest.ai.openrouter.min_throughput_tokens_per_second, 400);
-        assert_eq!(manifest.ai.openrouter.max_p50_latency_seconds, 2.0);
-        assert!(!manifest.ai.editor.auto_persist_html_transcripts);
-        let encoded = serde_json::to_value(&manifest).unwrap();
-        assert_eq!(
-            encoded.pointer("/ai/openrouter/approved_models/0"),
-            Some(&json!("openai/gpt-oss-120b"))
-        );
-        assert_eq!(
-            encoded.pointer("/ai/openrouter/max_p50_latency_seconds"),
-            Some(&json!(2.0))
-        );
-        assert_eq!(
-            encoded.pointer("/ai/editor/auto_persist_html_transcripts"),
-            Some(&json!(false))
-        );
-
-        let legacy: ProjectManifest = serde_json::from_value(json!({
-            "manifest_version": 1,
-            "name": "legacy",
-            "entry": "src/main.stasis",
-            "tests": "tests",
-            "output": "build"
-        }))
-        .unwrap();
-        assert_eq!(legacy.ai, stasis_ai::ProjectAiConfig::default());
-
-        let mut invalid = manifest.clone();
-        invalid.ai.openrouter.approved_models.clear();
-        assert_eq!(
-            invalid.validate().unwrap_err(),
-            "ai.openrouter.approved_models must not be empty"
-        );
-        invalid = manifest;
-        invalid.ai.openrouter.max_p50_latency_seconds = 0.0;
-        assert_eq!(
-            invalid.validate().unwrap_err(),
-            "ai.openrouter.max_p50_latency_seconds must be a finite number greater than zero"
-        );
     }
 
     #[test]

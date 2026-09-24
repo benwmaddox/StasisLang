@@ -1,0 +1,15 @@
+{
+  "retired_paths_absent": [
+    "files/codex",
+    "files/workshop_ai_queue",
+    "files/workshop_ai_sessions",
+    "files/workshop_ai_transactions",
+    "files/ai_trace.jsonl",
+    "files/ai_usage.jsonl",
+    "shared_prefs/ai_settings.xml",
+    "shared_prefs/ai_settings.xml.bak"
+  ],
+  "retained_files_unchanged": 51,
+  "migration_complete": true,
+  "codex_symlink_did_not_delete_projects": true
+}

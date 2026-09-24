@@ -187,8 +187,6 @@ framework or a generic scenario DSL.
 - Inspect the final changed-file list. Restore only unrelated changes created during the task and
   do not accept broad rewrites or empty placeholder files as incidental cleanup.
 
-Use `stasis ai "PROMPT"` only when the user explicitly wants Stasis's subscription-backed nested
-AI turn. An agent already performing the task should use the commands above directly.
 
 Every AI-authored work summary must include a `Visual evidence:` line. Name each inspected PNG
 and/or MP4 and state what it proves, or write `Visual evidence: not applicable` when the work has no

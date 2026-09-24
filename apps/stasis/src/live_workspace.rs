@@ -1096,7 +1096,7 @@ impl LiveWorkspace {
                 let snapshot = self
                     .validation_snapshot
                     .as_ref()
-                    .ok_or_else(|| "no AI validation baseline is available".to_string())?;
+                    .ok_or_else(|| "no validation baseline is available".to_string())?;
                 stasis_dynload::restore_jit_runtime_state(snapshot);
                 Ok(("validation_restored", json!({"restored": true})))
             }
@@ -3624,8 +3624,6 @@ fn help_data() -> Value {
             ":call-hierarchy FILE OFFSET", ":type-hierarchy FILE OFFSET",
             ":rename FILE OFFSET NEW_NAME",
             ":validate PATH OP VALUE [--frames N]",
-            ":edit SYMBOL (interactive TUI)",
-            ":ai PROMPT | :ai status | :ai cancel (interactive TUI; installed Codex subscription)",
             ":complete BUFFER", ":palette [QUERY]",
             ":add KIND NAME FILE ... :end", ":update KIND NAME [FILE] ... :end",
             ":delete KIND NAME [FILE]", ":preview", ":apply", ":changes", ":undo", ":redo",
@@ -3635,7 +3633,6 @@ fn help_data() -> Value {
         ],
         "multiline_terminator": ":end",
         "multiline_cancel": ":abort or Ctrl-C",
-        "line_editor": "session history; Ctrl-P opens the compiler-backed palette; Tab completes",
         "durability": "semantic edits persist through code-aware receipts; scratch cells do not persist unless explicitly promoted",
     })
 }
@@ -3665,7 +3662,6 @@ fn live_command_completions() -> Vec<CompletionItem> {
         ":rename",
         ":validate",
         ":edit",
-        ":ai",
         ":complete",
         ":palette",
         ":add",

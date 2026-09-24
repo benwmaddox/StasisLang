@@ -9,7 +9,7 @@ under `target/windows-launch-tests`, gives every child process a 60-second timeo
 
 - `stasis play ENTRY` and manifest-inferred `stasis play` from a nested project directory;
 - `stasis run --watch`;
-- `stasis tui ENTRY` with a deterministic live script;
+- `stasis live ENTRY` with a deterministic live script;
 - `stasis build --mode release`, followed by the generated AOT executable;
 - `stasis package --target desktop --development-build`, followed by the packaged executable.
 

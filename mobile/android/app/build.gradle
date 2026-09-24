@@ -52,6 +52,10 @@ android {
         }
     }
 
+    packaging {
+        jniLibs.excludes += ["**/libstasis_codex_android.so"]
+    }
+
     sourceSets {
         main.assets.setSrcDirs([])
         workshop.assets.setSrcDirs([workshopAssetsDir.get().asFile])
@@ -61,10 +65,7 @@ android {
 dependencies {
     testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.json:json:20250517'
-    def rustlsVerifier = file('src/workshop/libs/rustls-platform-verifier.aar')
-    if (rustlsVerifier.isFile()) {
-        workshopImplementation files(rustlsVerifier)
-    }
+
 }
 
 tasks.register('prepareWorkshopAssets', Sync) {

@@ -11,18 +11,10 @@ Current scope:
 - Opens the native Android symbol browser and source editor from a top-right hamburger overlay grouped by Main, Structs, Systems, and Root.
 - Opens into a full-screen native Android preview surface by default and starts an automatic 60 fps compile/tick loop so the preview advances without pressing `Compile` and `Run Tick`.
 - Keeps the preview, status text, and menu button inside Android system-bar and display-cutout safe insets, so they do not sit under the bottom navigation bar or camera notch.
-- Keeps timing/budget diagnostics visible over the game and lets a three-finger tap hide or restore them. Exploration additionally shows keepsake progress and its current tap/find/complete lesson without covering the voice shortcut.
+- Keeps timing/budget diagnostics visible over the game and lets a three-finger tap hide or restore them. Exploration additionally shows keepsake progress and its current tap/find/complete lesson without covering the controls.
 - Seeds bundled `.stasis` files into app-private storage when missing and preserves edits across app launches.
 - Lets a selected symbol display and edit its source from the app-private `.stasis` file.
-- Routes AI symbol writes/deletes through the shared Rust semantic-edit protocol used by the
-  desktop `stasis symbol` CLI; see `docs/semantic_edit_protocol.md`.
 - Saves selected symbol edits back to the app-private `.stasis` file, reparses the project so later edits use fresh symbol spans, and reports `FastReload` versus `ResetRequired` expectations.
-- Provides a dev-first AI edit panel whose primary provider is phone-native Codex with ChatGPT device-code sign-in. The existing OpenAI Responses API harness remains an explicit API-key fallback with `gpt-6-sol` and medium reasoning.
-- Codex sign-in copies the one-time device code before opening the official verification page, survives repeated browser/app switching with one resumable poll, keeps a selectable copy and explicit completion status in-app, retries transient polling network failures, and clears the matching clipboard value after success.
-- Codex subscription runs discover the account's current default model, stream through the phone-native authenticated bridge, and drive the same bounded Workshop inspect/edit/compile/test loop without API-key dollar budgeting.
-- Provider selection persists immediately. Existing signed-in installations receive a one-time migration to Codex primary now that the turn bridge is available; later manual API/Codex choices are respected.
-- Context & Images includes a direct 512x512 rough-layout sketch action. Mini Paint can save any canvas as a project PNG or save-and-attach it to the next AI command; queued metadata preserves its `design_sketch` role so the model treats structure as guidance rather than draft art as a final-quality target.
-- Shows monthly USD spend only for the API-key fallback. Codex mode instead shows the last native five-hour/weekly remaining percentages and refreshes them after a Codex action with a 30-minute attempt debounce.
 - Provides an explicit `Reset Project` control for restoring the bundled sample. Manual `Apply` saves and compiles immediately; there is no separate manual compile button. The automatic loop and manual controls both require the packaged Rust bridge and use the production parser, semantic analysis, lowering, and Cranelift JIT pipeline. Successful compiles write `build/native_compile_manifest.txt` with real in-memory JIT generation metadata (layout/source revisions, emitted and reused counts, executable bytes, and compiled function slots), plus `build/runtime_state.txt` when state must be initialized or reset. The bridge returns `CompileReady` only after real executable code exists; an unavailable bridge or unsupported reachable behavior returns `CompileError` without a C scanner or compiled-stub fallback.
 - Resizes and scrolls the editor when the Android keyboard opens so the active source remains visible.
 - Keeps fixed trailing scroll space under the editor as a fallback for phones where IME resize is inconsistent.
@@ -63,13 +55,8 @@ From this directory:
 .\build_debug.ps1
 ```
 
-This builds the Stasis Rust bridge with the Cargo release profile plus the optimized phone-native Codex login
-library from its pinned official revision, packages the Android Rustls verifier,
-and assembles the Workshop APK. The first Codex build downloads upstream Rust
-dependencies and takes longer; subsequent builds reuse Cargo output.
-
-For API-fallback-only iteration after the native artifacts already exist, call
-Gradle directly:
+This builds the Stasis Rust bridge with the Cargo release profile and assembles the
+Workshop APK. After rebuilding the native artifacts, Gradle can be called directly:
 
 ```powershell
 gradle :app:assembleWorkshopDebug
@@ -180,80 +167,29 @@ Install the repository-owned source-format pre-commit hook once per clone:
 
 The hook blocks noncanonical staged Stasis source. The headless Workshop gate remains an explicit validation command for rendering changes rather than a requirement for every local commit. Production packaging uses the generic `android-arm64` release target.
 
-## Host AI Run Review
+## Workshop controls
 
-Validate the Android AI Responses payload locally before a live run. This does not call OpenAI or modify the bundled sample, and writes a timestamped trace under the ignored `artifacts/android_ai_runs/` directory:
+The menu provides project creation, switching, archive import/export, manual symbol
+editing, diagnostics, recovery, tests, and baseline diffs. Apply saves and compiles a
+manual edit. Pending drafts are scoped to the selected project and source revision.
+GitHub backup and pull requests use explicitly configured credentials and settings.
 
-```powershell
-python ..\..\tools\android_ai_agent_host.py --preflight --prompt "verify Android AI payload"
-```
+Image Assets supports importing, previewing, painting, renaming, deleting, and restoring
+project images. Audio Assets supports bounded import, microphone recording, preview,
+rename, deletion, and restoration. Asset mutations update the runtime manifest.
+Microphone permission is requested only for recording. Mini Paint preserves its canvas
+through activity recreation and supports keyboard and accessibility controls.
 
-For a live local run, the same host tool always writes a trace, including API failures, tool observations, test results, token usage, and cost estimates. On device, `ai_trace.jsonl` records the exact application request context and tool exchanges, while provider token usage is written separately to `ai_usage.jsonl`. After a host run finishes, provide the printed trace path for review:
+Privacy & Data provides GitHub credential revocation, redacted crash/support export,
+and confirmed deletion of non-bundled projects. The onboarding guide follows the manual
+project/run/edit/test/review/revert workflow. AI editing, providers, prompts, voice
+commands, image generation, queues, and AI traces have been removed.
 
-```powershell
-python ..\..\tools\android_ai_agent_host.py --reset-paddle-speed-feature --prompt "enemy paddle should have speed change"
-```
+## Upgrade from AI-enabled Workshop
 
-Expected app surface:
-
-```text
-tick=<avg ms> render=<avg ms> budget=<tick+render % of 60 fps frame>
-[full-screen native preview]
-[top-right menu button]
-```
-
-Open the top-right menu button to access the AI prompt first, with manual symbols/source collapsed below it. Manual Apply/Reset, Changes, Reset Project, and Run Tick live with the selected manual symbol editor; Apply compiles immediately.
-
-GitHub settings remain collapsed below the command workflow. Saving a token, `owner/repository`, and base branch performs authenticated repository and branch validation before retaining the target. `Sync GitHub Now` uploads the current bounded project backup directly to that branch and deletes only files previously managed by that project/target; unrelated repository files are never inferred as deletions. After a successful backup, the stored remote object SHAs prevent a later remote edit or deletion from being silently overwritten. The optional `Automatically back up validated project changes` setting is explicit per-project consent: it schedules only compiled changes, waits for usable connectivity, and defers while battery saver is active on an unplugged device. For reviewed work, use `Review GitHub Changes` first; it shows additions, edits, and deletions in the symbol summary/raw diff and records the exact reviewed change set. `Create / Update Pull Request` then creates or reuses the deterministic Workshop review branch, applies those reviewed file changes, and creates or finds its open pull request. If local files change after review, submission stops until they are reviewed again.
-
-OpenAI and GitHub secrets are encrypted with AES-GCM using a key held by Android Keystore. Preferences contain ciphertext rather than plaintext; installations upgrading from the earlier format migrate each legacy secret on first read and remove the plaintext only after encrypted storage succeeds.
-
-GitHub validation, uploads, deletions, and pull-request operations share one serial background queue. The app persists whether an operation was queued, running, waiting for a network, completed, failed, or interrupted. Activity recreation recognizes an in-process foreground lease and does not falsely mark continuing work interrupted; process death exposes a retry instead. Offline work resumes after Android reports a usable default network. `Retry GitHub Operation` reconstructs failed work from current app-private files, idempotently accepts a write/delete that completed immediately before interruption, and surfaces remote-SHA or API conflicts without modifying local files. Pull-request retries also recheck the saved review fingerprint and stop if the files changed after review.
-
-Typed `Run` and confirmed voice `Run` append to the same durable per-project FIFO. The queue visibly distinguishes pending, active, and terminal work; pending items can be cancelled before any call. Active `Stop` disconnects the API request or drops the phone-native Codex response future, then prevents later model/tool turns. If cancellation arrives during an atomic source-write batch, that batch first reaches its existing compile/test/rollback boundary so source is never left partially applied. Any call that already returned remains included in the applicable provider usage totals. Project-image paths, dimensions, byte counts, and SHA-256 values plus logical-preview consent are snapshotted at submission and revalidated before delayed execution. Explicitly selected captured-preview pixels are encoded into a bounded, hashed, fsynced queue file and deleted on cancellation or terminal completion.
-
-Pending AI work is not claimed while Android has no validated internet connection. It stays visible and cancellable in the durable queue, then resumes when Android's default-network callback reports usable connectivity. The queue permits only one claimed item per project, preserves FIFO order across restarts, and never lets one project's queue claim another project's work.
-
-AI, GitHub sync/PR, project/media import/export, and support export share one process-level foreground lease with an Android `dataSync` notification. The notification opens the Workshop; AI also exposes `Stop` through the same safe API/Codex cancellation path. Destroying the Activity does not silently terminate the leased operation. Explicit user work continues during battery saver, while opt-in automatic GitHub backup defers on an unplugged device in battery saver.
-
-`Recent Commands` also shows bounded per-project AI outcomes, including cancellation/failure/rollback status, usage summaries when available, and the local trace path. `Retry Last AI` restores the latest recorded request and starts it again through the selected provider's normal sign-in/key and limit checks. Every terminal queue row also exposes `Fresh Retry`, which creates a new FIFO item and revalidates the active project, project-image hashes, provider/model, and budget before execution.
-
-`Projects` is collapsed below the command workflow. Fresh installs initialize Exploration Garden with a project-level `AGENTS.md` containing the Stasis theory-building practice and a `CLAUDE.md` pointer to that guidance; existing v1/v2 sample projects retain Pong identity and receive the same missing-file seeds on load. `New Project From Selected Template` offers Exploration Garden and Pong, creates a separately identified app-private project, records the choice, and seeds the same guidance. `Switch Project` changes the root used by symbols, compile, tests, AI history, and GitHub state and immediately recompiles it. Reset and Changes use the recorded template baseline rather than whichever template is currently the default. Project creation/switching is blocked while AI or GitHub work is active or the source editor contains an unapplied edit. GitHub repository/branch targets and review/retry state are project-specific; the encrypted token is shared.
-
-`Export Project Archive` opens Android's document-creation picker and writes a deterministic ZIP of the active project's normal files and versioned metadata. Generated `build/` output and temporary files are excluded. Export is limited to 512 files, 32 MiB per file, and 128 MiB total and does not require broad storage access.
-
-Enter a new project name and choose `Import Project Archive` to restore an exported ZIP through Android's document picker. Import applies the same bounds, rejects duplicate/traversing paths and unsupported or incomplete metadata, preserves a freshly assigned local project identity, and deletes the new target if validation or extraction fails. A successful import becomes active and compiles immediately.
-
-`Image Assets` stays inside the collapsed Projects panel. `Import PNG, JPEG, or WebP` reads only the document selected through Android's picker, rejects files over 8 MiB, 4096 pixels on either axis, or 16 megapixels, and stores a collision-safe copy under the active project's `assets/images/` directory. Tap a listed asset for preview, project-scoped selection, rename, or delete. Rename/delete stop when Stasis source references the asset path or filename. Confirmed deletion moves the file into a bounded project recovery queue, and `Restore Last Deleted Image` restores it without overwriting another asset. Images are included in project archive export/import and direct GitHub backup uploads their exact bytes alongside source.
-
-`New Painted Image` opens the touch-first mini paint editor on a bounded 16-1024 pixel canvas. Existing library images up to 1024x1024 offer `Paint as Copy`. Brush/eraser, four sizes, palette and hex colors, bounded undo/redo, clear, and resize/crop all operate on an isolated in-memory bitmap. `Save as PNG` atomically creates a new project asset; Cancel leaves every accepted asset unchanged.
-
-Selected library images appear in `Review AI Image Attachments` beside the command box with sampled thumbnails and remove controls. The next queued item snapshots only those app-private project files, up to four images and 12 MiB total, and sends exact PNG/JPEG/WebP bytes as Responses API `input_image` data URLs at original detail. The attachment status shows an estimated GPT-6 Sol image-token/input cost before the call. Traces retain paths, dimensions, and estimates but never image Base64, picker URIs, or unrelated device media.
-
-`Capture Preview for AI` reads the freshly rendered OpenGL framebuffer, bounds the retained capture to a 1024-pixel maximum axis, and pairs it with the exact logical frame commands used for that draw plus runtime/input context. The review dialog shows the pixels and separately opts rendered pixels and logical context into the next request; both default off. Remove clears the capture, switching projects discards it, pixels share the four-image/12 MiB budget, and neither pixel Base64 nor raw screenshot bytes enter AI traces.
-
-`Optional ImageGen output` defaults to no generated image and is snapshotted for one queued item only. Draft requests low-quality 1024x1024 output; Final requests high-quality square, landscape, or portrait output. The selected profile's documented image-output estimate is reserved before the call and charged only if an image is returned. Phone-native Codex rejects ImageGen profiles because the tool requires the OpenAI API provider. Generated PNG bytes remain temporary and absent from traces until the before/after review chooses `Accept as New Asset`; Reject and dialog dismissal leave the project unchanged, while acceptance creates a new collision-safe file and never overwrites its reference. See `docs/ai_image_quality_workflow.md` for the PNG-master, build-resize, and SVG reconstruction workflow.
-
-`Audio Assets` stays in the collapsed Projects panel. The Android document picker imports MP3, Ogg, WAV, or M4A only after the selected content is confirmed decodable, no larger than 16 MiB, and no longer than five minutes. `Record Audio` requests microphone permission on demand and captures bounded AAC/M4A; Stop & Save validates and atomically publishes it, while Cancel, app pause, or destruction deletes the temporary recording. Project switching, archives, AI, GitHub, and voice are blocked during capture. Tap an accepted item to preview, rename, or delete; Stop releases playback immediately. Referenced audio cannot be renamed or deleted until Stasis source is updated, and confirmed deletion uses a bounded project recovery queue. Accepted audio participates in archive import/export and bounded direct GitHub backup. Trim/normalize and AI audio attachment remain later AW57 work.
-
-Unsaved manual source is autosaved on activity pause and instance-state save in a bounded per-project draft record. Recovery records the selected symbol identity and base-source SHA-256; startup restores the editor only if the same symbol still has the same base, so a stale draft cannot overwrite newer code. Apply, Reset, and baseline Revert clear only the matching draft. Rotation also restores the typed AI command, saved-symbol selection, menu/collapsed panels, editor scroll, project-image selection paths, and an active Mini Paint canvas/name/tool through an in-memory non-configuration snapshot. Process death still discards unsaved Paint. Recreation deliberately drops screenshots, generated-image reviews, recording, voice, and playback so it cannot imply consent or accept temporary media. Multi-turn AI sessions persist bounded provider, usage, working-note, tool-observation, test, and project snapshots at atomic boundaries. A received response resumes without another provider call, completed tool/test boundaries preserve accepted writes, and partial tool batches restore their last safe snapshot. If the process stops while a provider call is in flight, the item becomes non-resumable because that paid call may have completed; Workshop never replays it automatically and offers a clearly labeled `Fresh Retry` instead. If process death follows an explicit cancellation, recovery restores the original project transaction before marking the queue item cancelled; a missing restore snapshot remains a failure rather than falsely claiming cancellation completed safely.
-
-`Privacy & Data` is collapsed with other infrequent settings and explains what stays local and which explicit actions send data. OpenAI and GitHub credentials can be revoked independently from encrypted storage without deleting project files or configuration. Pending image/screenshot/logical/generation consent can be cleared in one action. Confirmed AI activity erase removes command/outcome history and queued work for every project, usage and monthly-spend records, the local trace, and pending media. `Delete Active Non-Bundled Project` warns to export first, requires the exact name, switches to Bundled Workshop, and then removes that project's files/assets/trash, baseline, draft/recovery, queued work, and scoped AI/GitHub state; global credentials remain and Bundled Workshop cannot be deleted.
-
-Accepted images and audio are registered in the shared `assets/manifest.json` contract used by the Rust runtime. Import, paint/AI save, recording, rename, delete, and restore update the manifest atomically; existing accepted assets are reconciled on the next asset mutation after an upgrade.
-
-First run offers a deferrable zero-AI manual guide and requests no permission. Its versioned checklist advances only when the user actually opens a template-backed project, runs it, applies a manual function edit, passes the project tests, reviews Changes or Raw Diffs, and reverts that saved symbol revision in the same project. The project ID plus symbol/source fingerprint prevent unrelated workspaces or changes from completing later steps. Progress and deferral resume after activity/process recreation, and a future guide version restarts its own checklist instead of overclaiming completion. `Help & Onboarding` can resume the workflow or explicitly restart it with stale project/change context cleared, and explains that ChatGPT/OpenAI, GitHub, media, and voice are optional; microphone permission is requested only when voice or audio recording is explicitly started. Exploration Garden separately keeps its gameplay lesson checklist in the performance overlay and plays a short generated tone for deterministic collection cue events.
-
-Priority controls and media reviews include screen-reader descriptions, Workshop/section titles expose heading roles, status is a polite live region, and compile/test diagnostics are assertive. Menu, voice, source, AI Run/Cancel, symbols, asset rows, screenshots, generated comparisons, and paint all have explicit semantics and deterministic forward traversal. Mini Paint supports D-pad movement (Shift moves eight pixels), Space/Enter drawing, TalkBack cursor actions, a visible focus cursor, 48 dp tool targets, and scalable labels. Compact, medium, and expanded window profiles stack controls for narrow or 1.3x+ text, adapt canvas height, and cap the Workshop panel on tablets/foldables so the game remains visible. Rotation recreates the activity and restores the Workshop/menu sections, source/draft, scroll, and reviewed attachment selection; temporary media consent remains intentionally discarded. Core text/control pairs are contrast-tested and the resizable activity uses light icons on dark system bars. Hardware TalkBack, orientation, and fold-state acceptance remains tracked separately in Maddox #131.
-
-`Export Redacted Support Bundle` in Privacy & Data previews exactly what will be included, then uses Android's document picker for a bounded JSON export. It reports app/device versions, project category counts, coarse compile/reload and operation state, outcome status/usage presence, up to 50 recent trace event names, and any prior redacted crash type/class-method frames. The 64 KiB crash record excludes exception messages, filenames, line numbers, source, and paths, delegates to Android's normal crash handler, is reported next launch, and has a separate Clear control. The bundle builder never imports credentials, source, prompts, repository/project/file/media names or bytes, absolute paths, raw diagnostics, tool data, or raw trace fields.
-
-Project metadata is format v3 and records bundled template identity. Existing v1/v2 sample projects migrate to Pong after identity/origin validation and a version-specific fsynced metadata backup; replacement is atomic and the migrated version/ID/template is reread for verification. Imported projects remain template-free. V1, v2, and v3 archives remain importable with a fresh local ID. Unknown future formats or templates stop with an update instruction instead of being downgraded or reseeded.
-
-Sample and imported projects keep separate immutable source baselines. Sample baselines come from packaged assets; imported baselines come from the validated archive contents. Changes, Raw Diffs, Revert, and Reset therefore operate on the active project's own source, and imported projects are not silently filled with sample files. Direct GitHub backup uploads the complete active source set, while PR review remains limited to changes from that project's baseline.
-
-Real-device touch acceptance uses the same packaged Rust/JIT runtime as the preview: an injected Android gesture updates Stasis `Input`, advances game logic, and moves the emitted player-paddle render command. The 2026-07-09 device run advanced 120 ticks during the check and moved the paddle command from Y 811 to Y 1537.
-
-Published and Workshop runtime audio uses an AAudio PCM-float callback on API 26+, with a bounded native frame ring shared by the JIT and AOT bridges. Published apps hold game audio focus only while resumed; focus loss or backgrounding pauses and discards queued frames, while resume/focus gain restarts the stream. The three-finger HUD reports `audio=on/off`, queued frames (`q`), underruns (`u`), and a latched AAudio error code. Guest code owns `AudioStream`, `AudioAsset`, and `AudioVoice` values; the installed Android host resolves asset paths below the active project root, resets decoded assets on root changes/shutdown, and mixes those voices after ring-buffer consumption without blocking the device callback. The self-contained `audio_sink_sample` fixture uses the same typed surface for its manifest MP3 music, PCM16 WAV effect, and AAudio ring/lifecycle probe. From `mobile/android/app/src/main/assets/audio_sink_sample`, build the acceptance package with `stasis package-mobile --target android-arm64 --development-build`, then build its generated generic release shell with `gradle -p dist/brickout_audio-android-arm64/android :app:assembleDebug --no-daemon --max-workers=2 --console=plain`. Automated package, decode, event-order, and ring checks do not substitute for physical-device audible-output or focus/route acceptance.
-
-Failed manual Apply operations carry a structured project-relative file, line, column, span, and symbol from the compiler bridge. `Go to Diagnostic` opens that exact source location, including a file-level fallback when malformed syntax prevents symbol parsing. `Recovery History` keeps the diagnostic location separate from the edited file that can be restored, and `Undo Failed Apply` restores only when that file still matches the failed version, so recovery cannot overwrite newer edits. Failed and malformed Stasis tests use the same project-relative file/test/line navigation contract.
+Startup removes the retired `ai_settings` preferences (including the encrypted API key),
+`files/codex`, `workshop_ai_queue`, `workshop_ai_sessions`, `workshop_ai_transactions`,
+`ai_trace.jsonl` and `ai_usage.jsonl`. Cleanup runs after native preference storage initialization
+and records completion only after all deletions succeed. Interrupted cleanup retries on next launch.
+The shared credential encryption key remains because GitHub credentials still use it. Project source,
+assets, baselines, manual settings and GitHub preferences are outside the cleanup allowlist.

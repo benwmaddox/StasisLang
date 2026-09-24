@@ -294,7 +294,7 @@ function, and `STASIS_PROFILE_DONE` to the platform log. Android reports are ava
 logcat's `Stasis` tag. Mobile profiling is rejected for non-development packages so production
 artifacts remain uninstrumented.
 
-From a project containing `stasis.json`, `stasis tui` opens the manifest entry in the persistent live-workspace interface. Pass an entry path to override the manifest for one invocation.
+From a project containing `stasis.json`, `stasis live --live-stdio` opens the manifest entry with the persistent editor protocol. Pass an entry path to override the manifest for one invocation.
 
 Build distributable output with:
 

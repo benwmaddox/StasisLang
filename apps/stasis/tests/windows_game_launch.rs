@@ -400,7 +400,7 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
 
     let nested_launch_dir = project.join("nested/launch");
     fs::create_dir_all(&nested_launch_dir).expect("create nested manifest launch directory");
-    for case in ["play", "play_manifest_nested", "run_watch", "tui"] {
+    for case in ["play", "play_manifest_nested", "run_watch", "live"] {
         let screenshot = parent.join(format!("{case}.png"));
         let command_dir = if case == "play_manifest_nested" {
             &nested_launch_dir
@@ -438,9 +438,9 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
                 command.args(["run", "--watch"]);
                 configure_capture(&mut command, &screenshot, true);
             }
-            "tui" => {
+            "live" => {
                 command.args([
-                    "tui",
+                    "live",
                     "main.stasis",
                     "--live-script",
                     "live.commands",

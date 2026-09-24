@@ -13,7 +13,6 @@ SOURCE_ROOTS = ("apps", "crates", "mobile", "tests")
 ALLOWED_PREFIXES = (
     "crates/stasis_dynload/src/",
     "crates/stasis_android_bridge/src/",
-    "mobile/android/codex_native/src/",
 )
 ALLOWED_FILES = {
     "crates/stasis_network/src/lib.rs",
@@ -24,7 +23,6 @@ ALLOWED_FILES = {
     "apps/stasis/tests/desktop_input_frame_seam.rs",
     "apps/stasis/tests/desktop_manifest_assets_seam.rs",
     "apps/stasis/tests/desktop_render_recovery_seam.rs",
-    "crates/stasis_ai/src/lib.rs",
 }
 
 

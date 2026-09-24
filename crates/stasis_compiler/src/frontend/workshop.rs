@@ -5588,7 +5588,7 @@ pub fn apply_ai_code_response_to_file(
             })
             .ok_or_else(|| {
                 format!(
-                    "AI edit target not found: owner={:?} name={} file={}",
+                    "Semantic edit target not found: owner={:?} name={} file={}",
                     edit.owner, edit.name, edit.file
                 )
             })?;
@@ -5605,7 +5605,7 @@ pub fn apply_ai_code_response_to_file(
     replacements.sort_by_key(|(range, _)| range.start);
     for pair in replacements.windows(2) {
         if pair[0].0.end > pair[1].0.start {
-            return Err("AI edits overlap in source file".to_string());
+            return Err("Semantic edits overlap in source file".to_string());
         }
     }
 
@@ -5616,7 +5616,7 @@ pub fn apply_ai_code_response_to_file(
             || !updated.is_char_boundary(range.start)
             || !updated.is_char_boundary(range.end)
         {
-            return Err("AI edit target span is invalid for source file".to_string());
+            return Err("Semantic edit target span is invalid for source file".to_string());
         }
         updated.replace_range(range, &replacement);
     }
@@ -6321,7 +6321,7 @@ function player_overlaps_enemy(player: Player, enemy: Enemy): bool { return true
 }
 
 #[cfg(test)]
-mod ai_tests {
+mod semantic_edit_tests {
     use super::*;
 
     #[test]

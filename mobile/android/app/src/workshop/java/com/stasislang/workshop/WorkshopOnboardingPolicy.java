@@ -4,7 +4,7 @@ final class WorkshopOnboardingPolicy {
     static final int CURRENT_VERSION = 2;
 
     enum Step {
-        WELCOME("Read the account-free workflow", "Choose Resume Tutorial to begin. AI and GitHub are optional."),
+        WELCOME("Read the account-free workflow", "Choose Resume Tutorial to begin. GitHub sync is optional."),
         PROJECT_OPENED("Choose or open a template", "Open the bundled Exploration Garden or create a project from a selected template."),
         PROJECT_RAN("Run the project", "Watch the selected project compile and run in the game preview."),
         CHANGE_APPLIED("Make and apply a manual change", "Open Manual Symbols and Source, edit one function, then choose Apply."),
@@ -136,9 +136,9 @@ final class WorkshopOnboardingPolicy {
                     .append(steps[index].label);
         }
         text.append("\n\nNext: ").append(progress.nextStep().instruction);
-        text.append("\n\nOptional accounts: ChatGPT/OpenAI can propose edits and GitHub can back up or review them. ")
-                .append("Neither is required for projects, manual editing, tests, Changes, or Revert. ")
-                .append("Media and voice permissions are requested only when you start those features.");
+        text.append("\n\nOptional GitHub sync can back up or review project changes. ")
+                .append("It is not required for projects, manual editing, tests, Changes, or Revert. ")
+                .append("Microphone permission is requested only when you record audio.");
         return text.toString();
     }
 

@@ -40,6 +40,32 @@ fn native_release_executes_explicit_same_name_call_without_swap_hook() {
     fs::remove_dir_all(project).unwrap();
 }
 
+#[test]
+fn retired_ai_commands_fail_before_runtime_dispatch() {
+    let project = temp_dir("retired_commands");
+    fs::create_dir_all(&project).unwrap();
+    for command in ["ai", "editor", "tui", "gauntlet"] {
+        for suffix in [vec![], vec!["--help"], vec!["--ticks", "1"]] {
+            let mut args = vec![command];
+            args.extend(suffix);
+            let output = stasis(&args, &project);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(2), "{args:?}: {stderr}");
+            assert!(
+                stderr.contains("unrecognized subcommand"),
+                "{args:?}: {stderr}"
+            );
+            assert!(stderr.contains(command), "{args:?}: {stderr}");
+            assert!(
+                output.stdout.is_empty(),
+                "retired command started runtime output"
+            );
+        }
+    }
+    assert_eq!(fs::read_dir(&project).unwrap().count(), 0);
+    fs::remove_dir_all(project).unwrap();
+}
+
 fn temp_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "stasis_cli_integration_{name}_{}_{}",
@@ -3560,7 +3586,7 @@ fn semantic_symbol_cli_reapplies_edit_when_revert_tests_fail() {
 
 #[cfg(windows)]
 #[test]
-fn tui_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
+fn live_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     let parent = temp_dir("interactive_live");
     fs::create_dir_all(&parent).expect("create temp parent");
     let project = parent.join("demo");
@@ -3588,7 +3614,7 @@ fn tui_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
 
     let output = stasis(
         &[
-            "tui",
+            "live",
             "src/main.stasis",
             "--live-script",
             "live.commands",
@@ -3646,7 +3672,7 @@ fn tui_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     .expect("write failing live script");
     let failed = stasis(
         &[
-            "tui",
+            "live",
             "src/main.stasis",
             "--live-script",
             "failed-live.commands",
@@ -3674,7 +3700,7 @@ fn tui_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     .expect("write human live script");
     let human = stasis(
         &[
-            "tui",
+            "live",
             "src/main.stasis",
             "--live-script",
             "human-live.commands",
@@ -3705,7 +3731,7 @@ fn tui_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
     .expect("write unfinished live script");
     let unfinished = stasis(
         &[
-            "tui",
+            "live",
             "src/main.stasis",
             "--live-script",
             "unfinished-live.commands",
@@ -3726,7 +3752,7 @@ fn tui_live_cli_updates_mutates_and_undoes_while_process_stays_alive() {
 
 #[cfg(windows)]
 #[test]
-fn tui_live_stdio_keeps_a_jsonl_editor_session_open() {
+fn live_live_stdio_keeps_a_jsonl_editor_session_open() {
     let parent = temp_dir("live_stdio");
     fs::create_dir_all(&parent).expect("create temp parent");
     let project = parent.join("demo");
@@ -3743,7 +3769,7 @@ fn tui_live_stdio_keeps_a_jsonl_editor_session_open() {
     .expect("write stdio live project");
 
     let output = stasis_with_stdin(
-        &["tui", "src/main.stasis", "--live-stdio"],
+        &["live", "src/main.stasis", "--live-stdio"],
         &project,
         concat!(
             "{\"schema_version\":1,\"request_id\":101,\"type\":\"pause\"}\n",
@@ -3795,8 +3821,8 @@ fn tui_live_stdio_keeps_a_jsonl_editor_session_open() {
 
 #[cfg(windows)]
 #[test]
-fn tui_discovers_entry_workspace_and_anchors_source_relative_assets() {
-    let parent = temp_dir("tui_asset_root");
+fn live_discovers_entry_workspace_and_anchors_source_relative_assets() {
+    let parent = temp_dir("live_asset_root");
     let project = parent.join("demo");
     fs::create_dir_all(project.join("src")).expect("create source directory");
     fs::create_dir_all(project.join("assets")).expect("create asset directory");
@@ -3832,7 +3858,7 @@ fn tui_discovers_entry_workspace_and_anchors_source_relative_assets() {
 
     let rooted_output = stasis(
         &[
-            "tui",
+            "live",
             "demo/src/main.stasis",
             "--live-script",
             "live.commands",
@@ -3854,7 +3880,7 @@ fn tui_discovers_entry_workspace_and_anchors_source_relative_assets() {
     fs::write(project.join("src/main.stasis"), legacy_source).expect("write legacy entry");
     let output = stasis(
         &[
-            "tui",
+            "live",
             "demo/src/main.stasis",
             "--live-script",
             "live.commands",
@@ -3873,7 +3899,7 @@ fn tui_discovers_entry_workspace_and_anchors_source_relative_assets() {
     assert!(!String::from_utf8_lossy(&output.stderr).contains("failed to open"));
 
     let manifest_entry = stasis(
-        &["tui", "--live-script", "live.commands", "--live-json"],
+        &["live", "--live-script", "live.commands", "--live-json"],
         &project,
     );
     assert_eq!(
@@ -3900,7 +3926,7 @@ fn state_inspection_sample_browses_state_and_watches_live_runtime() {
 
     let output = stasis(
         &[
-            "tui",
+            "live",
             "samples/state_inspection/src/main.stasis",
             "--live-script",
             "live.commands",
