@@ -119,7 +119,7 @@ class VerifyIosAspectFitTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("ios-package-link:", workflow)
-        self.assertIn("runs-on: macos-15-arm64", workflow)
+        self.assertIn("runs-on: macos-15", workflow)
         self.assertIn("simulator-evidence.json", workflow)
         self.assertIn("ios-arm64_x86_64-simulator", script)
         self.assertIn("ios_aspect_fit_bindings.c", script)
