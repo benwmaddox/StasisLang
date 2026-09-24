@@ -1,0 +1,7 @@
+{
+  "manifest_version": 1,
+  "name": "local_fixed_arrays",
+  "entry": "main.stasis",
+  "tests": "tests",
+  "output": "build"
+}

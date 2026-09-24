@@ -12,6 +12,7 @@ use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TypedCollectionDescriptor, TYPE_ID_BOOL, TYPE_ID_F32,
     TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
+use crate::ir::hir::{FunctionHIR, SimpleCondition, SimpleExpr, SimpleStmt};
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone)]
@@ -399,6 +400,227 @@ pub(crate) fn is_collection_handle_type(type_id: TypeId, type_table: &TypeTable)
             | TypeCategory::AsciiView
             | TypeCategory::Utf8Fixed
             | TypeCategory::Utf8View
+    )
+}
+
+pub(crate) fn validate_owned_local_fixed_array_contract(
+    hir: &FunctionHIR,
+    type_table: &TypeTable,
+) -> Result<(), String> {
+    fn declaration_modes(
+        statements: &[SimpleStmt],
+        type_table: &TypeTable,
+        modes: &mut BTreeMap<String, (TypeId, bool)>,
+    ) -> Result<(), String> {
+        for statement in statements {
+            match statement {
+                SimpleStmt::Let {
+                    name,
+                    type_id: Some(type_id),
+                    expression,
+                } if type_table.type_info(*type_id).map(|info| info.category)
+                    == Some(TypeCategory::ArrayFixed) =>
+                {
+                    let owned =
+                        matches!(expression, SimpleExpr::DefaultValue(value) if value == type_id);
+                    if owned {
+                        let element_type = type_table
+                            .indexed_element_type_id(*type_id)
+                            .ok_or_else(|| {
+                                format!(
+                                    "owned local fixed array '{name}' has no scalar element type"
+                                )
+                            })?;
+                        if !matches!(
+                            element_type,
+                            TYPE_ID_I32
+                                | TYPE_ID_BOOL
+                                | TYPE_ID_U8
+                                | TYPE_ID_U16
+                                | TYPE_ID_U32
+                                | TYPE_ID_F32
+                                | TYPE_ID_F64
+                        ) {
+                            let element_name = type_table.type_info(element_type).map_or_else(
+                                || format!("type#{element_type}"),
+                                |info| info.name.clone(),
+                            );
+                            return Err(format!(
+                                "owned local fixed array '{name}' requires a primitive scalar element type, found '{element_name}'"
+                            ));
+                        }
+                    }
+                    if let Some((_, existing_owned)) = modes.get(name).copied() {
+                        if existing_owned != owned {
+                            return Err(format!(
+                                "local '{name}' cannot mix owned fixed-array and borrowed declarations"
+                            ));
+                        }
+                    } else {
+                        modes.insert(name.clone(), (*type_id, owned));
+                    }
+                }
+                SimpleStmt::If {
+                    then_statements,
+                    else_statements,
+                    ..
+                } => {
+                    declaration_modes(then_statements, type_table, modes)?;
+                    if let Some(else_statements) = else_statements {
+                        declaration_modes(else_statements, type_table, modes)?;
+                    }
+                }
+                SimpleStmt::For {
+                    init,
+                    step,
+                    body_statements,
+                    ..
+                } => {
+                    declaration_modes(std::slice::from_ref(init.as_ref()), type_table, modes)?;
+                    declaration_modes(body_statements, type_table, modes)?;
+                    declaration_modes(std::slice::from_ref(step.as_ref()), type_table, modes)?;
+                }
+                SimpleStmt::Foreach {
+                    body_statements, ..
+                } => declaration_modes(body_statements, type_table, modes)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_expr(
+        expression: &SimpleExpr,
+        owned: &std::collections::BTreeSet<String>,
+    ) -> Result<(), String> {
+        match expression {
+            SimpleExpr::Identifier(name) if owned.contains(name) => Err(format!(
+                "owned local fixed array '{name}' is non-escaping; index or iterate it directly instead of using it as a value"
+            )),
+            SimpleExpr::IndexedPath { index, .. } => validate_expr(index, owned),
+            SimpleExpr::Call { args, .. } => {
+                for argument in args {
+                    validate_expr(argument, owned)?;
+                }
+                Ok(())
+            }
+            SimpleExpr::Binary { lhs, rhs, .. } => {
+                validate_expr(lhs, owned)?;
+                validate_expr(rhs, owned)
+            }
+            SimpleExpr::Condition(condition) => validate_condition(condition, owned),
+            SimpleExpr::DefaultValue(_)
+            | SimpleExpr::Int(_)
+            | SimpleExpr::Float(_)
+            | SimpleExpr::Bool(_)
+            | SimpleExpr::StringLiteral(_)
+            | SimpleExpr::Identifier(_) => Ok(()),
+        }
+    }
+
+    fn validate_condition(
+        condition: &SimpleCondition,
+        owned: &std::collections::BTreeSet<String>,
+    ) -> Result<(), String> {
+        match condition {
+            SimpleCondition::Comparison { lhs, rhs, .. } => {
+                validate_expr(lhs, owned)?;
+                validate_expr(rhs, owned)
+            }
+            SimpleCondition::Expr(expression) => validate_expr(expression, owned),
+            SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+                validate_condition(lhs, owned)?;
+                validate_condition(rhs, owned)
+            }
+            SimpleCondition::Not(inner) => validate_condition(inner, owned),
+        }
+    }
+
+    fn validate_statements(
+        statements: &[SimpleStmt],
+        type_table: &TypeTable,
+        owned: &mut std::collections::BTreeSet<String>,
+    ) -> Result<(), String> {
+        for statement in statements {
+            match statement {
+                SimpleStmt::Let {
+                    name,
+                    type_id,
+                    expression,
+                } => {
+                    validate_expr(expression, owned)?;
+                    if type_id.is_some_and(|type_id| {
+                        type_table.type_info(type_id).map(|info| info.category)
+                            == Some(TypeCategory::ArrayFixed)
+                            && matches!(expression, SimpleExpr::DefaultValue(value) if *value == type_id)
+                    }) {
+                        owned.insert(name.clone());
+                    }
+                }
+                SimpleStmt::Assign {
+                    target, expression, ..
+                } => {
+                    if let crate::ir::hir::AssignTarget::Local(name) = target {
+                        if owned.contains(name) {
+                            return Err(format!(
+                                "owned local fixed array '{name}' is non-escaping and cannot be rebound"
+                            ));
+                        }
+                    }
+                    validate_expr(expression, owned)?;
+                    if let crate::ir::hir::AssignTarget::IndexedPath { index, .. } = target {
+                        validate_expr(index, owned)?;
+                    }
+                }
+                SimpleStmt::Convert { source, .. } => validate_expr(source, owned)?,
+                SimpleStmt::If {
+                    condition,
+                    then_statements,
+                    else_statements,
+                } => {
+                    validate_condition(condition, owned)?;
+                    validate_statements(then_statements, type_table, &mut owned.clone())?;
+                    if let Some(else_statements) = else_statements {
+                        validate_statements(else_statements, type_table, &mut owned.clone())?;
+                    }
+                }
+                SimpleStmt::For {
+                    init,
+                    condition,
+                    step,
+                    body_statements,
+                } => {
+                    let mut loop_owned = owned.clone();
+                    validate_statements(
+                        std::slice::from_ref(init.as_ref()),
+                        type_table,
+                        &mut loop_owned,
+                    )?;
+                    validate_condition(condition, &loop_owned)?;
+                    validate_statements(body_statements, type_table, &mut loop_owned.clone())?;
+                    validate_statements(
+                        std::slice::from_ref(step.as_ref()),
+                        type_table,
+                        &mut loop_owned,
+                    )?;
+                }
+                SimpleStmt::Foreach {
+                    body_statements, ..
+                } => validate_statements(body_statements, type_table, &mut owned.clone())?,
+                SimpleStmt::Expr(expression) | SimpleStmt::Return(expression) => {
+                    validate_expr(expression, owned)?;
+                }
+                SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
+            }
+        }
+        Ok(())
+    }
+
+    declaration_modes(&hir.statements, type_table, &mut BTreeMap::new())?;
+    validate_statements(
+        &hir.statements,
+        type_table,
+        &mut std::collections::BTreeSet::new(),
     )
 }
 

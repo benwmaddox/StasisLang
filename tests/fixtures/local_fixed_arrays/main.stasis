@@ -1,0 +1,128 @@
+function local_array_score(depth: i32, seed: i32): i32 {
+    let values: i32[9];
+    let flags: bool[3];
+    if (values.max_length != 9 || flags.max_length != 3 || values[0] != 0 || values[8] != 0 || flags[0] || flags[2]) {
+        return -1000;
+    }
+
+    values[0] = seed;
+    values[8] = seed + 8;
+    values[0] += 1;
+    flags[0] = true;
+    flags[2] = true;
+    let before: i32 = values[0] + values[8];
+    if (flags[0] && !flags[1] && flags[2]) {
+        before += 5;
+    }
+
+    if (depth > 0) {
+        let nested: i32 = local_array_score(depth - 1, seed + 1);
+        if (values[0] != seed + 1 || values[8] != seed + 8 || !flags[0] || flags[1] || !flags[2]) {
+            return -2000;
+        }
+        return before + nested;
+    }
+    return before;
+}
+
+global dynamic_index_calls: i32;
+global rhs_index: i32;
+global rhs_effects: i32[2];
+global caller_backed_values: i32[2];
+
+function next_dynamic_index(): i32 {
+    let result: i32 = dynamic_index_calls;
+    dynamic_index_calls += 1;
+    return result;
+}
+
+function mutate_compound_rhs(): i32 {
+    rhs_index = 1;
+    rhs_effects[0] += 1;
+    return rhs_effects[0] + 4;
+}
+
+function mutate_caller_backed_view(values: i32[]): i32 {
+    values[0] += 1;
+    return values.max_length + values[0] + values[1];
+}
+
+function caller_backed_view_score(): i32 {
+    caller_backed_values[0] = 6;
+    caller_backed_values[1] = 7;
+    return mutate_caller_backed_view(caller_backed_values);
+}
+
+function local_array_feature_score(): i32 {
+    let dynamic_values: i32[9];
+    dynamic_index_calls = 0;
+    dynamic_values[next_dynamic_index()] += 7;
+    if (dynamic_index_calls != 1 || dynamic_values[0] != 7 || dynamic_values[1] != 0) {
+        return -3000;
+    }
+
+    let ordered_values: i32[2];
+    ordered_values[0] = 10;
+    ordered_values[1] = 20;
+    rhs_index = 0;
+    rhs_effects[0] = 0;
+    ordered_values[rhs_index] += mutate_compound_rhs();
+    if (rhs_index != 1 || rhs_effects[0] != 1 || ordered_values[0] != 15 || ordered_values[1] != 20) {
+        return -3500;
+    }
+
+    let floats: f32[3];
+    floats[0] = 0.5;
+    floats[1] = 1.5;
+    floats[2] = 2.5;
+    foreach (let value, i in floats) {
+        floats[i] = value + 0.5;
+    }
+    if (floats[0] != 1.0 || floats[1] != 2.0 || floats[2] != 3.0) {
+        return -4000;
+    }
+
+    let flags: bool[3];
+    flags[0] = true;
+    flags[2] = true;
+    let true_count: i32 = 0;
+    foreach (let flag in flags) {
+        if (flag) {
+            true_count += 1;
+        }
+    }
+    if (true_count != 2) {
+        return -5000;
+    }
+    return 20;
+}
+
+function main(): i32 {
+    return local_array_score(2, 4) + local_array_score(0, 9) + local_array_feature_score() + caller_backed_view_score();
+}
+
+function tick(): i32 {
+    return main();
+}
+
+function render(index: i32): i32 {
+    let values: i32[9];
+    if (index < 0) {
+        return values[index];
+    }
+    if (index >= values.max_length) {
+        values[index] = 1;
+        return 0;
+    }
+    return main();
+}
+
+function trap_negative_entry(): i32 {
+    let index: i32 = -1;
+    return render(index);
+}
+
+function trap_upper_entry(): i32 {
+    let index: i32 = 9;
+    return render(index);
+}

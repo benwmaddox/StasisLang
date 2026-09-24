@@ -520,9 +520,21 @@ impl Compiler {
         let index = self.analyze_program()?;
         let functions = self.functions.clone();
         for function in functions {
-            if let Err(error) = self.lower_function_to_hir(&function) {
-                self.record_function_diagnostic(&function, compile_error_message(&error));
-                return Err(error);
+            let hir = match self.lower_function_to_hir(&function) {
+                Ok(hir) => hir,
+                Err(error) => {
+                    self.record_function_diagnostic(&function, compile_error_message(&error));
+                    return Err(error);
+                }
+            };
+            if let Err(message) =
+                crate::backend::compile_analysis::validate_owned_local_fixed_array_contract(
+                    &hir,
+                    &self.types,
+                )
+            {
+                self.record_function_diagnostic(&function, &message);
+                return Err(CompileError::Frontend(message));
             }
         }
         Ok(index)

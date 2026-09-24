@@ -1,0 +1,5 @@
+import "../main.stasis";
+
+test `owned local fixed arrays are zeroed and independent per call`(): bool {
+    return main() == 140 && tick() == 140;
+}

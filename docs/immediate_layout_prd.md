@@ -17,7 +17,7 @@ The v1 system is deliberately scalar. Each placement function receives:
 
 It returns one `f32` coordinate. The caller uses those returned coordinates for text, sprites, buttons, hit testing, or as inputs to another layout calculation.
 
-This design matches the Stasis language surface implemented today. It uses ordinary scalar locals and scalar returns. It does not require function-local arrays, local struct materialization, array returns, hidden allocation, or a retained UI tree.
+This design matches the Stasis language surface implemented today. It uses ordinary scalar locals and scalar returns. Although function-local fixed arrays now have per-invocation owned storage, this API does not require them, local struct materialization, array returns, hidden allocation, or a retained UI tree.
 
 `f32` is the canonical type for presentation geometry across the proposed public path. Positions, sizes, padding, pointer coordinates, text measurement, single-pass rectangle results, and sprite geometry remain `f32` until a platform renderer explicitly rasterizes them.
 
@@ -131,10 +131,12 @@ The functions operate in whatever coordinate space the caller supplies. They do 
 
 ### 5.6 Current language behavior is the boundary
 
-V1 examples must compile using implemented Stasis features. In particular, examples must not declare function-local fixed arrays such as:
+V1 examples must compile using implemented Stasis features. Function-local
+fixed arrays are supported, but the placement contract deliberately remains a
+scalar API and does not require temporary rectangle storage such as:
 
 ```stasis
-// Not part of the currently supported v1 contract.
+// Valid storage, but unnecessary for this scalar placement contract.
 let rect: f32[4];
 ```
 
@@ -772,11 +774,18 @@ Text width comes from cached measurement, text height from an explicit line box,
 
 ### Rationale
 
-Stasis currently supports scalar locals and returns cleanly, while `Type[]` is a view over existing fixed storage rather than local temporary array construction. A scalar-return API expresses the needed calculation without pretending that local rectangle values are available.
+Stasis supports scalar locals and returns cleanly, and an uninitialized local
+`Type[N]` declaration owns zero-initialized storage for each invocation.
+`Type[]` remains a view over existing fixed storage. A scalar-return API still
+expresses this calculation directly without introducing unnecessary temporary
+rectangle storage.
 
 Using `f32` throughout presentation geometry also matches cached text measurement, pointer input, line commands, single-pass layout, and scaled canvases. Keeping sprite geometry or layout-facing viewport accessors as `i32` would insert conversion and rounding decisions into ordinary UI code without providing a meaningful performance benefit.
 
-The nearest tempting alternative is an output `f32[]` rectangle API. Although array views are supported, that design requires pre-existing storage and makes a simple calculation appear to create a local rectangle. It also encourages unnecessary global scratch layout state.
+The nearest tempting alternative is an output `f32[]` rectangle API. Array
+views require pre-existing storage, so that design makes a simple calculation
+look stateful. An owned `f32[4]` local avoids global scratch but is still
+unnecessary allocation and mutation for a scalar placement result.
 
 ### Extension point
 

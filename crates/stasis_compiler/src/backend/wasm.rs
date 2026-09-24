@@ -2066,6 +2066,7 @@ fn encode_function(
     internal_overloads: &BTreeMap<String, Vec<u32>>,
     signatures: &[Signature],
 ) -> Result<Vec<u8>, String> {
+    crate::backend::compile_analysis::validate_owned_local_fixed_array_contract(hir, types)?;
     let mut local_declarations = Vec::new();
     collect_locals(&hir.statements, &mut local_declarations)?;
     let mut locals = BTreeMap::new();
@@ -2082,42 +2083,80 @@ fn encode_function(
                 index: physical_cursor,
                 type_id: *type_id,
                 struct_view,
+                owned_fixed: None,
             },
         );
         physical_cursor += if struct_view.is_some() { 3 } else { 1 };
     }
-    for (name, type_id) in &local_declarations {
+    for (name, type_id, default_initialized) in &local_declarations {
         if locals.contains_key(name) {
             return Err(format!("duplicate local '{name}' in '{}'", function.name));
         }
+        let owned_fixed = if *default_initialized
+            && types.type_info(*type_id).map(|info| info.category) == Some(TypeCategory::ArrayFixed)
+            && !is_wasm_struct_view_type(*type_id, types, named_structs)
+        {
+            let element_type = types
+                .indexed_element_type_id(*type_id)
+                .ok_or_else(|| format!("web local fixed array '{name}' has no element type"))?;
+            wasm_value_type(element_type)?;
+            let len = types.fixed_collection_len(*type_id).ok_or_else(|| {
+                format!("web local fixed array '{name}' has no declared capacity")
+            })?;
+            let len = u32::try_from(len)
+                .map_err(|_| format!("web local fixed array '{name}' has invalid capacity"))?;
+            Some(OwnedFixedArrayBinding {
+                element_start: physical_cursor + 1,
+                element_type,
+                len,
+            })
+        } else {
+            None
+        };
+        let struct_view =
+            is_wasm_struct_view_type(*type_id, types, named_structs).then_some(StructViewBinding {
+                index: physical_cursor + 1,
+                len: physical_cursor + 2,
+            });
         locals.insert(
             name.clone(),
             LocalBinding {
                 index: physical_cursor,
                 type_id: *type_id,
-                struct_view: is_wasm_struct_view_type(*type_id, types, named_structs).then_some(
-                    StructViewBinding {
-                        index: physical_cursor + 1,
-                        len: physical_cursor + 2,
-                    },
-                ),
+                struct_view,
+                owned_fixed,
             },
         );
-        physical_cursor += if is_wasm_struct_view_type(*type_id, types, named_structs) {
-            3
-        } else {
-            1
-        };
+        physical_cursor += if struct_view.is_some() { 3 } else { 1 };
+        if let Some(owned) = owned_fixed {
+            physical_cursor = physical_cursor
+                .checked_add(owned.len)
+                .ok_or_else(|| "web local fixed-array count overflow".to_string())?;
+        }
     }
 
     let mut local_types = Vec::new();
-    for (_, type_id) in &local_declarations {
+    for (_, type_id, default_initialized) in &local_declarations {
         if is_wasm_struct_view_type(*type_id, types, named_structs) {
             for _ in 0..3 {
                 local_types.push(I32);
             }
         } else {
             local_types.push(wasm_value_type(*type_id)?);
+            if *default_initialized
+                && types.type_info(*type_id).map(|info| info.category)
+                    == Some(TypeCategory::ArrayFixed)
+            {
+                let element_type = types
+                    .indexed_element_type_id(*type_id)
+                    .ok_or_else(|| "web local fixed array has no element type".to_string())?;
+                let len = types
+                    .fixed_collection_len(*type_id)
+                    .ok_or_else(|| "web local fixed array has no declared capacity".to_string())?;
+                for _ in 0..len {
+                    local_types.push(wasm_value_type(element_type)?);
+                }
+            }
         }
     }
     let scratch_index = physical_cursor;
@@ -2130,7 +2169,8 @@ fn encode_function(
     let saved_view_owner = scratch_index + 7;
     let saved_view_start = scratch_index + 8;
     let saved_view_len = scratch_index + 9;
-    local_types.extend([I32, I32, I32, I32, I32, F32, F64, I32, I32, I32]);
+    let saved_owned_index = scratch_index + 10;
+    local_types.extend([I32, I32, I32, I32, I32, F32, F64, I32, I32, I32, I32]);
     let mut body = Vec::new();
     encode_local_declarations(&local_types, &mut body);
     let context = EncodeContext {
@@ -2159,6 +2199,7 @@ fn encode_function(
         saved_view_owner,
         saved_view_start,
         saved_view_len,
+        saved_owned_index,
         foreach: BTreeMap::new(),
         continue_depth: None,
     };
@@ -2199,16 +2240,22 @@ fn ends_with_explicit_return(statements: &[SimpleStmt]) -> bool {
 
 fn collect_locals(
     statements: &[SimpleStmt],
-    out: &mut Vec<(String, TypeId)>,
+    out: &mut Vec<(String, TypeId, bool)>,
 ) -> Result<(), String> {
     for statement in statements {
         match statement {
-            SimpleStmt::Let { name, type_id, .. } => {
+            SimpleStmt::Let {
+                name,
+                type_id,
+                expression,
+            } => {
                 let type_id = type_id.ok_or_else(|| {
                     format!("web backend requires an explicit type for local '{name}'")
                 })?;
                 wasm_value_type(type_id)?;
-                collect_local(name, type_id, out)?;
+                let default_initialized =
+                    matches!(expression, SimpleExpr::DefaultValue(value) if *value == type_id);
+                collect_local(name, type_id, default_initialized, out)?;
             }
             SimpleStmt::If {
                 then_statements,
@@ -2237,7 +2284,7 @@ fn collect_locals(
                 ..
             } => {
                 let index_name = foreach_index_name(item_name, index_name.as_deref());
-                collect_local(&index_name, TYPE_ID_I32, out)?;
+                collect_local(&index_name, TYPE_ID_I32, false, out)?;
                 collect_locals(body_statements, out)?;
             }
             _ => {}
@@ -2249,17 +2296,25 @@ fn collect_locals(
 fn collect_local(
     name: &str,
     type_id: TypeId,
-    out: &mut Vec<(String, TypeId)>,
+    default_initialized: bool,
+    out: &mut Vec<(String, TypeId, bool)>,
 ) -> Result<(), String> {
-    if let Some((_, existing)) = out.iter().find(|(existing, _)| existing == name) {
-        if *existing == type_id {
+    if let Some((_, existing, existing_default)) =
+        out.iter().find(|(existing, _, _)| existing == name)
+    {
+        if *existing == type_id && *existing_default == default_initialized {
             return Ok(());
+        }
+        if *existing == type_id {
+            return Err(format!(
+                "web local '{name}' cannot mix owned fixed-array and borrowed declarations"
+            ));
         }
         return Err(format!(
             "web local '{name}' is redeclared with conflicting types {existing} and {type_id}"
         ));
     }
-    out.push((name.to_string(), type_id));
+    out.push((name.to_string(), type_id, default_initialized));
     Ok(())
 }
 
@@ -2290,6 +2345,7 @@ struct EncodeContext<'a> {
     saved_view_owner: u32,
     saved_view_start: u32,
     saved_view_len: u32,
+    saved_owned_index: u32,
     foreach: BTreeMap<String, WebForeachBinding>,
     continue_depth: Option<u32>,
 }
@@ -2330,6 +2386,14 @@ struct LocalBinding {
     index: u32,
     type_id: TypeId,
     struct_view: Option<StructViewBinding>,
+    owned_fixed: Option<OwnedFixedArrayBinding>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OwnedFixedArrayBinding {
+    element_start: u32,
+    element_type: TypeId,
+    len: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2367,6 +2431,22 @@ fn encode_statements(
                 name, expression, ..
             } => {
                 let binding = local_binding(context, name)?;
+                if let Some(owned) = binding.owned_fixed {
+                    if !matches!(expression, SimpleExpr::DefaultValue(value) if *value == binding.type_id)
+                    {
+                        return Err(format!(
+                            "web owned local fixed array '{name}' requires its default initializer"
+                        ));
+                    }
+                    out.extend([0x41, 0x00, 0x21]);
+                    uleb(binding.index, out);
+                    for offset in 0..owned.len {
+                        encode_zero(owned.element_type, out)?;
+                        out.push(0x21);
+                        uleb(owned.element_start + offset, out);
+                    }
+                    continue;
+                }
                 if let Some(view) = binding.struct_view {
                     let value_type = if is_named_struct_array_type(
                         binding.type_id,
@@ -2453,6 +2533,13 @@ fn encode_statements(
                             continue;
                         }
                     }
+                }
+                if *op != AssignOp::Set
+                    && encode_owned_fixed_array_compound_assignment(
+                        target, *op, expression, context, out,
+                    )?
+                {
+                    continue;
                 }
                 if *op != AssignOp::Set
                     && encode_receiver_array_compound_assignment(
@@ -2619,6 +2706,50 @@ fn encode_statements(
     Ok(())
 }
 
+fn encode_owned_fixed_array_compound_assignment(
+    target: &AssignTarget,
+    op: AssignOp,
+    expression: &SimpleExpr,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<bool, String> {
+    let AssignTarget::IndexedPath {
+        collection_path,
+        index,
+        suffix,
+    } = target
+    else {
+        return Ok(false);
+    };
+    if !suffix.is_empty() {
+        return Ok(false);
+    }
+    let Some(binding) = context.locals.get(collection_path).copied() else {
+        return Ok(false);
+    };
+    let Some(owned) = binding.owned_fixed else {
+        return Ok(false);
+    };
+    let element_type = encode_local_collection_index(binding, index, context, out)?;
+    out.push(0x20);
+    uleb(context.scratch_index, out);
+    out.push(0x21);
+    uleb(context.saved_owned_index, out);
+    encode_owned_fixed_array_load_for_index(owned, context.saved_owned_index, context, out)?;
+    let rhs_type = encode_expr_as(expression, Some(element_type), context, out)?;
+    require_same_type(
+        element_type,
+        rhs_type,
+        "owned fixed-array compound assignment",
+    )?;
+    out.push(arithmetic_opcode(op, element_type)?);
+    let value_local = scratch_local(context, element_type)?;
+    out.push(0x21);
+    uleb(value_local, out);
+    encode_owned_fixed_array_store_for_index(owned, context.saved_owned_index, value_local, out)?;
+    Ok(true)
+}
+
 fn encode_receiver_array_compound_assignment(
     target: &AssignTarget,
     op: AssignOp,
@@ -2763,6 +2894,16 @@ fn encode_target_get(
             if let Some((binding, suffix)) = foreach_path(context, name) {
                 encode_foreach_load(binding, suffix, context, out)
             } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
+                if let Some(owned) = binding.owned_fixed {
+                    if suffix != "max_length" {
+                        return Err(format!(
+                            "web local fixed array metadata '{suffix}' is unsupported; use '.max_length'"
+                        ));
+                    }
+                    out.push(0x41);
+                    sleb(owned.len as i32, out);
+                    return Ok(TYPE_ID_I32);
+                }
                 if is_named_struct_array_type(binding.type_id, context.types, context.named_structs)
                 {
                     if suffix != "max_length" {
@@ -2813,6 +2954,16 @@ fn encode_target_get(
             if let Some((binding, suffix)) = foreach_path(context, name) {
                 encode_foreach_load(binding, suffix, context, out)
             } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
+                if let Some(owned) = binding.owned_fixed {
+                    if suffix != "max_length" {
+                        return Err(format!(
+                            "web local fixed array metadata '{suffix}' is unsupported; use '.max_length'"
+                        ));
+                    }
+                    out.push(0x41);
+                    sleb(owned.len as i32, out);
+                    return Ok(TYPE_ID_I32);
+                }
                 let candidates = collection_meta_candidates(context, suffix);
                 encode_collection_meta_load(
                     binding.index,
@@ -3554,6 +3705,14 @@ fn memory_binding<'a>(
 }
 
 fn collection_len(context: &EncodeContext<'_>, collection_path: &str) -> Result<i32, String> {
+    if let Some(owned) = context
+        .locals
+        .get(collection_path)
+        .and_then(|binding| binding.owned_fixed)
+    {
+        return i32::try_from(owned.len)
+            .map_err(|_| format!("web local fixed array '{collection_path}' is too large"));
+    }
     if let Some(len) = receiver_struct_collection_len(collection_path, context)? {
         return Ok(len);
     }
@@ -4370,6 +4529,7 @@ fn encode_struct_collection_copy(
             index: context.saved_view_start,
             len: context.saved_view_len,
         }),
+        owned_fixed: None,
     };
     for (suffix, target_field) in &collection.fields {
         out.push(0x41);
@@ -4435,6 +4595,7 @@ fn encode_local_struct_collection_copy(
             index: context.saved_view_start,
             len: context.saved_view_len,
         }),
+        owned_fixed: None,
     };
     let fields = context
         .named_structs
@@ -4510,6 +4671,7 @@ fn encode_receiver_struct_collection_copy(
             index: context.saved_view_start,
             len: context.saved_view_len,
         }),
+        owned_fixed: None,
     };
     let fields = context.named_structs.get(&target_type).ok_or_else(|| {
         format!("web named-struct array element {target_type} has no field layout")
@@ -4781,6 +4943,18 @@ fn encode_foreach_load(
     context: &EncodeContext<'_>,
     out: &mut Vec<u8>,
 ) -> Result<TypeId, String> {
+    if suffix.is_empty() {
+        if let Some(local) = context.locals.get(&binding.collection_path).copied() {
+            if local.owned_fixed.is_some() {
+                return encode_local_collection_load(
+                    local,
+                    &SimpleExpr::Identifier(binding.index_name.clone()),
+                    context,
+                    out,
+                );
+            }
+        }
+    }
     if let Some(collection) = local_named_struct_array_binding(context, &binding.collection_path)? {
         if suffix.is_empty() {
             return Err("web foreach named-struct element requires field access".to_string());
@@ -4833,6 +5007,22 @@ fn encode_foreach_store(
     context: &EncodeContext<'_>,
     out: &mut Vec<u8>,
 ) -> Result<(), String> {
+    if suffix.is_empty() {
+        if let Some(local) = context.locals.get(&binding.collection_path).copied() {
+            if let Some(owned) = local.owned_fixed {
+                let value_local = scratch_local(context, owned.element_type)?;
+                out.push(0x21);
+                uleb(value_local, out);
+                return encode_local_collection_store(
+                    local,
+                    &SimpleExpr::Identifier(binding.index_name.clone()),
+                    value_local,
+                    context,
+                    out,
+                );
+            }
+        }
+    }
     if let Some(collection) = local_named_struct_array_binding(context, &binding.collection_path)? {
         if suffix.is_empty() {
             return Err("web foreach named-struct element requires field access".to_string());
@@ -5036,6 +5226,15 @@ fn encode_local_collection_store(
     out: &mut Vec<u8>,
 ) -> Result<(), String> {
     let element_type = encode_local_collection_index(binding, index, context, out)?;
+    if let Some(owned) = binding.owned_fixed {
+        debug_assert_eq!(owned.element_type, element_type);
+        return encode_owned_fixed_array_store_for_index(
+            owned,
+            context.scratch_index,
+            value_local,
+            out,
+        );
+    }
     let candidates = local_collection_memory_candidates(context, element_type)?;
     encode_registered_collection_store(
         binding.index,
@@ -5144,6 +5343,11 @@ fn encode_local_collection_load(
     out: &mut Vec<u8>,
 ) -> Result<TypeId, String> {
     let element_type = encode_local_collection_index(binding, index, context, out)?;
+    if let Some(owned) = binding.owned_fixed {
+        debug_assert_eq!(owned.element_type, element_type);
+        encode_owned_fixed_array_load_for_index(owned, context.scratch_index, context, out)?;
+        return Ok(element_type);
+    }
     let candidates = local_collection_memory_candidates(context, element_type)?;
     let allow_string_literals = is_text_collection_type(binding.type_id, context.types);
     if allow_string_literals && wasm_value_type(element_type)? != I32 {
@@ -5161,6 +5365,60 @@ fn encode_local_collection_load(
         out,
     )?;
     Ok(element_type)
+}
+
+fn encode_owned_fixed_array_store_for_index(
+    owned: OwnedFixedArrayBinding,
+    index_local: u32,
+    value_local: u32,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    emit_index_bounds_check(index_local, owned.len as i32, out);
+    for offset in 0..owned.len {
+        out.push(0x20);
+        uleb(index_local, out);
+        out.push(0x41);
+        sleb(offset as i32, out);
+        out.extend([0x46, 0x04, 0x40, 0x20]);
+        uleb(value_local, out);
+        out.push(0x21);
+        uleb(owned.element_start + offset, out);
+        out.push(0x0b);
+    }
+    Ok(())
+}
+
+fn encode_owned_fixed_array_load_for_index(
+    owned: OwnedFixedArrayBinding,
+    index_local: u32,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    emit_index_bounds_check(index_local, owned.len as i32, out);
+    if owned.len == 0 {
+        encode_zero(owned.element_type, out)?;
+        return Ok(());
+    }
+    let value_local = scratch_local(context, owned.element_type)?;
+    out.push(0x20);
+    uleb(owned.element_start, out);
+    out.push(0x21);
+    uleb(value_local, out);
+    for offset in 1..owned.len {
+        out.push(0x20);
+        uleb(owned.element_start + offset, out);
+        out.push(0x20);
+        uleb(value_local, out);
+        out.push(0x20);
+        uleb(index_local, out);
+        out.push(0x41);
+        sleb(offset as i32, out);
+        out.extend([0x46, 0x1b, 0x21]);
+        uleb(value_local, out);
+    }
+    out.push(0x20);
+    uleb(value_local, out);
+    Ok(())
 }
 
 fn encode_memory_load(type_id: TypeId, out: &mut Vec<u8>) -> Result<(), String> {
@@ -5617,6 +5875,16 @@ fn encode_expr_as(
             if let Some((binding, suffix)) = foreach_path(context, name) {
                 encode_foreach_load(binding, suffix, context, out)
             } else if let Some((binding, suffix)) = local_collection_meta(context, name) {
+                if let Some(owned) = binding.owned_fixed {
+                    if suffix != "max_length" {
+                        return Err(format!(
+                            "web local fixed array metadata '{suffix}' is unsupported; use '.max_length'"
+                        ));
+                    }
+                    out.push(0x41);
+                    sleb(owned.len as i32, out);
+                    return Ok(TYPE_ID_I32);
+                }
                 if is_named_struct_array_type(binding.type_id, context.types, context.named_structs)
                 {
                     if suffix != "max_length" {
