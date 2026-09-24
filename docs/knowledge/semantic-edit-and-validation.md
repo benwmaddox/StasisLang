@@ -9,72 +9,128 @@ replacement, import handling, candidate compilation, receipts, and rollback.
 
 ## Discover before editing
 
-Start with a scoped symbol inventory using `stasis --json symbol list`. Narrow
-it with `--file`, `--kind`, `--owner`, `--query`, and paging options. Use
-`symbol find` when several declarations may share a name; use `symbol read`
-when one exact item is required.
+Start with a scoped `symbol list` when the target is unknown. If its file is known, start with a
+file-scoped list; if an exact target is already established, read it directly. Default list results
+cover the manifest entry and its direct imports. The `result.imports` map reports dependencies for selected
+files; an explicit `--file` selects that file without expanding imports, so follow the map with
+additional file selections to walk deeper. Prefer a focused inventory such as
+`stasis --json symbol list --file src/main.stasis --kind function` over one-word searches.
 
-Before changing behavior, run `stasis --json symbol references SYMBOL` for the
-relevant function, struct, global field, or qualified field path. Inspect the
-definitions, reads, writes, and calls. A name match is not enough evidence
-that the target is the correct boundary.
+`--query` matches a substring of name or signature. `--page` is zero-based and defaults to 0;
+`--limit` defaults to 32 and is capped at 200. List results omit `imports` and empty `globals`
+items; read those groups by their names and matching kinds.
 
-`symbol list` returns compact metadata. `symbol find` adds `source_hash`, and
-`symbol read` returns the complete source item, including `symbol_id`, source
-spans, source, and source hash. These fields have different roles:
+Use `symbol find NAME` for an exact name across the loaded workspace; it returns every match.
+`symbol read NAME` requires exactly one match. Both accept one `--file`, with `--kind`,
+`--owner`, and `--signature` available to disambiguate.
+
+A JSON read returns the complete editable source item under `result.item`, including its
+`symbol_id`, source spans, and `source_hash`. For direct update/delete commands, pass the hash
+with `--expected-source-hash`. The fields have distinct roles:
 
 | Field | Meaning |
 | --- | --- |
-| `symbol_id` | Canonical semantic identity; required by schema-version 2 batch selectors |
+| `symbol_id` | Canonical semantic identity; required by schema-v2 batch selectors |
 | `kind` | `imports`, `globals`, `struct`, `function`, or `test` |
 | `file` | Project-relative source or test file |
-| `name` | Semantic declaration name |
+| `name` | Semantic declaration name; required in a batch selector |
 | `owner` | Optional containing type or scope |
 | `signature` | Normalized declaration signature; optional in a selector |
-| `source_hash` | Hash of the current item source used for optimistic concurrency |
+| `source_hash` | Current source-item hash for optimistic concurrency |
 
-For direct CLI selection, add `kind`, `file`, `owner`, and `signature` as needed
-to disambiguate the name. For a schema-version 2 `symbol apply` request, use the
-`symbol_id` returned by `symbol read`. Keep that read's `source_hash` as the
-expected hash for an update or delete.
+Before changing behavior, run `stasis --json symbol references SYMBOL` for the relevant function,
+struct, global field, or qualified field path. It defaults to 128 results, caps at 256, and has
+no file filter or paging. Treat a response at the cap as potentially truncated and supplement it
+with targeted `rg` searches. Inspect definitions, reads, writes, and calls.
 
 ## Plan a semantic operation
 
-Choose `add`, `update`, `delete`, or a related `apply` batch. For an update,
-provide the complete replacement declaration and the expected source hash.
-Do not reconstruct a partial declaration from a line offset. For related
-changes, put all edits in one versioned request so the compiler can validate
-their relationships together.
+For an existing symbol in a schema-v2 `symbol apply` request, copy both `symbol_id` and required
+`name` from `symbol read`. Include that read's `source_hash` as `expected_source_hash` for
+updates and deletes. Schema v1 tuple selectors remain supported. When an add has no ID to copy
+from a read, explicitly set `schema_version` to 1 for the whole batch and use `name`, `kind`,
+and `file` selectors. Never invent IDs; omitted `schema_version` defaults to v2. Direct CLI
+add/update/delete commands use v1 requests.
 
-Use a dry run when the target, import ownership, or changed-file set is
-uncertain. A dry run compiler-validates the candidate without writing files or
-running tests. The response reports successful validation, and its plan records:
+For an update, provide the complete replacement declaration, retaining attached comments and
+attributes. Do not reconstruct a partial declaration from a line offset. Related edits belong in
+one batch so the compiler can validate them together. This v1 example updates `tick` to call a
+new `helper`; because the new declaration has no ID yet, both edits use v1 tuple selectors:
 
-- the normalized edits;
-- each changed file's complete before and after source plus hashes;
-- the expected reload classification.
+```json
+{
+  "schema_version": 1,
+  "edits": [
+    {
+      "operation": "update",
+      "target": {
+        "kind": "function",
+        "file": "src/main.stasis",
+        "name": "tick"
+      },
+      "expected_source_hash": "HASH_FROM_SYMBOL_READ",
+      "new_source": "function tick(): i32 {\n    return helper();\n}"
+    },
+    {
+      "operation": "add",
+      "target": {
+        "kind": "function",
+        "file": "src/main.stasis",
+        "name": "helper"
+      },
+      "new_source": "function helper(): i32 {\n    return 2;\n}"
+    }
+  ]
+}
+```
 
-Embedded imports in replacement source are merged, and unused imports in
-touched files are pruned. Inspect the plan's after-source when import changes
-matter.
+This schema-v2 update request shows the required canonical ID and name. Copy their values, and the
+hash, from a fresh read:
+
+```json
+{
+  "schema_version": 2,
+  "edits": [
+    {
+      "operation": "update",
+      "target": {
+        "kind": "function",
+        "file": "src/main.stasis",
+        "name": "tick",
+        "symbol_id": "SYMBOL_ID_FROM_READ"
+      },
+      "expected_source_hash": "HASH_FROM_SYMBOL_READ",
+      "new_source": "function tick(): i32 {\n    return 2;\n}"
+    }
+  ]
+}
+```
+
+Use a dry run when the target, import ownership, or changed-file set is uncertain; for a clear
+single-item edit, apply once and inspect the returned plan instead of compiling the same candidate
+twice. Dry-run returns the compiler-validated plan without writing the proposed project source or
+running tests. Normal command setup may still synchronize vendor files or cache data. Inspect
+normalized edits, changed files and before/after hashes, and reload classification. Embedded
+imports are merged into the imports item and unused imports in touched files are pruned.
+
+Use direct text edits only for unsupported units, creating a new file or configuration, or
+correcting a parse error that prevents symbol discovery. Then return to semantic edits and the same
+validation gates. A failed semantic edit is not a reason to bypass compiler or hash checks.
 
 ## Apply atomically
 
-`stasis symbol apply --request REQUEST.json` plans the complete batch in memory,
-handles imports, and compiler-validates the resulting workspace before writing.
-A normal apply then writes the batch and runs the project tests. Candidate
-compilation failure leaves source files untouched. A write, test, or receipt
-failure triggers rollback of touched source files; an error reports separately
-if rollback is incomplete. A successful operation writes a receipt that records
-the reversible change.
+`stasis symbol apply --request REQUEST.json` validates the candidate workspace before writing. A
+normal apply runs project tests. Candidate compilation failure leaves source unchanged; test or
+receipt failure rolls touched sources back. If an error reports incomplete rollback, inspect each
+affected file and compare its current hash with the plan before retrying. Successful applies write
+a receipt under `<output>/semantic-edits/` (`build/semantic-edits/` by default). Revert verifies whole-file post-edit hashes before
+restoring source; formatting or another later change makes it refuse rather than overwrite that
+change. If tests fail during revert, the edited sources are reapplied. Re-read affected items after
+apply or formatting before later edits and use fresh IDs and hashes.
 
-Use `--no-tests` only when the surrounding workflow explicitly owns an
-equivalent test gate. It weakens the normal behavior guarantee and should be
-visible in the edit record.
-
-After a successful apply, retain the receipt and the post-edit source hashes.
-Revert through the semantic receipt; the revert operation verifies the expected
-post-edit state before restoring the prior source.
+Use `--no-tests` only when the user explicitly asks for it, even if another workflow owns a
+test gate. Inspect `result.plan`, `result.validation`, and `result.receipt` before reporting
+success.
 
 ## Validate behavior
 
@@ -95,14 +151,16 @@ observable path selected by that validation. Keep all three claims separate.
 
 | Failure | First check | Correct response |
 | --- | --- | --- |
-| No symbol or several symbols match | Scope, kind, file, owner, signature | Refine discovery; do not guess a text location |
-| Source hash is stale | Current `symbol read` result | Re-read references and re-plan from the current source |
-| Reference set is broader than expected | Reads, writes, callers, and import map | Include the affected declarations or narrow the intended change |
-| Batch does not compile | First compiler diagnostic in the changed item | Correct the smallest semantic unit and rerun the dry run |
+| No symbol or several symbols match | Exact name and `kind`, `file`, `owner`, or `signature` scope | Refine discovery; read the intended item |
+| V2 selector lacks an ID | Whether the target already exists | Re-read an existing item; for a new add, set the entire batch to v1 |
+| Source hash is stale | Current `symbol read` result and references | Re-read and rebuild with the new hash; do not drop the guard |
+| Reference response reaches its cap | Result count and relevant source files | Supplement with targeted `rg`; do not assume completeness |
+| Candidate does not compile | First diagnostic in the changed item | Correct the smallest semantic unit and rerun the plan |
 | Tests reject the batch | Failing invariant and first divergent tick | Repair behavior, preserve the regression, and reapply |
 | Runtime evidence disagrees | Fresh validation setup and projection boundary | Inspect authoritative state and render projection separately |
-| Apply fails after multiple edits | Error plus current source hashes | Confirm rollback restored every touched file before retrying |
+| Apply or receipt reports rollback incomplete | Each touched file's current hash versus the plan | Recover inconsistent source state before retrying |
+| Receipt revert hash check fails | Changes since the recorded edit, including formatting | Resolve the conflict; do not force the old receipt |
 
-Do not call an edit successful because source bytes changed. The success record
-should include the semantic target, expected hash, changed files, compiler/test
-result, runtime evidence when observable behavior changed, and the receipt path.
+Do not call an edit successful because source bytes changed. Report the semantic target, expected
+hash, changed files, compiler and test results, runtime evidence when behavior changed, and receipt
+path.

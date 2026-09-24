@@ -3356,6 +3356,189 @@ fn semantic_symbol_cli_supports_inline_crud_and_stale_guards() {
 }
 
 #[test]
+fn semantic_symbol_agent_guide_example_executes() {
+    let parent = temp_dir("agent_guide_symbol_batch");
+    fs::create_dir_all(&parent).expect("create temp parent");
+    let project = parent.join("demo");
+    let created = stasis(&["--json", "new", "demo", "--dir", "demo"], &parent);
+    assert_eq!(
+        created.status.code(),
+        Some(0),
+        "generated project creation failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&created.stdout),
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let source_path = project.join("src/main.stasis");
+    let original_source =
+        "function main(): i32 {\n    return tick();\n}\n\nfunction tick(): i32 {\n    return 1;\n}\n";
+    fs::write(&source_path, original_source).expect("write fixture source");
+
+    let guide = fs::read_to_string(project.join("AGENTS.md")).expect("read generated guide");
+    let example = guide
+        .split("```")
+        .find_map(|block| block.trim().strip_prefix("json").map(str::trim))
+        .expect("generated guide has a JSON request example");
+    let mut request: Value = serde_json::from_str(example).expect("parse guide request example");
+    assert_eq!(request["schema_version"], 2);
+    let edits = request["edits"]
+        .as_array_mut()
+        .expect("request edits array");
+    assert_eq!(edits.len(), 1, "guide example should update one symbol");
+    let edit = &mut edits[0];
+    assert_eq!(edit["operation"], "update");
+    assert_eq!(edit["target"]["name"], "tick");
+    assert_eq!(edit["target"]["symbol_id"], "SYMBOL_ID_FROM_READ");
+    assert_eq!(edit["expected_source_hash"], "HASH_FROM_SYMBOL_READ");
+
+    let read = stasis(
+        &[
+            "--json",
+            "symbol",
+            "read",
+            "tick",
+            "--kind",
+            "function",
+            "--file",
+            "src/main.stasis",
+        ],
+        &project,
+    );
+    assert_eq!(
+        read.status.code(),
+        Some(0),
+        "symbol read failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&read.stdout),
+        String::from_utf8_lossy(&read.stderr)
+    );
+    let read_json = json_stdout(&read);
+    let item = &read_json["result"]["item"];
+    edit["target"]["symbol_id"] = Value::String(
+        item["symbol_id"]
+            .as_str()
+            .expect("symbol read identity")
+            .to_owned(),
+    );
+    edit["expected_source_hash"] = Value::String(
+        item["source_hash"]
+            .as_str()
+            .expect("symbol read source hash")
+            .to_owned(),
+    );
+
+    let request_path = "build/agent-guide/request.json";
+    fs::create_dir_all(project.join("build/agent-guide")).expect("create request directory");
+    fs::write(
+        project.join(request_path),
+        serde_json::to_vec_pretty(&request).expect("serialize guide request"),
+    )
+    .expect("write guide request");
+
+    let preview = stasis(
+        &[
+            "--json",
+            "symbol",
+            "apply",
+            "--request",
+            request_path,
+            "--dry-run",
+        ],
+        &project,
+    );
+    assert_eq!(
+        preview.status.code(),
+        Some(0),
+        "guide request preview failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&preview.stdout),
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let preview_json = json_stdout(&preview);
+    assert_eq!(preview_json["result"]["status"], "preview");
+    assert_eq!(preview_json["result"]["tests"], "not_run_for_preview");
+    assert_eq!(
+        fs::read(&source_path).expect("source after preview"),
+        original_source.as_bytes()
+    );
+
+    let applied = stasis(
+        &["--json", "symbol", "apply", "--request", request_path],
+        &project,
+    );
+    assert_eq!(
+        applied.status.code(),
+        Some(0),
+        "guide request apply failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&applied.stdout),
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let applied_json = json_stdout(&applied);
+    assert_eq!(applied_json["result"]["status"], "applied");
+    assert_eq!(applied_json["result"]["validation"]["tests"], "passed");
+    let receipt = applied_json["result"]["receipt"]
+        .as_str()
+        .expect("semantic edit receipt")
+        .to_owned();
+    let edited_source = fs::read(&source_path).expect("read edited source");
+
+    let edited_run = stasis(&["--json", "run", "--headless"], &project);
+    assert_eq!(
+        edited_run.status.code(),
+        Some(2),
+        "edited program should return 2: stdout={} stderr={}",
+        String::from_utf8_lossy(&edited_run.stdout),
+        String::from_utf8_lossy(&edited_run.stderr)
+    );
+    assert_eq!(json_stdout(&edited_run)["result"]["exit_code"], 2);
+
+    let stale = stasis(
+        &["--json", "symbol", "apply", "--request", request_path],
+        &project,
+    );
+    assert_eq!(stale.status.code(), Some(1));
+    let stale_message = json_stderr(&stale)["message"]
+        .as_str()
+        .expect("stale request error message")
+        .to_ascii_lowercase();
+    assert!(
+        stale_message.contains("hash"),
+        "reused request should fail its source hash guard: {stale_message}"
+    );
+    assert_eq!(
+        fs::read(&source_path).expect("source after stale reuse"),
+        edited_source
+    );
+
+    let reverted = stasis(
+        &["--json", "symbol", "revert", "--receipt", &receipt],
+        &project,
+    );
+    assert_eq!(
+        reverted.status.code(),
+        Some(0),
+        "receipt revert failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&reverted.stdout),
+        String::from_utf8_lossy(&reverted.stderr)
+    );
+    assert_eq!(json_stdout(&reverted)["result"]["status"], "reverted");
+    assert_eq!(
+        fs::read(&source_path).expect("restored source"),
+        original_source.as_bytes()
+    );
+
+    let restored_run = stasis(&["--json", "run", "--headless"], &project);
+    assert_eq!(
+        restored_run.status.code(),
+        Some(1),
+        "restored program should return 1: stdout={} stderr={}",
+        String::from_utf8_lossy(&restored_run.stdout),
+        String::from_utf8_lossy(&restored_run.stderr)
+    );
+    assert_eq!(json_stdout(&restored_run)["result"]["exit_code"], 1);
+
+    fs::remove_dir_all(parent).ok();
+}
+
+#[test]
 fn semantic_symbol_cli_batch_apply_is_atomic_and_revertible() {
     let parent = temp_dir("semantic_batch");
     fs::create_dir_all(&parent).expect("create temp parent");
