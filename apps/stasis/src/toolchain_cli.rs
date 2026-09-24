@@ -13015,6 +13015,7 @@ mod tests {
         assert!(project.contains("stasis_platform_services.c in Sources"));
         assert!(project.contains("published_replay_identity.c in Sources"));
         assert!(project.contains("stasis_replay_consumer.c in Sources"));
+        assert!(project.contains("cJSON.c in Sources"));
         assert!(!project.contains("stasis_platform_storage.c in Sources"));
         assert!(config.contains("$(PROJECT_DIR)/../aot/game.o"));
         assert!(config.contains("STASIS_SDL_PLATFORM = ios-arm64"));

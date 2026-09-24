@@ -17,6 +17,7 @@
 		100000000000000000000013 /* stasis_platform_services.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* stasis_platform_services.c */; };
 		100000000000000000000015 /* published_replay_identity.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* published_replay_identity.c */; };
 		100000000000000000000016 /* stasis_replay_consumer.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* stasis_replay_consumer.c */; };
+		100000000000000000000017 /* cJSON.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* cJSON.c */; };
 		100000000000000000000006 /* published_aot_bindings.c in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* published_aot_bindings.c */; };
 		100000000000000000000007 /* stasis_game in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* stasis_game */; };
 		110000000000000000000001 /* stasis_svg.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 210000000000000000000001 /* stasis_svg.cpp */; };
@@ -73,6 +74,7 @@
 				100000000000000000000013 /* stasis_platform_services.c in Sources */,
 				100000000000000000000015 /* published_replay_identity.c in Sources */,
 				100000000000000000000016 /* stasis_replay_consumer.c in Sources */,
+				100000000000000000000017 /* cJSON.c in Sources */,
 				110000000000000000000001 /* stasis_svg.cpp in Sources */,
 				110000000000000000000002 /* tvgCompressor.cpp in Sources */,
 				110000000000000000000003 /* tvgMath.cpp in Sources */,
@@ -146,6 +148,7 @@
 		200000000000000000000013 /* stasis_platform_services.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_platform_services.c; sourceTree = "<group>"; };
 		200000000000000000000015 /* published_replay_identity.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../aot/published_replay_identity.c; sourceTree = "<group>"; };
 		200000000000000000000016 /* stasis_replay_consumer.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/stasis_replay_consumer.c; sourceTree = "<group>"; };
+		200000000000000000000017 /* cJSON.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ../runtime/cJSON.c; sourceTree = "<group>"; };
 		200000000000000000000011 /* stasis_ios_network.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StasisMobile/stasis_ios_network.m; sourceTree = "<group>"; };
 		200000000000000000000014 /* stasis_ios_external_url.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = StasisMobile/stasis_ios_external_url.m; sourceTree = "<group>"; };
 		210000000000000000000001 /* stasis_svg.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ../runtime/stasis_svg.cpp; sourceTree = "<group>"; };
@@ -239,6 +242,7 @@
 				200000000000000000000006 /* published_aot_bindings.c */,
 				200000000000000000000015 /* published_replay_identity.c */,
 				200000000000000000000016 /* stasis_replay_consumer.c */,
+				200000000000000000000017 /* cJSON.c */,
 				200000000000000000000007 /* stasis_game */,
 				200000000000000000000009 /* StasisMobile.xcconfig */,
 				400000000000000000000002 /* Products */,
