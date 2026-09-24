@@ -5925,12 +5925,14 @@ function render(): void {{ {draws} return; }}
             "successful replacements must publish current preparation receipts"
         );
         assert!(
-            STASIS_GRAPHICS_SOURCE.contains("stasis_display_font_raster_scale(g_pixel_scale)")
-                && STASIS_GRAPHICS_SOURCE
-                    .contains("stasis_display_font_scaled_extent_for_backing(")
+            STASIS_GRAPHICS_SOURCE.contains("stasis_display_font_scaled_extent_for_backing(")
                 && STASIS_GRAPHICS_SOURCE.contains("g_display_metrics.logical_w,")
-                && STASIS_GRAPHICS_SOURCE.contains("g_display_metrics.drawable_w,"),
-            "font preparation must derive from the exact bounded backing ratio"
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("(int)g_display_metrics.drawable_viewport.w,")
+                && STASIS_GRAPHICS_SOURCE
+                    .contains("(int)g_display_metrics.drawable_viewport.h);")
+                && STASIS_GRAPHICS_SOURCE.contains("stasis_display_font_logical_scale("),
+            "font preparation must cover the exact text viewport and normalize the rounded raster extent"
         );
         let capture_start = graphics_source
             .find("static int stasis_gfx_dump_image(")
@@ -6625,7 +6627,7 @@ function render(): void {{ {draws} return; }}
             "STASIS_TEXT_RUN_HANDLE_GENERATION_MASK",
             "stasis_text_run_get(run_handle)",
             "SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_LINEAR)",
-            "stasis_display_font_raster_scale(g_pixel_scale)",
+            "stasis_display_font_logical_scale(",
         ] {
             assert!(
                 STASIS_GRAPHICS_SOURCE.contains(required),
