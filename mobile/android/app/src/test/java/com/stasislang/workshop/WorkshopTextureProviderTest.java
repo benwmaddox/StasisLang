@@ -46,4 +46,40 @@ public final class WorkshopTextureProviderTest {
         assertFalse(WorkshopTextureProvider.textRasterSupported(Integer.MAX_VALUE, 2));
         assertFalse(WorkshopTextureProvider.textRasterSupported(0, 1));
     }
+
+    @Test
+    public void textRasterPlanPreservesLogicalBoundsThroughPhysicalRounding() {
+        WorkshopTextureProvider.TextRasterPlan plan =
+                WorkshopTextureProvider.textRasterPlan(10.1f, -7.2f, 2.9f, 1.501f, 4096);
+        assertTrue(plan.supported);
+        assertEquals(11, plan.logicalWidth);
+        assertEquals(11, plan.logicalHeight);
+        assertEquals(17, plan.rasterWidth);
+        assertEquals(17, plan.rasterHeight);
+        assertEquals(17.0f / 11.0f, plan.scaleX(), 0.0001f);
+        assertEquals(17L * 17L * 4L, plan.byteLength());
+    }
+
+    @Test
+    public void textRasterPlanRejectsDeviceAxisLimitBeforeAllocation() {
+        WorkshopTextureProvider.TextRasterPlan tooWide =
+                WorkshopTextureProvider.textRasterPlan(3000.0f, -8.0f, 3.0f, 2.0f, 4096);
+        assertFalse(tooWide.supported);
+        assertEquals(6000, tooWide.rasterWidth);
+
+        WorkshopTextureProvider.TextRasterPlan aboveSpriteCap =
+                WorkshopTextureProvider.textRasterPlan(20.0f, -8.0f, 3.0f, 9.0f, 4096);
+        assertTrue(aboveSpriteCap.supported);
+        assertEquals(180, aboveSpriteCap.rasterWidth);
+    }
+
+    @Test
+    public void textCacheIdentityIncludesFontAndExactPhysicalScale() {
+        String base = WorkshopTextureProvider.textIdentity("font-a", "label", 2.0f);
+        assertFalse(base.equals(WorkshopTextureProvider.textIdentity(
+                "font-b", "label", 2.0f)));
+        assertFalse(base.equals(WorkshopTextureProvider.textIdentity(
+                "font-a", "label", 2.0005f)));
+        assertEquals(base, WorkshopTextureProvider.textIdentity("font-a", "label", 2.0f));
+    }
 }

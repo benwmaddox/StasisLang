@@ -368,10 +368,35 @@ static float stasis_display_font_raster_scale(float pixel_scale) {
     if (!isfinite(pixel_scale) || pixel_scale < STASIS_DISPLAY_FONT_RASTER_SCALE_MIN) {
         return STASIS_DISPLAY_FONT_RASTER_SCALE_MIN;
     }
-    if (pixel_scale > (float)STASIS_DISPLAY_RASTER_SCALE_MAX) {
-        return (float)STASIS_DISPLAY_RASTER_SCALE_MAX;
-    }
     return pixel_scale;
+}
+
+/* Text covers the larger rounded viewport transform. Unlike sprite
+ * preparation, glyph sampling is not capped at the asset-density limit. */
+static StasisDisplayPreparationScale stasis_display_text_preparation_scale(
+    int logical_w,
+    int logical_h,
+    int viewport_w,
+    int viewport_h
+) {
+    StasisDisplayPreparationScale scale = {2, 1};
+    if (logical_w <= 0 || logical_h <= 0 || viewport_w <= 0 || viewport_h <= 0) {
+        return scale;
+    }
+    scale.numerator = viewport_w;
+    scale.denominator = logical_w;
+    if ((int64_t)viewport_h * logical_w > (int64_t)viewport_w * logical_h) {
+        scale.numerator = viewport_h;
+        scale.denominator = logical_h;
+    }
+    if (scale.numerator < 2 * scale.denominator) {
+        scale.numerator = 2;
+        scale.denominator = 1;
+    }
+    const int64_t divisor = stasis_display_gcd_i64(scale.numerator, scale.denominator);
+    scale.numerator /= divisor;
+    scale.denominator /= divisor;
+    return scale;
 }
 
 static int stasis_display_font_scaled_extent_for_backing(
@@ -383,16 +408,19 @@ static int stasis_display_font_scaled_extent_for_backing(
 ) {
     if (logical_extent <= 0) return 0;
     if (logical_extent >= 65536) return 65536;
-    StasisDisplayPreparationScale scale = stasis_display_preparation_scale(
+    StasisDisplayPreparationScale scale = stasis_display_text_preparation_scale(
         logical_w, logical_h, drawable_w, drawable_h);
-    if (scale.numerator < 2 * scale.denominator) {
-        scale.numerator = 2;
-        scale.denominator = 1;
-    }
     const int64_t scaled =
         ((int64_t)logical_extent * scale.numerator + scale.denominator - 1) /
         scale.denominator;
     return scaled > 65536 ? 65536 : (int)scaled;
+}
+
+static float stasis_display_font_logical_scale(int logical_extent, int raster_extent) {
+    if (logical_extent <= 0 || raster_extent <= 0) {
+        return STASIS_DISPLAY_FONT_RASTER_SCALE_MIN;
+    }
+    return (float)raster_extent / (float)logical_extent;
 }
 
 static int stasis_display_font_atlas_extent(float pixel_scale) {

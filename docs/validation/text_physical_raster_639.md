@@ -77,3 +77,55 @@ Theory gained: a host's scalar asset-density tier need not bound both actual tex
 output axes. The failing renderer tests and browser captures demonstrate that
 text needs its own sampling identity; a change confined to the smaller axis can
 then reuse the text raster while rebuilding sprite resources independently.
+
+## Native and Android Workshop completion (2026-09-24)
+
+The shared native renderer now computes a separate text-preparation scale from
+the larger actual drawable-to-logical viewport ratio. It retains the existing
+2x floor but no longer caps text at the 8x sprite-density ceiling. Glyph raster
+dimensions round upward, and the atlas records `raster_size / logical_size` as
+the exact inverse scale used when layout metrics are returned. Sprite-density
+and text-scale invalidation are independent, so a sprite-tier-only change does
+not churn fonts, while every physical text scale change rebuilds the atlas.
+
+Android Workshop now publishes the same uncapped larger-axis text scale beside
+the capped sprite scale. Scale identity uses exact float bits rather than the
+old 0.001 tolerance. Text rasters retain logical Paint metrics, allocate
+`ceil(logical * physical scale)` pixels, and scale the Canvas by each exact
+physical/logical extent; returned widths, heights, bearings, and baselines stay
+logical. Cache identity includes the exact scale and font file identity
+(canonical path, size, and modification time).
+Replacement, surface loss, and eviction delete the owned GL texture. A shared
+LRU caps cached text at 32 MiB and 4096 entries using physical RGBA bytes.
+Per-entry dimensions are checked against `GL_MAX_TEXTURE_SIZE`, and oversized
+or unavailable allocations fail visibly instead of silently downsampling.
+
+Focused validation on Windows:
+
+- Fresh Visual Studio Release build followed by
+  `ctest --test-dir target/task639-native-vs -C Release -R
+  "^stasis_(display_scale|font_cache)_contract$" --output-on-failure
+  --no-tests=error`: 2/2 passed. The contracts cover fractional/nonuniform
+  viewport axes, exact inverse scale, >8x sampling, cache reuse, invalidation,
+  renderer restoration, and retry after allocation failure.
+- `mobile/android/build_rust_bridge.ps1 -Release`: rebuilt and packaged the
+  ARM64 and x86_64 JNI bridge, then refreshed its provenance receipt.
+- `gradle :app:testWorkshopDebugUnitTest --no-daemon`: passed with verified
+  release bridge provenance. Added unit coverage exercises fractional inverse
+  extents, >8x text with an 8x sprite cap, sub-0.001 scale changes, GL axis
+  rejection, and font/scale cache identity.
+- `git diff --check`: passed.
+
+Visual evidence: no fresh native or Android capture was produced in this
+Windows-only pass. The repair was verified through source-level lifecycle tests
+and pure raster-plan contracts; the Android emulator and physical-phone lanes
+were not run. Apple desktop and packaged iOS use the repaired shared native
+source, but this host has no Xcode, simulator, or Apple device, so Apple build,
+font-backend, GPU-limit, restoration, and visual qualification remain explicit
+platform-lane work. The earlier Web Chrome captures above remain the only fresh
+visual evidence for task #639.
+
+Theory gained: logical measurement and physical text preparation need separate,
+invertible contracts. The physical raster may grow without changing layout only
+when its exact prepared extent is the inverse transform, and its scale, font
+source, bytes, and GL lifetime all participate in cache ownership.

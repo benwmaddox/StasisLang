@@ -23,6 +23,7 @@ int stasis_gfx_cache_text(int font, const char* text);
 int stasis_gfx_replace_text(int handle, int font, const char* text);
 float stasis_gfx_measure_text_cached(int handle);
 float stasis_gfx_measure_text_cached_height(int handle);
+int stasis_test_font_raster_size(int handle);
 void stasis_begin_frame(void);
 int stasis_test_push_display_event(
     int kind, int logical_w, int logical_h, int native_w, int native_h,
@@ -80,7 +81,7 @@ static void test_density_rebuild_failure_retries(void) {
 
     set_environment_value("STASIS_ENABLE_TEST_INPUT", "1");
     CHECK(stasis_test_push_display_event(
-        1, 64, 64, 128, 128, 128, 128, 128, 128, 0, 0, 128, 128));
+        1, 64, 64, 192, 192, 192, 192, 192, 192, 0, 0, 192, 192));
     stasis_begin_frame();
     set_environment_value("STASIS_TEST_FONT_REBUILD_FAILURES", "2");
     CHECK(stasis_gfx_measure_text_cached(run) == 0.0f);
@@ -122,6 +123,26 @@ static void test_density_rebuild_failure_retries(void) {
     CHECK(stasis_gfx_measure_text_cached(reset_run) > 0.0f);
     CHECK(stasis_gfx_measure_text_cached_height(reset_run) > 0.0f);
     stasis_gfx_release_font(reset_font);
+    stasis_shutdown();
+    clear_environment_value("STASIS_ENABLE_TEST_INPUT");
+}
+
+static void test_text_raster_exceeds_sprite_density_cap(void) {
+    stasis_shutdown();
+    CHECK(stasis_init_window(64, 64, "stasis_font_cache_test_above_sprite_cap"));
+    set_environment_value("STASIS_ENABLE_TEST_INPUT", "1");
+    CHECK(stasis_test_push_display_event(
+        1, 64, 64, 640, 640, 640, 640, 640, 640, 0, 0, 640, 640));
+    stasis_begin_frame();
+
+    int font = stasis_load_font(STASIS_TEST_FONT_PATH, 18);
+    CHECK(font > 0);
+    CHECK(stasis_test_font_raster_size(font) == 180);
+    int run = stasis_gfx_cache_text(font, "physical text above sprite cap");
+    CHECK(run > 0);
+    CHECK(stasis_gfx_measure_text_cached(run) > 0.0f);
+
+    stasis_gfx_release_font(font);
     stasis_shutdown();
     clear_environment_value("STASIS_ENABLE_TEST_INPUT");
 }
@@ -304,6 +325,7 @@ int main(void) {
     stasis_gfx_release_font(reset_replacement);
 
     test_density_rebuild_failure_retries();
+    test_text_raster_exceeds_sprite_density_cap();
     test_failed_immutable_cache_rolls_back_bytes();
 
     size_t identity_size = 0;

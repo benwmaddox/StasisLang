@@ -186,6 +186,7 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(2160, phone.height);
         assertEquals(3.0f, phone.contentScale, 0.001f);
         assertEquals(3.0f, phone.rasterScale, 0.001f);
+        assertEquals(3.0f, phone.textRasterScale, 0.001f);
 
         StasisPreviewRenderer.DisplayViewport fractional =
                 StasisPreviewRenderer.fitViewport(800, 600, 1200, 900);
@@ -198,6 +199,7 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(540, landscape.width);
         assertEquals(1080, landscape.height);
         assertEquals(1.5f, landscape.rasterScale, 0.001f);
+        assertEquals(1.5f, landscape.textRasterScale, 0.001f);
     }
 
     @Test
@@ -559,6 +561,18 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(541, viewport.width);
         assertEquals(1081, viewport.height);
         assertEquals(1081.0f / 720.0f, viewport.contentScale, 0.0001f);
+        assertEquals(541.0f / 360.0f, viewport.textRasterScale, 0.0001f);
+
+        StasisPreviewRenderer.DisplayViewport aboveSpriteCap =
+                StasisPreviewRenderer.fitViewport(100, 100, 901, 901);
+        assertEquals(8.0f, aboveSpriteCap.rasterScale, 0.0f);
+        assertEquals(9.01f, aboveSpriteCap.textRasterScale, 0.0001f);
+
+        StasisPreviewRenderer.DisplayViewport subTolerance =
+                StasisPreviewRenderer.fitViewport(4000, 2000, 8001, 4002);
+        assertEquals(8001, subTolerance.width);
+        assertEquals(4001, subTolerance.height);
+        assertEquals(4001.0f / 2000.0f, subTolerance.textRasterScale, 0.00001f);
 
         StasisPreviewRenderer.DisplayViewport vertical =
                 StasisPreviewRenderer.fitViewport(360, 720, 1080, 2401);

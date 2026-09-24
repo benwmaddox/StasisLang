@@ -548,3 +548,32 @@ Good: retained the same required job and shared compilation.
 Bad: the previous combined budget hid the Web suite's independent runtime cost.
 Adjustment: preserve separate bounded steps and guard single ownership in the
 existing CI placement tests.
+
+## 2026-09-24 - Maddox #639 native physical text sampling
+
+Completed the shared native and Android Workshop portions after the Web repair.
+Text now samples from the larger actual viewport axis without the sprite 8x cap,
+while logical widths, bearings, baselines, and quads remain unchanged through an
+exact inverse transform. Native text invalidation is independent of sprite
+density. Workshop cache identity includes exact scale and font source identity;
+physical RGBA bytes, entry count, GL texture limits, eviction, replacement, and
+surface-loss deletion are explicitly accounted for.
+
+Fresh Visual Studio Release native contracts passed 2/2. Fresh ARM64 and x86_64
+JNI bridges were built, their provenance verified, and the Workshop debug unit
+suite passed. Visual evidence: no new native or Android capture was produced;
+the Windows host cannot qualify Apple, and no emulator or physical-phone pass
+was run. Web Chrome visual evidence remains in
+`docs/evidence/task639-web-text/`.
+
+Theory gained: layout preservation requires the physical raster extent and its
+inverse mapping to be one contract; a nominal scale alone is insufficient after
+integer allocation. Resource identity must include every input that can change
+those physical pixels.
+
+Good: lifecycle, fractional-axis, >8x, GL-limit, and cache-ownership behavior is
+covered at the implementation seams. Bad: this host cannot provide Apple or
+physical-device evidence, and a fresh native screenshot was not captured.
+Adjustment: run the same focused contracts before platform-lane visual capture,
+then qualify Apple and phone font backends without weakening the shared source
+guarantees.

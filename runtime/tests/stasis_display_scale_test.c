@@ -265,10 +265,16 @@ static void test_font_atlas_growth_is_bounded_and_deterministic(void) {
     CHECK(close_enough(stasis_display_font_raster_scale(1.0f), 2.0f));
     CHECK(close_enough(stasis_display_font_raster_scale(1.5f), 2.0f));
     CHECK(close_enough(stasis_display_font_raster_scale(3.0f), 3.0f));
-    CHECK(close_enough(stasis_display_font_raster_scale(20.0f), 8.0f));
+    CHECK(close_enough(stasis_display_font_raster_scale(20.0f), 20.0f));
     CHECK(stasis_display_scaled_extent(13, stasis_display_font_raster_scale(1.0f)) == 26);
-    CHECK(stasis_display_font_scaled_extent_for_backing(18, 720, 360, 1920, 986) == 48);
+    CHECK(stasis_display_font_scaled_extent_for_backing(18, 720, 360, 1920, 986) == 50);
     CHECK(stasis_display_font_scaled_extent_for_backing(18, 800, 600, 1200, 900) == 36);
+    CHECK(stasis_display_font_scaled_extent_for_backing(18, 360, 720, 1081, 2161) == 55);
+    CHECK(stasis_display_font_scaled_extent_for_backing(13, 64, 64, 1280, 1280) == 260);
+    CHECK(close_enough(stasis_display_font_logical_scale(18, 55), 55.0f / 18.0f));
+    StasisDisplayPreparationScale above_sprite_cap =
+        stasis_display_text_preparation_scale(64, 64, 640, 640);
+    CHECK(above_sprite_cap.numerator == 10 && above_sprite_cap.denominator == 1);
     CHECK(stasis_display_font_atlas_extent(stasis_display_font_raster_scale(1.0f)) == 1024);
     CHECK(stasis_display_font_atlas_next_extent(512) == 1024);
     CHECK(stasis_display_font_atlas_next_extent(1024) == 2048);

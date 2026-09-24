@@ -191,6 +191,7 @@ static int g_native_window_height = 600;
 static int g_drawable_width = 800;
 static int g_drawable_height = 600;
 static float g_pixel_scale = 1.0f;
+static StasisDisplayPreparationScale g_text_preparation_scale = {0, 0};
 static bool g_recording_presentation = false;
 static bool g_x11_scale_controlled_window = false;
 static int g_recording_width = 0;
@@ -850,6 +851,9 @@ static void stasis_mark_density_resources_dirty(void) {
             g_sprites[i].needs_reraster = 1;
         }
     }
+}
+
+static void stasis_mark_text_resources_dirty(void) {
     for (int i = 0; i < MAX_FONTS; i++) {
         if (g_fonts[i].active) g_fonts[i].needs_reraster = 1;
     }
@@ -1075,6 +1079,10 @@ static void stasis_sync_display_metrics(void) {
         stasis_display_preparation_scale(
             next.logical_w, next.logical_h, next.drawable_w, next.drawable_h);
 #endif
+    const StasisDisplayPreparationScale next_text_preparation_scale =
+        stasis_display_text_preparation_scale(
+            next.logical_w, next.logical_h,
+            (int)next.drawable_viewport.w, (int)next.drawable_viewport.h);
     const int dimensions_changed =
         next.native_w != g_display_metrics.native_w ||
         next.native_h != g_display_metrics.native_h ||
@@ -1088,11 +1096,18 @@ static void stasis_sync_display_metrics(void) {
     const int density_changed = g_density_generation == 0 ||
         stasis_display_preparation_scale_changed(
             g_density_preparation_scale, next_preparation_scale);
+    const int text_density_changed =
+        stasis_display_preparation_scale_changed(
+            g_text_preparation_scale, next_text_preparation_scale);
     if (density_changed) {
         g_pixel_scale = next.raster_scale;
         g_density_preparation_scale = next_preparation_scale;
         stasis_mark_density_resources_dirty();
     }
+    if (text_density_changed) {
+        stasis_mark_text_resources_dirty();
+    }
+    g_text_preparation_scale = next_text_preparation_scale;
     if (g_display_generation == 0 || dimensions_changed) {
         g_display_generation++;
         g_window_resized = true;
@@ -3511,6 +3526,8 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     g_pixel_scale = 1.0f;
     g_density_preparation_scale.numerator = 0;
     g_density_preparation_scale.denominator = 0;
+    g_text_preparation_scale.numerator = 0;
+    g_text_preparation_scale.denominator = 0;
 
 
     int native_request_width = width;
@@ -8221,13 +8238,14 @@ static int stasis_build_font_atlas(StasisFont* font) {
 
     const int replaces_existing = font->raster_size > 0 && font->atlas_size > 0;
 
-    const float pixel_scale = stasis_display_font_raster_scale(g_pixel_scale);
     const int raster_size = stasis_display_font_scaled_extent_for_backing(
         font->font_size,
         g_display_metrics.logical_w,
         g_display_metrics.logical_h,
-        g_display_metrics.drawable_w,
-        g_display_metrics.drawable_h);
+        (int)g_display_metrics.drawable_viewport.w,
+        (int)g_display_metrics.drawable_viewport.h);
+    const float pixel_scale = stasis_display_font_logical_scale(
+        font->font_size, raster_size);
     int atlas_size = stasis_display_font_atlas_extent(pixel_scale);
     size_t atlas_pixels = 0;
     unsigned char* atlas_bitmap = NULL;
@@ -8759,6 +8777,11 @@ STASIS_EXPORT float stasis_gfx_measure_text_cached_height(int run_handle) {
     if (!run) return 0.0f;
     if (!stasis_ensure_font_ready(run->font_handle)) return 0.0f;
     return run->height;
+}
+
+STASIS_EXPORT int stasis_test_font_raster_size(int font_handle) {
+    StasisFont* font = stasis_font_get(font_handle);
+    return font ? font->raster_size : 0;
 }
 
 /* Load a TrueType font from disk */
