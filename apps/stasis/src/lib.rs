@@ -6416,21 +6416,22 @@ function render(): void {{ {draws} return; }}
     #[test]
     fn sprite_runtime_uploads_edge_extruded_atlas_padding() {
         let upload_start = STASIS_GRAPHICS_SOURCE
-            .find("static int stasis_sprite_atlas_upload(")
-            .expect("sprite atlas upload helper");
+            .find("static int stasis_sprite_atlas_upload_page(")
+            .expect("sprite atlas page upload helper");
         let upload_end = STASIS_GRAPHICS_SOURCE[upload_start..]
-            .find("static int sprite_publish_pixels_into_entry(")
-            .expect("sprite atlas upload helper boundary")
+            .find("static int stasis_sprite_atlas_upload(")
+            .expect("sprite atlas page upload helper boundary")
             + upload_start;
         let upload_source = &STASIS_GRAPHICS_SOURCE[upload_start..upload_end];
         for required in [
             "const int padded_w = alloc_w;",
             "const int padded_h = alloc_h;",
-            "if (padded_w < w + 2 || padded_h < h + 2) return 0;",
+            "if (padded_w < w + 2 || padded_h < h + 2 ||",
+            "(size_t)padded_w > SIZE_MAX / (size_t)padded_h / 4u",
             "int sy = py - 1;",
             "int sx = px - 1;",
             "SDL_Rect rect = {x - 1, y - 1, padded_w, padded_h};",
-            "g_sprite_atlas_pages[page_index].texture, &rect, padded, padded_w * 4",
+            "SDL_UpdateTexture(page->texture, &rect, padded, padded_w * 4)",
         ] {
             assert!(
                 upload_source.contains(required),
@@ -6450,10 +6451,10 @@ function render(): void {{ {draws} return; }}
             "stasis_sprite_atlas_page_size_v3",
             "#define STASIS_SDL_ATLAS_COLD_PAGE_SIZE 512",
             "if (eligible && w + 2 <= STASIS_SDL_ATLAS_PAGE_SIZE",
-            "if (!page->texture || page->dedicated || page->group_id != group_id) continue;",
+            "if (!page->texture || page->dedicated || page->planner_layout || page->group_id != group_id) continue;",
             "stasis_sprite_atlas_create_page(page_w, page_h, group_id, 0)",
             "if (!eligible && stasis_sprite_atlas_fits_cold_page(w, h))",
-            "if (!stasis_sprite_atlas_is_cold_page(page)) continue;",
+            "if (!stasis_sprite_atlas_is_cold_page(page) || page->planner_layout) continue;",
             "stasis_sprite_atlas_create_page(width, height, group_id, 1)",
         ] {
             assert!(

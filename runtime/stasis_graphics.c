@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <limits.h>
 #include <ctype.h>
 #include <errno.h>
@@ -6114,7 +6115,8 @@ _Static_assert(sizeof(StasisSpriteAtlasPageV1) == 56, "PageV1 ABI size");
 _Static_assert(sizeof(StasisSpriteAtlasPairV1) == 16, "PairV1 ABI size");
 _Static_assert(sizeof(StasisSpriteAtlasPlanPageV1) == 56, "PlanPageV1 ABI size");
 _Static_assert(sizeof(StasisSpriteAtlasPlanPlacementV1) == 16, "PlacementV1 ABI size");
-_Static_assert(sizeof(StasisSpriteAtlasFrameStatsV1) == 24, "FrameStatsV1 ABI size");
+_Static_assert(offsetof(StasisSpriteAtlasFrameStatsV1, page_transitions) == 24, "FrameStatsV1 field offset");
+_Static_assert(sizeof(StasisSpriteAtlasFrameStatsV1) == 32, "FrameStatsV1 ABI size");
 #endif
 
 STASIS_EXPORT int stasis_gfx_sprite_atlas_last_frame_stats_v1(
