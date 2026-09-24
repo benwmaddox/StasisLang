@@ -11,7 +11,11 @@ ROOT = Path(__file__).resolve().parents[2]
 VERIFY = ROOT / "tools" / "ci" / "verify_ios_aspect_fit.py"
 
 
-def receipt(stage: str, safe_x: float, safe_w: float, generation: int) -> dict:
+def receipt(stage: str, injected_x: float, injected_w: float, generation: int) -> dict:
+    safe_x = injected_x * 3.0
+    safe_w = injected_w * 3.0
+    safe_h = 380.0 * 3.0
+    viewport_h = float(int(safe_w * 720.0 / 1600.0))
     pointer = {
         "id": 1 if stage == "pointer" else 0,
         "down": 1 if stage == "pointer" else 0,
@@ -26,17 +30,17 @@ def receipt(stage: str, safe_x: float, safe_w: float, generation: int) -> dict:
         "schema": "stasis.ios.aspect_fit.v1",
         "stage": stage,
         "logical": [1600, 720],
-        "native": [844, 390],
-        "drawable": [2532, 1170],
+        "native": [874, 402],
+        "drawable": [2622, 1206],
         "safe_logical": [0, 0, 1600, 720],
-        "native_viewport": [59, 15.5, 785, 353.25],
-        "drawable_viewport": [safe_x, 25.0, safe_w, safe_w * 720.0 / 1600.0],
-        "safe_drawable": [safe_x, 0.0, safe_w, 1107.0],
+        "native_viewport": [injected_x, 11.0, injected_w, 365.0],
+        "drawable_viewport": [safe_x, (safe_h - viewport_h) / 2.0, safe_w, viewport_h],
+        "safe_drawable": [safe_x, 0.0, safe_w, safe_h],
         "content_scale": safe_w / 1600.0,
         "raster_scale": 2.0,
         "display_generation": generation,
         "density_generation": 2,
-        "injected_safe_native": [0, 0, 785, 369],
+        "injected_safe_native": [injected_x, 0, injected_w, 380],
         "pointer": pointer,
     }
 
@@ -55,11 +59,19 @@ class VerifyIosAspectFitTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             values = {
-                "actual": receipt("actual", 177.0, 2178.0, 1),
-                "left": receipt("landscape-left", 177.0, 2355.0, 2),
-                "pointer": receipt("pointer", 177.0, 2355.0, 2),
-                "right": receipt("landscape-right", 0.0, 2355.0, 3),
+                "actual": receipt("actual", 0.0, 874.0, 1),
+                "left": receipt("landscape-left", 62.0, 812.0, 2),
+                "pointer": receipt("pointer", 62.0, 812.0, 2),
+                "right": receipt("landscape-right", 0.0, 812.0, 3),
             }
+            values["actual"].update(
+                {
+                    "native_viewport": [0.0, 4.0, 874.0, 393.0],
+                    "drawable_viewport": [0.0, 13.0, 2622.0, 1180.0],
+                    "safe_drawable": [0.0, 0.0, 2622.0, 1206.0],
+                    "injected_safe_native": [0, 0, 0, 0],
+                }
+            )
             if mutate:
                 mutate(values)
             paths = {}
@@ -69,8 +81,8 @@ class VerifyIosAspectFitTests(unittest.TestCase):
                 paths[name] = path
             left_png = root / "left.png"
             right_png = root / "right.png"
-            write_png_header(left_png, 2532, 1170)
-            write_png_header(right_png, 2532, 1170)
+            write_png_header(left_png, 2622, 1206)
+            write_png_header(right_png, 2622, 1206)
             output = root / "evidence.json"
             result = subprocess.run(
                 [
@@ -98,6 +110,8 @@ class VerifyIosAspectFitTests(unittest.TestCase):
             if result.returncode == 0:
                 evidence = json.loads(output.read_text(encoding="utf-8"))
                 self.assertFalse(evidence["physical_device_qualified"])
+                self.assertTrue(evidence["injected_safe_area_qualified"])
+                self.assertFalse(evidence["actual_simulator_safe_area_inset_observed"])
             return result
 
     def test_accepts_fitted_cutout_and_pointer_receipts(self) -> None:
@@ -110,6 +124,15 @@ class VerifyIosAspectFitTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("pointer x=", result.stderr)
+
+    def test_rejects_injected_cutout_that_does_not_reach_presentation(self) -> None:
+        result = self.run_fixture(
+            lambda values: values["left"].update(
+                {"safe_drawable": [0.0, 0.0, 2622.0, 1206.0]}
+            )
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("injected safe drawable", result.stderr)
 
     def test_slow_ci_owns_arm64_simulator_evidence(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "pr-ci.yml").read_text(
@@ -140,6 +163,14 @@ class VerifyIosAspectFitTests(unittest.TestCase):
         self.assertIn("physical_device_qualified=false", script)
         fixture = (ROOT / "tools" / "ci" / "ios_aspect_fit_bindings.c").read_text(
             encoding="utf-8"
+        )
+        runtime = (ROOT / "runtime" / "stasis_graphics.c").read_text(encoding="utf-8")
+        self.assertIn(
+            "#if defined(SDL_PLATFORM_IOS) || defined(__IPHONEOS__)", runtime
+        )
+        self.assertIn("#define STASIS_PLATFORM_IOS 1", runtime)
+        self.assertIn(
+            "#if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)", runtime
         )
         self.assertIn("STASIS_RENDER_FLAG_CLEAR | STASIS_RENDER_FLAG_PRESENT", fixture)
         self.assertIn("hash_path(\"gfx_cmd_i32\")", fixture)

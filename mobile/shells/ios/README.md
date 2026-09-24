@@ -42,6 +42,10 @@ fixture fixes the logical canvas at 1600x720 and records the live safe-area fit,
 an injected resize/orientation-safe-area transition, and logical pointer
 round-trip receipts. The job uploads both landscape screenshots, exact
 Xcode/runtime/device identifiers, logs, and the machine-checked receipt.
+The live receipt preserves the simulator's actual safe area, including a
+truthful zero-inset result. The injected receipts separately exercise the
+production mobile safe target, left/right cutout math, display generation, and
+logical pointer mapping; they are seam evidence, not device-observed cutouts.
 This does not add a public simulator package target, and it does not qualify
 signing, thermal behavior, touch hardware, or cutout behavior on a physical
 phone.

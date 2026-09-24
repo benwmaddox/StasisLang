@@ -6121,7 +6121,12 @@ function render(): void {{ {draws} return; }}
         let apply_source = &STASIS_GRAPHICS_SOURCE[apply_start..apply_end];
         assert!(
             apply_source.contains("const int32_t HOST_REQ_FLAG_MAXIMIZED = 4;")
-                && apply_source.contains("#if !defined(__ANDROID__) && !defined(__IPHONEOS__)")
+                && STASIS_GRAPHICS_SOURCE.contains(
+                    "#if defined(SDL_PLATFORM_IOS) || defined(__IPHONEOS__)"
+                )
+                && STASIS_GRAPHICS_SOURCE.contains("#define STASIS_PLATFORM_IOS 1")
+                && apply_source
+                    .contains("#if !defined(__ANDROID__) && !defined(STASIS_PLATFORM_IOS)")
                 && apply_source.contains(
                     "stasis_set_logical_size(*host_req_window_w_px, *host_req_window_h_px);"
                 )

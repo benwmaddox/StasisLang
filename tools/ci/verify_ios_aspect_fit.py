@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import struct
 from pathlib import Path
 
@@ -35,7 +36,26 @@ def rect_inside(inner: list[float], outer: list[float], label: str) -> None:
         raise SystemExit(f"{label}: {inner!r} is outside {outer!r}")
 
 
-def validate_presentation(value: dict, require_inset: bool) -> None:
+def rect_matches(actual: list[float], expected: list[float], label: str) -> None:
+    if any(
+        abs(float(left) - float(right)) > 1.1
+        for left, right in zip(actual, expected)
+    ):
+        raise SystemExit(f"{label}: {actual!r} does not match {expected!r}")
+
+
+def has_inset(rect: list[float], extent: list[int]) -> bool:
+    right = rect[0] + rect[2]
+    bottom = rect[1] + rect[3]
+    return not (
+        abs(rect[0]) < 0.5
+        and abs(rect[1]) < 0.5
+        and abs(right - extent[0]) < 0.5
+        and abs(bottom - extent[1]) < 0.5
+    )
+
+
+def validate_presentation(value: dict) -> None:
     drawable = value["drawable"]
     safe = value["safe_drawable"]
     viewport = value["drawable_viewport"]
@@ -43,16 +63,31 @@ def validate_presentation(value: dict, require_inset: bool) -> None:
     rect_inside(viewport, safe, "fitted drawable viewport")
     if abs(viewport[2] / viewport[3] - 1600.0 / 720.0) > 0.01:
         raise SystemExit(f"fitted viewport has wrong aspect ratio: {viewport!r}")
-    if require_inset:
-        right = safe[0] + safe[2]
-        bottom = safe[1] + safe[3]
-        if (
-            abs(safe[0]) < 0.5
-            and abs(safe[1]) < 0.5
-            and abs(right - drawable[0]) < 0.5
-            and abs(bottom - drawable[1]) < 0.5
-        ):
-            raise SystemExit("simulator reported no safe-area inset")
+    rect_matches(value["safe_logical"], [0.0, 0.0, 1600.0, 720.0], "mobile safe logical")
+
+
+def validate_injected_safe_area(value: dict) -> None:
+    native = value["native"]
+    drawable = value["drawable"]
+    injected = value["injected_safe_native"]
+    rect_inside(
+        injected,
+        [0.0, 0.0, float(native[0]), float(native[1])],
+        "injected safe native",
+    )
+    if not has_inset(injected, native):
+        raise SystemExit(f"{value['stage']}: injected safe area has no inset")
+    scale_x = drawable[0] / native[0]
+    scale_y = drawable[1] / native[1]
+    expected_drawable = [
+        math.ceil(injected[0] * scale_x),
+        math.ceil(injected[1] * scale_y),
+        math.floor((injected[0] + injected[2]) * scale_x)
+        - math.ceil(injected[0] * scale_x),
+        math.floor((injected[1] + injected[3]) * scale_y)
+        - math.ceil(injected[1] * scale_y),
+    ]
+    rect_matches(value["safe_drawable"], expected_drawable, "injected safe drawable")
 
 
 def png_size(path: Path) -> tuple[int, int]:
@@ -77,11 +112,15 @@ def main() -> None:
     left = load_receipt(args.left, "landscape-left")
     pointer = load_receipt(args.pointer, "pointer")
     right = load_receipt(args.right, "landscape-right")
+    if any(actual["injected_safe_native"]):
+        raise SystemExit("actual simulator receipt must not use an injected safe area")
     for value in (actual, left, pointer, right):
-        validate_presentation(value, require_inset=True)
+        validate_presentation(value)
         if value["native"][0] <= value["native"][1]:
             raise SystemExit(f"{value['stage']}: simulator is not landscape")
 
+    for value in (left, pointer, right):
+        validate_injected_safe_area(value)
     if left["safe_drawable"][0] <= 0.0:
         raise SystemExit("left orientation did not retain the cutout inset")
     if abs(right["safe_drawable"][0]) > 0.5:
@@ -97,11 +136,12 @@ def main() -> None:
     for key, value in expected.items():
         if observed.get(key) != value:
             raise SystemExit(f"pointer {key}={observed.get(key)!r}, expected {value!r}")
+    safe_x, safe_y, safe_w, safe_h = pointer["safe_logical"]
     for key, value in (
         ("x", 160.0),
         ("y", 72.0),
-        ("x_normalized", 0.1),
-        ("y_normalized", 0.1),
+        ("x_normalized", (160.0 - safe_x) / safe_w),
+        ("y_normalized", (72.0 - safe_y) / safe_h),
     ):
         if abs(float(observed[key]) - value) > 0.01:
             raise SystemExit(f"pointer {key}={observed[key]!r}, expected {value!r}")
@@ -128,6 +168,10 @@ def main() -> None:
                 "pixels": list(right_png),
             },
         },
+        "actual_simulator_safe_area_inset_observed": has_inset(
+            actual["safe_drawable"], actual["drawable"]
+        ),
+        "injected_safe_area_qualified": True,
         "physical_device_qualified": False,
     }
     args.output.write_text(
