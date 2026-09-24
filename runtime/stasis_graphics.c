@@ -191,6 +191,7 @@ static int g_native_window_height = 600;
 static int g_drawable_width = 800;
 static int g_drawable_height = 600;
 static float g_pixel_scale = 1.0f;
+static StasisDisplayPreparationScale g_sprite_preparation_scale = {0, 0};
 static StasisDisplayPreparationScale g_text_preparation_scale = {0, 0};
 static bool g_recording_presentation = false;
 static bool g_x11_scale_controlled_window = false;
@@ -348,6 +349,8 @@ static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float 
     float rot_degrees, uint32_t tint_rgba, float src_x, float src_y, float src_w, float src_h,
     float pivot_x, float pivot_y, float scale_x, float scale_y, int do_hash);
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h);
+static void stasis_prepare_frame_sprite_requirements(
+    const int32_t* cmd_i32, const float* cmd_f32, int sprite_count);
 static void stasis_sync_display_metrics(void);
 static void stasis_set_logical_size(int width, int height);
 static void stasis_reset_text_cache(void);
@@ -413,6 +416,19 @@ typedef struct SpriteEntry {
     int h;              /* current rasterized height */
     int max_w;          /* requested max width (logical) */
     int max_h;          /* requested max height (logical) */
+    int required_w;     /* physical raster width requested by density/transforms */
+    int required_h;     /* physical raster height requested by density/transforms */
+    int source_w;       /* decoded raster source width, before preparation */
+    int source_h;       /* decoded raster source height, before preparation */
+    int source_underprovisioned;
+    uint64_t decoded_bytes;
+    uint64_t prepared_bytes;
+    double sampling_multiplier;
+    double frame_sampling_multiplier;
+    uint64_t frame_sampling_serial;
+    int failed_required_w;
+    int failed_required_h;
+    uint64_t preparation_count;
     int page_index;
     int atlas_x;
     int atlas_y;
@@ -451,6 +467,13 @@ static SpriteEntry g_sprite_fallback;
 #define STASIS_SDL_ATLAS_PADDING 1
 #define STASIS_SDL_ATLAS_WHITE_SIZE 2
 #define STASIS_SDL_ATLAS_MAX_FREE_RECTS 256
+typedef struct {
+    int source_w;
+    int source_h;
+    int source_underprovisioned;
+    uint64_t decoded_bytes;
+} StasisSpriteSourceInfo;
+
 typedef struct {
     int x;
     int y;
@@ -560,6 +583,7 @@ typedef struct {
     unsigned char* pixels;
     int pixel_w;
     int pixel_h;
+    StasisSpriteSourceInfo source_info;
     StasisDecodedAudio audio;
 } StasisAssetTask;
 
@@ -853,6 +877,14 @@ static void stasis_mark_density_resources_dirty(void) {
     }
 }
 
+static void stasis_mark_sprite_resources_dirty(void) {
+    for (int i = 0; i < g_sprite_capacity; i++) {
+        if (g_sprites[i].used && g_sprites[i].max_w > 0 && g_sprites[i].max_h > 0) {
+            g_sprites[i].needs_reraster = 1;
+        }
+    }
+}
+
 static void stasis_mark_text_resources_dirty(void) {
     for (int i = 0; i < MAX_FONTS; i++) {
         if (g_fonts[i].active) g_fonts[i].needs_reraster = 1;
@@ -860,14 +892,25 @@ static void stasis_mark_text_resources_dirty(void) {
 }
 
 static int stasis_current_scaled_extent(int logical_extent) {
-#if defined(__ANDROID__) || defined(__IPHONEOS__)
-    return stasis_display_scaled_extent(logical_extent, g_pixel_scale);
-#else
-    return stasis_display_scaled_extent_for_backing(
-        logical_extent,
-        g_window_width, g_window_height,
-        g_drawable_width, g_drawable_height);
-#endif
+    return stasis_display_sprite_scaled_extent(
+        logical_extent, g_sprite_preparation_scale, 1.0);
+}
+
+static double stasis_cached_sprite_sampling_multiplier(
+    const char* resolved_path, int max_w, int max_h
+) {
+    double sampling_multiplier = 1.0;
+    if (!resolved_path) return sampling_multiplier;
+    for (int i = 0; i < g_sprite_capacity; i++) {
+        const SpriteEntry* entry = &g_sprites[i];
+        if (!entry->used || !entry->path ||
+            entry->max_w != max_w || entry->max_h != max_h ||
+            strcmp(entry->path, resolved_path) != 0) continue;
+        if (entry->sampling_multiplier > sampling_multiplier) {
+            sampling_multiplier = entry->sampling_multiplier;
+        }
+    }
+    return sampling_multiplier;
 }
 
 static SDL_DisplayID stasis_select_presentation_display(
@@ -1083,6 +1126,10 @@ static void stasis_sync_display_metrics(void) {
         stasis_display_text_preparation_scale(
             next.logical_w, next.logical_h,
             (int)next.drawable_viewport.w, (int)next.drawable_viewport.h);
+    const StasisDisplayPreparationScale next_sprite_preparation_scale =
+        stasis_display_sprite_preparation_scale(
+            next.logical_w, next.logical_h,
+            (int)next.drawable_viewport.w, (int)next.drawable_viewport.h);
     const int dimensions_changed =
         next.native_w != g_display_metrics.native_w ||
         next.native_h != g_display_metrics.native_h ||
@@ -1099,6 +1146,9 @@ static void stasis_sync_display_metrics(void) {
     const int text_density_changed =
         stasis_display_preparation_scale_changed(
             g_text_preparation_scale, next_text_preparation_scale);
+    const int sprite_density_changed =
+        stasis_display_preparation_scale_changed(
+            g_sprite_preparation_scale, next_sprite_preparation_scale);
     if (density_changed) {
         g_pixel_scale = next.raster_scale;
         g_density_preparation_scale = next_preparation_scale;
@@ -1107,6 +1157,10 @@ static void stasis_sync_display_metrics(void) {
     if (text_density_changed) {
         stasis_mark_text_resources_dirty();
     }
+    if (sprite_density_changed && !density_changed) {
+        stasis_mark_sprite_resources_dirty();
+    }
+    g_sprite_preparation_scale = next_sprite_preparation_scale;
     g_text_preparation_scale = next_text_preparation_scale;
     if (g_display_generation == 0 || dimensions_changed) {
         g_display_generation++;
@@ -2685,10 +2739,12 @@ static int bake_svg_to_rgba(const char* path, unsigned char** out_pixels, int* o
  * avoid fuzz from resampling.
  */
 static int bake_svg_to_rgba_sized(const char* resolved_path, int max_w, int max_h,
-                                   unsigned char** out_pixels, int* out_w, int* out_h) {
+                                   unsigned char** out_pixels, int* out_w, int* out_h,
+                                   StasisSpriteSourceInfo* source_info) {
     *out_pixels = NULL;
     *out_w = 0;
     *out_h = 0;
+    if (source_info) memset(source_info, 0, sizeof(*source_info));
 
     if (max_w <= 0 || max_h <= 0) {
         fprintf(stderr, "bake_svg_to_rgba_sized: invalid max size %dx%d\n", max_w, max_h);
@@ -2752,10 +2808,12 @@ static void premultiply_rgba(unsigned char* pixels, int w, int h) {
 }
 
 static int bake_raster_to_rgba_sized(const char* resolved_path, int max_w, int max_h,
-                                     unsigned char** out_pixels, int* out_w, int* out_h) {
+                                     unsigned char** out_pixels, int* out_w, int* out_h,
+                                     StasisSpriteSourceInfo* source_info) {
     *out_pixels = NULL;
     *out_w = 0;
     *out_h = 0;
+    if (source_info) memset(source_info, 0, sizeof(*source_info));
 
     if (max_w <= 0 || max_h <= 0) {
         fprintf(stderr, "bake_raster_to_rgba_sized: invalid max size %dx%d\n", max_w, max_h);
@@ -2782,6 +2840,11 @@ static int bake_raster_to_rgba_sized(const char* resolved_path, int max_w, int m
         fprintf(stderr, "bake_raster_to_rgba_sized: invalid raster size %dx%d in %s\n", src_w, src_h, resolved_path);
         return 0;
     }
+    if (source_info) {
+        source_info->source_w = src_w;
+        source_info->source_h = src_h;
+        source_info->decoded_bytes = (uint64_t)src_w * (uint64_t)src_h * 4u;
+    }
 
     unsigned char* out = (unsigned char*)malloc((size_t)max_w * (size_t)max_h * 4u);
     if (!out) {
@@ -2794,6 +2857,9 @@ static int bake_raster_to_rgba_sized(const char* resolved_path, int max_w, int m
     float scale_x = (float)max_w / (float)src_w;
     float scale_y = (float)max_h / (float)src_h;
     float scale = (scale_x < scale_y) ? scale_x : scale_y;
+    if (source_info) {
+        source_info->source_underprovisioned = scale > 1.0f;
+    }
     int content_w = (int)ceilf((float)src_w * scale);
     int content_h = (int)ceilf((float)src_h * scale);
     if (content_w < 1) content_w = 1;
@@ -2838,11 +2904,14 @@ static int bake_raster_to_rgba_sized(const char* resolved_path, int max_w, int m
 }
 
 static int bake_image_to_rgba_sized(const char* path, int max_w, int max_h,
-                                    unsigned char** out_pixels, int* out_w, int* out_h) {
+                                    unsigned char** out_pixels, int* out_w, int* out_h,
+                                    StasisSpriteSourceInfo* source_info) {
     if (ends_with_ci(path, ".svg")) {
-        return bake_svg_to_rgba_sized(path, max_w, max_h, out_pixels, out_w, out_h);
+        return bake_svg_to_rgba_sized(
+            path, max_w, max_h, out_pixels, out_w, out_h, source_info);
     }
-    return bake_raster_to_rgba_sized(path, max_w, max_h, out_pixels, out_w, out_h);
+    return bake_raster_to_rgba_sized(
+        path, max_w, max_h, out_pixels, out_w, out_h, source_info);
 }
 
 static void stasis_asset_task_clear(StasisAssetTask* task) {
@@ -2893,10 +2962,13 @@ static int stasis_asset_task_worker(void* unused) {
         unsigned char* pixels = NULL;
         int pixel_w = 0;
         int pixel_h = 0;
+        StasisSpriteSourceInfo source_info;
+        memset(&source_info, 0, sizeof(source_info));
         StasisDecodedAudio audio;
         memset(&audio, 0, sizeof(audio));
         int ok = kind == STASIS_ASSET_KIND_SPRITE
-            ? bake_image_to_rgba_sized(path, raster_w, raster_h, &pixels, &pixel_w, &pixel_h)
+            ? bake_image_to_rgba_sized(
+                path, raster_w, raster_h, &pixels, &pixel_w, &pixel_h, &source_info)
             : stasis_audio_decode(path, &audio);
 
         SDL_LockMutex(g_asset_task_mutex);
@@ -2912,6 +2984,7 @@ static int stasis_asset_task_worker(void* unused) {
             task->pixels = pixels;
             task->pixel_w = pixel_w;
             task->pixel_h = pixel_h;
+            task->source_info = source_info;
             task->audio = audio;
             task->state = STASIS_ASSET_TASK_DECODED;
         }
@@ -2996,10 +3069,14 @@ static int stasis_asset_task_request(
     task->max_h = max_h;
     task->atlas_policy = kind == STASIS_ASSET_KIND_SPRITE
         ? atlas_policy : stasis_sprite_atlas_policy_v3_standalone();
+    const double sampling_multiplier = kind == STASIS_ASSET_KIND_SPRITE
+        ? stasis_cached_sprite_sampling_multiplier(resolved, max_w, max_h) : 1.0;
     task->raster_w = kind == STASIS_ASSET_KIND_SPRITE
-        ? stasis_current_scaled_extent(max_w) : 0;
+        ? stasis_display_sprite_scaled_extent(
+            max_w, g_sprite_preparation_scale, sampling_multiplier) : 0;
     task->raster_h = kind == STASIS_ASSET_KIND_SPRITE
-        ? stasis_current_scaled_extent(max_h) : 0;
+        ? stasis_display_sprite_scaled_extent(
+            max_h, g_sprite_preparation_scale, sampling_multiplier) : 0;
     task->normalized_path_hash = kind == STASIS_ASSET_KIND_SPRITE
         ? stasis_sprite_normalized_path_hash(path, resolved) : 0;
     memcpy(task->path, resolved, strlen(resolved) + 1);
@@ -3526,6 +3603,8 @@ STASIS_EXPORT int stasis_init_window(int width, int height, const char* title) {
     g_pixel_scale = 1.0f;
     g_density_preparation_scale.numerator = 0;
     g_density_preparation_scale.denominator = 0;
+    g_sprite_preparation_scale.numerator = 0;
+    g_sprite_preparation_scale.denominator = 0;
     g_text_preparation_scale.numerator = 0;
     g_text_preparation_scale.denominator = 0;
 
@@ -4754,6 +4833,7 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
         g_perf_render_started_counter = 0;
         return;
     }
+    stasis_prepare_frame_sprite_requirements(cmd_i32, cmd_f32, sprite_count);
 
     if ((flags & STASIS_RENDER_FLAG_CLEAR) != 0) {
         stasis_clear(cmd_f32[0], cmd_f32[1], cmd_f32[2], cmd_f32[3]);
@@ -4939,6 +5019,26 @@ STASIS_EXPORT int stasis_test_get_sprite_state(int32_t handle, int32_t* out_i32,
         out_i32[15] = entry != NULL ? entry->alloc_w : 0;
         out_i32[16] = entry != NULL ? entry->alloc_h : 0;
         out_i32[17] = g_sprite_atlas_page_count;
+    }
+    if (capacity >= 27) {
+        const uint64_t decoded_bytes = entry != NULL ? entry->decoded_bytes : 0;
+        const uint64_t prepared_bytes = entry != NULL ? entry->prepared_bytes : 0;
+        out_i32[18] = entry != NULL ? entry->source_w : 0;
+        out_i32[19] = entry != NULL ? entry->source_h : 0;
+        out_i32[20] = entry != NULL ? entry->required_w : 0;
+        out_i32[21] = entry != NULL ? entry->required_h : 0;
+        out_i32[22] = entry != NULL ? entry->source_underprovisioned : 0;
+        out_i32[23] = (int32_t)(uint32_t)decoded_bytes;
+        out_i32[24] = (int32_t)(uint32_t)(decoded_bytes >> 32);
+        out_i32[25] = (int32_t)(uint32_t)prepared_bytes;
+        out_i32[26] = (int32_t)(uint32_t)(prepared_bytes >> 32);
+    }
+    if (capacity >= 31) {
+        const uint64_t preparation_count = entry != NULL ? entry->preparation_count : 0;
+        out_i32[27] = entry != NULL ? entry->failed_required_w : 0;
+        out_i32[28] = entry != NULL ? entry->failed_required_h : 0;
+        out_i32[29] = (int32_t)(uint32_t)preparation_count;
+        out_i32[30] = (int32_t)(uint32_t)(preparation_count >> 32);
     }
     return 1;
 }
@@ -5473,11 +5573,17 @@ static void stasis_log_sprite_preparation(
         }
     }
     SDL_Log(
-        "Stasis resource preparation: kind=sprite event=%s handle=%d path=%s logical=%dx%d raster=%dx%d source_bytes=%llu density_generation=%d",
-        replaces_existing ? "replace" : "initial", handle,
+        "Stasis resource preparation: kind=sprite event=%s status=%s handle=%d path=%s logical=%dx%d required=%dx%d prepared=%dx%d source=%dx%d source_bytes=%llu decoded_bytes=%llu prepared_bytes=%llu density_generation=%d",
+        replaces_existing ? "replace" : "initial",
+        entry->source_underprovisioned ? "source-underprovisioned" : "ready",
+        handle,
         path ? path : "<unknown>", entry->max_w, entry->max_h,
-        entry->w, entry->h,
-        (unsigned long long)stasis_resource_source_bytes(path), g_density_generation);
+        entry->required_w, entry->required_h, entry->w, entry->h,
+        entry->source_w, entry->source_h,
+        (unsigned long long)stasis_resource_source_bytes(path),
+        (unsigned long long)entry->decoded_bytes,
+        (unsigned long long)entry->prepared_bytes,
+        g_density_generation);
 }
 
 static void stasis_log_font_preparation(const StasisFont* font, int replaces_existing) {
@@ -6361,15 +6467,20 @@ STASIS_EXPORT int stasis_gfx_sprite_atlas_stage_plan_v1(
         SpriteEntry* e = &g_sprites[slot];
         StasisSdlAtlasPage* staged = &g_sprite_atlas_staged_pages[
             pages[p->page_index].source_page_index];
-        const int rw = stasis_current_scaled_extent(e->max_w);
-        const int rh = stasis_current_scaled_extent(e->max_h);
+        const int rw = e->required_w > 0
+            ? e->required_w : stasis_current_scaled_extent(e->max_w);
+        const int rh = e->required_h > 0
+            ? e->required_h : stasis_current_scaled_extent(e->max_h);
         if (e->needs_reraster || e->reload_pending || rw != e->w || rh != e->h ||
             !sprite_source_within_limits(e->path, rw, rh) || get_file_mtime(e->path) != e->mtime) {
             goto done;
         }
         unsigned char* pixels = NULL;
         int width = 0, height = 0;
-        if (!bake_image_to_rgba_sized(e->path, rw, rh, &pixels, &width, &height)) goto done;
+        StasisSpriteSourceInfo source_info;
+        memset(&source_info, 0, sizeof(source_info));
+        if (!bake_image_to_rgba_sized(
+                e->path, rw, rh, &pixels, &width, &height, &source_info)) goto done;
         const uint64_t digest = stasis_sprite_atlas_pixel_hash(pixels, width, height);
         if (width != e->w || height != e->h || digest != e->raster_hash ||
             get_file_mtime(e->path) != e->mtime) {
@@ -6404,6 +6515,12 @@ done:
 STASIS_EXPORT void stasis_gfx_test_advance_renderer_generation(void) {
     stasis_renderer_lifecycle_renderer_reset(
         &g_resource_lifecycle, STASIS_RENDERER_REASON_DEVICE_RESET);
+}
+
+STASIS_EXPORT void stasis_gfx_test_reset_renderer_resources(void) {
+    stasis_renderer_lifecycle_renderer_reset(
+        &g_resource_lifecycle, STASIS_RENDERER_REASON_DEVICE_RESET);
+    stasis_invalidate_renderer_resources(0);
 }
 #endif
 
@@ -6480,7 +6597,10 @@ static int sprite_publish_pixels_into_entry(
     int max_h,
     unsigned char* pixels,
     int w,
-    int h
+    int h,
+    int required_w,
+    int required_h,
+    const StasisSpriteSourceInfo* source_info
 ) {
     const int replaces_existing = e->w > 0 && e->h > 0;
     const uint64_t raster_hash = stasis_sprite_atlas_pixel_hash(pixels, w, h);
@@ -6553,6 +6673,17 @@ static int sprite_publish_pixels_into_entry(
         e->h = h;
         e->max_w = max_w;
         e->max_h = max_h;
+        e->required_w = required_w;
+        e->required_h = required_h;
+        e->source_w = source_info ? source_info->source_w : 0;
+        e->source_h = source_info ? source_info->source_h : 0;
+        e->source_underprovisioned =
+            source_info ? source_info->source_underprovisioned : 0;
+        e->decoded_bytes = source_info ? source_info->decoded_bytes : 0;
+        e->prepared_bytes = (uint64_t)w * (uint64_t)h * 4u;
+        e->failed_required_w = 0;
+        e->failed_required_h = 0;
+        e->preparation_count++;
         e->page_index = page_index;
         e->atlas_x = atlas_x;
         e->atlas_y = atlas_y;
@@ -6570,25 +6701,127 @@ static int sprite_publish_pixels_into_entry(
         e->needs_reraster = 0;
         e->surface_generation = g_resource_lifecycle.surface_generation;
         e->renderer_generation = g_resource_lifecycle.renderer_generation;
+        if (e->source_underprovisioned) {
+            SDL_LogWarn(
+                SDL_LOG_CATEGORY_APPLICATION,
+                "Stasis sprite source underprovisioned: status=source-underprovisioned path=%s logical=%dx%d required=%dx%d prepared=%dx%d source=%dx%d decoded_bytes=%llu prepared_bytes=%llu",
+                path ? path : "<unknown>", max_w, max_h,
+                required_w, required_h, w, h, e->source_w, e->source_h,
+                (unsigned long long)e->decoded_bytes,
+                (unsigned long long)e->prepared_bytes);
+        }
         stasis_log_sprite_preparation(e, path, replaces_existing);
         stasis_sprite_atlas_bump_asset_generation();
         return 1;
 }
 
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h) {
-    const int raster_w = stasis_current_scaled_extent(max_w);
-    const int raster_h = stasis_current_scaled_extent(max_h);
+    const double sampling_multiplier =
+        e && e->sampling_multiplier >= 1.0 ? e->sampling_multiplier : 1.0;
+    const int raster_w = stasis_display_sprite_scaled_extent(
+        max_w, g_sprite_preparation_scale, sampling_multiplier);
+    const int raster_h = stasis_display_sprite_scaled_extent(
+        max_h, g_sprite_preparation_scale, sampling_multiplier);
     if (!sprite_source_within_limits(path, raster_w, raster_h)) {
         return 0;
     }
     unsigned char* pixels = NULL;
     int w = 0, h = 0;
-    if (!bake_image_to_rgba_sized(path, raster_w, raster_h, &pixels, &w, &h)) {
+    StasisSpriteSourceInfo source_info;
+    memset(&source_info, 0, sizeof(source_info));
+    if (!bake_image_to_rgba_sized(
+            path, raster_w, raster_h, &pixels, &w, &h, &source_info)) {
         SDL_Log("gfx_load_sprite: failed to bake %s at logical=%dx%d raster=%dx%d",
             path, max_w, max_h, raster_w, raster_h);
         return 0;
     }
-    return sprite_publish_pixels_into_entry(e, path, max_w, max_h, pixels, w, h);
+    return sprite_publish_pixels_into_entry(
+        e, path, max_w, max_h, pixels, w, h, raster_w, raster_h, &source_info);
+}
+
+static double stasis_sprite_draw_sampling_multiplier(
+    const SpriteEntry* entry,
+    float draw_w,
+    float draw_h,
+    float src_w,
+    float src_h,
+    float scale_x,
+    float scale_y
+) {
+    if (!entry || entry->max_w <= 0 || entry->max_h <= 0) return 1.0;
+    const double source_span_w = src_w > 0.0f
+        ? fabs((double)src_w) : (double)entry->max_w;
+    const double source_span_h = src_h > 0.0f
+        ? fabs((double)src_h) : (double)entry->max_h;
+    if (source_span_w <= 0.0 || source_span_h <= 0.0) return 1.0;
+    const double draw_scale_w = fabs((double)draw_w * (double)scale_x) / source_span_w;
+    const double draw_scale_h = fabs((double)draw_h * (double)scale_y) / source_span_h;
+    double sampling_multiplier = draw_scale_w > draw_scale_h ? draw_scale_w : draw_scale_h;
+    if (!isfinite(sampling_multiplier) || sampling_multiplier < 1.0) {
+        sampling_multiplier = 1.0;
+    }
+    return sampling_multiplier;
+}
+
+static int stasis_raise_sprite_sampling_requirement(
+    SpriteEntry* entry, double sampling_multiplier
+) {
+    if (!entry || !entry->path || !isfinite(sampling_multiplier) ||
+        sampling_multiplier <= entry->sampling_multiplier) return 1;
+    const int required_w = stasis_display_sprite_scaled_extent(
+        entry->max_w, g_sprite_preparation_scale, sampling_multiplier);
+    const int required_h = stasis_display_sprite_scaled_extent(
+        entry->max_h, g_sprite_preparation_scale, sampling_multiplier);
+    if (entry->failed_required_w == required_w &&
+        entry->failed_required_h == required_h) return 0;
+    const double previous_sampling_multiplier = entry->sampling_multiplier;
+    const int previous_needs_reraster = entry->needs_reraster;
+    entry->sampling_multiplier = sampling_multiplier;
+    entry->needs_reraster = 1;
+    if (sprite_build_into_entry_sized(
+            entry, entry->path, entry->max_w, entry->max_h)) return 1;
+    entry->sampling_multiplier = previous_sampling_multiplier;
+    entry->needs_reraster = previous_needs_reraster;
+    entry->failed_required_w = required_w;
+    entry->failed_required_h = required_h;
+    SDL_LogWarn(
+        SDL_LOG_CATEGORY_APPLICATION,
+        "Stasis sprite physical preparation failed: path=%s logical=%dx%d sampling_multiplier=%.6f",
+        entry->path, entry->max_w, entry->max_h, sampling_multiplier);
+    return 0;
+}
+
+static void stasis_prepare_frame_sprite_requirements(
+    const int32_t* cmd_i32, const float* cmd_f32, int sprite_count
+) {
+    if (!cmd_i32 || !cmd_f32 || sprite_count <= 0) return;
+    const int32_t* sprite_i32 = cmd_i32 + STASIS_RENDER_I_SPRITE_BASE;
+    const float* sprite_f32 = cmd_f32 + STASIS_RENDER_F_SPRITE_BASE;
+    const uint64_t frame_serial = g_render_accepted_frames;
+    for (int index = 0; index < sprite_count; index++) {
+        const int base_i = index * STASIS_RENDER_SPRITE_I32_STRIDE;
+        const int base_f = index * STASIS_RENDER_SPRITE_F32_STRIDE;
+        SpriteEntry* entry = sprite_get(sprite_i32[base_i + 0]);
+        if (!entry) continue;
+        if (entry->frame_sampling_serial != frame_serial) {
+            entry->frame_sampling_serial = frame_serial;
+            entry->frame_sampling_multiplier = 1.0;
+        }
+        const double sampling_multiplier = stasis_sprite_draw_sampling_multiplier(
+            entry,
+            sprite_f32[base_f + 2], sprite_f32[base_f + 3],
+            sprite_f32[base_f + 6], sprite_f32[base_f + 7],
+            sprite_f32[base_f + 10], sprite_f32[base_f + 11]);
+        if (sampling_multiplier > entry->frame_sampling_multiplier) {
+            entry->frame_sampling_multiplier = sampling_multiplier;
+        }
+    }
+    for (int index = 0; index < g_sprite_capacity; index++) {
+        SpriteEntry* entry = &g_sprites[index];
+        if (!entry->used || entry->frame_sampling_serial != frame_serial) continue;
+        (void)stasis_raise_sprite_sampling_requirement(
+            entry, entry->frame_sampling_multiplier);
+    }
 }
 
 static void gfx_asset_watch_apply_pending_changes(void) {
@@ -6695,9 +6928,6 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
         SDL_Log("gfx_load_sprite: could not resolve %s", path);
         return 0;
     }
-    const int raster_w = stasis_current_scaled_extent(max_w);
-    const int raster_h = stasis_current_scaled_extent(max_h);
-
     /* Reuse the device-local raster/GPU texture for the same source and
      * logical target size. Drawable-density changes mark the entry dirty and
      * replace its raster before it is returned or drawn, so the effective key
@@ -6713,7 +6943,13 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
             cached->atlas_policy = atlas_policy;
             cached->needs_reraster = 1;
         }
-        if (cached->w != raster_w || cached->h != raster_h) {
+        const double cached_sampling_multiplier = cached->sampling_multiplier >= 1.0
+            ? cached->sampling_multiplier : 1.0;
+        const int cached_raster_w = stasis_display_sprite_scaled_extent(
+            max_w, g_sprite_preparation_scale, cached_sampling_multiplier);
+        const int cached_raster_h = stasis_display_sprite_scaled_extent(
+            max_h, g_sprite_preparation_scale, cached_sampling_multiplier);
+        if (cached->w != cached_raster_w || cached->h != cached_raster_h) {
             cached->needs_reraster = 1;
         }
         if (cached->needs_reraster &&
@@ -6763,6 +6999,7 @@ STASIS_EXPORT int stasis_gfx_load_sprite(const char* path, int max_w, int max_h)
     if (!e->path) return 0;
     e->used = 1;
     e->ref_count = 1;
+    e->sampling_multiplier = 1.0;
     if (!sprite_build_into_entry_sized(e, resolved, max_w, max_h)) {
         stasis_report_runtime_errorf("Sprite failed to load: %s", path);
         SDL_Log("gfx_load_sprite: failed path=%s resolved=%s", path, resolved);
@@ -6810,7 +7047,10 @@ static int stasis_gfx_publish_sprite_task(StasisAssetTask* task) {
                     task->max_h,
                     pixels,
                     task->pixel_w,
-                    task->pixel_h)) {
+                    task->pixel_h,
+                    task->raster_w,
+                    task->raster_h,
+                    &task->source_info)) {
                 cached->atlas_policy = previous_atlas_policy;
                 cached->needs_reraster = previous_needs_reraster;
                 return 0;
@@ -6846,6 +7086,7 @@ static int stasis_gfx_publish_sprite_task(StasisAssetTask* task) {
     if (!entry->path) return 0;
     entry->used = 1;
     entry->ref_count = 1;
+    entry->sampling_multiplier = 1.0;
     unsigned char* pixels = task->pixels;
     task->pixels = NULL;
     if (!sprite_publish_pixels_into_entry(
@@ -6855,7 +7096,10 @@ static int stasis_gfx_publish_sprite_task(StasisAssetTask* task) {
             task->max_h,
             pixels,
             task->pixel_w,
-            task->pixel_h)) {
+            task->pixel_h,
+            task->raster_w,
+            task->raster_h,
+            &task->source_info)) {
         free(entry->path);
         memset(entry, 0, sizeof(*entry));
         entry->generation = generation;
@@ -6938,8 +7182,12 @@ STASIS_EXPORT int stasis_asset_task_poll(int task_id) {
         return state;
     }
     if (task->kind == STASIS_ASSET_KIND_SPRITE) {
-        int current_raster_w = stasis_current_scaled_extent(task->max_w);
-        int current_raster_h = stasis_current_scaled_extent(task->max_h);
+        const double sampling_multiplier = stasis_cached_sprite_sampling_multiplier(
+            task->path, task->max_w, task->max_h);
+        int current_raster_w = stasis_display_sprite_scaled_extent(
+            task->max_w, g_sprite_preparation_scale, sampling_multiplier);
+        int current_raster_h = stasis_display_sprite_scaled_extent(
+            task->max_h, g_sprite_preparation_scale, sampling_multiplier);
         if (task->raster_w != current_raster_w || task->raster_h != current_raster_h) {
             free(task->pixels);
             task->pixels = NULL;
@@ -7112,13 +7360,30 @@ static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float 
 
     if (w <= 0 || h <= 0 || scale_x == 0.0f || scale_y == 0.0f) return;
 
+    if (e->path) {
+        const double sampling_multiplier = stasis_sprite_draw_sampling_multiplier(
+            e, w, h, src_w, src_h, scale_x, scale_y);
+        (void)stasis_raise_sprite_sampling_requirement(e, sampling_multiplier);
+    }
+
     /* Re-rasterize only when explicitly invalidated (resize/reload).
      *
      * Re-baking per draw-size can overflow the atlas when sizes fluctuate frame-to-frame.
      * Sprites are baked at their load-time max size (max_w/max_h) and drawn scaled.
      */
-    if (e->needs_reraster) {
-        if (e->path) sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h);
+    if (e->needs_reraster && e->path) {
+        const int required_w = stasis_display_sprite_scaled_extent(
+            e->max_w, g_sprite_preparation_scale,
+            e->sampling_multiplier >= 1.0 ? e->sampling_multiplier : 1.0);
+        const int required_h = stasis_display_sprite_scaled_extent(
+            e->max_h, g_sprite_preparation_scale,
+            e->sampling_multiplier >= 1.0 ? e->sampling_multiplier : 1.0);
+        if (e->failed_required_w != required_w || e->failed_required_h != required_h) {
+            if (!sprite_build_into_entry_sized(e, e->path, e->max_w, e->max_h)) {
+                e->failed_required_w = required_w;
+                e->failed_required_h = required_h;
+            }
+        }
     }
     if (e->surface_generation != g_resource_lifecycle.surface_generation ||
         e->renderer_generation != g_resource_lifecycle.renderer_generation) {

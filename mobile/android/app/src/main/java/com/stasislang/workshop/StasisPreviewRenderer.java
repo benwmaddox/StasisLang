@@ -1211,10 +1211,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         int y = (drawableHeight - height) / 2;
         float contentScale = Math.min((float)width / logicalWidth,
                 (float)height / logicalHeight);
-        float textRasterScale = Math.max(1.0f, Math.max(
+        float physicalRasterScale = Math.max(1.0f, Math.max(
                 (float)width / logicalWidth, (float)height / logicalHeight));
         return new DisplayViewport(x, y, width, height, contentScale,
-                Math.max(1.0f, Math.min(8.0f, contentScale)), textRasterScale);
+                physicalRasterScale, physicalRasterScale);
     }
 
     static String formatResourceFailure(String stage, int handle, String path,

@@ -83,6 +83,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private long acceptanceUploadBytes;
     private long acceptanceTextureBytes;
     private long acceptanceMaximumCacheBytes;
+    private int acceptanceUnderprovisionedSprites;
 
     WorkshopTextureProvider(MainActivity activity) {
         this.activity = activity;
@@ -241,28 +242,37 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                 return shared.texture;
             }
             long decodeStarted = System.nanoTime();
-            Bitmap bitmap = decode(resolved, plan.width, plan.height);
-            long decodedBytes = (long)bitmap.getWidth() * bitmap.getHeight() * 4L;
+            DecodedSprite decoded = decode(resolved, plan);
             if (reportRestoreTiming) spriteDecodeNanos += System.nanoTime() - decodeStarted;
             SpriteTexture replacement;
             try {
                 long uploadStarted = System.nanoTime();
-                replacement = uploadSprite(bitmap, exactIdentity, manifestStamp,
+                replacement = uploadSprite(decoded, exactIdentity, manifestStamp,
                         Math.max(1, resolved.optInt("width")),
                         Math.max(1, resolved.optInt("height")));
                 if (reportRestoreTiming) spriteUploadNanos += System.nanoTime() - uploadStarted;
             } finally {
-                bitmap.recycle();
+                decoded.bitmap.recycle();
+            }
+            if (decoded.sourceUnderprovisioned) {
+                Log.w(LOG_TAG, formatSourceResolutionDiagnostic(
+                        canonicalSource, hash, decoded.sourceWidth, decoded.sourceHeight,
+                        plan.width, plan.height, plan.width,
+                        plan.height, decoded.decodedBytes,
+                        decoded.preparedBytes));
             }
             if (reportRestoreTiming) restoredSprites += 1;
             textures.put(handle, replacement);
             spriteTexturesByHash.put(exactIdentity, replacement);
             if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
                 acceptanceSourceBytes += new File(resolved.getString("path")).length();
-                acceptanceDecodeBytes += decodedBytes;
+                acceptanceDecodeBytes += replacement.decodedBytes;
                 acceptanceUploadBytes += WorkshopSpriteAtlas.uploadBytes(
                         replacement.rasterWidth, replacement.rasterHeight);
-                acceptanceTextureBytes += decodedBytes;
+                acceptanceTextureBytes += replacement.preparedBytes;
+                if (replacement.sourceUnderprovisioned) {
+                    acceptanceUnderprovisionedSprites += 1;
+                }
             }
             recordAcceptanceUpload("sprite", handle, exactIdentity);
             releaseSpriteIfUnreferenced(cached);
@@ -643,6 +653,18 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         return kind + ":" + handle + ":" + projectRoot + ":" + exactIdentity;
     }
 
+    static String formatSourceResolutionDiagnostic(String path, String contentHash,
+            int sourceWidth, int sourceHeight, int requiredWidth, int requiredHeight,
+            int preparedWidth, int preparedHeight, long decodedBytes, long preparedBytes) {
+        return "sprite_source_resolution status=source-underprovisioned path=" + path
+                + " content_sha256=" + contentHash
+                + " source=" + sourceWidth + "x" + sourceHeight
+                + " required=" + requiredWidth + "x" + requiredHeight
+                + " prepared=" + preparedWidth + "x" + preparedHeight
+                + " decoded_bytes=" + decodedBytes
+                + " prepared_bytes=" + preparedBytes;
+    }
+
     synchronized void resetAcceptanceMetrics() {
         if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return;
         acceptanceUploads.clear();
@@ -660,6 +682,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         acceptanceUploadBytes = 0L;
         acceptanceTextureBytes = 0L;
         acceptanceMaximumCacheBytes = 0L;
+        acceptanceUnderprovisionedSprites = 0;
     }
 
     synchronized JSONObject acceptanceSnapshot() throws Exception {
@@ -694,6 +717,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                 .put("decode_bytes", acceptanceDecodeBytes)
                 .put("upload_bytes", acceptanceUploadBytes)
                 .put("texture_bytes", acceptanceTextureBytes)
+                .put("underprovisioned_sprites", acceptanceUnderprovisionedSprites)
                 .put("maximum_cache_bytes", acceptanceMaximumCacheBytes)
                 .put("atlas_capacity_bytes", atlasCapacityBytes());
     }
@@ -842,10 +866,13 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         return true;
     }
 
-    private static Bitmap decode(JSONObject resolved, int targetWidth, int targetHeight) throws Exception {
+    private static DecodedSprite decode(JSONObject resolved, AndroidRasterPlan.Result plan)
+            throws Exception {
         String encoding = resolved.getString("encoding");
         int width = resolved.getInt("width");
         int height = resolved.getInt("height");
+        int targetWidth = plan.width;
+        int targetHeight = plan.height;
         long pixels = (long)targetWidth * targetHeight;
         if (width <= 0 || height <= 0 || targetWidth > 16384 || targetHeight > 16384
                 || pixels > 16_000_000L) {
@@ -861,7 +888,10 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             if (argb == null || argb.length != targetWidth * targetHeight) {
                 throw new IOException("Android could not decode the SVG sprite");
             }
-            return Bitmap.createBitmap(argb, targetWidth, targetHeight, Bitmap.Config.ARGB_8888);
+            Bitmap bitmap = Bitmap.createBitmap(
+                    argb, targetWidth, targetHeight, Bitmap.Config.ARGB_8888);
+            return new DecodedSprite(bitmap, width, height, false,
+                    plan.preparedBytes(), plan.preparedBytes());
         }
         if (!"png".equals(encoding) && !"jpeg".equals(encoding) && !"webp".equals(encoding)) {
             throw new IOException("unsupported Android sprite encoding " + encoding);
@@ -872,19 +902,24 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         if (bounds.outWidth != width || bounds.outHeight != height) {
             throw new IOException("decoded sprite dimensions do not match the manifest");
         }
+        boolean sourceUnderprovisioned = plan.sourceUnderprovisioned(width, height);
         Bitmap bitmap;
         if (Build.VERSION.SDK_INT >= 28) {
             ImageDecoder.Source source = ImageDecoder.createSource(file);
             bitmap = ImageDecoder.decodeBitmap(source, (decoder, info, source1) -> {
                 decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
-                decoder.setTargetSize(targetWidth, targetHeight);
+                if (!sourceUnderprovisioned) {
+                    decoder.setTargetSize(targetWidth, targetHeight);
+                }
             });
         } else {
             android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
             options.inPreferredConfig = Bitmap.Config.ARGB_8888;
-            options.inScaled = true;
-            options.inDensity = width;
-            options.inTargetDensity = targetWidth;
+            options.inScaled = !sourceUnderprovisioned;
+            if (!sourceUnderprovisioned) {
+                options.inDensity = width;
+                options.inTargetDensity = targetWidth;
+            }
             bitmap = android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath(), options);
         }
         if (bitmap == null) throw new IOException("Android could not decode the sprite");
@@ -893,12 +928,14 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             bitmap.recycle();
             bitmap = exact;
         }
-        return bitmap;
+        return new DecodedSprite(bitmap, width, height, sourceUnderprovisioned,
+                plan.decodedBytes(width, height), plan.preparedBytes());
     }
 
-    private SpriteTexture uploadSprite(Bitmap bitmap, String exactIdentity,
+    private SpriteTexture uploadSprite(DecodedSprite decoded, String exactIdentity,
             long checkedStamp,
             int logicalWidth, int logicalHeight) throws IOException {
+        Bitmap bitmap = decoded.bitmap;
         ensureAtlas();
         WorkshopSpriteAtlas.Region region = atlasLayout.allocate(
                 bitmap.getWidth(), bitmap.getHeight());
@@ -941,6 +978,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         }
         return new SpriteTexture(page.texture, exactIdentity, checkedStamp,
                 logicalWidth, logicalHeight, bitmap.getWidth(), bitmap.getHeight(),
+                decoded.sourceWidth, decoded.sourceHeight,
+                decoded.sourceUnderprovisioned, decoded.decodedBytes, decoded.preparedBytes,
                 (float)x / page.width, (float)y / page.height,
                 (float)(x + bitmap.getWidth()) / page.width,
                 (float)(y + bitmap.getHeight()) / page.height,
@@ -970,13 +1009,15 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             AtlasPage page = atlasPages.get(0);
             placeholderRegion = new SpriteTexture(page.texture, "<placeholder>",
                     manifestStamp, 2, 2, 2, 2,
+                    2, 2, false, 16L, 16L,
                     4.0f / page.width, 1.0f / page.height,
                     6.0f / page.width, 3.0f / page.height,
                     surfaceGeneration, rendererGeneration);
         } catch (IOException error) {
             recordFailure("placeholder", 0, "<atlas>", 2, 2, error);
             placeholderRegion = new SpriteTexture(0, "<unavailable>",
-                    manifestStamp, 1, 1, 1, 1, 0, 0, 1, 1,
+                    manifestStamp, 1, 1, 1, 1,
+                    1, 1, false, 4L, 4L, 0, 0, 1, 1,
                     surfaceGeneration, rendererGeneration);
         }
         return placeholderRegion;
@@ -1084,6 +1125,25 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         }
     }
 
+    private static final class DecodedSprite {
+        final Bitmap bitmap;
+        final int sourceWidth;
+        final int sourceHeight;
+        final boolean sourceUnderprovisioned;
+        final long decodedBytes;
+        final long preparedBytes;
+
+        DecodedSprite(Bitmap bitmap, int sourceWidth, int sourceHeight,
+                boolean sourceUnderprovisioned, long decodedBytes, long preparedBytes) {
+            this.bitmap = bitmap;
+            this.sourceWidth = sourceWidth;
+            this.sourceHeight = sourceHeight;
+            this.sourceUnderprovisioned = sourceUnderprovisioned;
+            this.decodedBytes = decodedBytes;
+            this.preparedBytes = preparedBytes;
+        }
+    }
+
     private static final class SpriteTexture {
         final int texture;
         final String exactIdentity;
@@ -1092,6 +1152,11 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         final int logicalHeight;
         final int rasterWidth;
         final int rasterHeight;
+        final int sourceWidth;
+        final int sourceHeight;
+        final boolean sourceUnderprovisioned;
+        final long decodedBytes;
+        final long preparedBytes;
         final float u0;
         final float v0;
         final float u1;
@@ -1103,6 +1168,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         SpriteTexture(int texture, String exactIdentity,
                 long checkedManifestStamp, int logicalWidth, int logicalHeight,
                 int rasterWidth, int rasterHeight,
+                int sourceWidth, int sourceHeight, boolean sourceUnderprovisioned,
+                long decodedBytes, long preparedBytes,
                 float u0, float v0, float u1, float v1,
                 int surfaceGeneration, int rendererGeneration) {
             this.texture = texture;
@@ -1112,6 +1179,11 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             this.logicalHeight = logicalHeight;
             this.rasterWidth = rasterWidth;
             this.rasterHeight = rasterHeight;
+            this.sourceWidth = sourceWidth;
+            this.sourceHeight = sourceHeight;
+            this.sourceUnderprovisioned = sourceUnderprovisioned;
+            this.decodedBytes = decodedBytes;
+            this.preparedBytes = preparedBytes;
             this.u0 = u0;
             this.v0 = v0;
             this.u1 = u1;

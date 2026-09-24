@@ -332,6 +332,52 @@ static int stasis_display_scaled_extent_for_backing(
     return scaled > 65536 ? 65536 : (int)scaled;
 }
 
+/* Sprite preparation covers the larger rounded viewport axis. The display
+ * density tier remains capped for public metrics, but physical source
+ * preparation must not silently inherit that cap. */
+static StasisDisplayPreparationScale stasis_display_sprite_preparation_scale(
+    int logical_w,
+    int logical_h,
+    int viewport_w,
+    int viewport_h
+) {
+    StasisDisplayPreparationScale scale = {1, 1};
+    if (logical_w <= 0 || logical_h <= 0 || viewport_w <= 0 || viewport_h <= 0) {
+        return scale;
+    }
+    scale.numerator = viewport_w;
+    scale.denominator = logical_w;
+    if ((int64_t)viewport_h * logical_w > (int64_t)viewport_w * logical_h) {
+        scale.numerator = viewport_h;
+        scale.denominator = logical_h;
+    }
+    if (scale.numerator < scale.denominator) {
+        scale.numerator = 1;
+        scale.denominator = 1;
+    }
+    const int64_t divisor = stasis_display_gcd_i64(scale.numerator, scale.denominator);
+    scale.numerator /= divisor;
+    scale.denominator /= divisor;
+    return scale;
+}
+
+static int stasis_display_sprite_scaled_extent(
+    int logical_extent,
+    StasisDisplayPreparationScale scale,
+    double instance_scale
+) {
+    if (logical_extent <= 0) return 0;
+    if (scale.numerator <= 0 || scale.denominator <= 0) {
+        scale.numerator = 1;
+        scale.denominator = 1;
+    }
+    if (!isfinite(instance_scale) || instance_scale < 1.0) instance_scale = 1.0;
+    const double scaled = ceil(
+        (double)logical_extent * (double)scale.numerator * instance_scale /
+        (double)scale.denominator);
+    return scaled > 65536.0 ? 65536 : (int)scaled;
+}
+
 static int stasis_display_scaled_window_extent(int logical_extent, float display_scale) {
     if (logical_extent <= 0) return 0;
     if (!isfinite(display_scale) || display_scale < 1.0f) display_scale = 1.0f;
