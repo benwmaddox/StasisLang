@@ -41,6 +41,7 @@ void stasis_gfx_set_next_sprite_atlas_policy_v3(
 int stasis_test_get_sprite_state(int handle, int* out_i32, int capacity);
 int stasis_test_get_render_submission_state(int32_t* out_i32, int32_t capacity);
 void stasis_gfx_submit(int32_t* cmd_i32, const float* cmd_f32);
+int stasis_gfx_dump_png(const char* path);
 int stasis_test_push_display_event(
     int kind,
     int logical_w,
@@ -59,6 +60,7 @@ int stasis_mobile_poll_events(void);
 void stasis_host_get_frame(int32_t* out_i32, float* out_f32);
 void stasis_audio_release(int handle);
 void stasis_sleep_ms(int ms);
+void stasis_gfx_test_reset_renderer_resources(void);
 
 #define CHECK(condition) do { \
     if (!(condition)) { \
@@ -94,6 +96,30 @@ int main(void) {
 #endif
     CHECK(stasis_init_window(64, 64, "stasis_asset_tasks_test"));
 
+    /* A completion decoded for the old backing is discarded and rebuilt for
+     * the current exact physical requirement before publication. */
+    int stale_density_task = stasis_asset_request_sprite(
+        STASIS_TEST_ADEQUATE_SPRITE_PATH, 8, 8);
+    CHECK(stale_density_task > 0);
+    CHECK(stasis_test_push_display_event(
+              1, 64, 64, 64, 64, 96, 96, 64, 64, 0, 0, 64, 64) == 1);
+    CHECK(stasis_mobile_poll_events() == 0);
+    CHECK(wait_for_task(stale_density_task) == 3);
+    int adequate_sprite = stasis_asset_task_take_handle(stale_density_task);
+    CHECK(adequate_sprite > 0);
+    int adequate_state[31] = {0};
+    CHECK(stasis_test_get_sprite_state(adequate_sprite, adequate_state, 31) == 1);
+    CHECK(adequate_state[18] == 64 && adequate_state[19] == 64);
+    CHECK(adequate_state[20] == 12 && adequate_state[21] == 12);
+    CHECK(adequate_state[7] == 12 && adequate_state[8] == 12);
+    CHECK(adequate_state[22] == 0);
+    CHECK(adequate_state[23] == 16384 && adequate_state[24] == 0);
+    CHECK(adequate_state[25] == 576 && adequate_state[26] == 0);
+    stasis_gfx_release_sprite(adequate_sprite);
+    CHECK(stasis_test_push_display_event(
+              1, 64, 64, 64, 64, 64, 64, 64, 64, 0, 0, 64, 64) == 1);
+    CHECK(stasis_mobile_poll_events() == 0);
+
     int sprite_task = stasis_asset_request_sprite(STASIS_TEST_SPRITE_PATH, 32, 32);
     int audio_task = stasis_asset_request_audio(STASIS_TEST_AUDIO_PATH);
     CHECK(sprite_task > 0);
@@ -112,6 +138,15 @@ int main(void) {
     CHECK(stasis_test_get_sprite_state(sprite, sprite_state, 5) == 1);
     CHECK(sprite_state[0] == 1 && sprite_state[1] == 1 && sprite_state[3] >= 1);
     CHECK(sprite_state[4] == 0);
+    int physical_state[31] = {0};
+    CHECK(stasis_test_get_sprite_state(sprite, physical_state, 31) == 1);
+    CHECK(physical_state[18] == 2 && physical_state[19] == 2);
+    CHECK(physical_state[20] == 32 && physical_state[21] == 32);
+    CHECK(physical_state[22] == 1);
+    CHECK(physical_state[23] == 16 && physical_state[24] == 0);
+    CHECK(physical_state[25] == 4096 && physical_state[26] == 0);
+    CHECK(physical_state[27] == 0 && physical_state[28] == 0);
+    CHECK(physical_state[29] == 1 && physical_state[30] == 0);
 
     /* The legacy boolean ABI is standalone-safe under the v3 contract. */
     int legacy_task = stasis_asset_request_sprite_with_policy(
@@ -268,14 +303,15 @@ int main(void) {
     CHECK(frame_i32 != NULL && frame_f32 != NULL);
     frame_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_MAGIC;
     frame_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_VERSION;
-    frame_i32[STASIS_RENDER_I_SPRITE_COUNT] = 1;
+    frame_i32[STASIS_RENDER_I_FLAGS] = STASIS_RENDER_FLAG_PRESENT;
+    frame_i32[STASIS_RENDER_I_SPRITE_COUNT] = 2;
     frame_i32[STASIS_RENDER_I_ORDER_COUNT] = 3;
     frame_i32[STASIS_RENDER_I_CLIP_COUNT] = 2;
     frame_i32[STASIS_RENDER_I_SPRITE_RUN_COUNT] = 1;
     frame_i32[STASIS_RENDER_I_SPRITE_BASE] = second_reuse;
     frame_i32[STASIS_RENDER_I_SPRITE_BASE + 1] = (int32_t)UINT32_C(0xffffffff);
     frame_i32[STASIS_RENDER_I_SPRITE_RUN_BASE + 0] = 0;
-    frame_i32[STASIS_RENDER_I_SPRITE_RUN_BASE + 1] = 1;
+    frame_i32[STASIS_RENDER_I_SPRITE_RUN_BASE + 1] = 2;
     frame_i32[STASIS_RENDER_I_SPRITE_RUN_BASE + 2] = 1;
     frame_i32[STASIS_RENDER_I_ORDER_BASE + 0] =
         STASIS_RENDER_ORDER_CLIP_PUSH * STASIS_RENDER_ORDER_KIND_SCALE;
@@ -285,8 +321,28 @@ int main(void) {
         STASIS_RENDER_ORDER_CLIP_POP * STASIS_RENDER_ORDER_KIND_SCALE;
     frame_f32[STASIS_RENDER_F_SPRITE_BASE + 2] = 8.0f;
     frame_f32[STASIS_RENDER_F_SPRITE_BASE + 3] = 8.0f;
-    frame_f32[STASIS_RENDER_F_SPRITE_BASE + 10] = 1.0f;
+    frame_f32[STASIS_RENDER_F_SPRITE_BASE + 6] = 8.0f;
+    frame_f32[STASIS_RENDER_F_SPRITE_BASE + 7] = 8.0f;
+    frame_f32[STASIS_RENDER_F_SPRITE_BASE + 8] = 4.0f;
+    frame_f32[STASIS_RENDER_F_SPRITE_BASE + 9] = 4.0f;
+    frame_f32[STASIS_RENDER_F_SPRITE_BASE + 10] = -2.0f;
     frame_f32[STASIS_RENDER_F_SPRITE_BASE + 11] = 1.0f;
+    frame_i32[STASIS_RENDER_I_SPRITE_BASE + STASIS_RENDER_SPRITE_I32_STRIDE] =
+        second_reuse;
+    frame_i32[STASIS_RENDER_I_SPRITE_BASE + STASIS_RENDER_SPRITE_I32_STRIDE + 1] =
+        (int32_t)UINT32_C(0xffffffff);
+    const int transformed_base =
+        STASIS_RENDER_F_SPRITE_BASE + STASIS_RENDER_SPRITE_F32_STRIDE;
+    frame_f32[transformed_base + 0] = 24.0f;
+    frame_f32[transformed_base + 2] = 8.0f;
+    frame_f32[transformed_base + 3] = 8.0f;
+    frame_f32[transformed_base + 6] = 4.0f;
+    frame_f32[transformed_base + 7] = 4.0f;
+    frame_f32[transformed_base + 8] = 4.0f;
+    frame_f32[transformed_base + 9] = 4.0f;
+    frame_f32[transformed_base + 10] = 1.5f;
+    frame_f32[transformed_base + 11] = 1.0f;
+    frame_f32[transformed_base + 12] = 31.0f;
     frame_f32[STASIS_RENDER_F_CLIP_BASE + 0] = 0.0f;
     frame_f32[STASIS_RENDER_F_CLIP_BASE + 1] = 0.0f;
     frame_f32[STASIS_RENDER_F_CLIP_BASE + 2] = 10.0f;
@@ -302,6 +358,86 @@ int main(void) {
     CHECK(render_state[14] == 5 && render_state[15] == 5);
     CHECK(render_state[16] == 5 && render_state[17] == 5);
     CHECK(render_state[18] == 1);
+    memset(physical_state, 0, sizeof(physical_state));
+    CHECK(stasis_test_get_sprite_state(second_reuse, physical_state, 31) == 1);
+    CHECK(physical_state[18] == 2 && physical_state[19] == 2);
+    CHECK(physical_state[20] == 48 && physical_state[21] == 48);
+    CHECK(physical_state[7] == 48 && physical_state[8] == 48);
+    CHECK(physical_state[22] == 1);
+    CHECK(physical_state[23] == 16 && physical_state[24] == 0);
+    CHECK(physical_state[25] == 9216 && physical_state[26] == 0);
+    CHECK(physical_state[29] == 2 && physical_state[30] == 0);
+    stasis_gfx_submit(frame_i32, frame_f32);
+    memset(physical_state, 0, sizeof(physical_state));
+    CHECK(stasis_test_get_sprite_state(second_reuse, physical_state, 31) == 1);
+    CHECK(physical_state[20] == 48 && physical_state[21] == 48);
+    CHECK(physical_state[29] == 2 && physical_state[30] == 0);
+
+    stasis_gfx_set_next_sprite_atlas_policy_v3(1, reuse_group, 4, 1024, 16, 16);
+    int shared_transformed = stasis_gfx_load_sprite(STASIS_TEST_SPRITE_PATH, 16, 16);
+    CHECK(shared_transformed == second_reuse);
+    memset(physical_state, 0, sizeof(physical_state));
+    CHECK(stasis_test_get_sprite_state(second_reuse, physical_state, 31) == 1);
+    CHECK(physical_state[1] == 2 && physical_state[29] == 2);
+    CHECK(stasis_test_push_display_event(
+              1, 64, 64, 64, 64, 96, 96, 64, 64, 0, 0, 64, 64) == 1);
+    CHECK(stasis_mobile_poll_events() == 0);
+    stasis_gfx_submit(frame_i32, frame_f32);
+    memset(physical_state, 0, sizeof(physical_state));
+    CHECK(stasis_test_get_sprite_state(second_reuse, physical_state, 31) == 1);
+    CHECK(physical_state[1] == 2);
+    CHECK(physical_state[20] == 72 && physical_state[21] == 72);
+    CHECK(physical_state[29] == 3 && physical_state[30] == 0);
+
+    stasis_gfx_test_reset_renderer_resources();
+    stasis_gfx_submit(frame_i32, frame_f32);
+    memset(physical_state, 0, sizeof(physical_state));
+    CHECK(stasis_test_get_sprite_state(second_reuse, physical_state, 31) == 1);
+    CHECK(physical_state[1] == 2);
+    CHECK(physical_state[20] == 72 && physical_state[21] == 72);
+    CHECK(physical_state[29] == 4 && physical_state[30] == 0);
+
+    /* Render all four logical sheet cells after returning to 1x. Adjacent
+     * opaque colors make crop or atlas-gutter bleed visible in the PNG. */
+    CHECK(stasis_test_push_display_event(
+              1, 64, 64, 64, 64, 64, 64, 64, 64, 0, 0, 64, 64) == 1);
+    CHECK(stasis_mobile_poll_events() == 0);
+    memset(frame_i32, 0, sizeof(int32_t) * STASIS_RENDER_I32_COUNT);
+    memset(frame_f32, 0, sizeof(float) * STASIS_RENDER_F32_COUNT);
+    frame_i32[STASIS_RENDER_I_MAGIC] = STASIS_RENDER_MAGIC;
+    frame_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_VERSION;
+    frame_i32[STASIS_RENDER_I_FLAGS] =
+        STASIS_RENDER_FLAG_CLEAR | STASIS_RENDER_FLAG_PRESENT;
+    frame_i32[STASIS_RENDER_I_SPRITE_COUNT] = 4;
+    frame_i32[STASIS_RENDER_I_SPRITE_RUN_COUNT] = 1;
+    frame_i32[STASIS_RENDER_I_SPRITE_RUN_BASE + 0] = 0;
+    frame_i32[STASIS_RENDER_I_SPRITE_RUN_BASE + 1] = 4;
+    frame_i32[STASIS_RENDER_I_SPRITE_RUN_BASE + 2] =
+        STASIS_RENDER_SPRITE_CLIP_ORDERED;
+    frame_f32[3] = 1.0f;
+    for (int cell = 0; cell < 4; cell++) {
+        const int i32_base = STASIS_RENDER_I_SPRITE_BASE +
+            cell * STASIS_RENDER_SPRITE_I32_STRIDE;
+        const int f32_base = STASIS_RENDER_F_SPRITE_BASE +
+            cell * STASIS_RENDER_SPRITE_F32_STRIDE;
+        frame_i32[i32_base] = second_reuse;
+        frame_i32[i32_base + 1] = (int32_t)UINT32_C(0xffffffff);
+        frame_f32[f32_base + 0] = (float)((cell & 1) * 32);
+        frame_f32[f32_base + 1] = (float)((cell >> 1) * 32);
+        frame_f32[f32_base + 2] = 32.0f;
+        frame_f32[f32_base + 3] = 32.0f;
+        frame_f32[f32_base + 4] = (float)((cell & 1) * 8);
+        frame_f32[f32_base + 5] = (float)((cell >> 1) * 8);
+        frame_f32[f32_base + 6] = 8.0f;
+        frame_f32[f32_base + 7] = 8.0f;
+        frame_f32[f32_base + 8] = 16.0f;
+        frame_f32[f32_base + 9] = 16.0f;
+        frame_f32[f32_base + 10] = 1.0f;
+        frame_f32[f32_base + 11] = 1.0f;
+    }
+    stasis_gfx_submit(frame_i32, frame_f32);
+    CHECK(stasis_gfx_dump_png(STASIS_TEST_PHYSICAL_CAPTURE_PATH) == 1);
+    stasis_gfx_release_sprite(shared_transformed);
     free(frame_i32);
     free(frame_f32);
 

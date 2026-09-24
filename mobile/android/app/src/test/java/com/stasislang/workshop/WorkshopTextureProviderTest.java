@@ -33,6 +33,17 @@ public final class WorkshopTextureProviderTest {
     }
 
     @Test
+    public void underprovisionDiagnosticNamesSourceRequiredPreparedAndMemory() {
+        assertEquals(
+                "sprite_source_resolution status=source-underprovisioned path=/project/sheet.png"
+                        + " content_sha256=abc source=64x32 required=192x96 prepared=192x96"
+                        + " decoded_bytes=8192 prepared_bytes=73728",
+                WorkshopTextureProvider.formatSourceResolutionDiagnostic(
+                        "/project/sheet.png", "abc", 64, 32, 192, 96, 192, 96,
+                        8192L, 73728L));
+    }
+
+    @Test
     public void generationMatchRejectsEitherStaleGenerationDimension() {
         assertTrue(WorkshopTextureProvider.generationMatches(4, 7, 4, 7));
         assertFalse(WorkshopTextureProvider.generationMatches(3, 7, 4, 7));

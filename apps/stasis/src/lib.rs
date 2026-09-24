@@ -5904,7 +5904,7 @@ function render(): void {{ {draws} return; }}
         );
         assert!(
             STASIS_GRAPHICS_SOURCE.contains(
-                "Stasis resource preparation: kind=sprite event=%s handle=%d path=%s logical=%dx%d raster=%dx%d source_bytes=%llu density_generation=%d"
+                "Stasis resource preparation: kind=sprite event=%s status=%s handle=%d path=%s logical=%dx%d required=%dx%d prepared=%dx%d source=%dx%d source_bytes=%llu decoded_bytes=%llu prepared_bytes=%llu density_generation=%d"
             ) && STASIS_GRAPHICS_SOURCE.contains(
                 "Stasis resource preparation: kind=font event=%s handle=%d path=%s logical_size=%d raster_size=%d atlas=%dx%d source_bytes=%llu density_generation=%d"
             ),
@@ -6548,13 +6548,13 @@ function render(): void {{ {draws} return; }}
             );
         }
         let scaled_extent = STASIS_GRAPHICS_SOURCE
-            .find("const int raster_w = stasis_current_scaled_extent(max_w);")
-            .expect("current-density sprite extent");
+            .find("const int raster_w = stasis_display_sprite_scaled_extent(")
+            .expect("physical sprite preparation extent");
         let bounds_check = STASIS_GRAPHICS_SOURCE
             .find("sprite_source_within_limits(path, raster_w, raster_h)")
             .expect("scaled sprite bounds check");
         let image_bake = STASIS_GRAPHICS_SOURCE
-            .find("bake_image_to_rgba_sized(path, raster_w, raster_h, &pixels, &w, &h)")
+            .find("path, raster_w, raster_h, &pixels, &w, &h, &source_info)")
             .expect("scaled sprite image bake");
         assert!(
             scaled_extent < bounds_check && bounds_check < image_bake,

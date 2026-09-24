@@ -58,4 +58,15 @@ public final class AndroidRasterPlanTest {
         assertFalse(baseline.equals(plan.identity(2.0f, 4, 8)));
         assertEquals(baseline, plan.identity(2.0f, 4, 7));
     }
+
+    @Test public void sourceInsufficiencyAndMemoryAccountingStayDistinct() {
+        AndroidRasterPlan.Result plan = new AndroidRasterPlan.Result(640, 320, true);
+        assertFalse(plan.sourceUnderprovisioned(1280, 640));
+        assertEquals(640L * 320L * 4L, plan.decodedBytes(1280, 640));
+        assertEquals(640L * 320L * 4L, plan.preparedBytes());
+
+        assertTrue(plan.sourceUnderprovisioned(320, 160));
+        assertEquals(320L * 160L * 4L, plan.decodedBytes(320, 160));
+        assertEquals(640L * 320L * 4L, plan.preparedBytes());
+    }
 }

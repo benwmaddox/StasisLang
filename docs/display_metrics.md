@@ -143,6 +143,25 @@ the browser can know them. Density generation invalidates each live atlas
 entry once, and stale async preparations are rejected by resource generation
 and tier key before becoming drawable.
 
+Native SDL sprite preparation and the Android Workshop preview use the larger
+rounded fitted-viewport axis without the public 8x display-density cap. A
+sprite-sheet crop contributes the displayed-pixels-per-logical-source-pixel
+ratio, including nonuniform or negative instance scale; rotation does not
+change that sampling magnitude. Requirements for every use of a shared handle
+are combined before preparation. Logical destination geometry, crop
+coordinates, pivot, tint, alpha and order remain unchanged.
+
+The asset manifest currently selects one canonical raster source by path and
+content hash; it does not define density-family variants. When that source is
+smaller than the required physical raster, native SDL and Workshop keep the
+logical draw intact but report `source-underprovisioned` with source, required
+and prepared dimensions plus decoded and prepared byte counts. The displayed
+fallback may therefore be interpolated, which is explicitly not a claim that
+new source detail was recovered. SVG sources remain resolution-independent.
+Cache identity includes the exact prepared size and resource generations;
+resize, async publication and renderer restoration replace resources
+transactionally while stable requirements reuse the existing preparation.
+
 ### Web text sampling
 
 Web text uses a separate `textRasterScale` receipt. It covers the larger of the

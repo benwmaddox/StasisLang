@@ -554,7 +554,9 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
             stasis_asset_tasks_test
             PRIVATE
                 STASIS_TEST_SPRITE_PATH="${CMAKE_SOURCE_DIR}/../samples/sprite_sheet_animation/assets/sprite_sheet_2x2.png"
+                STASIS_TEST_ADEQUATE_SPRITE_PATH="${CMAKE_SOURCE_DIR}/../samples/windows_launch_smoke/assets/smoke.png"
                 STASIS_TEST_AUDIO_PATH="${CMAKE_SOURCE_DIR}/../samples/audio_asset_playback/assets/tone.mp3"
+                STASIS_TEST_PHYSICAL_CAPTURE_PATH="${CMAKE_CURRENT_BINARY_DIR}/task640-native-physical-sheet.png"
         )
         add_test(NAME stasis_asset_tasks_contract COMMAND stasis_asset_tasks_test)
         set_tests_properties(
