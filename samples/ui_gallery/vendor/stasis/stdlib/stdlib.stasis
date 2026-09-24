@@ -151,7 +151,8 @@ function ascii_scan_limit(s: ascii[]): i32 {
     if (known_len < 0) {
         return 0;
     }
-    return known_len + 1;
+    // Non-owning views expose logical bytes, not an extra sentinel slot.
+    return known_len;
 }
 
 function ascii_set_len(s: ascii[], len: i32) {

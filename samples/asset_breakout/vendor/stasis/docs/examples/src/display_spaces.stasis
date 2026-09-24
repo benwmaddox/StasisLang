@@ -1,0 +1,63 @@
+import "/vendor/stasis/stdlib/graphics.stasis";
+
+struct DisplayRect {
+    x: f32;
+    y: f32;
+    w: f32;
+    h: f32;
+}
+
+global display_frame: HostFrame;
+global button_rect: DisplayRect;
+global button_pressed: bool;
+global button_presentation: PresentationList;
+
+// A 360 x 720 authored page is optionally contained inside the host's safe
+// logical viewport. The result is still a logical-canvas rectangle.
+function resolve_button(): void {
+    let safe_x: f32 = display_frame.display.safe_x;
+    let safe_y: f32 = display_frame.display.safe_y;
+    let safe_w: f32 = display_frame.display.safe_width;
+    let safe_h: f32 = display_frame.display.safe_height;
+    let fit_x: f32 = safe_w / 360.0;
+    let fit_y: f32 = safe_h / 720.0;
+    let reference_fit: f32 = fit_x;
+    if (fit_y < reference_fit) {
+        reference_fit = fit_y;
+    }
+    let page_x: f32 = safe_x +(safe_w - 360.0 * reference_fit) / 2.0;
+    let page_y: f32 = safe_y +(safe_h - 720.0 * reference_fit) / 2.0;
+    button_rect.x = page_x + 90.0 * reference_fit;
+    button_rect.y = page_y + 240.0 * reference_fit;
+    button_rect.w = 180.0 * reference_fit;
+    button_rect.h = 72.0 * reference_fit;
+}
+
+function pointer_hits_button(pointer: HostPointerFrame): bool {
+    return pointer.x_logical >= button_rect.x && pointer.x_logical < button_rect.x + button_rect.w && pointer.y_logical >= button_rect.y && pointer.y_logical < button_rect.y + button_rect.h;
+}
+
+function main(): i32 {
+    init_window(360, 720, "Coordinate spaces");
+    return 0;
+}
+
+function on_code_swap(): void {
+}
+
+function tick(): i32 {
+    display_frame.refresh();
+    resolve_button();
+    button_pressed = false;
+    if (display_frame.pointer_count > 0) {
+        button_pressed = display_frame.pointers[0].went_down && pointer_hits_button(display_frame.pointers[0]);
+    }
+    return 0;
+}
+
+function render(): i32 {
+    button_presentation.reset_presentation();
+    button_presentation.append_solid_rect(button_rect.x, button_rect.y, button_rect.w, button_rect.h, 0.2, 0.5, 0.9, 1.0);
+    button_presentation.replay();
+    return 0;
+}

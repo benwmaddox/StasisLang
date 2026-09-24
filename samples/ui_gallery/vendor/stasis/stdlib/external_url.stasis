@@ -1,0 +1,12 @@
+// Results returned by open_external_url.
+const EXTERNAL_URL_INVALID: i32 = -1;
+const EXTERNAL_URL_IGNORED: i32 = 0;
+const EXTERNAL_URL_OPENED: i32 = 1;
+
+function @internal @effects(platform)@extern("stasis_jit_open_external_url") open_external_url_raw(url: string): i32;
+
+// Request that the host open a bounded HTTP(S) URL from an explicit user action.
+// Headless and unavailable hosts deterministically return EXTERNAL_URL_IGNORED.
+function open_external_url(url: string): i32 {
+    return open_external_url_raw(url);
+}

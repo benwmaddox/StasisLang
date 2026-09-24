@@ -77,6 +77,18 @@ HOT_SWAP_FIXTURES = (
 )
 RENDER_PARITY_MANIFEST = Path("samples/render_parity/capture_manifest.json")
 COMPILER_AOT = Path("crates/stasis_compiler/src/backend/aot.rs")
+SAMPLE_VENDOR_GRAPHICS = tuple(
+    Path(f"samples/{sample}/vendor/stasis/stdlib/graphics.stasis")
+    for sample in ("asset_breakout", "ui_gallery", "swarm_field", "generics_collections")
+)
+SAMPLE_VENDOR_LOADING = Path(
+    "samples/generics_collections/vendor/stasis/docs/examples/src/loading_screen.stasis"
+)
+SAMPLE_VENDOR_SOURCES = tuple(
+    path.relative_to(ROOT)
+    for sample in ("asset_breakout", "ui_gallery", "swarm_field", "generics_collections")
+    for path in sorted((ROOT / "samples" / sample / "vendor/stasis").rglob("*.stasis"))
+)
 RENDER_DOWNSTREAM = (
     GFX_CMD, DYNLOAD, DESKTOP, AOT, TOOLCHAIN, RELEASE_PROVENANCE,
     PACKAGE_PROVENANCE, WEB, ANDROID, JAVA_RENDERER, JNI, NATIVE_HOST,
@@ -105,7 +117,7 @@ REQUIRED = (
     RENDER_PARITY_FRAME, RENDER_PARITY_TRACE,
     JIT_AOT_REPLAY_FIXTURE, VSCODE_RENDER_FIXTURE, WINDOWS_LAUNCH_FIXTURE,
     WORKSHOP_PREVIEW_ADAPTER, EXPLORATION_HOST, *HOT_SWAP_FIXTURES,
-    RENDER_PARITY_MANIFEST, COMPILER_AOT,
+    RENDER_PARITY_MANIFEST, COMPILER_AOT, *SAMPLE_VENDOR_SOURCES,
 )
 IGNORED_SOURCE_DIRS = {
     ".git",
@@ -836,6 +848,21 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
             label(RENDER_HEADER), label(JIT_AOT_REPLAY_FIXTURE),
             "render_trace.current_capacities", "67888/146564/65536", "missing",
         ))
+
+    for vendor_path in SAMPLE_VENDOR_SOURCES:
+        vendor_text = without_c_comments(sources[vendor_path])
+        checks += 1
+        obsolete = re.search(
+            r"\b(?:function\s+)?(?:begin_frame|end_frame)\s*\(\s*\)",
+            vendor_text,
+        )
+        if obsolete:
+            failures.append(Mismatch(
+                label(RENDER_HEADER), label(vendor_path),
+                "sample_vendor.public_graphics_lifecycle",
+                "no public begin_frame/end_frame declaration or call",
+                obsolete.group(0),
+            ))
 
     hot_swap_public_import = (
         'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";'

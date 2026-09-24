@@ -15,8 +15,9 @@
   },
   "vendor": {
     "stasis": {
-      "release_id": "development",
-      "sha256": "b18043b126f4fd1dbbb15ac2ae3b637c46db1c94c45a411c22595a575902d43f"
+      "release_id": "nightly-20260923-344",
+      "sha256": "1c91faa3e6baac7f72faecd11da75c781d688be7f0e817f9ea23e16a44b29623",
+      "hash_version": 2
     }
   },
   "android": {
