@@ -474,8 +474,8 @@ class WorkshopSeamTests(unittest.TestCase):
         source = (Path(__file__).resolve().parents[2]
                   / "mobile/android/app/src/workshop/java/com/stasislang/workshop/WorkshopTextureProvider.java").read_text()
         for call in (
-            'recordAcceptanceUpload("cached_text", runHandle, sha256(text));',
-            'recordAcceptanceUpload("text", font, sha256(bytes));',
+            'recordAcceptanceUpload("cached_text", runHandle, exactIdentity);',
+            'recordAcceptanceUpload("text", font, exactIdentity);',
         ):
             offset = source.index(call)
             guard = source.rfind("if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {", 0, offset)
