@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { waitForBrowserEndpoint } from "../../../tools/network_browser_startup.mjs";
+import { startBrowserWithRetry } from "../../../tools/network_browser_startup.mjs";
 
 const requestedBrowser = process.env.STASIS_BROWSER_EXECUTABLE;
 const browser = requestedBrowser
@@ -29,7 +29,7 @@ const embed = '<!doctype html><html><body style="margin:0"><iframe id="game" src
 test("real Chrome fits 1600x720 in an embedded iframe after resize", {
   skip: browserAvailable || requestedBrowser ? false
     : "Chrome unavailable; set STASIS_BROWSER_EXECUTABLE to run the browser fit test",
-  timeout: 30_000
+  timeout: 150_000
 }, async () => {
   assert.ok(browserAvailable, `Chrome executable missing: ${browser}`);
   const server = createServer((request, response) => {
@@ -43,14 +43,22 @@ test("real Chrome fits 1600x720 in an embedded iframe after resize", {
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const profile = await mkdtemp(path.join(tmpdir(), "stasis-embed-fit-"));
-  const chrome = spawn(browser, [
-    "--headless=new", "--no-sandbox", "--disable-gpu-sandbox", "--no-first-run",
-    "--no-default-browser-check", "--remote-debugging-port=0",
-    `--user-data-dir=${profile}`, "about:blank"
-  ], { stdio: "ignore", windowsHide: true });
+  let chrome;
   let socket;
   try {
-    const { port } = await waitForBrowserEndpoint(chrome, profile, 10_000);
+    const started = await startBrowserWithRetry(attempt => {
+      const candidateProfile = path.join(profile, `chrome-${attempt}`);
+      const candidate = spawn(browser, [
+        "--headless=new", "--no-sandbox", "--disable-gpu-sandbox",
+        "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0",
+        `--user-data-dir=${candidateProfile}`, "about:blank"
+      ], { stdio: "ignore", windowsHide: true });
+      return { browser: candidate, profile: candidateProfile };
+    }, candidate => {
+      candidate.kill();
+    }, { attempts: 2, timeout: 60_000 });
+    chrome = started.browser;
+    const { port } = started;
     const pages = await fetch(`http://127.0.0.1:${port}/json/list`).then(response => response.json());
     const page = pages.find(candidate => candidate.type === "page");
     assert.ok(page, "Chrome exposes a page target");
@@ -138,7 +146,7 @@ test("real Chrome fits 1600x720 in an embedded iframe after resize", {
     assert.deepEqual(landscape.available, { width: 844, height: 390 });
   } finally {
     socket?.close();
-    chrome.kill();
+    chrome?.kill();
     await new Promise(resolve => server.close(resolve));
     await rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
