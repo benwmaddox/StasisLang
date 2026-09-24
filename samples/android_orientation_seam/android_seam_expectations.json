@@ -9,6 +9,7 @@
     "coordinate_tolerance": 16.0,
     "surface_tolerance": 2,
     "safe_viewport": [0, 0, 360, 720],
+    "fit_rect": {"rect": [20, 20, 320, 680], "rgb": [25, 31, 41], "tolerance": 5},
     "touch": [270, 540],
     "stages": [
       {

@@ -279,8 +279,120 @@ static void test_font_atlas_growth_is_bounded_and_deterministic(void) {
     CHECK(stasis_display_font_atlas_next_extent(513) == 1024);
 }
 
+static void test_wide_game_uses_maximal_centered_surface(void) {
+    const struct {
+        int width;
+        int height;
+        int x;
+        int y;
+        int content_width;
+        int content_height;
+    } cases[] = {
+        {1280, 720, 0, 72, 1280, 576},
+        {1920, 1080, 0, 108, 1920, 864},
+        {2560, 1440, 0, 144, 2560, 1152},
+        {2560, 1080, 80, 0, 2400, 1080},
+        {844, 390, 0, 5, 844, 380},
+        {390, 844, 0, 334, 390, 176},
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        const StasisDisplayMetrics metrics = metrics_for(
+            1600, 720, cases[index].width, cases[index].height,
+            cases[index].width * 2, cases[index].height * 2);
+        CHECK(close_enough(metrics.native_viewport.x, (float)cases[index].x));
+        CHECK(close_enough(metrics.native_viewport.y, (float)cases[index].y));
+        CHECK(close_enough(metrics.native_viewport.w, (float)cases[index].content_width));
+        CHECK(close_enough(metrics.native_viewport.h, (float)cases[index].content_height));
+        CHECK(close_enough(metrics.drawable_viewport.x, 2.0f * cases[index].x));
+        CHECK(close_enough(metrics.drawable_viewport.y, 2.0f * cases[index].y));
+        CHECK(close_enough(metrics.drawable_viewport.w, 2.0f * cases[index].content_width));
+        CHECK(fabsf(metrics.drawable_viewport.h - 2.0f * cases[index].content_height) <= 1.0f);
+        const float points[][2] = {{0.0f, 0.0f}, {800.0f, 360.0f}, {1600.0f, 720.0f}};
+        for (size_t point = 0; point < sizeof(points) / sizeof(points[0]); point++) {
+            float native_x = -1.0f;
+            float native_y = -1.0f;
+            float logical_x = -1.0f;
+            float logical_y = -1.0f;
+            stasis_display_logical_to_native_xy(
+                &metrics, points[point][0], points[point][1], &native_x, &native_y);
+            stasis_display_native_to_logical_xy(
+                &metrics, native_x, native_y, &logical_x, &logical_y);
+            CHECK(close_enough(logical_x, points[point][0]));
+            CHECK(close_enough(logical_y, points[point][1]));
+        }
+    }
+}
+
+static void test_mobile_safe_fit_uses_usable_surface_and_pointer_edges(void) {
+    const StasisDisplayViewport safe = {100.0f, 20.0f, 2200.0f, 1040.0f};
+    const StasisDisplayMetrics metrics = stasis_display_metrics_safe_fit(
+        1600, 720, 2400, 1080, 4800, 2160, safe);
+    CHECK(close_enough(metrics.native_viewport.x, 100.0f));
+    CHECK(close_enough(metrics.native_viewport.y, 45.0f));
+    CHECK(close_enough(metrics.native_viewport.w, 2200.0f));
+    CHECK(close_enough(metrics.native_viewport.h, 990.0f));
+    CHECK(close_enough(metrics.drawable_viewport.x, 200.0f));
+    CHECK(close_enough(metrics.drawable_viewport.y, 90.0f));
+    CHECK(close_enough(metrics.drawable_viewport.w, 4400.0f));
+    CHECK(close_enough(metrics.drawable_viewport.h, 1980.0f));
+    CHECK(close_enough(metrics.safe_logical_viewport.x, 0.0f));
+    CHECK(close_enough(metrics.safe_logical_viewport.y, 0.0f));
+    CHECK(close_enough(metrics.safe_logical_viewport.w, 1600.0f));
+    CHECK(close_enough(metrics.safe_logical_viewport.h, 720.0f));
+    const float points[][2] = {{0.0f, 0.0f}, {800.0f, 360.0f}, {1600.0f, 720.0f}};
+    for (size_t point = 0; point < sizeof(points) / sizeof(points[0]); point++) {
+        float native_x = -1.0f;
+        float native_y = -1.0f;
+        float logical_x = -1.0f;
+        float logical_y = -1.0f;
+        stasis_display_logical_to_native_xy(
+            &metrics, points[point][0], points[point][1], &native_x, &native_y);
+        stasis_display_native_to_logical_xy(
+            &metrics, native_x, native_y, &logical_x, &logical_y);
+        CHECK(close_enough(logical_x, points[point][0]));
+        CHECK(close_enough(logical_y, points[point][1]));
+    }
+}
+
+static void test_mobile_safe_fit_handles_rotation_and_no_drawable_pixel(void) {
+    const StasisDisplayMetrics portrait = stasis_display_metrics_safe_fit(
+        360, 720, 1080, 2400, 2160, 4800,
+        (StasisDisplayViewport){0.0f, 100.0f, 1080.0f, 2100.0f});
+    CHECK(close_enough(portrait.native_viewport.x, 15.0f));
+    CHECK(close_enough(portrait.native_viewport.y, 100.0f));
+    CHECK(close_enough(portrait.native_viewport.w, 1050.0f));
+    CHECK(close_enough(portrait.native_viewport.h, 2100.0f));
+    CHECK(close_enough(portrait.content_scale, 35.0f / 6.0f));
+    const StasisDisplayMetrics fractional = stasis_display_metrics_safe_fit(
+        1600, 720, 390, 844, 780, 1688,
+        (StasisDisplayViewport){0.0f, 0.0f, 390.0f, 844.0f});
+    CHECK(close_enough(fractional.native_viewport.y, 334.5f));
+    CHECK(close_enough(fractional.native_viewport.h, 175.0f));
+    CHECK(close_enough(fractional.drawable_viewport.y, 668.5f));
+    CHECK(close_enough(fractional.drawable_viewport.h, 351.0f));
+    const StasisDisplayViewport fractional_edges = stasis_display_safe_drawable_rect(
+        1000, 1000, 1501, 1501,
+        (StasisDisplayViewport){3.0f, 5.0f, 900.0f, 900.0f});
+    CHECK(close_enough(fractional_edges.x, 5.0f));
+    CHECK(close_enough(fractional_edges.y, 8.0f));
+    CHECK(close_enough(fractional_edges.w, 1350.0f));
+    CHECK(close_enough(fractional_edges.h, 1350.0f));
+    const StasisDisplayViewport near_equal = stasis_display_fit_within_rect(
+        1600, 720, (StasisDisplayViewport){0.0f, 0.0f, 50000.0f, 22501.0f});
+    CHECK(close_enough(near_equal.w, 50000.0f));
+    CHECK(close_enough(near_equal.h, 22501.0f));
+    const StasisDisplayViewport empty = stasis_display_safe_drawable_rect(
+        1000, 1000, 1, 1,
+        (StasisDisplayViewport){100.0f, 100.0f, 100.0f, 100.0f});
+    CHECK(close_enough(empty.w, 0.0f));
+    CHECK(close_enough(empty.h, 0.0f));
+}
+
 int main(void) {
     test_phone_scale_preserves_logical_canvas();
+    test_wide_game_uses_maximal_centered_surface();
+    test_mobile_safe_fit_uses_usable_surface_and_pointer_edges();
+    test_mobile_safe_fit_handles_rotation_and_no_drawable_pixel();
     test_pointer_mapping_round_trips_through_letterbox();
     test_fractional_and_downscale_metrics_are_distinct();
     test_desktop_density_tiers_preserve_logical_geometry();

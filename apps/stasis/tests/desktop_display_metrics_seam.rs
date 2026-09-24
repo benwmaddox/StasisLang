@@ -17,6 +17,7 @@ const FIXTURE: &str =
 const DISPLAY_CHANGED: i32 = 1;
 const WINDOW_MINIMIZED: i32 = 2;
 const WINDOW_RESTORED: i32 = 3;
+const SAFE_AREA_CHANGED: i32 = 4;
 const POINTER_DOWN: i32 = 3;
 const POINTER_MOVE: i32 = 4;
 const POINTER_UP: i32 = 5;
@@ -927,6 +928,42 @@ fn desktop_surface_metrics_reach_stasis_and_renderer_in_one_generation() {
     for _ in 0..5 {
         native.release_sprite(sprite);
     }
+
+    let inset_only = DisplaySample {
+        safe_native: [20, 10, 360, 280],
+        safe_logical: [20.0, 10.0, 360.0, 280.0],
+        safe_rounded: [20, 10, 360, 280],
+        display_generation: 13,
+        ..downscaled
+    };
+    native.display(SAFE_AREA_CHANGED, inset_only);
+    let inset_trace = run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        inset_only,
+        false,
+        true,
+    );
+    let inset_quiet_trace = run_frame(
+        &gfx,
+        &mut jit,
+        &mut host_i32,
+        &mut host_f32,
+        &mut gfx_i32,
+        &gfx_f32,
+        &gfx_u8,
+        inset_only,
+        false,
+        false,
+    );
+    assert_eq!(inset_trace, inset_quiet_trace);
+    assert_eq!(host_i32[30], 13, "safe inset updates display once");
+    assert_eq!(host_i32[31], 8, "safe inset does not invalidate density");
 
     let evidence = json!({
         "schema": "stasis.seam_test.v1",

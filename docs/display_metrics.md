@@ -33,6 +33,18 @@ viewport, then clamped to the logical canvas. Normalized pointer coordinates
 are relative to the safe logical viewport. The forward and inverse transform
 use the same aspect-fit values, including letterbox offsets.
 
+The content viewport uses the largest centered rectangle that fits the current
+usable surface without changing the logical aspect. A `1600 x 720` game on a
+`1280 x 720` surface occupies `1280 x 576` with 72-pixel top and bottom bars;
+on a `2560 x 1080` surface it occupies `2400 x 1080` with 80-pixel side bars.
+On Android and iOS, the SDL window safe rectangle is the usable surface. When
+it has insets, the host draws into a safe-sized target and composites it at the
+safe drawable origin, so cutouts do not crop the game. The mobile safe logical
+viewport then spans the whole logical canvas. Desktop work-area insets retain
+the intersected safe logical viewport. Native and drawable extents apply the
+fit separately; fractional rounding may differ by one physical pixel while
+pointer mapping remains in logical units.
+
 ## HostFrame API
 
 `graphics.stasis` transitively imports the public `HostFrame` snapshot. A game
@@ -72,7 +84,7 @@ Display state is grouped under `host_frame.display`:
 Available presentation values are scalar platform units:
 CSS pixels after safe-area accounting on Web, desktop usable-area units on
 the native window's current display (with the primary display only as a
-fallback), and platform surface units on Android. They are populated
+fallback), and safe SDL window units on Android and iOS. They are populated
 into the private raw frame before guest `main()` and every `tick()`; the public
 snapshot reflects them after `refresh()`. Native hosts can call
 `stasis_get_display_metrics` for the pre-existing display geometry.

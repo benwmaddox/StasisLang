@@ -12534,6 +12534,16 @@ mod tests {
         let ios_info = fs::read_to_string(ios.join("ios/StasisMobile/Info.plist"))
             .expect("read non-network iOS Info.plist");
         assert!(!ios_info.contains("NSLocalNetworkUsageDescription"));
+        assert_eq!(
+            ios_info
+                .matches("<key>UISupportedInterfaceOrientations</key>")
+                .count(),
+            1
+        );
+        assert!(ios_info.contains(
+            "<array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>"
+        ));
+        assert!(!ios_info.contains("UIInterfaceOrientationPortrait"));
         assert!(!config.contains("STASIS_NETWORK_ENABLED"));
         assert!(!config.contains("network/libstasis_network.a"));
         assert!(!project.contains("@STASIS_"));

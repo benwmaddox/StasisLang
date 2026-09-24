@@ -132,6 +132,94 @@ static StasisDisplayMetrics stasis_display_metrics(
     return metrics;
 }
 
+static StasisDisplayViewport stasis_display_clamp_safe_rect(
+    int target_w, int target_h, StasisDisplayViewport safe
+) {
+    const StasisDisplayViewport full = {
+        0.0f, 0.0f, (float)target_w, (float)target_h};
+    if (target_w <= 0 || target_h <= 0 ||
+        !isfinite(safe.x) || !isfinite(safe.y) ||
+        !isfinite(safe.w) || !isfinite(safe.h)) return full;
+    const float left = stasis_display_clampf(safe.x, 0.0f, (float)target_w);
+    const float top = stasis_display_clampf(safe.y, 0.0f, (float)target_h);
+    const float right = stasis_display_clampf(safe.x + safe.w, left, (float)target_w);
+    const float bottom = stasis_display_clampf(safe.y + safe.h, top, (float)target_h);
+    if (right <= left || bottom <= top) return full;
+    return (StasisDisplayViewport){left, top, right - left, bottom - top};
+}
+
+static StasisDisplayViewport stasis_display_safe_drawable_rect(
+    int native_w, int native_h, int drawable_w, int drawable_h,
+    StasisDisplayViewport safe_native
+) {
+    const StasisDisplayViewport safe = stasis_display_clamp_safe_rect(
+        native_w, native_h, safe_native);
+    if (native_w <= 0 || native_h <= 0 || drawable_w <= 0 || drawable_h <= 0) {
+        return (StasisDisplayViewport){0.0f, 0.0f, 0.0f, 0.0f};
+    }
+    const float sx = (float)drawable_w / (float)native_w;
+    const float sy = (float)drawable_h / (float)native_h;
+    const float left = ceilf(safe.x * sx);
+    const float top = ceilf(safe.y * sy);
+    const float right = floorf((safe.x + safe.w) * sx);
+    const float bottom = floorf((safe.y + safe.h) * sy);
+    if (right <= left || bottom <= top) {
+        return (StasisDisplayViewport){0.0f, 0.0f, 0.0f, 0.0f};
+    }
+    return (StasisDisplayViewport){left, top, right - left, bottom - top};
+}
+
+/* Match SDL3 LETTERBOX aspect tolerance, floor, and half-pixel centering. */
+static StasisDisplayViewport stasis_display_fit_within_rect(
+    int logical_w, int logical_h, StasisDisplayViewport rect
+) {
+    StasisDisplayViewport fitted = {rect.x, rect.y, 0.0f, 0.0f};
+    if (logical_w <= 0 || logical_h <= 0 || rect.w <= 0.0f || rect.h <= 0.0f) {
+        return fitted;
+    }
+    const float want_aspect = (float)logical_w / (float)logical_h;
+    const float real_aspect = rect.w / rect.h;
+    if (fabsf(want_aspect - real_aspect) < 0.0001f) {
+        fitted.w = rect.w;
+        fitted.h = rect.h;
+    } else if (want_aspect > real_aspect) {
+        fitted.w = rect.w;
+        fitted.h = floorf((float)logical_h * (rect.w / (float)logical_w));
+    } else {
+        fitted.w = floorf((float)logical_w * (rect.h / (float)logical_h));
+        fitted.h = rect.h;
+    }
+    fitted.x += (rect.w - fitted.w) * 0.5f;
+    fitted.y += (rect.h - fitted.h) * 0.5f;
+    return fitted;
+}
+
+static StasisDisplayMetrics stasis_display_metrics_safe_fit(
+    int logical_w, int logical_h, int native_w, int native_h,
+    int drawable_w, int drawable_h, StasisDisplayViewport safe_native
+) {
+    StasisDisplayMetrics metrics = stasis_display_metrics(
+        logical_w, logical_h, native_w, native_h,
+        drawable_w, drawable_h, safe_native);
+    const StasisDisplayViewport native_rect = stasis_display_clamp_safe_rect(
+        metrics.native_w, metrics.native_h, safe_native);
+    const StasisDisplayViewport drawable_rect = stasis_display_safe_drawable_rect(
+        metrics.native_w, metrics.native_h, metrics.drawable_w, metrics.drawable_h,
+        native_rect);
+    metrics.native_viewport = stasis_display_fit_within_rect(
+        metrics.logical_w, metrics.logical_h, native_rect);
+    metrics.drawable_viewport = stasis_display_fit_within_rect(
+        metrics.logical_w, metrics.logical_h, drawable_rect);
+    const float sx = metrics.drawable_viewport.w / (float)metrics.logical_w;
+    const float sy = metrics.drawable_viewport.h / (float)metrics.logical_h;
+    metrics.content_scale = sx < sy ? sx : sy;
+    metrics.raster_scale = stasis_display_clampf(
+        metrics.content_scale, 1.0f, (float)STASIS_DISPLAY_RASTER_SCALE_MAX);
+    metrics.safe_logical_viewport = (StasisDisplayViewport){
+        0.0f, 0.0f, (float)metrics.logical_w, (float)metrics.logical_h};
+    return metrics;
+}
+
 static void stasis_display_native_to_logical_xy(
     const StasisDisplayMetrics* metrics,
     float native_x,

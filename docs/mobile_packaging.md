@@ -134,8 +134,22 @@ xcodebuild -project StasisMobile.xcodeproj -scheme StasisMobile \
 ```
 
 The checked-in Xcode shell compiles the same runtime, links the iOS AOT objects,
-and copies `StasisMobile/stasis_game` into the app resources. Device arm64 is
-the v1 target; simulator and multi-architecture packaging are intentionally out
+and copies `StasisMobile/stasis_game` into the app resources. The generated
+`Info.plist` deliberately supports landscape left and right only on iPhone and
+iPad; the Android `orientation` manifest field does not configure iOS. Portrait
+rotation is outside this v1 shell contract. The SDL window supplies a safe area
+for notches and system overlays. On Android and iOS, Stasis fits the logical
+canvas inside that usable rectangle and composites it at the safe drawable
+origin. A full-surface safe area uses the direct window path. If SDL cannot
+report a safe area, mobile hosts use the full window. An inset render target is
+limited to 64 MiB (width × height × four bytes); a resize can briefly hold both
+old and new targets (up to 128 MiB), in addition to the window backing and game
+textures. Allocation failure rejects the frame and reports a runtime error.
+Validate both supported landscape rotations, safe-area changes, screenshot
+bounds, and touch mapping on a signed device before claiming iOS orientation
+acceptance.
+
+Device arm64 is the v1 target; simulator and multi-architecture packaging are intentionally out
 of scope. Pull requests run `tools/ci/build_ios_package.sh` on macOS with code
 signing disabled; the driver builds `samples/mobile_storage_link` and verifies
 the arm64 executable, embedded SDL frameworks, packaged assets and provenance,

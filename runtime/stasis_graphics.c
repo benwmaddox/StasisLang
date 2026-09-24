@@ -171,6 +171,13 @@ static SDL_SpinLock g_runtime_error_lock;
 static char g_runtime_error[512];
 static SDL_Window* g_window = NULL;
 static SDL_Renderer* g_renderer = NULL;
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+#define STASIS_MOBILE_SAFE_TARGET_MAX_BYTES (64u * 1024u * 1024u)
+static SDL_Texture* g_mobile_safe_target = NULL;
+static int g_mobile_safe_target_w = 0;
+static int g_mobile_safe_target_h = 0;
+static StasisDisplayViewport g_mobile_safe_drawable;
+#endif
 static bool g_should_quit = false;
 static const bool* g_keyboard_state = NULL;
 static int g_window_width = 800;
@@ -342,6 +349,10 @@ static void stasis_reset_text_cache(void);
 static void stasis_invalidate_renderer_resources(int discard_gpu_handles);
 static int stasis_restore_renderer_resources(void);
 static void stasis_present_gpu_loading(void);
+static void stasis_report_runtime_errorf(const char* format, ...);
+static int stasis_mobile_prepare_presentation(void);
+static int stasis_mobile_composite_presentation(void);
+static void stasis_mobile_release_presentation(int discard_gpu_handles);
 static void stasis_asset_tasks_shutdown(void);
 static void stasis_sprite_atlas_reset(int destroy_textures);
 static int stasis_draw_mixed_order_span(
@@ -596,6 +607,7 @@ static const char* stasis_renderer_reason_name(StasisRendererResourceReason reas
 }
 
 static void stasis_invalidate_renderer_resources(int discard_gpu_handles) {
+    stasis_mobile_release_presentation(discard_gpu_handles);
     stasis_sprite_atlas_reset(!discard_gpu_handles);
     for (int i = 0; i < g_sprite_capacity; i++) {
         SpriteEntry* entry = &g_sprites[i];
@@ -615,6 +627,126 @@ static void stasis_invalidate_renderer_resources(int discard_gpu_handles) {
     g_resource_frame_ready = false;
 }
 
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+static void stasis_mobile_release_presentation(int discard_gpu_handles) {
+    if (g_mobile_safe_target) {
+        if (!discard_gpu_handles) {
+            if (SDL_GetRenderTarget(g_renderer) == g_mobile_safe_target) {
+                SDL_SetRenderTarget(g_renderer, NULL);
+            }
+            SDL_DestroyTexture(g_mobile_safe_target);
+        }
+        g_mobile_safe_target = NULL;
+    }
+    g_mobile_safe_target_w = 0;
+    g_mobile_safe_target_h = 0;
+}
+
+static int stasis_mobile_prepare_presentation(void) {
+    if (!g_renderer || !SDL_SetRenderTarget(g_renderer, NULL)) {
+        stasis_report_runtime_errorf("Mobile window target unavailable: %s", SDL_GetError());
+        return 0;
+    }
+    const StasisDisplayViewport safe = g_mobile_safe_drawable;
+    const int x = (int)safe.x;
+    const int y = (int)safe.y;
+    const int w = (int)safe.w;
+    const int h = (int)safe.h;
+    if (x < 0 || y < 0 || w <= 0 || h <= 0 ||
+        x + w > g_drawable_width || y + h > g_drawable_height) {
+        stasis_report_runtime_errorf(
+            "Mobile safe target invalid: rect=%d,%d %dx%d drawable=%dx%d",
+            x, y, w, h, g_drawable_width, g_drawable_height);
+        return 0;
+    }
+    if (x == 0 && y == 0 && w == g_drawable_width && h == g_drawable_height) {
+        stasis_mobile_release_presentation(0);
+        if (!SDL_SetRenderLogicalPresentation(
+                g_renderer, g_window_width, g_window_height,
+                SDL_LOGICAL_PRESENTATION_LETTERBOX)) {
+            stasis_report_runtime_errorf("Mobile logical presentation failed: %s", SDL_GetError());
+            return 0;
+        }
+        return 1;
+    }
+    const uint64_t bytes = (uint64_t)w * (uint64_t)h * 4u;
+    if (bytes > STASIS_MOBILE_SAFE_TARGET_MAX_BYTES) {
+        stasis_report_runtime_errorf(
+            "Mobile safe target exceeds 64 MiB: %dx%d (%llu bytes)",
+            w, h, (unsigned long long)bytes);
+        return 0;
+    }
+    const Sint64 max_dimension = SDL_GetNumberProperty(
+        SDL_GetRendererProperties(g_renderer), SDL_PROP_RENDERER_MAX_TEXTURE_SIZE_NUMBER, 0);
+    if (max_dimension > 0 && (w > max_dimension || h > max_dimension)) {
+        stasis_report_runtime_errorf(
+            "Mobile safe target exceeds renderer texture limit: %dx%d max=%lld",
+            w, h, (long long)max_dimension);
+        return 0;
+    }
+    if (!g_mobile_safe_target || w != g_mobile_safe_target_w ||
+        h != g_mobile_safe_target_h) {
+        SDL_Texture* next = SDL_CreateTexture(
+            g_renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, w, h);
+        if (!next) {
+            stasis_report_runtime_errorf(
+                "Mobile safe target allocation failed: %dx%d: %s", w, h, SDL_GetError());
+            return 0;
+        }
+        if (!SDL_SetTextureBlendMode(next, SDL_BLENDMODE_NONE) ||
+            !SDL_SetRenderTarget(g_renderer, next) ||
+            !SDL_SetRenderLogicalPresentation(
+                g_renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED) ||
+            !SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255) ||
+            !SDL_RenderClear(g_renderer)) {
+            stasis_report_runtime_errorf("Mobile safe target initialization failed: %s", SDL_GetError());
+            SDL_SetRenderTarget(g_renderer, NULL);
+            SDL_DestroyTexture(next);
+            return 0;
+        }
+        stasis_mobile_release_presentation(0);
+        g_mobile_safe_target = next;
+        g_mobile_safe_target_w = w;
+        g_mobile_safe_target_h = h;
+    }
+    if (!SDL_SetRenderTarget(g_renderer, g_mobile_safe_target) ||
+        !SDL_SetRenderLogicalPresentation(
+            g_renderer, g_window_width, g_window_height,
+            SDL_LOGICAL_PRESENTATION_LETTERBOX)) {
+        stasis_report_runtime_errorf("Mobile safe target activation failed: %s", SDL_GetError());
+        SDL_SetRenderTarget(g_renderer, NULL);
+        return 0;
+    }
+    return 1;
+}
+
+static int stasis_mobile_composite_presentation(void) {
+    if (!g_mobile_safe_target) return 1;
+    const SDL_FRect destination = {
+        g_mobile_safe_drawable.x, g_mobile_safe_drawable.y,
+        g_mobile_safe_drawable.w, g_mobile_safe_drawable.h
+    };
+    if (!SDL_SetRenderTarget(g_renderer, NULL) ||
+        !SDL_SetRenderLogicalPresentation(
+            g_renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED) ||
+        !SDL_SetRenderClipRect(g_renderer, NULL) ||
+        !SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE) ||
+        !SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255) ||
+        !SDL_RenderClear(g_renderer) ||
+        !SDL_RenderTexture(g_renderer, g_mobile_safe_target, NULL, &destination)) {
+        stasis_report_runtime_errorf("Mobile safe target composite failed: %s", SDL_GetError());
+        return 0;
+    }
+    return 1;
+}
+#else
+static int stasis_mobile_prepare_presentation(void) { return 1; }
+static int stasis_mobile_composite_presentation(void) { return 1; }
+static void stasis_mobile_release_presentation(int discard_gpu_handles) {
+    (void)discard_gpu_handles;
+}
+#endif
+
 static void stasis_present_gpu_loading(void) {
     if (!g_window) return;
     const int rows = (int)(sizeof(g_restore_label) / sizeof(g_restore_label[0]));
@@ -627,10 +759,14 @@ static void stasis_present_gpu_loading(void) {
     const int origin_y = (g_window_height - rows * cell) / 2;
 
     if (g_renderer) {
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+        if (!stasis_mobile_prepare_presentation()) return;
+#else
         SDL_SetRenderTarget(g_renderer, NULL);
         SDL_SetRenderLogicalPresentation(
             g_renderer, g_window_width, g_window_height,
             SDL_LOGICAL_PRESENTATION_LETTERBOX);
+#endif
         SDL_SetRenderClipRect(g_renderer, NULL);
         SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE);
         SDL_SetRenderDrawColor(g_renderer, 15, 20, 28, 255);
@@ -649,7 +785,10 @@ static void stasis_present_gpu_loading(void) {
                 SDL_RenderFillRect(g_renderer, &pixel);
             }
         }
-        SDL_RenderPresent(g_renderer);
+        if (!stasis_mobile_composite_presentation() || !SDL_RenderPresent(g_renderer)) {
+            stasis_report_runtime_errorf("Loading presentation failed: %s", SDL_GetError());
+            return;
+        }
     }
     else {
         return;
@@ -678,10 +817,14 @@ static void stasis_mark_density_resources_dirty(void) {
 }
 
 static int stasis_current_scaled_extent(int logical_extent) {
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    return stasis_display_scaled_extent(logical_extent, g_pixel_scale);
+#else
     return stasis_display_scaled_extent_for_backing(
         logical_extent,
         g_window_width, g_window_height,
         g_drawable_width, g_drawable_height);
+#endif
 }
 
 static SDL_DisplayID stasis_select_presentation_display(
@@ -759,6 +902,56 @@ static void stasis_query_available_presentation(
     if (height) *height = available_h;
 }
 
+static StasisDisplayViewport stasis_query_safe_native_viewport(void) {
+    StasisDisplayViewport safe = {
+        0.0f, 0.0f, (float)g_native_window_width, (float)g_native_window_height};
+    if (g_test_display_override.active) return g_test_display_override.safe_native;
+
+#if SDL_VERSION_ATLEAST(3, 2, 0)
+    SDL_Rect window_safe;
+    if (SDL_GetWindowSafeArea(g_window, &window_safe) &&
+        window_safe.w > 0 && window_safe.h > 0) {
+        safe = (StasisDisplayViewport){
+            (float)window_safe.x, (float)window_safe.y,
+            (float)window_safe.w, (float)window_safe.h};
+    }
+#endif
+
+#if !defined(__ANDROID__) && !defined(__IPHONEOS__)
+    /* Desktop work-area bounds still protect windows overlapping system UI. */
+    const SDL_DisplayID display = SDL_GetDisplayForWindow(g_window);
+    SDL_Rect usable;
+    if (display != 0 && SDL_GetDisplayUsableBounds(display, &usable)) {
+        int win_x = 0;
+        int win_y = 0;
+        SDL_GetWindowPosition(g_window, &win_x, &win_y);
+        const float left = fmaxf(safe.x, (float)(usable.x - win_x));
+        const float top = fmaxf(safe.y, (float)(usable.y - win_y));
+        const float right = fminf(safe.x + safe.w,
+            (float)(usable.x + usable.w - win_x));
+        const float bottom = fminf(safe.y + safe.h,
+            (float)(usable.y + usable.h - win_y));
+        if (right > left && bottom > top) {
+            safe = (StasisDisplayViewport){left, top, right - left, bottom - top};
+        }
+    }
+#endif
+    return safe;
+}
+
+static int stasis_viewport_changed(
+    StasisDisplayViewport previous, StasisDisplayViewport next) {
+    return previous.x != next.x || previous.y != next.y ||
+        previous.w != next.w || previous.h != next.h;
+}
+
+static int stasis_presentation_viewport_changed(
+    StasisDisplayMetrics previous, StasisDisplayMetrics next) {
+    return stasis_viewport_changed(previous.native_viewport, next.native_viewport) ||
+        stasis_viewport_changed(previous.drawable_viewport, next.drawable_viewport) ||
+        stasis_viewport_changed(previous.safe_logical_viewport, next.safe_logical_viewport);
+}
+
 static void stasis_sync_display_metrics(void) {
     if (!g_window) return;
 
@@ -786,6 +979,10 @@ static void stasis_sync_display_metrics(void) {
                 SDL_LOGICAL_PRESENTATION_LETTERBOX);
         }
     } else if (g_renderer) {
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+        /* Query the complete window backing, even after an inset target frame. */
+        SDL_SetRenderTarget(g_renderer, NULL);
+#endif
         /* The display contract owns the complete renderer backing here.  The
          * "current" output is adjusted by SDL logical presentation and can
          * still describe the previous fitted viewport while a logical canvas
@@ -801,25 +998,44 @@ static void stasis_sync_display_metrics(void) {
 
     if (drawable_w <= 0) drawable_w = g_window_width;
     if (drawable_h <= 0) drawable_h = g_window_height;
+    const StasisDisplayViewport safe_native = stasis_query_safe_native_viewport();
     int available_w = 0;
     int available_h = 0;
     if (g_test_display_override.active) {
         available_w = g_test_display_override.available_w;
         available_h = g_test_display_override.available_h;
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    } else {
+        available_w = (int)safe_native.w;
+        available_h = (int)safe_native.h;
+#else
     } else {
         stasis_query_available_presentation(
             g_native_window_width, g_native_window_height,
             &available_w, &available_h);
+#endif
     }
-    StasisDisplayViewport safe_native = {
-        0.0f, 0.0f, (float)g_native_window_width, (float)g_native_window_height};
-    StasisDisplayMetrics next = stasis_display_metrics(
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    const StasisDisplayMetrics next = stasis_display_metrics_safe_fit(
+        g_window_width, g_window_height,
+        g_native_window_width, g_native_window_height,
+        drawable_w, drawable_h, safe_native);
+    g_mobile_safe_drawable = stasis_display_safe_drawable_rect(
+        g_native_window_width, g_native_window_height,
+        drawable_w, drawable_h, safe_native);
+    const StasisDisplayPreparationScale next_preparation_scale =
+        stasis_display_preparation_scale(
+            next.logical_w, next.logical_h,
+            (int)next.drawable_viewport.w, (int)next.drawable_viewport.h);
+#else
+    const StasisDisplayMetrics next = stasis_display_metrics(
         g_window_width, g_window_height,
         g_native_window_width, g_native_window_height,
         drawable_w, drawable_h, safe_native);
     const StasisDisplayPreparationScale next_preparation_scale =
         stasis_display_preparation_scale(
             next.logical_w, next.logical_h, next.drawable_w, next.drawable_h);
+#endif
     const int dimensions_changed =
         next.native_w != g_display_metrics.native_w ||
         next.native_h != g_display_metrics.native_h ||
@@ -827,6 +1043,7 @@ static void stasis_sync_display_metrics(void) {
         next.drawable_h != g_display_metrics.drawable_h ||
         next.logical_w != g_display_metrics.logical_w ||
         next.logical_h != g_display_metrics.logical_h ||
+        stasis_presentation_viewport_changed(g_display_metrics, next) ||
         available_w != g_available_width ||
         available_h != g_available_height;
     const int density_changed = g_density_generation == 0 ||
@@ -879,7 +1096,7 @@ STASIS_EXPORT int stasis_test_push_display_event(
         drawable_w <= 0 || drawable_h <= 0 || available_w <= 0 ||
         available_h <= 0 || safe_x < 0 || safe_y < 0 ||
         safe_w <= 0 || safe_h <= 0 || safe_x + safe_w > native_w ||
-        safe_y + safe_h > native_h || kind < 1 || kind > 3) {
+        safe_y + safe_h > native_h || kind < 1 || kind > 4) {
         return 0;
     }
 
@@ -898,7 +1115,8 @@ STASIS_EXPORT int stasis_test_push_display_event(
     SDL_Event event;
     SDL_zero(event);
     event.type = kind == 1 ? SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED :
-        (kind == 2 ? SDL_EVENT_WINDOW_MINIMIZED : SDL_EVENT_WINDOW_RESTORED);
+        (kind == 2 ? SDL_EVENT_WINDOW_MINIMIZED :
+        (kind == 3 ? SDL_EVENT_WINDOW_RESTORED : SDL_EVENT_WINDOW_SAFE_AREA_CHANGED));
     event.window.windowID = SDL_GetWindowID(g_window);
     return SDL_PushEvent(&event) ? 1 : 0;
 }
@@ -930,7 +1148,11 @@ STASIS_EXPORT int stasis_test_push_input_event(
     } else if (kind >= 3 && kind <= 5) {
         StasisDisplayMetrics input_metrics = g_display_metrics;
         if (g_test_display_override.active) {
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+            input_metrics = stasis_display_metrics_safe_fit(
+#else
             input_metrics = stasis_display_metrics(
+#endif
                 g_test_display_override.logical_w,
                 g_test_display_override.logical_h,
                 g_test_display_override.native_w,
@@ -998,48 +1220,37 @@ static void stasis_set_pointer_pos_px(int idx, float x, float y) {
 
 static void stasis_update_safe_viewport(void) {
     if (!g_window) return;
-
-    StasisDisplayViewport safe_native = {
-        0.0f, 0.0f, (float)g_native_window_width, (float)g_native_window_height};
-
-    if (g_test_display_override.active) {
-        safe_native = g_test_display_override.safe_native;
-        goto publish;
-    }
-
-    SDL_DisplayID display = SDL_GetDisplayForWindow(g_window);
-    if (display == 0) goto publish;
-
-    SDL_Rect usable;
-    if (!SDL_GetDisplayUsableBounds(display, &usable)) {
-        goto publish;
-    }
-
-    int win_x = 0;
-    int win_y = 0;
-    SDL_GetWindowPosition(g_window, &win_x, &win_y);
-
-    int win_right = win_x + g_native_window_width;
-    int win_bottom = win_y + g_native_window_height;
-    int left = usable.x > win_x ? usable.x : win_x;
-    int top = usable.y > win_y ? usable.y : win_y;
-    int right = (usable.x + usable.w) < win_right ? (usable.x + usable.w) : win_right;
-    int bottom = (usable.y + usable.h) < win_bottom ? (usable.y + usable.h) : win_bottom;
-    int w = right - left;
-    int h = bottom - top;
-
-    if (w > 0 && h > 0) {
-        safe_native.x = (float)(left - win_x);
-        safe_native.y = (float)(top - win_y);
-        safe_native.w = (float)w;
-        safe_native.h = (float)h;
-    }
-
-publish:
-    g_display_metrics = stasis_display_metrics(
+    const StasisDisplayViewport safe_native = stasis_query_safe_native_viewport();
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    const StasisDisplayMetrics next = stasis_display_metrics_safe_fit(
         g_window_width, g_window_height,
         g_native_window_width, g_native_window_height,
         g_drawable_width, g_drawable_height, safe_native);
+    g_mobile_safe_drawable = stasis_display_safe_drawable_rect(
+        g_native_window_width, g_native_window_height,
+        g_drawable_width, g_drawable_height, safe_native);
+#else
+    const StasisDisplayMetrics next = stasis_display_metrics(
+        g_window_width, g_window_height,
+        g_native_window_width, g_native_window_height,
+        g_drawable_width, g_drawable_height, safe_native);
+#endif
+    int safe_changed = stasis_presentation_viewport_changed(g_display_metrics, next);
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    if (!g_test_display_override.active) {
+        const int available_w = (int)safe_native.w;
+        const int available_h = (int)safe_native.h;
+        safe_changed = safe_changed ||
+            available_w != g_available_width || available_h != g_available_height;
+        g_available_width = available_w;
+        g_available_height = available_h;
+    }
+#endif
+    if (safe_changed) {
+        g_display_generation++;
+        g_window_resized = true;
+    }
+    g_display_metrics = next;
     g_input_frame.viewport_x_px = (int)floorf(g_display_metrics.safe_logical_viewport.x);
     g_input_frame.viewport_y_px = (int)floorf(g_display_metrics.safe_logical_viewport.y);
     g_input_frame.viewport_w_px = (int)ceilf(g_display_metrics.safe_logical_viewport.w);
@@ -1143,6 +1354,7 @@ static void stasis_pump_events(void) {
                 break;
             case SDL_EVENT_WINDOW_RESIZED:
             case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+            case SDL_EVENT_WINDOW_SAFE_AREA_CHANGED:
                 stasis_sync_display_metrics();
                 g_input_frame.viewport_w_px = g_window_width;
                 g_input_frame.viewport_h_px = g_window_height;
@@ -2755,6 +2967,16 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
 
     int ok = 0;
     if (!g_renderer) return 0;
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    const int restore_mobile_target =
+        g_mobile_safe_target && SDL_GetRenderTarget(g_renderer) == g_mobile_safe_target;
+    SDL_BlendMode saved_blend_mode = SDL_BLENDMODE_BLEND;
+    Uint8 saved_r = 0, saved_g = 0, saved_b = 0, saved_a = 255;
+    if (restore_mobile_target) {
+        SDL_GetRenderDrawBlendMode(g_renderer, &saved_blend_mode);
+        SDL_GetRenderDrawColor(g_renderer, &saved_r, &saved_g, &saved_b, &saved_a);
+    }
+#endif
 
     if (render_queued_lines) {
         /* Direct API calls may happen before end_frame(), so flush pending lines once. */
@@ -2771,6 +2993,19 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
         g_line_count = 0;
     }
 
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    if (!stasis_mobile_composite_presentation()) {
+        if (restore_mobile_target) {
+            SDL_SetRenderTarget(g_renderer, g_mobile_safe_target);
+            SDL_SetRenderLogicalPresentation(
+                g_renderer, g_window_width, g_window_height,
+                SDL_LOGICAL_PRESENTATION_LETTERBOX);
+            SDL_SetRenderDrawBlendMode(g_renderer, saved_blend_mode);
+            SDL_SetRenderDrawColor(g_renderer, saved_r, saved_g, saved_b, saved_a);
+        }
+        return 0;
+    }
+#endif
     /* Read the fixed physical recording target, not the logical viewport. */
     if (g_recording_presentation) {
         SDL_SetRenderLogicalPresentation(
@@ -2815,6 +3050,19 @@ static int stasis_gfx_dump_image(const char* path, int png, int render_queued_li
             g_renderer, g_window_width, g_window_height,
             SDL_LOGICAL_PRESENTATION_LETTERBOX);
     }
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    if (restore_mobile_target) {
+        if (!SDL_SetRenderTarget(g_renderer, g_mobile_safe_target) ||
+            !SDL_SetRenderLogicalPresentation(
+                g_renderer, g_window_width, g_window_height,
+                SDL_LOGICAL_PRESENTATION_LETTERBOX)) {
+            stasis_report_runtime_errorf("Mobile capture target restore failed: %s", SDL_GetError());
+            return 0;
+        }
+        SDL_SetRenderDrawBlendMode(g_renderer, saved_blend_mode);
+        SDL_SetRenderDrawColor(g_renderer, saved_r, saved_g, saved_b, saved_a);
+    }
+#endif
     return ok;
 }
 
@@ -3744,6 +3992,9 @@ STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {
  * Begin a new frame
  */
 STASIS_EXPORT void stasis_begin_frame(void) {
+#if defined(__ANDROID__) || defined(__IPHONEOS__)
+    if (g_renderer) SDL_SetRenderTarget(g_renderer, NULL);
+#endif
     gfx_debug_hash_reset_if_enabled();
     gfx_asset_watch_apply_pending_changes();
     if (!g_events_pumped_this_frame) {
@@ -3751,10 +4002,15 @@ STASIS_EXPORT void stasis_begin_frame(void) {
         g_events_pumped_this_frame = 1;
     }
     g_resource_frame_ready = stasis_restore_renderer_resources() != 0;
+    if (g_resource_frame_ready) {
+        g_resource_frame_ready = stasis_mobile_prepare_presentation() != 0;
+    }
     g_line_count = 0;
     stasis_render_reset_clip();
-    SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
-    SDL_SetRenderClipRect(g_renderer, NULL);
+    if (g_resource_frame_ready) {
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderClipRect(g_renderer, NULL);
+    }
 }
 
 static uint64_t stasis_perf_elapsed_us(uint64_t started_counter, uint64_t finished_counter) {
@@ -3965,19 +4221,29 @@ STASIS_EXPORT void stasis_end_frame(void) {
             SDL_RenderLine(g_renderer, g_lines[i].x1, g_lines[i].y1, g_lines[i].x2, g_lines[i].y2);
         }
 
-        /* Capture before present so we read the current render target. */
+        if (!stasis_mobile_composite_presentation()) {
+            g_resource_frame_ready = false;
+            g_line_count = 0;
+            g_perf_render_started_counter = 0;
+            g_events_pumped_this_frame = 0;
+            return;
+        }
+        /* Capture before present so we read the complete physical backing. */
         capture_scheduled_screenshot();
         const int measure_frame = stasis_host_performance_metrics_enabled();
         if (measure_frame) {
             const uint64_t host_finished = SDL_GetPerformanceCounter();
             const uint64_t present_started = SDL_GetPerformanceCounter();
-            SDL_RenderPresent(g_renderer);
+            g_resource_frame_ready = SDL_RenderPresent(g_renderer);
             const uint64_t present_finished = SDL_GetPerformanceCounter();
             stasis_perf_finish_render_sample(stasis_perf_elapsed_us(
                 g_perf_render_started_counter, host_finished),
                 stasis_perf_elapsed_us(present_started, present_finished));
         } else {
-            SDL_RenderPresent(g_renderer);
+            g_resource_frame_ready = SDL_RenderPresent(g_renderer);
+        }
+        if (!g_resource_frame_ready) {
+            stasis_report_runtime_errorf("Frame presentation failed: %s", SDL_GetError());
         }
         g_line_count = 0;
     }
@@ -4402,6 +4668,10 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
     }
 
     stasis_begin_frame();
+    if (!g_resource_frame_ready) {
+        g_perf_render_started_counter = 0;
+        return;
+    }
 
     if ((flags & STASIS_RENDER_FLAG_CLEAR) != 0) {
         stasis_clear(cmd_f32[0], cmd_f32[1], cmd_f32[2], cmd_f32[3]);
@@ -4503,7 +4773,7 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
     if ((flags & STASIS_RENDER_FLAG_PRESENT) != 0) {
         stasis_perf_draw_overlay();
         stasis_end_frame();
-        g_render_presented_frames++;
+        if (g_resource_frame_ready) g_render_presented_frames++;
     } else {
         g_perf_render_started_counter = 0;
     }
@@ -6544,6 +6814,7 @@ STASIS_EXPORT void stasis_shutdown(void) {
     }
     stasis_reset_text_cache();
     if (g_renderer) {
+        stasis_mobile_release_presentation(0);
         SDL_DestroyRenderer(g_renderer);
         g_renderer = NULL;
     }

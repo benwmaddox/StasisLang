@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import struct
 import subprocess
@@ -1208,8 +1209,125 @@ def validate_touch_markers(markers: list[dict], expectations: dict) -> list[dict
     return observed
 
 
+ANDROID_SAFE_INSET_TYPES = {
+    "statusBars", "navigationBars", "captionBar", "systemGestures",
+    "mandatorySystemGestures", "tappableElement", "displayCutout",
+    "systemOverlays",
+}
+
+
+def parse_android_safe_surface(
+    dumpsys: str, surface: tuple[int, int]
+) -> tuple[int, int, int, int]:
+    """Read Android's visible inset union independently of SDL and guest metrics."""
+    if "WindowInsetsStateController" not in dumpsys:
+        raise SeamError("Android orientation InsetsState is unavailable")
+    section = dumpsys.split("WindowInsetsStateController", 1)[1].split(
+        "Control map:", 1
+    )[0]
+    frame = re.search(
+        r"mDisplayFrame=Rect\((-?\d+),\s*(-?\d+) - (-?\d+),\s*(-?\d+)\)",
+        section,
+    )
+    if frame is None:
+        raise SeamError("Android orientation InsetsState has no display frame")
+    x0, y0, x1, y1 = map(int, frame.groups())
+    if (x0, y0, x1 - x0, y1 - y0) != (0, 0, *surface):
+        raise SeamError(
+            "Android orientation InsetsState display frame differs from capture: "
+            f"frame={(x0, y0, x1, y1)} surface={surface}"
+        )
+    insets = {"LEFT": 0, "TOP": 0, "RIGHT": 0, "BOTTOM": 0}
+    sources = re.findall(
+        r"InsetsSource id=\S+ type=(\w+) frame=\[(-?\d+),(-?\d+)\]"
+        r"\[(-?\d+),(-?\d+)\] visible=(true|false).*?sideHint="
+        r"(LEFT|TOP|RIGHT|BOTTOM|NONE)",
+        section,
+    )
+    if not sources:
+        raise SeamError("Android orientation InsetsState has no inset sources")
+    for kind, left, top, right, bottom, visible, side in sources:
+        if kind not in ANDROID_SAFE_INSET_TYPES or visible != "true":
+            continue
+        left, top, right, bottom = map(int, (left, top, right, bottom))
+        extent = {
+            "LEFT": right - x0,
+            "TOP": bottom - y0,
+            "RIGHT": x1 - left,
+            "BOTTOM": y1 - top,
+        }.get(side, 0)
+        if side in insets:
+            insets[side] = max(insets[side], extent)
+    left = insets["LEFT"]
+    top = insets["TOP"]
+    width = surface[0] - left - insets["RIGHT"]
+    height = surface[1] - top - insets["BOTTOM"]
+    if left < 0 or top < 0 or width <= 0 or height <= 0:
+        raise SeamError(f"Android orientation InsetsState has invalid safe area: {insets}")
+    return left, top, width, height
+
+
+def fit_safe_surface(
+    logical_size: list[int], safe: tuple[int, int, int, int]
+) -> tuple[float, float, int, int]:
+    logical_w, logical_h = logical_size
+    x, y, width, height = safe
+    want_aspect = logical_w / logical_h
+    real_aspect = width / height
+    if abs(want_aspect - real_aspect) < 0.0001:
+        fitted_w, fitted_h = width, height
+    elif want_aspect > real_aspect:
+        fitted_w, fitted_h = width, math.floor(logical_h * width / logical_w)
+    else:
+        fitted_w, fitted_h = math.floor(logical_w * height / logical_h), height
+    return (
+        x + (width - fitted_w) / 2,
+        y + (height - fitted_h) / 2,
+        fitted_w,
+        fitted_h,
+    )
+
+
+def validate_orientation_fit_pixels(
+    capture: Path, logical_size: list[int], viewport: tuple[float, float, int, int],
+    fit_rect: dict,
+) -> dict:
+    width, height, pixels = read_png_rgb(capture)
+    red, green, blue = fit_rect["rgb"]
+    tolerance = fit_rect["tolerance"]
+    left_bound, top_bound = width, height
+    right_bound = bottom_bound = -1
+    for index, pixel in enumerate(pixels):
+        if (abs(pixel[0] - red) <= tolerance
+                and abs(pixel[1] - green) <= tolerance
+                and abs(pixel[2] - blue) <= tolerance):
+            x, y = index % width, index // width
+            left_bound = min(left_bound, x)
+            top_bound = min(top_bound, y)
+            right_bound = max(right_bound, x)
+            bottom_bound = max(bottom_bound, y)
+    if right_bound < 0:
+        raise SeamError("Android orientation authored fit rectangle is absent")
+    actual = (left_bound, top_bound, right_bound + 1, bottom_bound + 1)
+    left, top, rect_w, rect_h = fit_rect["rect"]
+    view_x, view_y, view_w, view_h = viewport
+    expected = (
+        view_x + left * view_w / logical_size[0],
+        view_y + top * view_h / logical_size[1],
+        view_x + (left + rect_w) * view_w / logical_size[0],
+        view_y + (top + rect_h) * view_h / logical_size[1],
+    )
+    if any(abs(found - wanted) > 3 for found, wanted in zip(actual, expected)):
+        raise SeamError(
+            "Android orientation authored fit rectangle is not maximal in safe area: "
+            f"expected={expected} actual={actual}"
+        )
+    return {"pixel_bounds": list(actual), "expected_bounds": list(expected)}
+
+
 def validate_orientation_markers(
-    markers: list[dict], expectations: dict, surfaces: dict[str, tuple[int, int]]
+    markers: list[dict], expectations: dict, surfaces: dict[str, tuple[int, int]],
+    safe_surfaces: dict[str, tuple[int, int, int, int]],
 ) -> list[dict]:
     orientation = expectations["orientation"]
     probes = {
@@ -1306,13 +1424,11 @@ def validate_orientation_markers(
                     f"actual={actual_width}x{actual_height} "
                     f"tolerance={surface_tolerance}"
                 )
-        fitted_scale = min(
-            surface_width / logical_width, surface_height / logical_height
-        )
-        fitted_extent = (
-            max(1, int(logical_width * fitted_scale + 0.5)),
-            max(1, int(logical_height * fitted_scale + 0.5)),
-        )
+        safe = safe_surfaces.get(stage["name"])
+        if safe is None:
+            raise SeamError(f"Android orientation stage {stage['name']} has no InsetsState")
+        fitted = fit_safe_surface(expectations["logical_size"], safe)
+        fitted_extent = (fitted[2], fitted[3])
         expected_scale = min(
             fitted_extent[0] / logical_width,
             fitted_extent[1] / logical_height,
@@ -1361,6 +1477,7 @@ def validate_orientation_markers(
             )
         observed_marker = dict(marker)
         observed_marker["fitted_content_extent"] = list(fitted_extent)
+        observed_marker["safe_surface"] = list(safe)
         observed.append(observed_marker)
     ticks = [item.get("probe_tick") for item in observed]
     display_generations = [item.get("display_generation") for item in observed]
@@ -1391,16 +1508,23 @@ def validate_orientation_markers(
 
 
 def logical_to_native(
-    logical: list[float], logical_size: list[int], native_size: tuple[int, int]
+    logical: list[float], logical_size: list[int], native_size: tuple[int, int],
+    viewport: tuple[float, float, float, float] | None = None,
 ) -> tuple[int, int]:
     logical_width, logical_height = logical_size
     native_width, native_height = native_size
-    scale = min(native_width / logical_width, native_height / logical_height)
-    offset_x = (native_width - logical_width * scale) / 2.0
-    offset_y = (native_height - logical_height * scale) / 2.0
+    if viewport is None:
+        scale = min(native_width / logical_width, native_height / logical_height)
+        viewport = (
+            (native_width - logical_width * scale) / 2,
+            (native_height - logical_height * scale) / 2,
+            logical_width * scale,
+            logical_height * scale,
+        )
+    x, y, width, height = viewport
     return (
-        max(0, min(native_width - 1, round(offset_x + logical[0] * scale))),
-        max(0, min(native_height - 1, round(offset_y + logical[1] * scale))),
+        max(0, min(native_width - 1, round(x + logical[0] * width / logical_width))),
+        max(0, min(native_height - 1, round(y + logical[1] * height / logical_height))),
     )
 
 
@@ -1497,8 +1621,15 @@ def validate_regions(capture: Path, expectations: dict) -> list[dict]:
     width, height, pixels = read_png_rgb(capture)
     logical_width, logical_height = expectations["logical_size"]
     scale = min(width / logical_width, height / logical_height)
-    offset_x = (width - logical_width * scale) / 2.0
-    offset_y = (height - logical_height * scale) / 2.0
+    viewport = expectations.get("fitted_viewport")
+    if viewport is None:
+        viewport = (
+            (width - logical_width * scale) / 2,
+            (height - logical_height * scale) / 2,
+            logical_width * scale,
+            logical_height * scale,
+        )
+    offset_x, offset_y, fitted_w, fitted_h = viewport
     observed = []
     for region in expectations["regions"]:
         if region.get("location") == "outside_letterbox":
@@ -1507,12 +1638,14 @@ def validate_regions(capture: Path, expectations: dict) -> list[dict]:
             )
         else:
             x = max(
-                0, min(width - 1, round(offset_x + region["center"][0] * scale))
+                0, min(width - 1, round(offset_x + region["center"][0] * fitted_w / logical_width))
             )
             y = max(
-                0, min(height - 1, round(offset_y + region["center"][1] * scale))
+                0, min(height - 1, round(offset_y + region["center"][1] * fitted_h / logical_height))
             )
-        radius = max(2, round(scale * 3))
+        radius = max(2, round(min(
+            fitted_w / logical_width, fitted_h / logical_height
+        ) * 3))
         samples = [
             pixels[row * width + column]
             for row in range(max(0, y - radius), min(height, y + radius + 1))
@@ -2453,6 +2586,7 @@ def main() -> int:
             evidence["injected_gestures"] = injected_gestures
         if orientation is not None:
             surfaces = {}
+            safe_surfaces = {}
             for index, stage in enumerate(orientation["stages"]):
                 if index > 0:
                     _run(
@@ -2482,8 +2616,17 @@ def main() -> int:
                     stage_capture_path,
                 )
                 surfaces[stage["name"]] = surface
+                insets_dump = _run(
+                    args.adb, args.serial, "shell", "dumpsys", "window", "displays"
+                )
+                insets_path = args.output / f"{stage['name']}-insets.txt"
+                insets_path.write_text(insets_dump, encoding="utf-8")
+                safe = parse_android_safe_surface(insets_dump, surface)
+                safe_surfaces[stage["name"]] = safe
+                fitted = fit_safe_surface(expectations["logical_size"], safe)
                 touch_x, touch_y = logical_to_native(
-                    orientation["touch"], expectations["logical_size"], surface
+                    orientation["touch"], expectations["logical_size"], surface,
+                    fitted,
                 )
                 _run(
                     args.adb,
@@ -2525,6 +2668,7 @@ def main() -> int:
                 stage_expectations = {
                     "logical_size": expectations["logical_size"],
                     "regions": stage["regions"],
+                    "fitted_viewport": fitted,
                 }
                 stage_regions = capture_until_regions_match(
                     args.adb,
@@ -2535,18 +2679,26 @@ def main() -> int:
                     package_id,
                     component,
                 )
+                fit_pixels = validate_orientation_fit_pixels(
+                    stage_capture_path, expectations["logical_size"], fitted,
+                    orientation["fit_rect"],
+                )
                 orientation_evidence.append(
                     {
                         "name": stage["name"],
                         "rotation": stage["rotation"],
                         "surface": list(surface),
+                        "safe_surface": list(safe),
+                        "fitted_viewport": list(fitted),
                         "touch": [touch_x, touch_y],
                         "capture": str(stage_capture_path),
+                        "insets": str(insets_path),
+                        "fit_pixels": fit_pixels,
                         "regions": stage_regions,
                     }
                 )
             orientation_probes = validate_orientation_markers(
-                markers, expectations, surfaces
+                markers, expectations, surfaces, safe_surfaces
             )
         if lifecycle:
             log = "\n".join(log_history)

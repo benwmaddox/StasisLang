@@ -188,11 +188,29 @@ function assertAuthoredViewportFit(name, logical, viewport, unusedAxis) {
 }
 
 test("Sheep Herder authored viewport fits desktop and mobile orientations uniformly", () => {
-  const logical = [1600, 900];
+  const logical = [1600, 720];
   assert.match(html, /body \{[\s\S]*?display: grid;[\s\S]*?place-items: center;/, "shell centers letterbox and pillarbox space");
   assertAuthoredViewportFit("desktop landscape", logical, [1440, 900], "y");
   assertAuthoredViewportFit("mobile portrait", logical, [390, 844], "y");
-  assertAuthoredViewportFit("mobile landscape", logical, [844, 390], "x");
+  assertAuthoredViewportFit("mobile landscape", logical, [844, 390], "y");
+});
+
+test("1600x720 uses the entire limiting desktop axis without a 960px cap", () => {
+  const fit = runFitter({
+    layoutWidth: 1920, layoutHeight: 1080,
+    visualWidth: 1920, visualHeight: 1080,
+    logicalWidth: 1600, logicalHeight: 720
+  });
+  assert.equal(fit.shellStyle.width, "1920px");
+  assert.equal(fit.shellStyle.height, "864px");
+  assert.deepEqual({ ...fit.window.STASIS_AVAILABLE_VIEWPORT }, { width: 1920, height: 1080 });
+  assert.equal(fit.canvas.width, 640, "CSS fit leaves physical backing to the runtime");
+
+  fit.visualViewport.width = 1200;
+  fit.visualViewport.height = 800;
+  fit.dispatchVisual("resize");
+  assert.equal(fit.shellStyle.width, "1200px");
+  assert.equal(fit.shellStyle.height, "540px");
 });
 
 test("extreme valid aspect ratios remain uniformly contained", () => {
@@ -499,7 +517,7 @@ test("portrait guest observes landscape availability before main and settles wit
 
 test("pointer and touch map through a fitted Sheep Herder viewport", async () => {
   const fixture = integratedRuntime({
-    logical: [1600, 900], viewport: [390, 844], layout: [390, 844], safe: {}, desktop: [390, 844]
+    logical: [1600, 720], viewport: [390, 844], layout: [390, 844], safe: {}, desktop: [390, 844]
   });
   await new Promise(resolve => setImmediate(resolve));
   await new Promise(resolve => setImmediate(resolve));
@@ -512,7 +530,7 @@ test("pointer and touch map through a fitted Sheep Herder viewport", async () =>
     clientY: bounds.top + bounds.height / 2
   });
   fixture.raf.shift()(16);
-  assert.deepEqual(fixture.ticks.at(-1).pointer, [800, 450]);
+  assert.deepEqual(fixture.ticks.at(-1).pointer, [800, 360]);
 
   fixture.canvas.listeners.get("pointerdown")({
     pointerId: 11, pointerType: "touch",
@@ -520,7 +538,24 @@ test("pointer and touch map through a fitted Sheep Herder viewport", async () =>
     clientY: bounds.top + bounds.height / 4
   });
   fixture.raf.shift()(32);
-  assert.deepEqual(fixture.ticks.at(-1).pointer, [400, 225]);
+  assert.deepEqual(fixture.ticks.at(-1).pointer, [400, 180]);
+
+  fixture.visualViewport.width = 844;
+  fixture.visualViewport.height = 390;
+  fixture.visualViewport.dispatchEvent(new fixture.context.Event("resize"));
+  fixture.raf.shift()(48);
+  const resizedBounds = fixture.canvas.getBoundingClientRect();
+  assert.equal(resizedBounds.width, 844);
+  assert.ok(resizedBounds.top > 0 && resizedBounds.bottom < 390);
+  for (const [clientX, clientY, expected] of [
+    [resizedBounds.left, resizedBounds.top, [0, 0]],
+    [resizedBounds.left + resizedBounds.width / 2, resizedBounds.top + resizedBounds.height / 2, [800, 360]],
+    [resizedBounds.right, resizedBounds.bottom, [1600, 720]]
+  ]) {
+    fixture.canvas.listeners.get("pointermove")({ pointerId: 11, pointerType: "mouse", clientX, clientY });
+    fixture.raf.shift()(64);
+    assert.deepEqual(fixture.ticks.at(-1).pointer, expected);
+  }
 });
 
 test("configured maximum logical size starts from a safe physical backing", async () => {

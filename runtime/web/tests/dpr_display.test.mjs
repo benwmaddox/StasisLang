@@ -176,6 +176,40 @@ test("CSS pointer coordinates round trip into logical normalized coordinates", a
   assert.deepEqual(runtime.ticks.at(-1).normalized, [1, 1]);
 });
 
+test("1600x720 fitted canvas keeps DPR backing and pointer center and edges through resize", async () => {
+  const runtime = await loadRuntime({ logical: [1600, 720], css: [1920, 864], dpr: 2 });
+  const initial = runtime.ticks.at(-1);
+  assert.deepEqual(initial.css, [1920, 864]);
+  assert.deepEqual(initial.backing, [3840, 1728]);
+  assert.equal(runtime.body.dataset.backingFallback, "none");
+
+  for (const [clientX, clientY, expected, normalized] of [
+    [10, 20, [0, 0], [0, 0]],
+    [970, 452, [800, 360], [0.5, 0.5]],
+    [1930, 884, [1600, 720], [1, 1]]
+  ]) {
+    runtime.canvas.listeners.get("pointermove")({
+      pointerId: 7, pointerType: "mouse", clientX, clientY
+    });
+    runtime.frame();
+    assert.deepEqual(runtime.ticks.at(-1).pointer, expected);
+    assert.deepEqual(runtime.ticks.at(-1).normalized, normalized);
+  }
+
+  runtime.setCss(1200, 540);
+  runtime.frame();
+  const resized = runtime.ticks.at(-1);
+  assert.deepEqual(resized.css, [1200, 540]);
+  assert.deepEqual(resized.backing, [2400, 1080]);
+  assert.equal(resized.generation, initial.generation + 1);
+  runtime.canvas.listeners.get("pointermove")({
+    pointerId: 7, pointerType: "mouse", clientX: 1210, clientY: 560
+  });
+  runtime.frame();
+  assert.deepEqual(runtime.ticks.at(-1).pointer, [1600, 720]);
+  assert.deepEqual(runtime.ticks.at(-1).normalized, [1, 1]);
+});
+
 test("WebGL2 keeps logical coordinates while using the DPR-scaled backing", async () => {
   const runtime = await loadRuntime({ logical: [320, 180], css: [640, 360], dpr: 2 });
   assert.equal(runtime.canvas.width, 1280);

@@ -116,6 +116,18 @@ test -d "${app}/Frameworks/SDL3.framework"
 test -d "${app}/Frameworks/SDL3_image.framework"
 test -f "${app}/stasis_game/assets/manifest.json"
 test -f "${app}/stasis_game/stasis_provenance.json"
+orientations="$(python3 - "${app}/Info.plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as source:
+    orientations = plistlib.load(source)["UISupportedInterfaceOrientations"]
+expected = ["UIInterfaceOrientationLandscapeLeft", "UIInterfaceOrientationLandscapeRight"]
+if orientations != expected:
+    raise SystemExit(f"unsupported iOS orientation contract: {orientations!r}")
+print(",".join(orientations))
+PY
+)"
 lipo "${executable}" -verify_arch arm64
 otool -L "${executable}" | tee "${build_root}/linked-libraries.txt"
 grep -Fq '@rpath/SDL3.framework/SDL3' "${build_root}/linked-libraries.txt"
@@ -134,6 +146,7 @@ fi
   xcodebuild -version
   printf 'app=%s\n' "${app}"
   printf 'architectures=%s\n' "$(lipo "${executable}" -archs)"
+  printf 'supported_orientations=%s\n' "${orientations}"
   printf 'asset_manifest=%s\n' "${app}/stasis_game/assets/manifest.json"
   printf 'provenance=%s\n' "${app}/stasis_game/stasis_provenance.json"
   printf 'stasis_sources=0\n'
