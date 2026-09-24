@@ -469,6 +469,7 @@ jobs:
             )
             New-Item -ItemType Directory -Force -Path "cli-smoke/assets" | Out-Null
             Set-Content -Path "cli-smoke/assets/manifest.json" -Encoding ASCII -Value '{"schema":"stasis-assets","version":1,"assets":[]}'
+            python (Join-Path $checkoutRoot "tools/ci/add_smoke_android_launcher.py") cli-smoke
             .\stasis.exe --workspace cli-smoke package --target desktop
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe")) { throw "game package runner missing" }
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis.json")) { throw "game package manifest missing" }
@@ -583,6 +584,7 @@ jobs:
             'function render(): i32 { return 0; }' > cli-smoke/src/main.stasis
           mkdir -p cli-smoke/assets
           printf '%s\n' '{"schema":"stasis-assets","version":1,"assets":[]}' > cli-smoke/assets/manifest.json
+          python3 "${repo_root}/tools/ci/add_smoke_android_launcher.py" cli-smoke
           ./bin/stasis --workspace cli-smoke package --target desktop
           ./bin/stasis --workspace cli-smoke package-mobile --target android-arm64 --out dist/android
           ./bin/stasis --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios

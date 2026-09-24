@@ -473,6 +473,30 @@ class AndroidReleaseBoundaryTest(unittest.TestCase):
                     android_release.finalize(args)
             self.assertFalse(output.exists())
 
+    def test_release_missing_compiled_launcher_aborts_before_publish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.apk"
+            self.write_package(source)
+            manifest, provenance = self.write_manifest(root, development_build=False)
+            output = root / "artifacts" / "stasis-release.apk"
+            receipt = root / "artifacts" / "stasis-release.receipt.json"
+            args = self.finalize_args(
+                source, manifest, provenance, output, receipt,
+                variant="release", unsigned_release=True,
+            )
+            with patch("tools.android_release.find_sdk_tool", return_value="tool"), patch(
+                "tools.android_release._inspect_apk_details",
+                return_value=(False, "1", "1.0", "com.example.game"),
+            ), patch("tools.android_release.ensure_unsigned"), patch(
+                "tools.android_release.verify_compiled_launcher",
+                side_effect=ValueError("compiled Android application is missing android:icon"),
+            ):
+                with self.assertRaisesRegex(ValueError, "missing android:icon"):
+                    android_release.finalize(args)
+            self.assertFalse(output.exists())
+            self.assertFalse(receipt.exists())
+
     def test_unsigned_release_finalize_is_explicit_handoff(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -495,8 +519,11 @@ class AndroidReleaseBoundaryTest(unittest.TestCase):
             with patch("tools.android_release.find_sdk_tool", return_value="tool"), patch(
                 "tools.android_release._inspect_apk_details",
                 return_value=(False, "1", "1.0", "com.example.game"),
-            ), patch("tools.android_release.ensure_unsigned") as unsigned:
+            ), patch("tools.android_release.ensure_unsigned") as unsigned, patch(
+                "tools.android_release.verify_compiled_launcher"
+            ) as launcher:
                 result = android_release.finalize(args)
+            launcher.assert_called_once()
             unsigned.assert_called_once()
             self.assertEqual(result["signing_mode"], "unsigned-release")
             self.assertIsNone(result["signer_sha256"])
@@ -580,7 +607,9 @@ class AndroidReleaseBoundaryTest(unittest.TestCase):
                 "tools.android_release.run_tool", return_value=badging
             ), patch(
                 "tools.android_release.inspect_apk", return_value=(False, "7", "1.2.3")
-            ), patch("tools.android_release.verify_apk_signer", return_value=signer):
+            ), patch("tools.android_release.verify_apk_signer", return_value=signer), patch(
+                "tools.android_release.verify_compiled_launcher"
+            ):
                 with self.assertRaisesRegex(android_release.ReleaseError, "artifact digest"):
                     android_release.verify(arguments)
 

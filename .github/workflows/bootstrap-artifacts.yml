@@ -261,6 +261,7 @@ jobs:
           )
           New-Item -ItemType Directory -Force -Path "cli-smoke/assets" | Out-Null
           Set-Content -Path "cli-smoke/assets/manifest.json" -Encoding ASCII -Value '{"schema":"stasis-assets","version":1,"assets":[]}'
+          python (Join-Path $env:GITHUB_WORKSPACE "tools/ci/add_smoke_android_launcher.py") cli-smoke
           if ("${{ github.event_name }}" -eq "workflow_dispatch") {
             .\stasis.exe --workspace cli-smoke package --target desktop --development-build
           } else {
@@ -328,6 +329,7 @@ jobs:
             'function render(): i32 { return 0; }' > cli-smoke/src/main.stasis
           mkdir -p cli-smoke/assets
           printf '%s\n' '{"schema":"stasis-assets","version":1,"assets":[]}' > cli-smoke/assets/manifest.json
+          python3 "${GITHUB_WORKSPACE}/tools/ci/add_smoke_android_launcher.py" cli-smoke
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             package_flag=(--development-build)
           else

@@ -18,6 +18,7 @@
     <application
         android:allowBackup="false"
         android:appCategory="game"
+@STASIS_ANDROID_ICON_ATTRIBUTES@
         android:label="@STASIS_APP_NAME@"
         android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
         <property

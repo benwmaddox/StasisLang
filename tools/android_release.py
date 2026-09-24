@@ -21,6 +21,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.ci.check_android_release_package import validate as validate_contents
+from tools.ci.check_android_launcher_icon import verify_compiled_launcher
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 
@@ -678,6 +679,10 @@ def finalize(args: argparse.Namespace) -> dict[str, object]:
                 signer_digest = verify_aab_signer(
                     staged, jarsigner, find_sdk_tool("keytool", args.keytool)
                 )
+        if not expected_development:
+            verify_compiled_launcher(
+                staged, aapt=args.aapt, bundletool=args.bundletool, java=args.java
+            )
         if debuggable is not expected_development:
             raise ReleaseError(
                 f"{args.variant} artifact reported debuggable={str(debuggable).lower()}"
@@ -792,6 +797,7 @@ def verify(args: argparse.Namespace) -> dict[str, object]:
         raise ReleaseError("production Android releases require the arm64-v8a ABI")
     validate_contents(artifact, abi, args.required_asset)
     aapt = find_sdk_tool("aapt", args.aapt)
+    verify_compiled_launcher(artifact, aapt=aapt)
     badging = run_tool([aapt, "dump", "badging", str(artifact)]).stdout
     package_match = re.search(r"^package:\s+name='([^']+)'", badging, re.M)
     if not package_match:

@@ -936,6 +936,8 @@ struct AndroidProjectManifest {
     orientation: String,
     version_code: u32,
     version_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launcher_resources: Option<String>,
 }
 
 impl ProjectManifest {
@@ -1046,6 +1048,9 @@ impl ProjectManifest {
                 })
             {
                 return Err("android version_name is invalid".to_string());
+            }
+            if let Some(path) = android.launcher_resources.as_deref() {
+                validate_relative_path("android.launcher_resources", Path::new(path))?;
             }
         }
         if let Some(web) = &self.web {
@@ -7076,6 +7081,443 @@ fn android_ndk_clang(executable: &str) -> Option<PathBuf> {
     cmd_path.is_file().then_some(cmd_path)
 }
 
+const ANDROID_LAUNCHER_DENSITIES: [&str; 5] = ["mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"];
+const ANDROID_LAUNCHER_ADAPTIVE_XML: &str = "mipmap-anydpi-v26/ic_launcher.xml";
+#[cfg(test)]
+const ANDROID_LAUNCHER_FOREGROUND_NAME: &str = "stasis_icon_foreground";
+
+fn stage_android_launcher_resources(
+    workspace: &Workspace,
+    staging_root: &Path,
+    development_build: bool,
+) -> Result<Option<String>, String> {
+    let configured = workspace
+        .manifest
+        .android
+        .as_ref()
+        .and_then(|android| android.launcher_resources.as_deref());
+    let Some(relative) = configured else {
+        if development_build {
+            return Ok(None);
+        }
+        return Err(
+            "release Android packaging requires android.launcher_resources with complete launcher icon resources"
+                .to_string(),
+        );
+    };
+    let relative_path = Path::new(relative);
+    validate_relative_path("android.launcher_resources", relative_path)?;
+    let workspace_root = workspace
+        .root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve workspace root: {error}"))?;
+    let source = workspace.root.join(relative_path);
+    validate_android_resource_path_components(&workspace_root, relative_path)?;
+    let source_root = source.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve android.launcher_resources {}: {error}",
+            source.display()
+        )
+    })?;
+    if !source_root.starts_with(&workspace_root) {
+        return Err("android.launcher_resources resolves outside the workspace".to_string());
+    }
+    validate_android_resource_tree(&workspace_root, &source)?;
+
+    for density in ANDROID_LAUNCHER_DENSITIES {
+        validate_android_launcher_png(
+            &workspace_root,
+            &source.join(format!("mipmap-{density}/ic_launcher.png")),
+        )?;
+    }
+    let adaptive_icon = source.join(ANDROID_LAUNCHER_ADAPTIVE_XML);
+    let adaptive_xml = fs::read_to_string(&adaptive_icon).map_err(|error| {
+        format!(
+            "failed to read Android adaptive launcher icon {}: {error}",
+            adaptive_icon.display()
+        )
+    })?;
+    let foreground_name = android_adaptive_icon_foreground(&adaptive_xml).ok_or_else(|| {
+        format!(
+            "Android adaptive launcher icon must reference a drawable foreground resource: {}",
+            adaptive_icon.display()
+        )
+    })?;
+    validate_android_launcher_foreground(&workspace_root, &source, foreground_name)?;
+
+    let destination = staging_root.join("android/app/src/main/res");
+    copy_android_launcher_resource_tree(&workspace_root, &source, &destination)?;
+    Ok(Some(relative.to_string()))
+}
+
+fn android_adaptive_icon_foreground(xml: &str) -> Option<&str> {
+    let adaptive_start = xml.find("<adaptive-icon")?;
+    let after_name = xml
+        .as_bytes()
+        .get(adaptive_start + "<adaptive-icon".len())?;
+    if !matches!(after_name, b' ' | b'\t' | b'\r' | b'\n' | b'>')
+        || !xml.contains("</adaptive-icon>")
+        || !xml.contains("xmlns:android=\"http://schemas.android.com/apk/res/android\"")
+    {
+        return None;
+    }
+    let start = xml.find("<foreground")?;
+    let end = xml[start..].find('>')? + start;
+    let tag = &xml[start..end];
+    let attribute = "android:drawable";
+    let attribute_start = tag.find(attribute)? + attribute.len();
+    let value = tag[attribute_start..]
+        .trim_start()
+        .strip_prefix('=')?
+        .trim_start();
+    let value = value.strip_prefix('"')?;
+    let name = value.strip_prefix("@drawable/")?.split('"').next()?;
+    let mut bytes = name.bytes();
+    if !bytes.next().is_some_and(|byte| byte.is_ascii_lowercase())
+        || !bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return None;
+    }
+    Some(name)
+}
+
+fn validate_android_launcher_foreground(
+    workspace_root: &Path,
+    resource_root: &Path,
+    name: &str,
+) -> Result<(), String> {
+    let mut directories = fs::read_dir(resource_root)
+        .map_err(|error| {
+            format!(
+                "failed to read Android resources {}: {error}",
+                resource_root.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            format!(
+                "failed to enumerate Android resources {}: {error}",
+                resource_root.display()
+            )
+        })?;
+    directories.sort_by_key(|entry| entry.file_name());
+    let mut found = false;
+    for directory in directories {
+        let file_type = directory.file_type().map_err(|error| {
+            format!("failed to inspect {}: {error}", directory.path().display())
+        })?;
+        let folder_name = directory.file_name().to_string_lossy().into_owned();
+        if !file_type.is_dir()
+            || !(folder_name == "drawable" || folder_name.starts_with("drawable-"))
+        {
+            continue;
+        }
+        for extension in ["png", "webp", "jpg", "jpeg", "xml"] {
+            let path = directory.path().join(format!("{name}.{extension}"));
+            if !path.exists() {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                format!(
+                    "failed to inspect launcher foreground {}: {error}",
+                    path.display()
+                )
+            })?;
+            if metadata.file_type().is_symlink()
+                || metadata_is_reparse_point(&metadata)
+                || !metadata.is_file()
+            {
+                return Err(format!(
+                    "Android adaptive launcher foreground must be a regular resource file: {}",
+                    path.display()
+                ));
+            }
+            let resolved = path.canonicalize().map_err(|error| {
+                format!(
+                    "failed to resolve launcher foreground {}: {error}",
+                    path.display()
+                )
+            })?;
+            if !resolved.starts_with(workspace_root) {
+                return Err(format!(
+                    "Android adaptive launcher foreground resolves outside the workspace: {}",
+                    path.display()
+                ));
+            }
+            match extension {
+                "png" => validate_android_launcher_png(workspace_root, &path)?,
+                "webp" => {
+                    let bytes = fs::read(&path).map_err(|error| {
+                        format!(
+                            "failed to read launcher foreground {}: {error}",
+                            path.display()
+                        )
+                    })?;
+                    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+                        return Err(format!(
+                            "invalid Android launcher foreground image: {}",
+                            path.display()
+                        ));
+                    }
+                }
+                "jpg" | "jpeg" => {
+                    let bytes = fs::read(&path).map_err(|error| {
+                        format!(
+                            "failed to read launcher foreground {}: {error}",
+                            path.display()
+                        )
+                    })?;
+                    if bytes.len() < 3 || !bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+                        return Err(format!(
+                            "invalid Android launcher foreground image: {}",
+                            path.display()
+                        ));
+                    }
+                }
+                "xml" => {
+                    let body = fs::read_to_string(&path).map_err(|error| {
+                        format!(
+                            "failed to read launcher foreground {}: {error}",
+                            path.display()
+                        )
+                    })?;
+                    if !body.trim_start().starts_with('<') || !body.contains('>') {
+                        return Err(format!(
+                            "invalid Android launcher foreground drawable XML: {}",
+                            path.display()
+                        ));
+                    }
+                }
+                _ => unreachable!(),
+            }
+            found = true;
+        }
+    }
+    if found {
+        Ok(())
+    } else {
+        Err(format!(
+            "Android adaptive launcher foreground @drawable/{name} is missing from drawable/ or drawable-* resources"
+        ))
+    }
+}
+
+fn validate_android_resource_path_components(
+    workspace_root: &Path,
+    relative: &Path,
+) -> Result<(), String> {
+    let mut current = workspace_root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(
+                "android.launcher_resources must be a project-relative resource directory"
+                    .to_string(),
+            );
+        };
+        current.push(name);
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            format!(
+                "failed to inspect android.launcher_resources path {}: {error}",
+                current.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+            return Err(format!(
+                "android.launcher_resources cannot contain symlinks or reparse points: {}",
+                current.display()
+            ));
+        }
+        if !metadata.is_dir() {
+            return Err(format!(
+                "android.launcher_resources must name a directory: {}",
+                current.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_android_resource_tree(workspace_root: &Path, directory: &Path) -> Result<(), String> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| {
+            format!(
+                "failed to read Android resource directory {}: {error}",
+                directory.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            format!(
+                "failed to enumerate Android resource directory {}: {error}",
+                directory.display()
+            )
+        })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            format!(
+                "failed to inspect Android resource {}: {error}",
+                path.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+            return Err(format!(
+                "Android launcher resources cannot contain symlinks or reparse points: {}",
+                path.display()
+            ));
+        }
+        let resolved = path.canonicalize().map_err(|error| {
+            format!(
+                "failed to resolve Android resource {}: {error}",
+                path.display()
+            )
+        })?;
+        if !resolved.starts_with(workspace_root) {
+            return Err(format!(
+                "Android launcher resource resolves outside the workspace: {}",
+                path.display()
+            ));
+        }
+        if metadata.is_dir() {
+            validate_android_resource_tree(workspace_root, &path)?;
+        } else if !metadata.is_file() {
+            return Err(format!(
+                "unsupported Android launcher resource: {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_android_launcher_png(workspace_root: &Path, path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "required Android launcher PNG is missing or invalid at {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink()
+        || metadata_is_reparse_point(&metadata)
+        || !metadata.is_file()
+    {
+        return Err(format!(
+            "required Android launcher resource must be a regular PNG file: {}",
+            path.display()
+        ));
+    }
+    let resolved = path.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve Android launcher PNG {}: {error}",
+            path.display()
+        )
+    })?;
+    if !resolved.starts_with(workspace_root) {
+        return Err(format!(
+            "Android launcher PNG resolves outside the workspace: {}",
+            path.display()
+        ));
+    }
+    let bytes = fs::read(path).map_err(|error| {
+        format!(
+            "failed to read Android launcher PNG {}: {error}",
+            path.display()
+        )
+    })?;
+    if bytes.len() < 24
+        || !bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || &bytes[12..16] != b"IHDR"
+        || u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) == 0
+        || u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]) == 0
+    {
+        return Err(format!(
+            "required Android launcher resource is not a valid PNG file: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+fn copy_android_launcher_resource_tree(
+    workspace_root: &Path,
+    source: &Path,
+    destination: &Path,
+) -> Result<(), String> {
+    fs::create_dir_all(destination).map_err(|error| {
+        format!(
+            "failed to create Android resources {}: {error}",
+            destination.display()
+        )
+    })?;
+    let mut entries = fs::read_dir(source)
+        .map_err(|error| {
+            format!(
+                "failed to read Android resource directory {}: {error}",
+                source.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            format!(
+                "failed to enumerate Android resource directory {}: {error}",
+                source.display()
+            )
+        })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let from = entry.path();
+        let to = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&from).map_err(|error| {
+            format!(
+                "failed to inspect Android resource {}: {error}",
+                from.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+            return Err(format!(
+                "Android launcher resources cannot contain symlinks or reparse points: {}",
+                from.display()
+            ));
+        }
+        let resolved = from.canonicalize().map_err(|error| {
+            format!(
+                "failed to resolve Android resource {}: {error}",
+                from.display()
+            )
+        })?;
+        if !resolved.starts_with(workspace_root) {
+            return Err(format!(
+                "Android launcher resource resolves outside the workspace: {}",
+                from.display()
+            ));
+        }
+        if metadata.is_dir() {
+            copy_android_launcher_resource_tree(workspace_root, &from, &to)?;
+        } else if metadata.is_file() {
+            copy_file(&from, &to)?;
+        } else {
+            return Err(format!(
+                "unsupported Android launcher resource: {}",
+                from.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn assemble_mobile_shell(
     workspace: &Workspace,
     target: PackageTarget,
@@ -7126,6 +7568,20 @@ fn assemble_mobile_shell(
     let app_name = android_manifest
         .map(|manifest| manifest.label.as_str())
         .unwrap_or(workspace.manifest.name.as_str());
+    let android_launcher_resources = if target.is_android() {
+        stage_android_launcher_resources(
+            workspace,
+            staging_root,
+            provenance["development_build"].as_bool() == Some(true),
+        )?
+    } else {
+        None
+    };
+    let android_icon_attributes = if android_launcher_resources.is_some() {
+        "        android:icon=\"@mipmap/ic_launcher\"\n        android:roundIcon=\"@mipmap/ic_launcher\""
+    } else {
+        ""
+    };
     let android_orientation = android_manifest
         .map(|manifest| manifest.orientation.as_str())
         .unwrap_or("sensorLandscape");
@@ -7172,6 +7628,7 @@ fn assemble_mobile_shell(
     };
     let replacements = [
         ("@STASIS_APP_NAME@", app_name),
+        ("@STASIS_ANDROID_ICON_ATTRIBUTES@", android_icon_attributes),
         ("@STASIS_PACKAGE_ID@", package_id.as_str()),
         ("@STASIS_JNI_PACKAGE@", jni_package.as_str()),
         ("@STASIS_ASSET_BASE@", "."),
@@ -7284,6 +7741,7 @@ fn assemble_mobile_shell(
             "aot_manifest": "aot/mobile_aot_bundle_manifest.json",
             "provenance": PACKAGE_PROVENANCE_NAME,
             "development_build": provenance["development_build"],
+            "android_launcher_resources": android_launcher_resources,
             "assets": match target {
                 PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
                     "android/app/src/main/assets/stasis_game"
@@ -10681,6 +11139,47 @@ mod tests {
         ))
     }
 
+    fn create_android_launcher_resources(project_root: &Path) -> String {
+        let relative = "launcher-res";
+        let root = project_root.join(relative);
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01";
+        for density in ANDROID_LAUNCHER_DENSITIES {
+            let path = root.join(format!("mipmap-{density}/ic_launcher.png"));
+            fs::create_dir_all(path.parent().unwrap()).expect("create launcher density");
+            fs::write(path, png).expect("write launcher PNG");
+        }
+        let foreground = root.join(format!(
+            "drawable-xxxhdpi/{ANDROID_LAUNCHER_FOREGROUND_NAME}.png"
+        ));
+        fs::create_dir_all(foreground.parent().unwrap()).expect("create launcher drawable");
+        fs::write(foreground, png).expect("write launcher foreground");
+        let adaptive = root.join(ANDROID_LAUNCHER_ADAPTIVE_XML);
+        fs::create_dir_all(adaptive.parent().unwrap()).expect("create adaptive icon directory");
+        fs::write(
+            adaptive,
+            r#"<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android"><foreground android:drawable="@drawable/stasis_icon_foreground"/></adaptive-icon>"#,
+        )
+        .expect("write adaptive icon");
+        relative.to_string()
+    }
+
+    fn android_test_workspace(root: &Path, launcher_resources: Option<String>) -> Workspace {
+        Workspace {
+            root: root.to_path_buf(),
+            manifest: ProjectManifest {
+                android: Some(AndroidProjectManifest {
+                    application_id: "org.example.launcher".to_string(),
+                    label: "Launcher Test".to_string(),
+                    orientation: "sensorLandscape".to_string(),
+                    version_code: 3,
+                    version_name: "1.2.3".to_string(),
+                    launcher_resources,
+                }),
+                ..ProjectManifest::new("launcher_test".to_string())
+            },
+        }
+    }
+
     pub(super) fn remove_temp(path: &Path) {
         let _ = fs::remove_dir_all(path);
     }
@@ -12241,6 +12740,7 @@ mod tests {
                     orientation: "fullSensor".to_string(),
                     version_code: 7,
                     version_name: "2.1.0".to_string(),
+                    launcher_resources: None,
                 }),
                 ..ProjectManifest::new("mobile_smoke".to_string())
             },
@@ -12295,6 +12795,7 @@ mod tests {
         assert!(android_manifest.contains("android:mimeType=\"application/octet-stream\""));
         assert!(android_manifest.matches("android:value=\"false\"").count() >= 2);
         assert!(android_manifest.contains("android:label=\"Mobile Smoke\""));
+        assert!(!android_manifest.contains("android:icon="));
         assert!(android_manifest.contains("android:screenOrientation=\"fullSensor\""));
         assert!(!android_manifest.contains("android.permission.INTERNET"));
         assert!(!android_manifest.contains("PROVISION_NETWORK_CLIENT"));
@@ -13049,6 +13550,159 @@ mod tests {
     }
 
     #[test]
+    fn android_release_requires_complete_launcher_resources_and_development_can_omit_them() {
+        let root = temp_dir("android_launcher_contract");
+        fs::create_dir_all(&root).expect("create launcher project root");
+        let unbranded = android_test_workspace(&root, None);
+        let error =
+            stage_android_launcher_resources(&unbranded, &root.join("release-staging"), false)
+                .expect_err("release packaging must require launcher resources");
+        assert!(error.contains("requires android.launcher_resources"));
+
+        assert_eq!(
+            stage_android_launcher_resources(&unbranded, &root.join("development-staging"), true,)
+                .expect("iconless development smoke package"),
+            None
+        );
+
+        let relative = create_android_launcher_resources(&root);
+        let branded = android_test_workspace(&root, Some(relative.clone()));
+        let staged = root.join("branded-staging");
+        let resolved = stage_android_launcher_resources(&branded, &staged, false)
+            .expect("complete release resources")
+            .expect("configured launcher resources");
+        assert_eq!(resolved, relative);
+        for density in ANDROID_LAUNCHER_DENSITIES {
+            let resource = format!("mipmap-{density}/ic_launcher.png");
+            assert!(staged
+                .join("android/app/src/main/res")
+                .join(&resource)
+                .is_file());
+        }
+        assert!(staged
+            .join("android/app/src/main/res")
+            .join(ANDROID_LAUNCHER_ADAPTIVE_XML)
+            .is_file());
+        assert!(staged
+            .join("android/app/src/main/res")
+            .join(format!(
+                "drawable-xxxhdpi/{ANDROID_LAUNCHER_FOREGROUND_NAME}.png"
+            ))
+            .is_file());
+
+        fs::remove_file(root.join(&relative).join("mipmap-xhdpi/ic_launcher.png"))
+            .expect("remove required density icon");
+        let missing_density = stage_android_launcher_resources(
+            &branded,
+            &root.join("missing-density-staging"),
+            false,
+        )
+        .expect_err("missing density icon must fail");
+        assert!(missing_density.contains("required Android launcher PNG"));
+
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn android_launcher_resources_reject_invalid_xml_and_project_escape() {
+        let root = temp_dir("android_launcher_invalid");
+        fs::create_dir_all(&root).expect("create launcher project root");
+        let relative = create_android_launcher_resources(&root);
+        let workspace = android_test_workspace(&root, Some(relative.clone()));
+        let adaptive = root.join(relative).join(ANDROID_LAUNCHER_ADAPTIVE_XML);
+        fs::write(
+            &adaptive,
+            r#"<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android"><foreground android:drawable="@drawable/wrong_name"/></adaptive-icon>"#,
+        )
+        .expect("write invalid adaptive icon");
+        let error =
+            stage_android_launcher_resources(&workspace, &root.join("invalid-staging"), false)
+                .expect_err("invalid foreground reference must fail");
+        assert!(
+            error.contains("Android adaptive launcher foreground @drawable/wrong_name is missing")
+        );
+
+        let mut escaping = workspace;
+        escaping
+            .manifest
+            .android
+            .as_mut()
+            .expect("Android config")
+            .launcher_resources = Some("../outside".to_string());
+        assert!(escaping.manifest.validate().is_err());
+
+        remove_temp(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn android_launcher_resources_reject_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("android_launcher_symlink");
+        fs::create_dir_all(&root).expect("create launcher project root");
+        let outside = temp_dir("android_launcher_outside");
+        fs::create_dir_all(&outside).expect("create external launcher directory");
+        let link = root.join("launcher-link");
+        symlink(&outside, &link).expect("create launcher resource symlink");
+        let workspace = android_test_workspace(&root, Some("launcher-link".to_string()));
+        let error =
+            stage_android_launcher_resources(&workspace, &root.join("symlink-staging"), false)
+                .expect_err("symlink escape must fail");
+        assert!(error.contains("symlinks or reparse points"));
+        remove_temp(&root);
+        remove_temp(&outside);
+    }
+
+    #[test]
+    fn android_shell_copies_branded_icons_and_sets_manifest_attributes() {
+        let root = temp_dir("android_launcher_assembly");
+        let aot = root.join("aot");
+        fs::create_dir_all(aot.join("apk_assets/stasis_game/assets"))
+            .expect("create Android AOT assets");
+        fs::write(
+            aot.join("apk_assets/stasis_game/assets/manifest.json"),
+            r#"{"schema":"stasis-assets","version":1,"assets":[]}"#,
+        )
+        .expect("write Android asset manifest");
+        let relative = create_android_launcher_resources(&root);
+        let workspace = android_test_workspace(&root, Some(relative.clone()));
+        let staging = root.join("android-package");
+        fs::create_dir_all(&staging).expect("create Android staging");
+        let provenance = local_provenance(true).expect("development provenance");
+        assemble_mobile_shell(
+            &workspace,
+            PackageTarget::AndroidArm64,
+            &aot,
+            &staging,
+            &provenance,
+            None,
+        )
+        .expect("assemble branded Android shell");
+
+        let manifest = fs::read_to_string(staging.join("android/app/src/main/AndroidManifest.xml"))
+            .expect("read assembled Android manifest");
+        assert!(manifest.contains("android:icon=\"@mipmap/ic_launcher\""));
+        assert!(manifest.contains("android:roundIcon=\"@mipmap/ic_launcher\""));
+        assert!(!manifest.contains("\\n"));
+        assert!(manifest.contains("android:label=\"Launcher Test\""));
+        assert!(manifest.contains("android:screenOrientation=\"sensorLandscape\""));
+        assert!(staging
+            .join("android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png")
+            .is_file());
+        let receipt: Value = serde_json::from_str(
+            &fs::read_to_string(staging.join("stasis_mobile_package.json"))
+                .expect("read package receipt"),
+        )
+        .expect("parse package receipt");
+        assert_eq!(receipt["android_launcher_resources"], relative);
+        assert_eq!(receipt["package_id"], "org.example.launcher");
+        assert_eq!(receipt["app_name"], "Launcher Test");
+
+        remove_temp(&root);
+    }
+
+    #[test]
     fn prepare_is_a_noop_without_toolchain_stdlib() {
         let root = temp_dir("prepare_noop");
         create_project(root.clone(), "demo".to_string()).expect("create project");
@@ -13071,6 +13725,7 @@ mod tests {
                 orientation: "unspecified".to_string(),
                 version_code: 1,
                 version_name: "1.0.0".to_string(),
+                launcher_resources: None,
             }),
             ..ProjectManifest::new("example_game".to_string())
         };
