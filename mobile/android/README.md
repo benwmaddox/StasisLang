@@ -27,19 +27,30 @@ Android has two products: the general-purpose `com.stasislang.workshop` app in t
 
 Each game owns its published identity in `stasis.json`. Pong declares `com.stasislang.pong`, `Stasis Pong`, landscape orientation, and its version there. `stasis package-mobile` compiles the game AOT and fills the generic shell with that identity, the shared runtime, and only the declared release assets. The result excludes Workshop UI, source, tests, compiler/JIT, Codex, and writable project files.
 
-Build Pong as an Android App Bundle with:
+Build an Android App Bundle for a game that supplies its own launcher resources with:
 
 ```powershell
-.\build_release.ps1
+.\build_release.ps1 -ProjectDir path/to/game -BundletoolPath path/to/bundletool-all.jar
 ```
 
 Build and install a debug-signed APK for device testing with:
 
 ```powershell
-.\build_release.ps1 -Install
+.\build_release.ps1 -ProjectDir path/to/game -Install -DevelopmentBuild
 ```
 
-Pass `-ProjectDir` for another game. The project must contain a valid `stasis.json` and Android release metadata. `-StasisPath` selects an installed official CLI; add `-DevelopmentBuild` only when that executable came from a source checkout. The script validates the APK/AAB contents, ABI, assets, and absence of Workshop/development payload before reporting success. The release AAB is unsigned until signing is configured; `-Install` uses Android's debug signing for device acceptance. In either Workshop or a released game, a three-finger tap toggles the rolling tick/render timing overlay.
+`android.launcher_resources` in the game's `stasis.json` names its own Android
+`res` tree with five legacy density icons, adaptive icon XML, and foreground
+art. Production packaging fails when the setting or required files are absent;
+there is no generic fallback artwork. The bundled Pong Workshop sample currently
+has no authored launcher art, so the script's default project is suitable only
+for an explicit `-DevelopmentBuild -Install` smoke run until Pong art is added.
+Pass `-StasisPath` for an installed official CLI; without it, the script builds
+the CLI locally. Production AAB validation needs official bundletool through
+`-BundletoolPath` or `BUNDLETOOL_PATH`. The script checks compiled icon resources,
+ABI, assets, and absence of Workshop/development payload before reporting
+success. In either Workshop or a released game, a three-finger tap toggles the
+rolling tick/render timing overlay.
 ## Build
 
 Prerequisites:

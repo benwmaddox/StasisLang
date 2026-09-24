@@ -7,7 +7,8 @@ param(
     [switch]$DevelopmentBuild,
     [string]$GradlePath = "",
     [string]$Sdl3Source = "",
-    [string]$Sdl3ImageSource = ""
+    [string]$Sdl3ImageSource = "",
+    [string]$BundletoolPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,8 +51,12 @@ try {
         if ($DevelopmentBuild) { $packageArguments += "--development-build" }
         & $stasis @packageArguments
     } else {
-        cargo run -p stasis -- --workspace $project package-mobile --target android-arm64 `
-            --out $relativeOutput --development-build
+        $packageArguments = @(
+            "--workspace", $project,
+            "package-mobile", "--target", "android-arm64", "--out", $relativeOutput
+        )
+        if ($DevelopmentBuild) { $packageArguments += "--development-build" }
+        cargo run -p stasis -- @packageArguments
     }
     if ($LASTEXITCODE -ne 0) {
         throw "Stasis release packaging failed with exit code $LASTEXITCODE"
@@ -103,5 +108,16 @@ python (Join-Path $repoRoot "tools/ci/check_android_release_package.py") `
     $package --abi arm64-v8a --required-asset $RequiredAsset
 if ($LASTEXITCODE -ne 0) {
     throw "Android release package validation failed with exit code $LASTEXITCODE"
+}
+if (-not $DevelopmentBuild -and -not $Install) {
+    $bundletool = if ($BundletoolPath) { $BundletoolPath } else { $env:BUNDLETOOL_PATH }
+    if (-not $bundletool -or -not (Test-Path -LiteralPath $bundletool -PathType Leaf)) {
+        throw "AAB launcher validation requires -BundletoolPath or BUNDLETOOL_PATH"
+    }
+    python (Join-Path $repoRoot "tools/ci/check_android_launcher_icon.py") `
+        $package --bundletool $bundletool
+    if ($LASTEXITCODE -ne 0) {
+        throw "Android launcher icon validation failed with exit code $LASTEXITCODE"
+    }
 }
 Write-Output "Android release package: $package"

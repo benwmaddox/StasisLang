@@ -15,9 +15,9 @@ optimized release behavior. `--development-build` explicitly selects development
 `release_provenance.md` for the manifest and repinning contract.
 
 `stasis.json` supplies the entry source. Its optional Android object supplies
-`application_id`, `label`, `orientation`, `version_code`, and `version_name`;
-those values become the generated app's package, title, activity orientation,
-and release version. Use `--entry path/to/main.stasis` to
+`application_id`, `label`, `orientation`, `version_code`, `version_name`, and
+`launcher_resources`; those values become the generated app's package, title,
+activity orientation, release version, and launcher artwork. Use `--entry path/to/main.stasis` to
 select another project-relative import root and `--out path` to select a new,
 nonexistent output directory. Packaging is atomic: compiler or file failures do
 not publish a partial app project.
@@ -28,13 +28,34 @@ not publish a partial app project.
   "label": "Example Game",
   "orientation": "sensorLandscape",
   "version_code": 1,
-  "version_name": "1.0.0"
+  "version_name": "1.0.0",
+  "launcher_resources": "branding/android/res"
 }
 ```
 
 `orientation` accepts `unspecified`, `sensorLandscape`, `sensorPortrait`, or
 Android's `fullSensor`. Use `fullSensor` when the app owns responsive logical
 canvases for all four physical device rotations.
+
+Production Android packaging requires `android.launcher_resources`, a project-relative
+Android `res` directory owned by the game. It must contain
+`mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png`,
+`mipmap-anydpi-v26/ic_launcher.xml`, and a bundled drawable referenced by
+its `<foreground>` element (for example `drawable-xxxhdpi/icon_foreground.png`). The game must supply its own art; the generic Stasis shell has no
+fallback launcher icon. Explicit `--development-build` may omit the setting for
+smoke builds. The generated manifest uses `@mipmap/ic_launcher` for both
+`android:icon` and `android:roundIcon` when resources are supplied, and the
+package receipt records the resource path. Packaging rejects incomplete or
+escaping resource trees before publishing its output.
+
+The release boundary validates the compiled APK or AAB resource table and
+manifest, including all five legacy density variants and the adaptive icon.
+For an APK, run `python tools/ci/check_android_launcher_icon.py game.apk`
+with Android SDK `aapt` available. For an AAB, pass
+`--bundletool path/to/bundletool-all.jar` or set `BUNDLETOOL_PATH` to the
+official bundletool JAR. `mobile/android/build_release.ps1` applies this gate to
+production AABs, as does `tools/android_release.py` during release finalization
+and APK receipt verification.
 
 Each output contains the same pieces:
 
