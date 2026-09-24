@@ -15,7 +15,7 @@ const ROOTS: &[&str] = &[
     "trap_negative_entry",
     "trap_upper_entry",
 ];
-const EXPECTED: i32 = 140;
+const EXPECTED: i32 = 146;
 const TRAP_CHILD: &str = "STASIS_LOCAL_FIXED_ARRAY_TRAP_CHILD";
 #[cfg(windows)]
 const WINDOWS_ILLEGAL_INSTRUCTION: i32 = 0xC000001D_u32 as i32;
@@ -238,7 +238,7 @@ fn local_fixed_arrays_match_jit_linked_aot_and_executable_wasm() {
         "Node failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "140,140,true,true");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "146,146,true,true");
 }
 
 #[test]

@@ -5381,6 +5381,19 @@ fn encode_owned_fixed_array_store_for_index(
         sleb(offset as i32, out);
         out.extend([0x46, 0x04, 0x40, 0x20]);
         uleb(value_local, out);
+        match owned.element_type {
+            TYPE_ID_U8 => {
+                out.push(0x41);
+                sleb(0xff, out);
+                out.push(0x71);
+            }
+            TYPE_ID_U16 => {
+                out.push(0x41);
+                sleb(0xffff, out);
+                out.push(0x71);
+            }
+            _ => {}
+        }
         out.push(0x21);
         uleb(owned.element_start + offset, out);
         out.push(0x0b);

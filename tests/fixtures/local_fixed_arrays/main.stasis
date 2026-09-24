@@ -53,6 +53,23 @@ function caller_backed_view_score(): i32 {
     return mutate_caller_backed_view(caller_backed_values);
 }
 
+function narrow_lane_score(): i32 {
+    let bytes: u8[2];
+    let words: u16[2];
+    bytes[0] = 255;
+    bytes[0] += 1;
+    bytes[1] = 255;
+    bytes[1] += 2;
+    words[0] = 65535;
+    words[0] += 1;
+    words[1] = 65535;
+    words[1] += 2;
+    if (bytes[0] != 0 || bytes[1] != 1 || words[0] != 0 || words[1] != 1) {
+        return -6000;
+    }
+    return 6;
+}
+
 function local_array_feature_score(): i32 {
     let dynamic_values: i32[9];
     dynamic_index_calls = 0;
@@ -98,7 +115,7 @@ function local_array_feature_score(): i32 {
 }
 
 function main(): i32 {
-    return local_array_score(2, 4) + local_array_score(0, 9) + local_array_feature_score() + caller_backed_view_score();
+    return local_array_score(2, 4) + local_array_score(0, 9) + local_array_feature_score() + caller_backed_view_score() + narrow_lane_score();
 }
 
 function tick(): i32 {

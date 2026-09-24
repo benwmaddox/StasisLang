@@ -11,7 +11,7 @@ import tempfile
 from pathlib import Path
 
 
-EXPECTED = 140
+EXPECTED = 146
 
 
 def run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
