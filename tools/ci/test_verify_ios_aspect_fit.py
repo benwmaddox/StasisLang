@@ -131,6 +131,7 @@ class VerifyIosAspectFitTests(unittest.TestCase):
         self.assertIn("simulator-evidence.json", workflow)
         self.assertIn("ios-arm64_x86_64-simulator", script)
         self.assertNotIn("-sdk iphonesimulator -arch arm64", script)
+        self.assertNotIn("-destination 'generic/platform=iOS Simulator'", script)
         self.assertIn('lipo "${simulator_executable}" -verify_arch arm64', script)
         self.assertIn("ARCHS = arm64", project)
         self.assertIn("ios_aspect_fit_bindings.c", script)
