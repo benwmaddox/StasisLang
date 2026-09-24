@@ -118,10 +118,21 @@ class VerifyIosAspectFitTests(unittest.TestCase):
         script = (ROOT / "tools" / "ci" / "build_ios_package.sh").read_text(
             encoding="utf-8"
         )
+        project = (
+            ROOT
+            / "mobile"
+            / "shells"
+            / "ios"
+            / "StasisMobile.xcodeproj"
+            / "project.pbxproj"
+        ).read_text(encoding="utf-8")
         self.assertIn("ios-package-link:", workflow)
         self.assertIn("runs-on: macos-15", workflow)
         self.assertIn("simulator-evidence.json", workflow)
         self.assertIn("ios-arm64_x86_64-simulator", script)
+        self.assertNotIn("-sdk iphonesimulator -arch arm64", script)
+        self.assertIn('lipo "${simulator_executable}" -verify_arch arm64', script)
+        self.assertIn("ARCHS = arm64", project)
         self.assertIn("ios_aspect_fit_bindings.c", script)
         self.assertIn("Intentionally empty simulator replacement object", script)
         self.assertNotIn("stasis_ios_simulator_placeholder(void)", script)

@@ -169,7 +169,7 @@ while IFS= read -r object; do
   xcrun --sdk iphonesimulator clang -target arm64-apple-ios15.0-simulator -c "${build_root}/simulator_placeholder.c" -o "${object}"
 done < <(find "${simulator_package}/aot" -type f -name '*.o' -print)
 
-xcodebuild -project "${simulator_project}/StasisMobile.xcodeproj" -scheme StasisMobile -configuration Debug -sdk iphonesimulator -arch arm64 -destination 'generic/platform=iOS Simulator' -derivedDataPath "${simulator_derived_data}" STASIS_SDL_FRAMEWORKS="${framework_root}" STASIS_SDL_PLATFORM=ios-arm64_x86_64-simulator SDKROOT=iphonesimulator SUPPORTED_PLATFORMS=iphonesimulator CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build | tee "${build_root}/simulator-xcodebuild.log"
+xcodebuild -project "${simulator_project}/StasisMobile.xcodeproj" -scheme StasisMobile -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "${simulator_derived_data}" STASIS_SDL_FRAMEWORKS="${framework_root}" STASIS_SDL_PLATFORM=ios-arm64_x86_64-simulator SDKROOT=iphonesimulator SUPPORTED_PLATFORMS=iphonesimulator CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build | tee "${build_root}/simulator-xcodebuild.log"
 
 simulator_app="${simulator_derived_data}/Build/Products/Debug-iphonesimulator/StasisMobile.app"
 simulator_executable="${simulator_app}/StasisMobile"
