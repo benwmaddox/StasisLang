@@ -16,11 +16,12 @@ use crate::backend::input_usage::{
     analyze_host_frame_input_usage_with_functions, HostFrameInputField, HostFrameInputUsage,
     HOST_F32_COUNT, HOST_FRAME_SCHEMA_VERSION, HOST_I32_COUNT,
 };
-use crate::backend::reachability::compute_reachable_function_ids;
+use crate::backend::reachability::compute_reachable_function_ids_with_policy;
 use crate::backend::state_layout::{
     build_state_layout, collection_field_element_count, is_replay_host_or_presentation_path,
     state_layout_digest, typed_collection_layout_metadata, StateLayout,
 };
+use crate::backend::ReachabilityPolicy;
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::data_flow::FunctionDataFlowSummary;
 use crate::frontend::module_graph::ModuleGraph;
@@ -301,6 +302,7 @@ pub struct ProgramCollectionMetadata {
 
 #[derive(Debug, Clone)]
 pub struct ProgramSnapshot {
+    reachability_policy: ReachabilityPolicy,
     source_revision: u64,
     files: Vec<SourceFile>,
     module_graph: ModuleGraph,
@@ -413,6 +415,7 @@ fn compiler_layout_digest(
 
 impl ProgramSnapshot {
     pub(crate) fn build(
+        reachability_policy: ReachabilityPolicy,
         source_revision: u64,
         files: &[SourceFile],
         module_graph: &ModuleGraph,
@@ -482,7 +485,11 @@ impl ProgramSnapshot {
         }
         collections.sort_by(|left, right| left.path.cmp(&right.path));
         let literal_table = collect_program_literals(files)?;
-        let reachable_function_ids = compute_reachable_function_ids(functions, required_emit_roots);
+        let reachable_function_ids = compute_reachable_function_ids_with_policy(
+            functions,
+            required_emit_roots,
+            reachability_policy,
+        );
         let extern_imports = analysis
             .resolved_extern_signatures
             .iter()
@@ -518,6 +525,7 @@ impl ProgramSnapshot {
             &analysis.constant_values,
         );
         Ok(Self {
+            reachability_policy,
             source_revision,
             files: files.to_vec(),
             module_graph: module_graph.clone(),
@@ -541,6 +549,10 @@ impl ProgramSnapshot {
             artifact_mappings: BTreeMap::new(),
             analysis,
         })
+    }
+
+    pub fn reachability_policy(&self) -> ReachabilityPolicy {
+        self.reachability_policy
     }
 
     pub fn source_revision(&self) -> u64 {
@@ -774,6 +786,7 @@ fn canonical_layout_digest_with_root(
         .analysis_hirs(&[])
         .map_err(|error| format!("canonical hot-render HIR failed: {error:?}"))?;
     ProgramSnapshot::build(
+        ReachabilityPolicy::Development,
         revision,
         compiler.files(),
         compiler.module_graph(),
@@ -824,10 +837,26 @@ pub fn semantic_revision_with_required_roots(
     files_fingerprint: u64,
     required_roots: &[String],
 ) -> u64 {
+    semantic_revision_with_policy(
+        files_fingerprint,
+        required_roots,
+        ReachabilityPolicy::Development,
+    )
+}
+
+pub fn semantic_revision_with_policy(
+    files_fingerprint: u64,
+    required_roots: &[String],
+    policy: ReachabilityPolicy,
+) -> u64 {
     let mut roots = required_roots.to_vec();
     roots.sort();
     roots.dedup();
-    let mut revision = files_fingerprint ^ 0x5354_4153_4953_524f;
+    let mut revision = files_fingerprint
+        ^ match policy {
+            ReachabilityPolicy::Development => 0x5354_4153_4953_524f,
+            ReachabilityPolicy::Release => 0x5354_4153_4953_5250,
+        };
     revision = revision.wrapping_mul(1_099_511_628_211) ^ roots.len() as u64;
     for root in roots {
         revision = revision.wrapping_mul(1_099_511_628_211);

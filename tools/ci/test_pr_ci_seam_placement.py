@@ -80,6 +80,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             "cargo test -p stasis --bin stasis --no-run",
             "./target/pr-ci-stasis/provenance-test-harness\n          toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources",
             'cargo test -p stasis "${test_args[@]}" -- --test-threads=1',
+            "cargo test -p stasis --test web_package -- --test-threads=1",
         )
         expected_counts = {
             "cargo build -p stasis --bin stasis": 2,
@@ -90,7 +91,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
                     self.linux_ordinary.count(command),
                     expected_counts.get(command, 1),
                 )
-        self.assertEqual(self.linux_ordinary.count("timeout-minutes: 15"), 8)
+        self.assertEqual(self.linux_ordinary.count("timeout-minutes: 15"), 9)
         self.assertIn("find apps/stasis/tests", self.linux_ordinary)
         self.assertIn("needs:", self.linux)
         self.assertIn("always()", self.linux)
@@ -116,6 +117,15 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         for command in redundant_commands:
             with self.subTest(command=command):
                 self.assertNotIn(command, self.linux_ordinary)
+
+    def test_web_packages_have_a_separate_bounded_step_in_required_integration_job(self):
+        integration = job(self.workflow, "pr-ci-cargo-stasis-integration")
+        ordinary = step(integration, "Run Stasis integration Cargo tests")
+        web = step(integration, "Run Stasis Web package Cargo tests")
+        self.assertIn('if [[ "$test_name" == "web_package" ]]; then continue; fi', ordinary)
+        self.assertIn("timeout-minutes: 15", web)
+        self.assertIn("cargo test -p stasis --test web_package -- --test-threads=1", web)
+        self.assertNotIn("continue-on-error", integration)
 
     def test_windows_platform_suites_have_exact_ownership(self):
         self.assertEqual(self.windows.count("--suite DesktopSdl"), 1)

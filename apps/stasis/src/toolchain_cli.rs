@@ -30,6 +30,7 @@ use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::wasm::{
     WasmProcess, COLLECTION_VIEW_ABI_VERSION, STRING_LITERAL_TABLE_VERSION,
 };
+use stasis_compiler::backend::ReachabilityPolicy;
 use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::parser::{
     map_rewritten_test_range_to_original, rewrite_top_level_test_declarations,
@@ -4338,20 +4339,15 @@ fn build_workspace_with_desktop_network(
             ))
         }
         BuildMode::Release => {
-            let validation_jit = if desktop_network
-                .as_ref()
-                .is_some_and(|network| network.mode == DesktopNetworkMode::Client)
-            {
-                compile_workspace_jit_with_options(
-                    workspace,
-                    false,
-                    Some(JitExternProfile::DeterministicOfflineWebNetwork),
-                )?
-            } else {
-                compile_workspace_jit(workspace)?
-            };
-            let manifest = validate_compiled_workspace_assets(workspace, &validation_jit)?;
-            preflight_release_asset_preparation(workspace, &validation_jit, manifest.as_ref())?;
+            let validation_aot = compile_workspace_release_preflight(workspace)?;
+            let validation_snapshot = validation_aot.program_snapshot().ok_or_else(|| {
+                "release asset preflight did not publish a ProgramSnapshot".to_string()
+            })?;
+            let manifest = Some(crate::release_assets::resolve_snapshot_assets(
+                &workspace.root,
+                validation_snapshot,
+            )?);
+            preflight_release_asset_preparation(workspace, validation_snapshot, manifest.as_ref())?;
             let output = output
                 .map(|path| workspace.root.join(path))
                 .unwrap_or_else(|| default_release_output(workspace));
@@ -4398,9 +4394,6 @@ fn build_workspace_with_desktop_network(
             let build_snapshot = summary.program_snapshot.as_ref().ok_or_else(|| {
                 "release build did not publish its authoritative ProgramSnapshot".to_string()
             })?;
-            let validation_snapshot = validation_jit.program_snapshot().ok_or_else(|| {
-                "release asset preflight did not publish a ProgramSnapshot".to_string()
-            })?;
             if build_snapshot.asset_references() != validation_snapshot.asset_references() {
                 return Err(
                     "release build asset roots changed after successful preflight validation"
@@ -4442,17 +4435,30 @@ fn build_workspace_with_desktop_network(
     }
 }
 
+fn compile_workspace_release_preflight(workspace: &Workspace) -> Result<AotProcess, String> {
+    let files =
+        load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
+    let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
+    let mut validation_aot = AotProcess::new();
+    validation_aot.set_reachability_policy(ReachabilityPolicy::Release);
+    validation_aot.set_project_root(display_path(&workspace.root))?;
+    for file in files {
+        validation_aot.upsert_file(file.path, file.source);
+    }
+    validation_aot
+        .compile()
+        .map_err(|error| format!("release preflight compile failed: {error:?}"))?;
+    Ok(validation_aot)
+}
+
 fn preflight_release_asset_preparation(
     workspace: &Workspace,
-    jit: &JitProcess,
+    snapshot: &ProgramSnapshot,
     resolved: Option<&stasis_assets::ResolvedAssetManifest>,
 ) -> Result<(), String> {
     let Some(resolved) = resolved else {
         return Ok(());
     };
-    let snapshot = jit
-        .program_snapshot()
-        .ok_or_else(|| "release asset preflight produced no ProgramSnapshot".to_string())?;
     let retained =
         crate::release_assets::retain_snapshot_assets(&workspace.root, snapshot, resolved)?;
     let stamp = SystemTime::now()
@@ -5491,6 +5497,11 @@ fn package_web_workspace(
             })
             .transpose()?;
         let mut process = WasmProcess::new();
+        process.set_reachability_policy(if development_build {
+            ReachabilityPolicy::Development
+        } else {
+            ReachabilityPolicy::Release
+        });
         process.set_debug_symbols(development_build);
         process.set_project_root(display_path(&workspace.root))?;
         process.set_required_emit_roots(&[
@@ -5525,7 +5536,14 @@ fn package_web_workspace(
         let snapshot = process
             .program_snapshot()
             .ok_or_else(|| "web compile produced no ProgramSnapshot".to_string())?;
-        let resolved = validate_program_snapshot_assets(workspace, snapshot)?;
+        let resolved = if development_build {
+            validate_program_snapshot_assets(workspace, snapshot)?
+        } else {
+            Some(crate::release_assets::resolve_snapshot_assets(
+                &workspace.root,
+                snapshot,
+            )?)
+        };
         let retained = resolved
             .as_ref()
             .map(|manifest| {
@@ -6245,6 +6263,13 @@ fn stage_workspace_assets(
     let assets = workspace.root.join("assets");
     validate_workspace_destination(workspace, "assets directory", &assets)?;
     if let Some(resolved) = resolved {
+        // No inferred assets means there is no asset package to publish.
+        if resolved.assets.is_empty()
+            && resolved.dynamic_assets.is_empty()
+            && !workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file()
+        {
+            return Ok(());
+        }
         prepare_asset_bundle(
             resolved,
             destination_root,
@@ -12135,7 +12160,7 @@ mod tests {
     }
 
     #[test]
-    fn native_network_client_release_preflight_uses_offline_mailbox_profile() {
+    fn native_network_client_release_preflight_compiles_release_aot() {
         let root = temp_dir("native_network_client_preflight");
         fs::create_dir_all(root.join("vendor/stasis/stdlib"))
             .expect("create network client vendor directory");
@@ -12161,12 +12186,12 @@ mod tests {
             Err(error) => error,
         };
         assert!(default_error.contains("stasis_web_network_supported"));
-        compile_workspace_jit_with_options(
-            &workspace,
-            false,
-            Some(JitExternProfile::DeterministicOfflineWebNetwork),
-        )
-        .expect("client package release preflight");
+        let aot = compile_workspace_release_preflight(&workspace)
+            .expect("client package release preflight");
+        assert_eq!(
+            aot.program_snapshot().unwrap().reachability_policy(),
+            ReachabilityPolicy::Release
+        );
         remove_temp(&root);
     }
 

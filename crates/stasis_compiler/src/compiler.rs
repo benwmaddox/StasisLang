@@ -1405,10 +1405,22 @@ impl Compiler {
         &mut self,
         required_emit_roots: &[String],
     ) -> CompileResult<BTreeMap<FunctionId, FunctionHIR>> {
+        self.analysis_hirs_with_policy(
+            required_emit_roots,
+            crate::backend::ReachabilityPolicy::Development,
+        )
+    }
+
+    pub(crate) fn analysis_hirs_with_policy(
+        &mut self,
+        required_emit_roots: &[String],
+        policy: crate::backend::ReachabilityPolicy,
+    ) -> CompileResult<BTreeMap<FunctionId, FunctionHIR>> {
         let functions = self.functions.clone();
-        let reachable = crate::backend::reachability::compute_reachable_function_ids(
+        let reachable = crate::backend::reachability::compute_reachable_function_ids_with_policy(
             &functions,
             required_emit_roots,
+            policy,
         );
         functions
             .iter()

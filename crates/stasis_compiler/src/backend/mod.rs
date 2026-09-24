@@ -15,6 +15,14 @@ pub mod state_migration;
 mod state_query;
 pub mod wasm;
 
+/// Host lifecycle policy, independent of backend and optimization level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReachabilityPolicy {
+    #[default]
+    Development,
+    Release,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineEntrypoints {
     pub tick: String,

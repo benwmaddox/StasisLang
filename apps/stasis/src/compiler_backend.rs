@@ -9,7 +9,7 @@ use stasis_compiler::backend::program_snapshot::{
 use stasis_compiler::backend::state_layout::{
     aot_storage_symbol, AotStorageSymbolKind, StateLayout,
 };
-use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints};
+use stasis_compiler::backend::{AotOptimizationProfile, EngineEntrypoints, ReachabilityPolicy};
 use stasis_jit::{
     link_objects_to_dynamic_library, link_objects_to_executable, AotCompileConfig, AotLinkConfig,
 };
@@ -814,19 +814,20 @@ impl IncrementalCompilerBackend {
                 ),
             };
         }
-        let candidate = match self.compile_aot_process_from_source_cache() {
-            Ok(candidate) => candidate,
-            Err(message) => {
-                return CompileResult::failed(
-                    request.request_id,
-                    vec![self.runner_diagnostic_from_source(
-                        self.last_aot_source_diagnostic.as_ref(),
-                        message,
-                        request.changed_files.first().cloned(),
-                    )],
-                )
-            }
-        };
+        let candidate =
+            match self.compile_aot_process_from_source_cache(ReachabilityPolicy::Development) {
+                Ok(candidate) => candidate,
+                Err(message) => {
+                    return CompileResult::failed(
+                        request.request_id,
+                        vec![self.runner_diagnostic_from_source(
+                            self.last_aot_source_diagnostic.as_ref(),
+                            message,
+                            request.changed_files.first().cloned(),
+                        )],
+                    )
+                }
+            };
         let function_entries = snapshot_function_entries(
             candidate
                 .program_snapshot()
@@ -1440,10 +1441,14 @@ impl IncrementalCompilerBackend {
         )
     }
 
-    fn compile_aot_process_from_source_cache(&mut self) -> Result<AotProcess, String> {
+    fn compile_aot_process_from_source_cache(
+        &mut self,
+        policy: ReachabilityPolicy,
+    ) -> Result<AotProcess, String> {
         let mut process = AotProcess::with_optimization_profile(
             Self::aot_optimization_profile_from_compile_config(&self.aot_compile_config),
         );
+        process.set_reachability_policy(policy);
         process.set_target(self.aot_compile_config.target.clone());
         process.set_project_root(
             self.project_root
@@ -4670,11 +4675,6 @@ fn package_engine_bundle_release(
     let render_alias = render_row
         .map(|render| packaged_render_alias(&manifest, render))
         .transpose()?;
-    let on_code_swap_symbol = manifest
-        .functions
-        .iter()
-        .find(|row| row.name == "on_code_swap")
-        .map(|row| row.symbol.clone());
 
     let runner_layout = packaged_runner_layout(output_exe, cfg!(target_os = "macos"))?;
     let packaged_output_exe = &runner_layout.executable;
@@ -4742,13 +4742,6 @@ fn package_engine_bundle_release(
             returns_i32: true,
         });
     }
-    if let Some(symbol) = on_code_swap_symbol.as_ref() {
-        function_aliases.push(PackagedFunctionAlias {
-            alias: "on_code_swap",
-            target_symbol: symbol.clone(),
-            returns_i32: false,
-        });
-    }
 
     let mut export_symbols: BTreeSet<String> = BTreeSet::new();
     export_symbols.extend(
@@ -4772,10 +4765,6 @@ fn package_engine_bundle_release(
     if let Some(render) = render_row {
         export_symbols.insert(render.symbol.clone());
         export_symbols.insert("render".to_string());
-    }
-    if let Some(on_code_swap) = on_code_swap_symbol.as_ref() {
-        export_symbols.insert(on_code_swap.clone());
-        export_symbols.insert("on_code_swap".to_string());
     }
     for symbol in [
         "host_i32",
@@ -8915,15 +8904,13 @@ fn run_self_host_aot_cli_with_backend_and_options(
     backend.last_jit_engine_package = None;
     backend.last_aot_engine_bundle = None;
     backend.refresh_cached_sources(&changed_files)?;
-    let mut candidate = backend.compile_aot_process_from_source_cache()?;
+    let mut candidate =
+        backend.compile_aot_process_from_source_cache(ReachabilityPolicy::Release)?;
     let function_entries = snapshot_function_entries(
         candidate
             .program_snapshot()
             .expect("compiled self-host AOT candidate snapshot"),
     );
-    let include_on_code_swap = function_entries
-        .iter()
-        .any(|entry| entry.name == "on_code_swap");
     let use_engine_mode_contracts = function_entries.iter().any(is_zero_argument_tick)
         && function_entries.iter().any(|entry| entry.name == "render");
 
@@ -8941,7 +8928,7 @@ fn run_self_host_aot_cli_with_backend_and_options(
             })?;
         }
         let bundle = candidate.write_engine_bundle(
-            &IncrementalCompilerBackend::engine_entrypoints(include_on_code_swap),
+            &IncrementalCompilerBackend::engine_entrypoints(false),
             &bundle_output_dir,
         )?;
         backend.last_program_snapshot = candidate.program_snapshot().cloned();

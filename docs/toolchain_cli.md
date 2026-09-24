@@ -500,3 +500,26 @@ Windows graphical launch coverage is defined in
 [Windows game launch integration testing](windows_game_launch_testing.md). It exercises `play`,
 `run --watch`, `live`, generated release executables, and packaged desktop executables with real
 PNG, SVG, font, tick, and framebuffer assertions.
+
+## Release callback reachability
+
+Desktop packages (Windows, Linux, macOS), Android arm64/x86_64 and iOS arm64 AOT
+bundles, and release Web packages omit the implicit `on_code_swap` root and host
+binding. LAN browser guests follow the Web package policy. A function reached by an
+ordinary source call is preserved by its resolved function identity, including a
+function named `on_code_swap`; its name does not create a release host export.
+Shared dependencies and startup/frame/graphics construction roots remain reachable.
+Asset manifests and inferred static assets use the same release snapshot.
+
+Live JIT and live AOT swaps retain development reachability. Explicit Web
+`--development-build` output also retains the callback and its dependencies.
+Desktop/mobile `--development-build` labels provenance, signing and diagnostic
+behavior; these standalone AOT shells do not implement code swapping, so their
+callback policy remains release. Android x86_64 remains a development-only package
+target, using that same standalone AOT policy. Pause/resume and graphics resource
+restoration do not invoke the code-swap callback.
+
+The compiler exposes `ReachabilityPolicy` separately from optimization and debug
+symbols. Low-level AOT/Wasm processes retain their development-compatible default;
+package boundaries select the appropriate policy explicitly. Snapshot revisions
+include this policy, and changing it recomputes reachability and active artifacts.

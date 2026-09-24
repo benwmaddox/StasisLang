@@ -910,6 +910,7 @@ impl JitProcess {
             .map_err(crate::compiler::CompileError::Backend)?;
             self.program_snapshot = Some(Arc::new(
                 ProgramSnapshot::build(
+                    crate::backend::ReachabilityPolicy::Development,
                     snapshot_revision,
                     self.compiler.files(),
                     self.compiler.module_graph(),
