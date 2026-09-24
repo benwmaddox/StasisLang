@@ -394,6 +394,29 @@ static void test_mobile_safe_fit_handles_rotation_and_no_drawable_pixel(void) {
     CHECK(close_enough(empty.h, 0.0f));
 }
 
+static void test_sprite_preparation_uses_physical_axis_and_instance_transform(void) {
+    StasisDisplayPreparationScale scale = stasis_display_sprite_preparation_scale(
+        1600, 720, 2531, 1140);
+    CHECK(scale.numerator == 19);
+    CHECK(scale.denominator == 12);
+    CHECK(stasis_display_sprite_scaled_extent(32, scale, 1.0) == 51);
+    CHECK(stasis_display_sprite_scaled_extent(32, scale, 1.5) == 76);
+
+    scale = stasis_display_sprite_preparation_scale(100, 100, 901, 899);
+    CHECK(scale.numerator == 901);
+    CHECK(scale.denominator == 100);
+    CHECK(stasis_display_sprite_scaled_extent(10, scale, 1.0) == 91);
+
+    scale = stasis_display_sprite_preparation_scale(100, 100, 50, 40);
+    CHECK(scale.numerator == 1);
+    CHECK(scale.denominator == 1);
+    CHECK(stasis_display_sprite_scaled_extent(10, scale, 0.5) == 10);
+
+    scale.numerator = 0;
+    scale.denominator = 0;
+    CHECK(stasis_display_sprite_scaled_extent(10, scale, 1.0) == 10);
+}
+
 int main(void) {
     test_phone_scale_preserves_logical_canvas();
     test_wide_game_uses_maximal_centered_surface();
@@ -413,5 +436,6 @@ int main(void) {
     test_maximized_portrait_pointer_mapping();
     test_extreme_density_and_extent_are_bounded();
     test_font_atlas_growth_is_bounded_and_deterministic();
+    test_sprite_preparation_uses_physical_axis_and_instance_transform();
     return 0;
 }

@@ -44,6 +44,20 @@ final class AndroidRasterPlan {
             return width + "x" + height + ":density=" + Float.floatToIntBits(density)
                     + ":surface=" + surfaceGeneration + ":renderer=" + rendererGeneration;
         }
+
+        boolean sourceUnderprovisioned(int sourceWidth, int sourceHeight) {
+            return sourceWidth > 0 && sourceHeight > 0
+                    && (width > sourceWidth || height > sourceHeight);
+        }
+
+        long decodedBytes(int sourceWidth, int sourceHeight) {
+            return sourceUnderprovisioned(sourceWidth, sourceHeight)
+                    ? byteLength(sourceWidth, sourceHeight) : preparedBytes();
+        }
+
+        long preparedBytes() {
+            return byteLength(width, height);
+        }
     }
 
     static Result exact(int sourceWidth, int sourceHeight, Requirement requirement,
@@ -79,6 +93,14 @@ final class AndroidRasterPlan {
         double result = Math.ceil(value * scale);
         if (!Double.isFinite(result) || result > Integer.MAX_VALUE) return Integer.MAX_VALUE;
         return Math.max(1, (int)result);
+    }
+
+    private static long byteLength(int width, int height) {
+        if (width <= 0 || height <= 0
+                || (long)width > Long.MAX_VALUE / (long)height / 4L) {
+            return Long.MAX_VALUE;
+        }
+        return (long)width * height * 4L;
     }
 
     private AndroidRasterPlan() {}

@@ -561,11 +561,12 @@ public final class StasisPreviewRendererSchemaTest {
         assertEquals(541, viewport.width);
         assertEquals(1081, viewport.height);
         assertEquals(1081.0f / 720.0f, viewport.contentScale, 0.0001f);
+        assertEquals(541.0f / 360.0f, viewport.rasterScale, 0.0001f);
         assertEquals(541.0f / 360.0f, viewport.textRasterScale, 0.0001f);
 
         StasisPreviewRenderer.DisplayViewport aboveSpriteCap =
                 StasisPreviewRenderer.fitViewport(100, 100, 901, 901);
-        assertEquals(8.0f, aboveSpriteCap.rasterScale, 0.0f);
+        assertEquals(9.01f, aboveSpriteCap.rasterScale, 0.0001f);
         assertEquals(9.01f, aboveSpriteCap.textRasterScale, 0.0001f);
 
         StasisPreviewRenderer.DisplayViewport subTolerance =
