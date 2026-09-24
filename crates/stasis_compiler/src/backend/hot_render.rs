@@ -10,7 +10,10 @@ use crate::backend::compile_analysis::{ConstantValue, ConstantValueMap};
 use crate::compiler::{FunctionId, FunctionMeta};
 use crate::ir::hir::{eval_const_i64, AssignOp, AssignTarget, FunctionHIR, SimpleExpr, SimpleStmt};
 
-pub const HOT_RENDER_METADATA_VERSION: u32 = 3;
+pub const HOT_RENDER_METADATA_VERSION: u32 = 4;
+
+const MAX_PUBLISHED_TRANSITION_PAIRS: usize = 4096;
+const MAX_TRANSITIONS_PER_PAIR: u64 = 1_000_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HotRenderImageMetadata {
@@ -33,6 +36,57 @@ pub struct HotRenderImageMetadata {
     pub group_max_logical_height: u32,
     pub backend_constraints: String,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotRenderTransitionProvenance {
+    SequenceJoin,
+    BranchMaximum,
+    FixedRepeatInternal,
+    FixedRepeatBoundary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotRenderTransitionValidity {
+    Finite,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HotRenderTransitionAnalysisValidity {
+    Complete,
+    Incomplete,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HotRenderTransitionMetadata {
+    pub from_identity: String,
+    pub to_identity: String,
+    pub max_transitions_per_render: Option<u64>,
+    pub validity: HotRenderTransitionValidity,
+    pub unknown_cause: Option<String>,
+    pub provenance: Vec<HotRenderTransitionProvenance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HotRenderTransitionAnalysis {
+    pub validity: HotRenderTransitionAnalysisValidity,
+    pub unknown_causes: Vec<String>,
+    pub pair_count: Option<u32>,
+    pub published_pair_count: u32,
+    pub omitted_pair_count: Option<u32>,
+    pub pair_limit: u32,
+    pub max_pair_weight: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotRenderAnalysis {
+    pub images: Vec<HotRenderImageMetadata>,
+    pub transitions: Vec<HotRenderTransitionMetadata>,
+    pub transition_analysis: HotRenderTransitionAnalysis,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +137,7 @@ pub(crate) fn analyze_hot_render_images(
     reachable: &BTreeSet<FunctionId>,
     collection_capacities: &BTreeMap<String, i32>,
     constants: &ConstantValueMap,
-) -> Vec<HotRenderImageMetadata> {
+) -> HotRenderAnalysis {
     let mut images = BTreeMap::<String, ImageDecl>::new();
     let mut loader_uncertainty = None;
     for function in functions.iter().filter(|f| reachable.contains(&f.id)) {
@@ -207,7 +261,110 @@ pub(crate) fn analyze_hot_render_images(
         })
         .collect::<Vec<_>>();
     apply_profitability_policy(&mut records, &render_flow.transitions);
-    records
+    let (transitions, transition_analysis) = publish_transitions(&render_flow);
+    HotRenderAnalysis {
+        images: records,
+        transitions,
+        transition_analysis,
+    }
+}
+
+fn publish_transitions(
+    flow: &FlowSummary,
+) -> (
+    Vec<HotRenderTransitionMetadata>,
+    HotRenderTransitionAnalysis,
+) {
+    let mut unknown_causes = flow.unknown_causes.clone();
+    let pair_count = if flow.unknown_causes.is_empty() {
+        u32::try_from(flow.transitions.len()).ok()
+    } else {
+        None
+    };
+    if pair_count.is_none() && flow.unknown_causes.is_empty() {
+        unknown_causes.insert("ordered transition pair count exceeds u32".to_string());
+    }
+
+    let mut transitions = Vec::new();
+    if flow.unknown_causes.is_empty() {
+        for ((from_identity, to_identity), bound) in &flow.transitions {
+            let (maximum, validity, unknown_cause) = match bound {
+                Bound::Finite(value) if *value <= MAX_TRANSITIONS_PER_PAIR => {
+                    (Some(*value), HotRenderTransitionValidity::Finite, None)
+                }
+                Bound::Finite(_) => {
+                    let cause = format!(
+                        "transition upper bound exceeds metadata weight cap {MAX_TRANSITIONS_PER_PAIR}"
+                    );
+                    unknown_causes.insert(cause.clone());
+                    (None, HotRenderTransitionValidity::Unknown, Some(cause))
+                }
+                Bound::Unknown => {
+                    let cause = "transition upper bound overflowed checked arithmetic".to_string();
+                    unknown_causes.insert(cause.clone());
+                    (None, HotRenderTransitionValidity::Unknown, Some(cause))
+                }
+            };
+            transitions.push(HotRenderTransitionMetadata {
+                from_identity: from_identity.clone(),
+                to_identity: to_identity.clone(),
+                max_transitions_per_render: maximum,
+                validity,
+                unknown_cause,
+                provenance: flow
+                    .transition_provenance
+                    .get(&(from_identity.clone(), to_identity.clone()))
+                    .map(|provenance| provenance.iter().copied().collect())
+                    .unwrap_or_default(),
+            });
+        }
+        transitions.sort_by(|left, right| {
+            let weight_order = match (
+                left.max_transitions_per_render,
+                right.max_transitions_per_render,
+            ) {
+                (Some(left), Some(right)) => right.cmp(&left),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            };
+            weight_order
+                .then_with(|| left.from_identity.cmp(&right.from_identity))
+                .then_with(|| left.to_identity.cmp(&right.to_identity))
+        });
+    }
+
+    let pair_limit =
+        u32::try_from(MAX_PUBLISHED_TRANSITION_PAIRS).expect("transition pair cap fits in u32");
+    let (reported_count, omitted_pair_count) = if let Some(pair_count) = pair_count {
+        let reported_count = pair_count.min(pair_limit);
+        let omitted = pair_count - reported_count;
+        if omitted > 0 {
+            unknown_causes.insert(format!(
+                "ordered transition pair count exceeds metadata cap {pair_limit}"
+            ));
+        }
+        (reported_count, Some(omitted))
+    } else {
+        (0, None)
+    };
+    transitions.truncate(reported_count as usize);
+
+    let validity = if unknown_causes.is_empty() {
+        HotRenderTransitionAnalysisValidity::Complete
+    } else {
+        HotRenderTransitionAnalysisValidity::Incomplete
+    };
+    let analysis = HotRenderTransitionAnalysis {
+        validity,
+        unknown_causes: unknown_causes.into_iter().collect(),
+        pair_count,
+        published_pair_count: reported_count,
+        omitted_pair_count,
+        pair_limit,
+        max_pair_weight: MAX_TRANSITIONS_PER_PAIR,
+    };
+    (transitions, analysis)
 }
 
 fn apply_profitability_policy(
@@ -462,6 +619,8 @@ struct FlowSummary {
     last: BTreeSet<String>,
     may_be_empty: bool,
     transitions: BTreeMap<(String, String), Bound>,
+    transition_provenance: BTreeMap<(String, String), BTreeSet<HotRenderTransitionProvenance>>,
+    unknown_causes: BTreeSet<String>,
 }
 
 impl FlowSummary {
@@ -472,7 +631,27 @@ impl FlowSummary {
             last: BTreeSet::new(),
             may_be_empty: true,
             transitions: BTreeMap::new(),
+            transition_provenance: BTreeMap::new(),
+            unknown_causes: BTreeSet::new(),
         }
+    }
+
+    /// An ordered non-sprite draw or clip operation. It emits no image identity,
+    /// but separates sprite runs on either side of it.
+    fn barrier() -> Self {
+        Self {
+            counts: BTreeMap::new(),
+            first: BTreeSet::new(),
+            last: BTreeSet::new(),
+            may_be_empty: false,
+            transitions: BTreeMap::new(),
+            transition_provenance: BTreeMap::new(),
+            unknown_causes: BTreeSet::new(),
+        }
+    }
+
+    fn has_image_activity(&self) -> bool {
+        !self.counts.is_empty() || !self.transitions.is_empty() || !self.unknown_causes.is_empty()
     }
 
     fn draw(identities: BTreeSet<String>) -> Self {
@@ -486,25 +665,38 @@ impl FlowSummary {
             last: identities,
             may_be_empty: false,
             transitions: BTreeMap::new(),
+            transition_provenance: BTreeMap::new(),
+            unknown_causes: BTreeSet::new(),
         }
     }
 
     fn sequential(mut self, next: Self) -> Self {
-        if self.counts.is_empty() && self.transitions.is_empty() && self.may_be_empty {
+        if self.counts.is_empty()
+            && self.transitions.is_empty()
+            && self.unknown_causes.is_empty()
+            && self.may_be_empty
+        {
             return next;
         }
-        if next.counts.is_empty() && next.transitions.is_empty() && next.may_be_empty {
+        if next.counts.is_empty()
+            && next.transitions.is_empty()
+            && next.unknown_causes.is_empty()
+            && next.may_be_empty
+        {
             return self;
         }
         add_bound_maps(&mut self.counts, next.counts);
-        add_bound_maps(&mut self.transitions, next.transitions);
+        merge_transition_bounds(&mut self.transitions, next.transitions);
+        merge_transition_provenance(&mut self.transition_provenance, next.transition_provenance);
+        self.unknown_causes.extend(next.unknown_causes);
         for left in &self.last {
             for right in &next.first {
-                add_bound(
-                    &mut self.transitions,
-                    (left.clone(), right.clone()),
-                    Bound::Finite(1),
-                );
+                let pair = (left.clone(), right.clone());
+                add_bound(&mut self.transitions, pair.clone(), Bound::Finite(1));
+                self.transition_provenance
+                    .entry(pair)
+                    .or_default()
+                    .insert(HotRenderTransitionProvenance::SequenceJoin);
             }
         }
         let previous_empty = self.may_be_empty;
@@ -525,12 +717,24 @@ impl FlowSummary {
     }
 
     fn branch(self, other: Self) -> Self {
+        let mut transitions = branch_bound_maps(self.transitions, other.transitions);
+        let mut transition_provenance = self.transition_provenance;
+        merge_transition_provenance(&mut transition_provenance, other.transition_provenance);
+        for provenance in transition_provenance.values_mut() {
+            provenance.insert(HotRenderTransitionProvenance::BranchMaximum);
+        }
         Self {
             counts: branch_bound_maps(self.counts, other.counts),
             first: self.first.union(&other.first).cloned().collect(),
             last: self.last.union(&other.last).cloned().collect(),
             may_be_empty: self.may_be_empty || other.may_be_empty,
-            transitions: branch_bound_maps(self.transitions, other.transitions),
+            transitions: std::mem::take(&mut transitions),
+            transition_provenance,
+            unknown_causes: self
+                .unknown_causes
+                .union(&other.unknown_causes)
+                .cloned()
+                .collect(),
         }
     }
 
@@ -540,15 +744,23 @@ impl FlowSummary {
         }
         self.counts = multiply_bound_map(self.counts, count);
         self.transitions = multiply_bound_map(self.transitions, count);
+        for provenance in self.transition_provenance.values_mut() {
+            provenance.insert(HotRenderTransitionProvenance::FixedRepeatInternal);
+        }
         if count > 1 {
             let repeat_edges = count - 1;
             for left in &self.last {
                 for right in &self.first {
+                    let pair = (left.clone(), right.clone());
                     add_bound(
                         &mut self.transitions,
-                        (left.clone(), right.clone()),
+                        pair.clone(),
                         Bound::Finite(repeat_edges),
                     );
+                    self.transition_provenance
+                        .entry(pair)
+                        .or_default()
+                        .insert(HotRenderTransitionProvenance::FixedRepeatBoundary);
                 }
             }
         }
@@ -561,6 +773,7 @@ impl FlowSummary {
         causes: &mut BTreeMap<String, String>,
         cause: &str,
     ) {
+        self.unknown_causes.insert(cause.to_string());
         for identity in all_images {
             self.counts.insert(identity.clone(), Bound::Unknown);
             causes
@@ -568,8 +781,27 @@ impl FlowSummary {
                 .or_insert_with(|| cause.to_string());
         }
         self.transitions.clear();
+        self.transition_provenance.clear();
         self.first = all_images.clone();
         self.last = all_images.clone();
+    }
+}
+
+fn merge_transition_bounds(
+    out: &mut BTreeMap<(String, String), Bound>,
+    other: BTreeMap<(String, String), Bound>,
+) {
+    for (pair, bound) in other {
+        add_bound(out, pair, bound);
+    }
+}
+
+fn merge_transition_provenance(
+    out: &mut BTreeMap<(String, String), BTreeSet<HotRenderTransitionProvenance>>,
+    other: BTreeMap<(String, String), BTreeSet<HotRenderTransitionProvenance>>,
+) {
+    for (pair, provenance) in other {
+        out.entry(pair).or_default().extend(provenance);
     }
 }
 
@@ -728,8 +960,15 @@ fn analyze_statements(
                             .sequential(condition_flow)
                             .sequential(body)
                             .sequential(step_flow);
-                        unknown.poison_all(all_images, causes, "unbounded or dynamic for loop");
-                        unknown
+                        if !unknown.has_image_activity() {
+                            // The loop may execute zero times. Work containing no
+                            // image draw cannot make the image transition bound
+                            // unknown; preserve its possible empty path.
+                            FlowSummary::empty()
+                        } else {
+                            unknown.poison_all(all_images, causes, "unbounded or dynamic for loop");
+                            unknown
+                        }
                     }
                     LoopBound::Overflow => {
                         let mut unknown = init_flow
@@ -765,11 +1004,12 @@ fn analyze_statements(
                     .and_then(|v| u64::try_from(*v).ok())
                 {
                     Some(capacity) => body.repeat(capacity),
-                    None => {
+                    None if body.has_image_activity() => {
                         let mut unknown = body;
                         unknown.poison_all(all_images, causes, "unknown collection capacity");
                         unknown
                     }
+                    None => FlowSummary::empty(),
                 }
             }
             _ => analyze_statement_calls(
@@ -834,35 +1074,71 @@ fn analyze_call(
     causes: &mut BTreeMap<String, String>,
 ) -> FlowSummary {
     let leaf_target = target.rsplit('.').next().unwrap_or(target);
+    if is_ordered_render_barrier(leaf_target) {
+        return FlowSummary::barrier();
+    }
     if matches!(leaf_target, "draw" | "draw_frame" | "draw_frame_scaled") {
         if let Some(receiver) = args.first() {
-            if let IdentitySet::Known(identities) = resolve_identities(receiver, env, all_images) {
-                if !identities.is_empty() {
+            match resolve_identities(receiver, env, all_images) {
+                IdentitySet::Known(identities)
+                    if !identities.is_empty() && identities.is_subset(all_images) =>
+                {
                     return FlowSummary::draw(identities);
                 }
+                IdentitySet::Known(identities)
+                    if leaf_target == "draw" && identities.is_disjoint(all_images) =>
+                {
+                    // draw is also used by TextRun and LineBatch. Resolve those
+                    // helper bodies below rather than treating them as images.
+                }
+                _ => {
+                    return unknown_render_flow(
+                        all_images,
+                        causes,
+                        &format!("dynamic render receiver in call to {leaf_target}"),
+                    );
+                }
             }
+        } else if leaf_target != "draw" {
+            return unknown_render_flow(
+                all_images,
+                causes,
+                &format!("dynamic render receiver in call to {leaf_target}"),
+            );
         }
-        let mut unknown = FlowSummary::empty();
-        unknown.poison_all(
-            all_images,
-            causes,
-            &format!("dynamic render receiver in call to {leaf_target}"),
-        );
-        return unknown;
     }
     let Some(candidates) = by_name.get(&(leaf_target, args.len())) else {
-        return FlowSummary::empty();
+        if is_known_nonrender_graphics_call(leaf_target) {
+            return FlowSummary::empty();
+        }
+        let cause = if is_potential_render_call(leaf_target) || leaf_target == "draw" {
+            format!("unresolved potentially rendering call {leaf_target}")
+        } else {
+            format!("unresolved call target {leaf_target} has no analyzable body")
+        };
+        return unknown_render_flow(all_images, causes, &cause);
     };
     if candidates.len() != 1 {
-        let mut unknown = FlowSummary::empty();
-        unknown.poison_all(
+        return unknown_render_flow(
             all_images,
             causes,
             &format!("ambiguous render-reachable call target {leaf_target}"),
         );
-        return unknown;
     }
     let callee = candidates[0];
+    let has_analyzable_body = hirs
+        .get(&callee.id)
+        .is_some_and(|hir| !hir.statements.is_empty());
+    if !has_analyzable_body
+        && (leaf_target == "draw"
+            || (has_graphics_effect(callee) && !is_known_nonrender_graphics_call(leaf_target)))
+    {
+        return unknown_render_flow(
+            all_images,
+            causes,
+            &format!("potentially rendering external call {leaf_target} has no analyzable body"),
+        );
+    }
     let callee_env = callee
         .param_names
         .iter()
@@ -878,6 +1154,64 @@ fn analyze_call(
         all_images,
         stack,
         causes,
+    )
+}
+
+fn unknown_render_flow(
+    all_images: &BTreeSet<String>,
+    causes: &mut BTreeMap<String, String>,
+    cause: &str,
+) -> FlowSummary {
+    let mut unknown = FlowSummary::empty();
+    unknown.poison_all(all_images, causes, cause);
+    unknown
+}
+
+fn is_ordered_render_barrier(target: &str) -> bool {
+    matches!(
+        target,
+        "draw_line"
+            | "draw_text"
+            | "fill_rect"
+            | "draw_rect"
+            | "gfx_push_clip"
+            | "gfx_pop_clip"
+            | "gfx_cmd_line"
+            | "gfx_cmd_rect"
+            | "gfx_cmd_text"
+            | "gfx_cmd_text_cached"
+            | "gfx_cmd_clip_push"
+            | "gfx_cmd_clip_pop"
+    )
+}
+
+fn is_potential_render_call(target: &str) -> bool {
+    target.starts_with("draw_") || target.starts_with("gfx_cmd_")
+}
+
+fn has_graphics_effect(function: &FunctionMeta) -> bool {
+    function
+        .effect_contract
+        .as_ref()
+        .is_some_and(|effects| effects.iter().any(|effect| effect == "graphics"))
+}
+
+fn is_known_nonrender_graphics_call(target: &str) -> bool {
+    matches!(
+        target,
+        "gfx_poll_reload"
+            | "gfx_dump_bmp"
+            | "gfx_dump_png"
+            | "load_font"
+            | "gfx_release_font"
+            | "gfx_font_status"
+            | "measure_text"
+            | "load_sprite_from"
+            | "load_sprite_sheet_asset_from"
+            | "load_text_from"
+            | "replace_text_from"
+            | "asset_request_sprite"
+            | "gfx_release_sprite"
     )
 }
 
@@ -1137,6 +1471,29 @@ mod tests {
     }
 
     #[test]
+    fn ordered_barriers_separate_sprite_pairs_but_optional_barriers_preserve_possible_edges() {
+        let a = FlowSummary::draw(BTreeSet::from(["a".to_string()]));
+        let b = FlowSummary::draw(BTreeSet::from(["b".to_string()]));
+
+        let separated = a
+            .clone()
+            .sequential(FlowSummary::barrier())
+            .sequential(b.clone());
+        assert!(!separated
+            .transitions
+            .contains_key(&("a".to_string(), "b".to_string())));
+
+        let optional_barrier = FlowSummary::barrier().branch(FlowSummary::empty());
+        let possible = a.sequential(optional_barrier).sequential(b);
+        assert_eq!(
+            possible
+                .transitions
+                .get(&("a".to_string(), "b".to_string())),
+            Some(&Bound::Finite(1))
+        );
+    }
+
+    #[test]
     fn dynamic_draw_receiver_poisons_every_declared_image() {
         let hirs = BTreeMap::new();
         let by_name = BTreeMap::new();
@@ -1216,6 +1573,120 @@ mod tests {
         );
         assert_eq!(out.counts.get("hero"), Some(&Bound::Unknown));
         assert!(causes["hero"].contains("ambiguous"));
+    }
+
+    #[test]
+    fn bodyless_graphics_external_poisons_pair_evidence() {
+        let path = CanonicalSourcePath::project_relative("main.stasis").expect("path");
+        let external = FunctionMeta {
+            id: 1,
+            symbol_id: SymbolId::function(&path, "custom_renderer", "(i32)"),
+            storage_index: 1,
+            name: "custom_renderer".to_string(),
+            module_alias: String::new(),
+            name_hash: 0,
+            file_id: 0,
+            source_range: 0..0,
+            signature_range: 0..0,
+            signature_hash: 1,
+            body_hash: 0,
+            param_names: vec!["font".to_string()],
+            params: vec![0],
+            return_type: 0,
+            inline: false,
+            host_export: None,
+            effect_contract: Some(vec!["graphics".to_string()]),
+            requires_contract: None,
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            call_sites: Vec::new(),
+            dirty: false,
+        };
+        let by_name = BTreeMap::from([(("custom_renderer", 1), vec![&external])]);
+        let mut causes = BTreeMap::new();
+        let out = analyze_call(
+            "custom_renderer",
+            &[SimpleExpr::Int(0)],
+            &BTreeMap::new(),
+            &by_name,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeSet::from(["hero".to_string()]),
+            &mut BTreeSet::new(),
+            &mut causes,
+        );
+
+        assert_eq!(out.counts.get("hero"), Some(&Bound::Unknown));
+        assert!(causes["hero"].contains("potentially rendering external call custom_renderer"));
+    }
+
+    #[test]
+    fn transition_publication_marks_weight_overflow_unknown_and_caps_pair_rows() {
+        let mut capped = FlowSummary::empty();
+        for index in 0..=MAX_PUBLISHED_TRANSITION_PAIRS {
+            capped.transitions.insert(
+                (format!("source-{index:04}"), "target".to_string()),
+                Bound::Finite(1),
+            );
+        }
+        let (rows, analysis) = publish_transitions(&capped);
+        assert_eq!(rows.len(), MAX_PUBLISHED_TRANSITION_PAIRS);
+        assert_eq!(rows[0].from_identity, "source-0000");
+        assert_eq!(
+            analysis.pair_count,
+            Some((MAX_PUBLISHED_TRANSITION_PAIRS + 1) as u32)
+        );
+        assert_eq!(
+            analysis.published_pair_count,
+            MAX_PUBLISHED_TRANSITION_PAIRS as u32
+        );
+        assert_eq!(analysis.omitted_pair_count, Some(1));
+        assert_eq!(
+            analysis.validity,
+            HotRenderTransitionAnalysisValidity::Incomplete
+        );
+        assert!(analysis
+            .unknown_causes
+            .iter()
+            .any(|cause| cause.contains("pair count exceeds metadata cap")));
+
+        let pair = ("a".to_string(), "b".to_string());
+        let mut overweight = FlowSummary::empty();
+        overweight
+            .transitions
+            .insert(pair.clone(), Bound::Finite(MAX_TRANSITIONS_PER_PAIR + 1));
+        overweight.transition_provenance.insert(
+            pair,
+            BTreeSet::from([HotRenderTransitionProvenance::SequenceJoin]),
+        );
+        let (rows, analysis) = publish_transitions(&overweight);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].validity, HotRenderTransitionValidity::Unknown);
+        assert_eq!(rows[0].max_transitions_per_render, None);
+        assert!(rows[0]
+            .unknown_cause
+            .as_deref()
+            .is_some_and(|cause| cause.contains("weight cap")));
+        assert_eq!(
+            analysis.validity,
+            HotRenderTransitionAnalysisValidity::Incomplete
+        );
+
+        let mut unknown = FlowSummary::empty();
+        unknown
+            .transitions
+            .insert(("a".to_string(), "b".to_string()), Bound::Finite(1));
+        unknown
+            .unknown_causes
+            .insert("dynamic loop bound".to_string());
+        let (rows, analysis) = publish_transitions(&unknown);
+        assert!(rows.is_empty());
+        assert_eq!(analysis.pair_count, None);
+        assert_eq!(analysis.published_pair_count, 0);
+        assert_eq!(analysis.omitted_pair_count, None);
+        assert!(analysis
+            .unknown_causes
+            .contains(&"dynamic loop bound".to_string()));
     }
 
     #[test]

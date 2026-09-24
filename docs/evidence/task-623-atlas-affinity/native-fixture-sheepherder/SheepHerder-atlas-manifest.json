@@ -1,0 +1,365 @@
+{
+  "schema": "atlas-affinity-preview/report-v1",
+  "project": "SheepHerder",
+  "source": {
+    "snapshot_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\native-fixture\\atlas-affinity-native-query-v1.json",
+    "snapshot_sha256": "57fc3f976c68bf903a3e5a196153bae0ad1bfb1b364a4282cd16be785665a949",
+    "project_root": "D:\\code\\SheepHerder",
+    "native_query": "stasis_gfx_sprite_atlas_query_v1",
+    "snapshot_token": 7396508118523649800,
+    "renderer_generation": 1,
+    "asset_generation": 7,
+    "evidence_provenance": "bounded-runtime-histogram",
+    "native_flags": 9,
+    "stage_peak_cap_bytes": 268435456,
+    "unmapped_pair_count": 0,
+    "unmapped_pair_weight": 0,
+    "aot_identity_join_ambiguities": []
+  },
+  "evidence": {
+    "mode": "bounded-runtime-histogram",
+    "provenance": "production stasis_gfx_sprite_atlas_query_v1 pair rows",
+    "mapped_pair_count": 2,
+    "unmapped_pair_count": 0,
+    "unmapped_pair_weight": 0,
+    "weight_direction": "directed native from_handle \u2192 to_handle rows are preserved separately",
+    "status": "mapped-edges",
+    "aot_manifest_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\native-fixture\\engine-bundle-manifest-v4.json",
+    "aot_manifest_sha256": "ef920f01a814e032bc0cb57f839b7fe668e61c2af61c6af4446b6ef0217438cb",
+    "aot_fallback_reason": "AOT analysis is 'incomplete'; unknown causes: unbounded or dynamic for loop",
+    "aot_unmapped_pair_count": 0,
+    "aot_unmapped_pair_weight": 0,
+    "aot_manifest_validation": "rejected; runtime histogram used"
+  },
+  "contract": {
+    "contact_width": 2000,
+    "contact_height": 900,
+    "default_affinity_page_extent": [
+      512,
+      512
+    ],
+    "native_page_extents_preserved": true,
+    "page_extent_policy": "Use exact native page extents; protected or dedicated pages stay frozen.",
+    "page_format": "RGBA8 PNG",
+    "atlas_pngs_labeled": false
+  },
+  "memory_budget": {
+    "current_device_bytes": 16859136,
+    "max_final_bytes": 16859136,
+    "max_peak_bytes": 268435456
+  },
+  "planner_schema": "atlas-affinity-plan/v1",
+  "baseline_metrics": {
+    "baseline_page_count": 2,
+    "candidate_page_count": 2,
+    "moved_sprite_count": 0,
+    "baseline_cut_weight": 63,
+    "candidate_cut_weight": 63,
+    "cut_weight_saved": 0,
+    "candidate_texture_bytes": 81920,
+    "final_device_bytes": 16859136,
+    "peak_device_bytes": 16859136
+  },
+  "optimized_metrics": {
+    "baseline_page_count": 2,
+    "candidate_page_count": 1,
+    "moved_sprite_count": 1,
+    "baseline_cut_weight": 63,
+    "candidate_cut_weight": 0,
+    "cut_weight_saved": 63,
+    "candidate_texture_bytes": 65536,
+    "final_device_bytes": 16842752,
+    "peak_device_bytes": 16924672
+  },
+  "contacts": [
+    {
+      "path": "contacts\\SheepHerder-contact-00.png",
+      "width": 2000,
+      "height": 900,
+      "sha256": "f02ca1acfa87565bd47da5bc93358e5e8b4f8d7140cb5c7095d13ec7afbb173e"
+    }
+  ],
+  "page_inventory": [
+    {
+      "id": 0,
+      "width": 2048,
+      "height": 2048,
+      "allocation_bytes": 16777216,
+      "planner_eligible": false,
+      "planner_exclusion_reason": "protected_or_dedicated_page_flags"
+    },
+    {
+      "id": 1,
+      "width": 64,
+      "height": 64,
+      "allocation_bytes": 16384,
+      "planner_eligible": true,
+      "planner_exclusion_reason": null
+    },
+    {
+      "id": 2,
+      "width": 128,
+      "height": 128,
+      "allocation_bytes": 65536,
+      "planner_eligible": true,
+      "planner_exclusion_reason": null
+    }
+  ],
+  "planner_scope": {
+    "page_count": 2,
+    "sprite_count": 3,
+    "metrics_cover_only_pages_marked_plan_eligible_by_the_native_bridge": true,
+    "frozen_pages_and_sprites_remain_at_native_baseline_positions": true
+  },
+  "baseline": {
+    "pages": [
+      {
+        "id": 0,
+        "path": "atlases\\SheepHerder-baseline-page-000.png",
+        "width": 2048,
+        "height": 2048,
+        "allocation_bytes": 16777216,
+        "sprite_count": 0,
+        "usable_origin_x": 1,
+        "usable_origin_y": 6,
+        "reserved_header_height": 6,
+        "native_flags": 12,
+        "native_compatibility_flags": 1,
+        "group_id": 0,
+        "planner_eligible": false,
+        "planner_exclusion_reason": "protected_or_dedicated_page_flags",
+        "sha256": "4577c7f722a16789a37d9e5395b0df8b2c75182fa6db5c15ca21a7daf17bbbe1"
+      },
+      {
+        "id": 1,
+        "path": "atlases\\SheepHerder-baseline-page-001.png",
+        "width": 64,
+        "height": 64,
+        "allocation_bytes": 16384,
+        "sprite_count": 1,
+        "usable_origin_x": 1,
+        "usable_origin_y": 6,
+        "reserved_header_height": 6,
+        "native_flags": 16,
+        "native_compatibility_flags": 1,
+        "group_id": 6437489,
+        "planner_eligible": true,
+        "planner_exclusion_reason": null,
+        "sha256": "7b956fc10791a6a211f5a66d320f487026833446007886550224a04d3e67aeb5"
+      },
+      {
+        "id": 2,
+        "path": "atlases\\SheepHerder-baseline-page-002.png",
+        "width": 128,
+        "height": 128,
+        "allocation_bytes": 65536,
+        "sprite_count": 2,
+        "usable_origin_x": 1,
+        "usable_origin_y": 6,
+        "reserved_header_height": 6,
+        "native_flags": 16,
+        "native_compatibility_flags": 1,
+        "group_id": 6437489,
+        "planner_eligible": true,
+        "planner_exclusion_reason": null,
+        "sha256": "da78d9e9a8994ed542ddd2aeb9eb395d81be49eebd9f91729215c3e6827a94aa"
+      }
+    ],
+    "placements": [
+      {
+        "sprite_id": 1,
+        "page_id": 1,
+        "x": 2,
+        "y": 7,
+        "width": 24,
+        "height": 36,
+        "allocation_x": 1,
+        "allocation_y": 6,
+        "allocation_width": 26,
+        "allocation_height": 38
+      },
+      {
+        "sprite_id": 2,
+        "page_id": 2,
+        "x": 2,
+        "y": 7,
+        "width": 40,
+        "height": 60,
+        "allocation_x": 1,
+        "allocation_y": 6,
+        "allocation_width": 42,
+        "allocation_height": 62
+      },
+      {
+        "sprite_id": 3,
+        "page_id": 2,
+        "x": 44,
+        "y": 7,
+        "width": 40,
+        "height": 60,
+        "allocation_x": 43,
+        "allocation_y": 6,
+        "allocation_width": 42,
+        "allocation_height": 62
+      }
+    ]
+  },
+  "optimized": {
+    "pages": [
+      {
+        "id": 0,
+        "path": "atlases\\SheepHerder-optimized-page-000.png",
+        "width": 2048,
+        "height": 2048,
+        "allocation_bytes": 16777216,
+        "sprite_count": 0,
+        "usable_origin_x": 1,
+        "usable_origin_y": 6,
+        "reserved_header_height": 6,
+        "native_flags": 12,
+        "native_compatibility_flags": 1,
+        "group_id": 0,
+        "planner_eligible": false,
+        "planner_exclusion_reason": "protected_or_dedicated_page_flags",
+        "sha256": "4577c7f722a16789a37d9e5395b0df8b2c75182fa6db5c15ca21a7daf17bbbe1"
+      },
+      {
+        "id": 2,
+        "path": "atlases\\SheepHerder-optimized-page-002.png",
+        "width": 128,
+        "height": 128,
+        "allocation_bytes": 65536,
+        "sprite_count": 3,
+        "usable_origin_x": 1,
+        "usable_origin_y": 6,
+        "reserved_header_height": 6,
+        "native_flags": 16,
+        "native_compatibility_flags": 1,
+        "group_id": 6437489,
+        "planner_eligible": true,
+        "planner_exclusion_reason": null,
+        "sha256": "06d769d078a96b5d4fa5e9abdb4086b5df52c6114226d60c07626b60752701d1"
+      }
+    ],
+    "placements": [
+      {
+        "sprite_id": 1,
+        "page_id": 2,
+        "x": 2,
+        "y": 69,
+        "width": 24,
+        "height": 36,
+        "allocation_x": 1,
+        "allocation_y": 68,
+        "allocation_width": 26,
+        "allocation_height": 38
+      },
+      {
+        "sprite_id": 2,
+        "page_id": 2,
+        "x": 2,
+        "y": 7,
+        "width": 40,
+        "height": 60,
+        "allocation_x": 1,
+        "allocation_y": 6,
+        "allocation_width": 42,
+        "allocation_height": 62
+      },
+      {
+        "sprite_id": 3,
+        "page_id": 2,
+        "x": 44,
+        "y": 7,
+        "width": 40,
+        "height": 60,
+        "allocation_x": 43,
+        "allocation_y": 6,
+        "allocation_width": 42,
+        "allocation_height": 62
+      }
+    ],
+    "frozen_page_ids": [
+      0
+    ],
+    "frozen_sprite_ids": []
+  },
+  "sprites": [
+    {
+      "id": 1,
+      "identity": "app.resources.sheep_sprite",
+      "logical_path": "/assets/generated/sheep.png",
+      "source_path": "D:\\code\\SheepHerder\\assets\\generated\\sheep.png",
+      "source_sha256": "4a1300dd7b3968a222ad56bfde9f5164cfc9ae8c0334b1d3ebe3af47fa8f4cf9",
+      "source_type": "png",
+      "logical_width": 24,
+      "logical_height": 36,
+      "width": 24,
+      "height": 36,
+      "padding": 1,
+      "compatibility": {
+        "group_id": 6437489,
+        "format": 1,
+        "sampler": 1,
+        "color_space": 1,
+        "backend": 1
+      },
+      "native_page_id": 1,
+      "planner_eligible": true
+    },
+    {
+      "id": 2,
+      "identity": "app.resources.dog_sprite",
+      "logical_path": "/assets/generated/dog.png",
+      "source_path": "D:\\code\\SheepHerder\\assets\\generated\\dog.png",
+      "source_sha256": "a8b2f6e7882e70d856372d2471e058357ba8d70f88e2fd9fac5f664fad117848",
+      "source_type": "png",
+      "logical_width": 40,
+      "logical_height": 60,
+      "width": 40,
+      "height": 60,
+      "padding": 1,
+      "compatibility": {
+        "group_id": 6437489,
+        "format": 1,
+        "sampler": 1,
+        "color_space": 1,
+        "backend": 1
+      },
+      "native_page_id": 2,
+      "planner_eligible": true
+    },
+    {
+      "id": 3,
+      "identity": "app.resources.dog_run_1",
+      "logical_path": "/assets/generated/dog-run-1.png",
+      "source_path": "D:\\code\\SheepHerder\\assets\\generated\\dog-run-1.png",
+      "source_sha256": "378bc0e69c638f5adb65640bed62868b3b826a18223be94e0d0d8c187b0946e3",
+      "source_type": "png",
+      "logical_width": 40,
+      "logical_height": 60,
+      "width": 40,
+      "height": 60,
+      "padding": 1,
+      "compatibility": {
+        "group_id": 6437489,
+        "format": 1,
+        "sampler": 1,
+        "color_space": 1,
+        "backend": 1
+      },
+      "native_page_id": 2,
+      "planner_eligible": true
+    }
+  ],
+  "gpu_timing": {
+    "status": "not-measured",
+    "reason": "No supported GPU timing data was supplied by this run."
+  },
+  "interpretation": "Planner metrics are placement, directed cut-weight, and byte accounting from the production Rust API. They do not estimate native page-run counts, GPU time, or frame-time speedup.",
+  "status": "accepted-plan",
+  "planner": {
+    "schema": "atlas-affinity-plan/v1",
+    "fallback_reason": null
+  }
+}

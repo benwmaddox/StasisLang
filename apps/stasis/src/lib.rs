@@ -3307,7 +3307,7 @@ fn publish_jit_hot_render_policy(jit: &JitProcess) -> Result<(), String> {
 
 struct StagedPlayHostPublication {
     previous_targets: Option<stasis_dynload::JitHostEntryTargets>,
-    previous_hot_render_images: Vec<stasis_dynload::HotRenderRuntimeImage>,
+    previous_hot_render_metadata: stasis_dynload::HotRenderRuntimeMetadata,
     candidate_hot_render_policy: crate::compiler_backend::HotRenderRuntimePolicy,
 }
 
@@ -3325,7 +3325,7 @@ impl DevelopmentSwapHost for PlayHostEntryPublication {
             .ok_or_else(|| "candidate is missing hot-render metadata".to_string())?;
         Ok(StagedPlayHostPublication {
             previous_targets: stasis_dynload::jit_host_entry_targets(),
-            previous_hot_render_images: stasis_dynload::snapshot_hot_render_metadata(),
+            previous_hot_render_metadata: stasis_dynload::snapshot_hot_render_runtime_metadata(),
             candidate_hot_render_policy: crate::compiler_backend::snapshot_hot_render_policy(
                 snapshot,
             ),
@@ -3339,9 +3339,11 @@ impl DevelopmentSwapHost for PlayHostEntryPublication {
     }
 
     fn restore(&mut self, staged: Self::Staged) -> Result<(), String> {
-        stasis_dynload::replace_hot_render_metadata(
+        stasis_dynload::replace_hot_render_metadata_v4(
             stasis_dynload::HOT_RENDER_METADATA_VERSION,
-            &staged.previous_hot_render_images,
+            &staged.previous_hot_render_metadata.images,
+            &staged.previous_hot_render_metadata.transitions,
+            &staged.previous_hot_render_metadata.analysis,
         );
         if let Some(previous) = staged.previous_targets {
             stasis_dynload::begin_jit_host_entry_session(previous)?;
@@ -4341,7 +4343,7 @@ fn apply_prepared_jit_transaction(
     let mut preview =
         plan_state_migration(&active_layout, &incoming_layout, Vec::new(), false, None)?;
     finalize_runtime_preview(&candidate, &mut preview);
-    let previous_hot_render_images = stasis_dynload::snapshot_hot_render_metadata();
+    let previous_hot_render_metadata = stasis_dynload::snapshot_hot_render_runtime_metadata();
     let candidate_hot_render_policy = candidate
         .program_snapshot()
         .map(crate::compiler_backend::snapshot_hot_render_policy);
@@ -4362,9 +4364,11 @@ fn apply_prepared_jit_transaction(
         result.as_ref(),
         Ok(result) if result.status == SwapCommitStatus::Success
     ) {
-        stasis_dynload::replace_hot_render_metadata(
+        stasis_dynload::replace_hot_render_metadata_v4(
             stasis_dynload::HOT_RENDER_METADATA_VERSION,
-            &previous_hot_render_images,
+            &previous_hot_render_metadata.images,
+            &previous_hot_render_metadata.transitions,
+            &previous_hot_render_metadata.analysis,
         );
     }
     let result = result?;
@@ -5126,6 +5130,7 @@ mod tests {
 
     fn hot_render_test_image(path: &str) -> stasis_dynload::HotRenderRuntimeImage {
         stasis_dynload::HotRenderRuntimeImage {
+            identity: path.to_string(),
             logical_path: path.to_string(),
             logical_width: 256,
             logical_height: 256,

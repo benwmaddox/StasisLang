@@ -1,9 +1,38 @@
 # Hot-render image metadata
 
 Stasis compiler snapshots publish versioned `hot_render_images` records for
-statically identifiable `Sprite` and `SpriteSheet` loads. The AOT engine bundle
-contains the same deterministic records as JIT `ProgramSnapshot`; neither form
-contains pixels, textures, page coordinates, or backend object identifiers.
+statically identifiable `Sprite` and `SpriteSheet` loads. Metadata v4 also
+publishes ordered `hot_render_transitions` and a
+`hot_render_transition_analysis` summary. The AOT engine bundle contains the
+same deterministic records as JIT `ProgramSnapshot`; neither form contains
+pixels, textures, page coordinates, or backend object identifiers. The v4 image
+rows retain the v3 fields. A consumer may ignore the additive pair evidence; an
+unsupported metadata version remains standalone-safe.
+
+Each transition endpoint is the corresponding image row's stable receiver
+`identity` (for example, `hero` or `pieces[0]`). Join it to the image row to
+resolve the logical asset path and geometry. `max_transitions_per_render` is a
+conservative upper bound on how many times that ordered pair can occur in one
+render invocation. `validity` is `finite` when that upper bound is known;
+`unknown` uses a JSON `null` bound and includes an `unknown_cause`. Provenance is
+an ordered set of derivation tags: `sequence_join` for adjacent flow summaries,
+`branch_maximum` for mutually exclusive paths, `fixed_repeat_internal` for
+transitions repeated inside a fixed loop, and `fixed_repeat_boundary` for the
+last-to-first edge between loop iterations. Branch counts use the larger arm,
+not the sum. Fixed loops multiply internal transitions and count their
+last-to-first edge `iterations - 1` times. Dynamic loops, recursion, unresolved
+render identities, and ambiguous calls make the pair summary incomplete and
+suppress pair rows rather than publishing finite-looking bounds. `pair_count`
+and `omitted_pair_count` are null when the total is unknown.
+
+The pair table is capped at 4,096 rows and each finite pair weight is capped at
+1,000,000,000. Rows are ordered by descending finite weight, then by stable
+source and target identity. A weight above the cap becomes an unknown row. When
+rows are omitted, the summary reports the total, published, and omitted counts
+and marks `validity` as `incomplete`. `complete` means every pair was published
+with a finite upper bound; consumers that require a full pair graph should
+reject incomplete summaries. The existing `hot_render_images` policy remains
+available when pair evidence is incomplete.
 
 Each record contains the stable receiver identity, logical asset path and
 geometry, `max_renders_per_render`, an optional unknown cause, eligibility, a
@@ -18,17 +47,24 @@ so small interleaved sprites remain valuable candidates. Raw frequency is only a
 as one standalone texture, while `A B A B` has avoidable texture transitions and
 can benefit from one atlas. The reason records the exact decision.
 
-The analysis starts at every reachable `render()` and follows shared HIR calls.
+The analysis starts at every reachable render() and follows shared HIR calls.
 Its ordered flow summary preserves conservative counts, possible first/last
-identities, empty paths, and weighted transitions. Sequential sites connect
-possible endpoints, branches take conservative maxima and union endpoints, fixed
-loops multiply internal transitions and add last-to-first iteration edges, and
-fixed-capacity `foreach` loops use their declared capacity. Checked `u64` and
-loop-bound arithmetic prevents wrapping. Recursion, overflow, dynamic loops,
+identities, empty paths, ordered non-sprite barriers, and weighted transitions.
+Known text, line, solid-rectangle, and clip commands break sprite adjacency;
+helper calls are followed so barriers inside helpers have the same effect.
+Calls with analyzable pure bodies and explicitly known non-render externs
+stay transparent. A bodyless graphics-effect external, an unresolved call with
+no known non-render classification, an unresolved draw target, or an ambiguous
+helper makes the pair summary incomplete instead of allowing evidence to cross
+a possible render operation. Sequential sites connect possible endpoints, branches take
+conservative maxima and union endpoints, fixed loops multiply internal
+transitions and add last-to-first iteration edges, and fixed-capacity foreach
+loops use their declared capacity. Checked u64 and loop-bound arithmetic
+prevents wrapping. Recursion, overflow, dynamic loops containing image draws,
 unresolved/type-erased image identity, ambiguous helper resolution, and other
-unprovable flow produce unknown rather than an optimistic estimate. A recursive render-reachable
-call poisons all declared images conservatively, including globals not passed as
-parameters.
+unprovable flow produce unknown rather than an optimistic estimate. A recursive
+render-reachable call poisons all declared images conservatively, including
+globals not passed as parameters.
 
 Constant indexed receivers remain one identity. A dynamic indexed receiver such
 as `pieces[kind]` resolves to every statically loaded `pieces[N]` element with the

@@ -11,7 +11,10 @@ use crate::backend::compile_analysis::{
     build_compile_analysis_cache, compute_files_fingerprint,
     resolve_preferred_extern_call_signatures, CompileAnalysisCache,
 };
-use crate::backend::hot_render::{analyze_hot_render_images, HotRenderImageMetadata};
+use crate::backend::hot_render::{
+    analyze_hot_render_images, HotRenderImageMetadata, HotRenderTransitionAnalysis,
+    HotRenderTransitionMetadata,
+};
 use crate::backend::input_usage::{
     analyze_host_frame_input_usage_with_functions, HostFrameInputField, HostFrameInputUsage,
     HOST_F32_COUNT, HOST_FRAME_SCHEMA_VERSION, HOST_I32_COUNT,
@@ -312,6 +315,8 @@ pub struct ProgramSnapshot {
     host_frame_input_usage: HostFrameInputUsage,
     asset_references: Vec<AssetReference>,
     hot_render_images: Vec<HotRenderImageMetadata>,
+    hot_render_transitions: Vec<HotRenderTransitionMetadata>,
+    hot_render_transition_analysis: HotRenderTransitionAnalysis,
     state_layout: StateLayout,
     replay_state_snapshot: ProgramReplayStateSnapshot,
     layout_digest: [u8; 32],
@@ -517,7 +522,7 @@ impl ProgramSnapshot {
             .iter()
             .map(|collection| (collection.path.clone(), collection.capacity))
             .collect();
-        let hot_render_images = analyze_hot_render_images(
+        let hot_render = analyze_hot_render_images(
             functions,
             function_hirs,
             &reachable_function_ids,
@@ -534,7 +539,9 @@ impl ProgramSnapshot {
             extern_imports,
             host_frame_input_usage,
             asset_references,
-            hot_render_images,
+            hot_render_images: hot_render.images,
+            hot_render_transitions: hot_render.transitions,
+            hot_render_transition_analysis: hot_render.transition_analysis,
             state_layout,
             replay_state_snapshot,
             layout_digest,
@@ -633,6 +640,12 @@ impl ProgramSnapshot {
     }
     pub fn hot_render_images(&self) -> &[HotRenderImageMetadata] {
         &self.hot_render_images
+    }
+    pub fn hot_render_transitions(&self) -> &[HotRenderTransitionMetadata] {
+        &self.hot_render_transitions
+    }
+    pub fn hot_render_transition_analysis(&self) -> &HotRenderTransitionAnalysis {
+        &self.hot_render_transition_analysis
     }
     pub fn state_layout(&self) -> &StateLayout {
         &self.state_layout
@@ -940,14 +953,182 @@ function render(): void { hero.draw(1.0, 2.0, 255, 0); hero.draw(3.0, 4.0, 255, 
         let mut aot = AotProcess::new();
         aot.upsert_file("tests/stasis/compiler/hot_render.stasis", source);
         aot.compile().expect("compile AOT hot-render fixture");
+        let jit_snapshot = jit.program_snapshot().expect("JIT snapshot");
+        let aot_snapshot = aot.program_snapshot().expect("AOT snapshot");
         assert_eq!(
-            jit.program_snapshot()
-                .expect("JIT snapshot")
-                .hot_render_images(),
-            aot.program_snapshot()
-                .expect("AOT snapshot")
-                .hot_render_images()
+            jit_snapshot.hot_render_images(),
+            aot_snapshot.hot_render_images()
         );
+        assert_eq!(
+            jit_snapshot.hot_render_transitions(),
+            aot_snapshot.hot_render_transitions()
+        );
+        assert_eq!(
+            jit_snapshot.hot_render_transition_analysis(),
+            aot_snapshot.hot_render_transition_analysis()
+        );
+    }
+
+    #[test]
+    fn hot_render_transition_evidence_tracks_order_branches_and_fixed_loops() {
+        let snapshot = hot_render_snapshot(
+            r#"
+global a: Sprite;
+global b: Sprite;
+function main(): void {
+    a.load_sprite_from("a.png", 16, 16);
+    b.load_sprite_from("b.png", 16, 16);
+}
+function render(): void {
+    if (true) {
+        a.draw(0.0, 0.0, 255, 0);
+        b.draw(0.0, 0.0, 255, 0);
+    } else {
+        b.draw(0.0, 0.0, 255, 0);
+        a.draw(0.0, 0.0, 255, 0);
+    }
+    for (let i: i32 = 0; i < 3; i += 1) {
+        a.draw(0.0, 0.0, 255, 0);
+        b.draw(0.0, 0.0, 255, 0);
+    }
+}
+"#,
+        );
+        let transitions = snapshot.hot_render_transitions();
+        let a_to_b = transitions
+            .iter()
+            .find(|transition| transition.from_identity == "a" && transition.to_identity == "b")
+            .expect("a to b edge");
+        assert_eq!(a_to_b.max_transitions_per_render, Some(4));
+        assert_eq!(
+            a_to_b.validity,
+            crate::backend::hot_render::HotRenderTransitionValidity::Finite
+        );
+        assert!(a_to_b
+            .provenance
+            .contains(&crate::backend::hot_render::HotRenderTransitionProvenance::SequenceJoin));
+        assert!(a_to_b
+            .provenance
+            .contains(&crate::backend::hot_render::HotRenderTransitionProvenance::BranchMaximum));
+        assert!(a_to_b.provenance.contains(
+            &crate::backend::hot_render::HotRenderTransitionProvenance::FixedRepeatInternal
+        ));
+
+        let b_to_a = transitions
+            .iter()
+            .find(|transition| transition.from_identity == "b" && transition.to_identity == "a")
+            .expect("b to a edge");
+        assert_eq!(b_to_a.max_transitions_per_render, Some(4));
+        assert!(b_to_a
+            .provenance
+            .contains(&crate::backend::hot_render::HotRenderTransitionProvenance::BranchMaximum));
+        assert!(b_to_a.provenance.contains(
+            &crate::backend::hot_render::HotRenderTransitionProvenance::FixedRepeatBoundary
+        ));
+        assert_eq!(
+            snapshot.hot_render_transition_analysis().validity,
+            crate::backend::hot_render::HotRenderTransitionAnalysisValidity::Complete
+        );
+    }
+
+    #[test]
+    fn hot_render_transitions_respect_non_sprite_barriers_and_jit_aot_parity() {
+        let source = r#"
+struct Sprite { handle: i32; width: i32; height: i32; }
+global a: Sprite;
+global b: Sprite;
+global c: Sprite;
+global d: Sprite;
+global enabled: bool;
+function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void { return; }
+function draw_text(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void { return; }
+function fill_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void { return; }
+function text_barrier(): void { draw_text(0, "", 0.0, 0.0, 1.0, 1.0, 1.0, 1.0); }
+function pure_helper(): void { return; }
+function main(): void {
+    a.load_sprite_from("a.png", 16, 16);
+    b.load_sprite_from("b.png", 16, 16);
+    c.load_sprite_from("c.png", 16, 16);
+    d.load_sprite_from("d.png", 16, 16);
+}
+function render(): void {
+    a.draw(0.0, 0.0, 255, 0);
+    text_barrier();
+    b.draw(0.0, 0.0, 255, 0);
+    pure_helper();
+    c.draw(0.0, 0.0, 255, 0);
+    if (enabled) { fill_rect(0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0); }
+    d.draw(0.0, 0.0, 255, 0);
+}
+"#;
+        let mut jit = JitProcess::new();
+        jit.upsert_file("tests/stasis/compiler/hot_render_barriers.stasis", source);
+        jit.compile().expect("compile JIT barrier fixture");
+        let mut aot = AotProcess::new();
+        aot.upsert_file("tests/stasis/compiler/hot_render_barriers.stasis", source);
+        aot.compile().expect("compile AOT barrier fixture");
+        let jit_snapshot = jit.program_snapshot().expect("JIT snapshot");
+        let aot_snapshot = aot.program_snapshot().expect("AOT snapshot");
+
+        assert_eq!(
+            jit_snapshot.hot_render_images(),
+            aot_snapshot.hot_render_images()
+        );
+        assert_eq!(
+            jit_snapshot.hot_render_transitions(),
+            aot_snapshot.hot_render_transitions()
+        );
+        assert_eq!(
+            jit_snapshot.hot_render_transition_analysis(),
+            aot_snapshot.hot_render_transition_analysis()
+        );
+        let transitions = aot_snapshot.hot_render_transitions();
+        assert!(!transitions
+            .iter()
+            .any(|edge| { edge.from_identity == "a" && edge.to_identity == "b" }));
+        assert!(transitions.iter().any(|edge| {
+            edge.from_identity == "b"
+                && edge.to_identity == "c"
+                && edge.max_transitions_per_render == Some(1)
+        }));
+        assert!(transitions.iter().any(|edge| {
+            edge.from_identity == "c"
+                && edge.to_identity == "d"
+                && edge.max_transitions_per_render == Some(1)
+        }));
+    }
+
+    #[test]
+    fn hot_render_unknown_graphics_externals_make_transition_evidence_incomplete() {
+        let snapshot = hot_render_snapshot(
+            r#"
+global a: Sprite;
+global b: Sprite;
+extern function @effects(graphics)@extern("stasis_jit_font_status") custom_renderer(font: i32): i32;
+function main(): void {
+    a.load_sprite_from("a.png", 16, 16);
+    b.load_sprite_from("b.png", 16, 16);
+}
+function render(): void {
+    a.draw(0.0, 0.0, 255, 0);
+    custom_renderer(0);
+    b.draw(0.0, 0.0, 255, 0);
+}
+"#,
+        );
+
+        assert!(snapshot.hot_render_transitions().is_empty());
+        let analysis = snapshot.hot_render_transition_analysis();
+        assert_eq!(
+            analysis.validity,
+            crate::backend::hot_render::HotRenderTransitionAnalysisValidity::Incomplete
+        );
+        assert_eq!(analysis.pair_count, None);
+        assert!(analysis
+            .unknown_causes
+            .iter()
+            .any(|cause| cause.contains("unresolved call target custom_renderer")));
     }
 
     #[test]
@@ -1142,6 +1323,17 @@ function render(): void { recursive_paint(1); }
             .unknown_cause
             .as_deref()
             .is_some_and(|cause| cause.contains("recursive")));
+        assert!(snapshot.hot_render_transitions().is_empty());
+        let analysis = snapshot.hot_render_transition_analysis();
+        assert_eq!(
+            analysis.validity,
+            crate::backend::hot_render::HotRenderTransitionAnalysisValidity::Incomplete
+        );
+        assert_eq!(analysis.pair_count, None);
+        assert!(analysis
+            .unknown_causes
+            .iter()
+            .any(|cause| cause.contains("recursive")));
     }
 
     #[test]

@@ -10,7 +10,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
+mod atlas_native_bridge;
+mod atlas_placement;
 mod dynamic_library;
+pub use atlas_native_bridge::*;
+pub use atlas_placement::*;
 pub use dynamic_library::{atomic_rename_no_replace, Library};
 
 #[cfg(windows)]
@@ -23,10 +27,11 @@ mod cross_atlas_research;
 #[cfg(feature = "cross-atlas-research")]
 pub use cross_atlas_research::*;
 
-pub const HOT_RENDER_METADATA_VERSION: u32 = 3;
+pub const HOT_RENDER_METADATA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HotRenderRuntimeImage {
+    pub identity: String,
     pub logical_path: String,
     pub logical_width: u32,
     pub logical_height: u32,
@@ -41,6 +46,33 @@ pub struct HotRenderRuntimeImage {
     pub backend_constraints: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotRenderRuntimeTransition {
+    pub from_identity: String,
+    pub to_identity: String,
+    pub max_transitions_per_render: Option<u64>,
+    pub validity: String,
+    pub unknown_cause: Option<String>,
+    pub provenance: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HotRenderRuntimeTransitionAnalysis {
+    pub validity: String,
+    pub unknown_causes: Vec<String>,
+    pub pair_count: Option<u32>,
+    pub published_pair_count: u32,
+    pub omitted_pair_count: Option<u32>,
+    pub pair_limit: u32,
+    pub max_pair_weight: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotRenderRuntimeMetadata {
+    pub images: Vec<HotRenderRuntimeImage>,
+    pub transitions: Vec<HotRenderRuntimeTransition>,
+    pub analysis: HotRenderRuntimeTransitionAnalysis,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HotRenderAtlasPolicy {
     pub eligible: bool,
@@ -64,11 +96,17 @@ pub struct HotRenderLoadPlan {
     pub standalone: Vec<(String, u32, u32)>,
 }
 
-fn hot_render_runtime_images() -> &'static RwLock<HashMap<(String, u32, u32), HotRenderRuntimeImage>>
-{
-    static IMAGES: OnceLock<RwLock<HashMap<(String, u32, u32), HotRenderRuntimeImage>>> =
-        OnceLock::new();
-    IMAGES.get_or_init(|| RwLock::new(HashMap::new()))
+#[derive(Default)]
+struct HotRenderPolicyState {
+    source_images: Vec<HotRenderRuntimeImage>,
+    images: HashMap<(String, u32, u32), HotRenderRuntimeImage>,
+    transitions: Vec<HotRenderRuntimeTransition>,
+    analysis: HotRenderRuntimeTransitionAnalysis,
+}
+
+fn hot_render_policy_state() -> &'static RwLock<HotRenderPolicyState> {
+    static STATE: OnceLock<RwLock<HotRenderPolicyState>> = OnceLock::new();
+    STATE.get_or_init(|| RwLock::new(HotRenderPolicyState::default()))
 }
 
 fn normalized_asset_key(path: &str, width: u32, height: u32) -> (String, u32, u32) {
@@ -78,10 +116,27 @@ fn normalized_asset_key(path: &str, width: u32, height: u32) -> (String, u32, u3
 /// Atomically replaces the runtime policy table. Unknown contract versions
 /// deliberately publish an empty table, preserving standalone-safe behavior.
 pub fn replace_hot_render_metadata(version: u32, images: &[HotRenderRuntimeImage]) {
-    let mut next = HashMap::new();
+    replace_hot_render_metadata_v4(
+        version,
+        images,
+        &[],
+        &HotRenderRuntimeTransitionAnalysis::default(),
+    );
+}
+
+pub fn replace_hot_render_metadata_v4(
+    version: u32,
+    images: &[HotRenderRuntimeImage],
+    transitions: &[HotRenderRuntimeTransition],
+    analysis: &HotRenderRuntimeTransitionAnalysis,
+) {
+    let mut next = HotRenderPolicyState::default();
     if version == HOT_RENDER_METADATA_VERSION {
-        for image in images {
-            next.insert(
+        next.source_images = images.to_vec();
+        next.source_images
+            .sort_by(|left, right| left.identity.cmp(&right.identity));
+        for image in &next.source_images {
+            next.images.insert(
                 normalized_asset_key(
                     &image.logical_path,
                     image.logical_width,
@@ -90,20 +145,57 @@ pub fn replace_hot_render_metadata(version: u32, images: &[HotRenderRuntimeImage
                 image.clone(),
             );
         }
+        let identities = images
+            .iter()
+            .map(|image| image.identity.as_str())
+            .collect::<HashSet<_>>();
+        let unique_pairs = transitions
+            .iter()
+            .map(|edge| (edge.from_identity.as_str(), edge.to_identity.as_str()))
+            .collect::<HashSet<_>>();
+        let complete = analysis.validity == "complete"
+            && analysis.unknown_causes.is_empty()
+            && analysis.pair_limit == 4096
+            && analysis.max_pair_weight == 1_000_000_000
+            && unique_pairs.len() == transitions.len()
+            && analysis.omitted_pair_count == Some(0)
+            && analysis.published_pair_count as usize == transitions.len()
+            && analysis.pair_count == Some(analysis.published_pair_count)
+            && identities.len() == images.len()
+            && next.images.len() == images.len()
+            && transitions.len() <= 4096
+            && transitions.iter().all(|edge| {
+                edge.validity == "finite"
+                    && edge
+                        .max_transitions_per_render
+                        .is_some_and(|weight| weight <= 1_000_000_000)
+                    && identities.contains(edge.from_identity.as_str())
+                    && identities.contains(edge.to_identity.as_str())
+            });
+        if complete {
+            next.transitions = transitions.to_vec();
+            next.transitions.sort_by(|left, right| {
+                (&left.from_identity, &left.to_identity)
+                    .cmp(&(&right.from_identity, &right.to_identity))
+            });
+            next.analysis = analysis.clone();
+        }
     }
-    *hot_render_runtime_images()
+    *hot_render_policy_state()
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
 }
 
 /// Captures the currently accepted policy for transactional host publication.
 pub fn snapshot_hot_render_metadata() -> Vec<HotRenderRuntimeImage> {
-    let mut images = hot_render_runtime_images()
+    snapshot_hot_render_runtime_metadata().images
+}
+
+pub fn snapshot_hot_render_runtime_metadata() -> HotRenderRuntimeMetadata {
+    let state = hot_render_policy_state()
         .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut images = state.source_images.clone();
     images.sort_by(|left, right| {
         (&left.logical_path, left.logical_width, left.logical_height).cmp(&(
             &right.logical_path,
@@ -111,9 +203,12 @@ pub fn snapshot_hot_render_metadata() -> Vec<HotRenderRuntimeImage> {
             right.logical_height,
         ))
     });
-    images
+    HotRenderRuntimeMetadata {
+        images,
+        transitions: state.transitions.clone(),
+        analysis: state.analysis.clone(),
+    }
 }
-
 /// Missing, stale, unknown, and <=1 records are standalone by default.
 pub fn hot_render_atlas_eligible(path: &str, width: u32, height: u32) -> bool {
     hot_render_atlas_policy(path, width, height).eligible
@@ -133,9 +228,10 @@ fn stable_group_id(key: &str) -> u64 {
 }
 
 pub fn hot_render_atlas_policy(path: &str, width: u32, height: u32) -> HotRenderAtlasPolicy {
-    hot_render_runtime_images()
+    hot_render_policy_state()
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .images
         .get(&normalized_asset_key(path, width, height))
         .filter(|image| {
             image.atlas_eligible
@@ -1383,6 +1479,9 @@ pub struct StasisGraphicsApi {
     stasis_host_performance_metrics_enabled: usize,
     stasis_host_set_performance_metrics: usize,
     stasis_gfx_submit_u8: usize,
+    atlas_query_v1: Option<usize>,
+    atlas_stage_v1: Option<usize>,
+    atlas_commit_v1: Option<usize>,
     stasis_set_recording_config: Option<usize>,
     stasis_set_recording_audio_config: Option<usize>,
     stasis_recording_audio_pull_f32_interleaved: Option<usize>,
@@ -1446,6 +1545,13 @@ impl StasisGraphicsApi {
         let stasis_host_performance_metrics_enabled =
             lib.symbol_address("stasis_host_performance_metrics_enabled")?;
         let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
+        let atlas_query_v1 = lib.symbol_address("stasis_gfx_sprite_atlas_query_v1").ok();
+        let atlas_stage_v1 = lib
+            .symbol_address("stasis_gfx_sprite_atlas_stage_plan_v1")
+            .ok();
+        let atlas_commit_v1 = lib
+            .symbol_address("stasis_gfx_sprite_atlas_commit_plan_v1")
+            .ok();
         let stasis_set_recording_config = lib.symbol_address("stasis_set_recording_config").ok();
         let stasis_set_recording_audio_config =
             lib.symbol_address("stasis_set_recording_audio_config").ok();
@@ -1481,6 +1587,9 @@ impl StasisGraphicsApi {
             stasis_host_performance_metrics_enabled,
             stasis_host_set_performance_metrics,
             stasis_gfx_submit_u8,
+            atlas_query_v1,
+            atlas_stage_v1,
+            atlas_commit_v1,
             stasis_set_recording_config,
             stasis_set_recording_audio_config,
             stasis_recording_audio_pull_f32_interleaved,
@@ -1493,6 +1602,14 @@ impl StasisGraphicsApi {
             stasis_host_get_monitor_usable_bounds,
             stasis_sleep_ms,
         })
+    }
+
+    pub fn atlas_exports_v1(&self) -> Option<NativeAtlasExportsV1> {
+        native_atlas_exports_v1(
+            self.atlas_query_v1,
+            self.atlas_stage_v1,
+            self.atlas_commit_v1,
+        )
     }
 
     pub fn runtime_path(&self) -> &Path {
@@ -1841,6 +1958,9 @@ impl StasisGraphicsApi {
         cmd_f32: &[f32],
         cmd_u8: &[u8],
     ) -> Result<(), String> {
+        if let Some(exports) = self.atlas_exports_v1() {
+            let _ = optimize_native_atlas_v1(exports);
+        }
         #[cfg(windows)]
         {
             let callback: extern "system" fn(*mut i32, *const f32, *const u8) =
@@ -7870,6 +7990,7 @@ mod tests {
 
     fn hot_image(path: &str, count: Option<u64>, eligible: bool) -> HotRenderRuntimeImage {
         HotRenderRuntimeImage {
+            identity: path.to_string(),
             logical_path: path.to_string(),
             logical_width: 32,
             logical_height: 24,
@@ -7917,6 +8038,67 @@ mod tests {
         assert!(!hot_render_atlas_eligible("assets/hot.png", 32, 24));
     }
 
+    #[test]
+    fn hot_render_v4_pairs_publish_atomically_and_unknown_flow_falls_back() {
+        let _guard = test_lock();
+        let images = [
+            hot_image("assets/a.png", Some(3), true),
+            hot_image("assets/b.png", Some(3), true),
+        ];
+        let pairs = [HotRenderRuntimeTransition {
+            from_identity: "assets/a.png".to_string(),
+            to_identity: "assets/b.png".to_string(),
+            max_transitions_per_render: Some(4),
+            validity: "finite".to_string(),
+            unknown_cause: None,
+            provenance: vec!["sequence_join".to_string()],
+        }];
+        let complete = HotRenderRuntimeTransitionAnalysis {
+            validity: "complete".to_string(),
+            unknown_causes: vec![],
+            pair_count: Some(1),
+            published_pair_count: 1,
+            omitted_pair_count: Some(0),
+            pair_limit: 4096,
+            max_pair_weight: 1_000_000_000,
+        };
+        replace_hot_render_metadata_v4(HOT_RENDER_METADATA_VERSION, &images, &pairs, &complete);
+        let saved = snapshot_hot_render_runtime_metadata();
+        assert_eq!(saved.images.len(), 2);
+        assert_eq!(saved.transitions, pairs);
+        assert_eq!(saved.analysis, complete);
+        let incomplete = HotRenderRuntimeTransitionAnalysis {
+            validity: "incomplete".to_string(),
+            unknown_causes: vec!["dynamic_identity".to_string()],
+            pair_count: None,
+            published_pair_count: 0,
+            omitted_pair_count: None,
+            ..complete.clone()
+        };
+        replace_hot_render_metadata_v4(HOT_RENDER_METADATA_VERSION, &images, &pairs, &incomplete);
+        let unknown = snapshot_hot_render_runtime_metadata();
+        assert_eq!(unknown.images.len(), 2);
+        assert!(unknown.transitions.is_empty());
+        let mut duplicate_summary = complete.clone();
+        duplicate_summary.pair_count = Some(2);
+        duplicate_summary.published_pair_count = 2;
+        replace_hot_render_metadata_v4(
+            HOT_RENDER_METADATA_VERSION,
+            &images,
+            &[pairs[0].clone(), pairs[0].clone()],
+            &duplicate_summary,
+        );
+        assert!(snapshot_hot_render_runtime_metadata()
+            .transitions
+            .is_empty());
+        replace_hot_render_metadata_v4(
+            HOT_RENDER_METADATA_VERSION,
+            &saved.images,
+            &saved.transitions,
+            &saved.analysis,
+        );
+        assert_eq!(snapshot_hot_render_runtime_metadata(), saved);
+    }
     #[test]
     fn hot_render_groups_are_deterministic_by_compiler_group_identity() {
         let images = vec![
