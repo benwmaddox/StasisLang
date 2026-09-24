@@ -3307,7 +3307,7 @@ fn publish_jit_hot_render_policy(jit: &JitProcess) -> Result<(), String> {
 
 struct StagedPlayHostPublication {
     previous_targets: Option<stasis_dynload::JitHostEntryTargets>,
-    previous_hot_render_images: Vec<stasis_dynload::HotRenderRuntimeImage>,
+    previous_hot_render_metadata: stasis_dynload::HotRenderRuntimeMetadata,
     candidate_hot_render_policy: crate::compiler_backend::HotRenderRuntimePolicy,
 }
 
@@ -3325,7 +3325,7 @@ impl DevelopmentSwapHost for PlayHostEntryPublication {
             .ok_or_else(|| "candidate is missing hot-render metadata".to_string())?;
         Ok(StagedPlayHostPublication {
             previous_targets: stasis_dynload::jit_host_entry_targets(),
-            previous_hot_render_images: stasis_dynload::snapshot_hot_render_metadata(),
+            previous_hot_render_metadata: stasis_dynload::snapshot_hot_render_runtime_metadata(),
             candidate_hot_render_policy: crate::compiler_backend::snapshot_hot_render_policy(
                 snapshot,
             ),
@@ -3339,9 +3339,11 @@ impl DevelopmentSwapHost for PlayHostEntryPublication {
     }
 
     fn restore(&mut self, staged: Self::Staged) -> Result<(), String> {
-        stasis_dynload::replace_hot_render_metadata(
+        stasis_dynload::replace_hot_render_metadata_v4(
             stasis_dynload::HOT_RENDER_METADATA_VERSION,
-            &staged.previous_hot_render_images,
+            &staged.previous_hot_render_metadata.images,
+            &staged.previous_hot_render_metadata.transitions,
+            &staged.previous_hot_render_metadata.analysis,
         );
         if let Some(previous) = staged.previous_targets {
             stasis_dynload::begin_jit_host_entry_session(previous)?;
@@ -4341,7 +4343,7 @@ fn apply_prepared_jit_transaction(
     let mut preview =
         plan_state_migration(&active_layout, &incoming_layout, Vec::new(), false, None)?;
     finalize_runtime_preview(&candidate, &mut preview);
-    let previous_hot_render_images = stasis_dynload::snapshot_hot_render_metadata();
+    let previous_hot_render_metadata = stasis_dynload::snapshot_hot_render_runtime_metadata();
     let candidate_hot_render_policy = candidate
         .program_snapshot()
         .map(crate::compiler_backend::snapshot_hot_render_policy);
@@ -4362,9 +4364,11 @@ fn apply_prepared_jit_transaction(
         result.as_ref(),
         Ok(result) if result.status == SwapCommitStatus::Success
     ) {
-        stasis_dynload::replace_hot_render_metadata(
+        stasis_dynload::replace_hot_render_metadata_v4(
             stasis_dynload::HOT_RENDER_METADATA_VERSION,
-            &previous_hot_render_images,
+            &previous_hot_render_metadata.images,
+            &previous_hot_render_metadata.transitions,
+            &previous_hot_render_metadata.analysis,
         );
     }
     let result = result?;
@@ -5126,6 +5130,7 @@ mod tests {
 
     fn hot_render_test_image(path: &str) -> stasis_dynload::HotRenderRuntimeImage {
         stasis_dynload::HotRenderRuntimeImage {
+            identity: path.to_string(),
             logical_path: path.to_string(),
             logical_width: 256,
             logical_height: 256,
@@ -6411,21 +6416,22 @@ function render(): void {{ {draws} return; }}
     #[test]
     fn sprite_runtime_uploads_edge_extruded_atlas_padding() {
         let upload_start = STASIS_GRAPHICS_SOURCE
-            .find("static int stasis_sprite_atlas_upload(")
-            .expect("sprite atlas upload helper");
+            .find("static int stasis_sprite_atlas_upload_page(")
+            .expect("sprite atlas page upload helper");
         let upload_end = STASIS_GRAPHICS_SOURCE[upload_start..]
-            .find("static int sprite_publish_pixels_into_entry(")
-            .expect("sprite atlas upload helper boundary")
+            .find("static int stasis_sprite_atlas_upload(")
+            .expect("sprite atlas page upload helper boundary")
             + upload_start;
         let upload_source = &STASIS_GRAPHICS_SOURCE[upload_start..upload_end];
         for required in [
             "const int padded_w = alloc_w;",
             "const int padded_h = alloc_h;",
-            "if (padded_w < w + 2 || padded_h < h + 2) return 0;",
+            "if (padded_w < w + 2 || padded_h < h + 2 ||",
+            "(size_t)padded_w > SIZE_MAX / (size_t)padded_h / 4u",
             "int sy = py - 1;",
             "int sx = px - 1;",
             "SDL_Rect rect = {x - 1, y - 1, padded_w, padded_h};",
-            "g_sprite_atlas_pages[page_index].texture, &rect, padded, padded_w * 4",
+            "SDL_UpdateTexture(page->texture, &rect, padded, padded_w * 4)",
         ] {
             assert!(
                 upload_source.contains(required),
@@ -6445,10 +6451,10 @@ function render(): void {{ {draws} return; }}
             "stasis_sprite_atlas_page_size_v3",
             "#define STASIS_SDL_ATLAS_COLD_PAGE_SIZE 512",
             "if (eligible && w + 2 <= STASIS_SDL_ATLAS_PAGE_SIZE",
-            "if (!page->texture || page->dedicated || page->group_id != group_id) continue;",
+            "if (!page->texture || page->dedicated || page->planner_layout || page->group_id != group_id) continue;",
             "stasis_sprite_atlas_create_page(page_w, page_h, group_id, 0)",
             "if (!eligible && stasis_sprite_atlas_fits_cold_page(w, h))",
-            "if (!stasis_sprite_atlas_is_cold_page(page)) continue;",
+            "if (!stasis_sprite_atlas_is_cold_page(page) || page->planner_layout) continue;",
             "stasis_sprite_atlas_create_page(width, height, group_id, 1)",
         ] {
             assert!(

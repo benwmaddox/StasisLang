@@ -1,0 +1,320 @@
+{
+  "schema": "atlas-affinity-representative-captures/v1",
+  "capture_date": "2026-09-24",
+  "requested_resolution": {
+    "width": 2000,
+    "height": 900
+  },
+  "renderer": "hidden SDL software renderer",
+  "gpu_timing": "not-measured",
+  "games": [
+    {
+      "game": "SheepHerder",
+      "capture_status": "captured",
+      "capture": {
+        "frames": 129,
+        "fps": 60,
+        "resolution": [
+          2000,
+          900
+        ],
+        "input": "pointer down at frame 24 (500,430), release at frame 25",
+        "screenshot": "sheep-herder-runtime/gameplay-frame-000129.png",
+        "screenshot_png_sha256": "5e6a9b46ba01dc7b8190953aa02ec9ce95ea830855268eba078f5d25a1a48fdf",
+        "screenshot_pixel_sha256_rgba": "be0be191e469d212d69099583bdedca0fdf6570a125e0cc76625bea887c01199"
+      },
+      "native_snapshot": {
+        "available": true,
+        "path": "sheep-herder-runtime/atlas-affinity-native-query-v1.json",
+        "snapshot_token": 7775677230363887886,
+        "renderer_generation": 1,
+        "asset_generation": 28,
+        "flags": 9,
+        "provenance": "bounded-runtime-histogram",
+        "sprite_count": 21,
+        "pair_rows": 5,
+        "pair_weight_sum": 6336,
+        "page_inventory": [
+          {
+            "page_index": 0,
+            "width": 2010,
+            "height": 908,
+            "flags": 9,
+            "group_id": 0,
+            "allocation_bytes": 7300320
+          },
+          {
+            "page_index": 1,
+            "width": 2048,
+            "height": 2048,
+            "flags": 12,
+            "group_id": 0,
+            "allocation_bytes": 16777216
+          },
+          {
+            "page_index": 2,
+            "width": 1578,
+            "height": 1576,
+            "flags": 9,
+            "group_id": 0,
+            "allocation_bytes": 9947712
+          },
+          {
+            "page_index": 3,
+            "width": 512,
+            "height": 512,
+            "flags": 10,
+            "group_id": 0,
+            "allocation_bytes": 1048576
+          },
+          {
+            "page_index": 4,
+            "width": 512,
+            "height": 512,
+            "flags": 10,
+            "group_id": 0,
+            "allocation_bytes": 1048576
+          },
+          {
+            "page_index": 5,
+            "width": 2010,
+            "height": 123,
+            "flags": 9,
+            "group_id": 0,
+            "allocation_bytes": 988920
+          }
+        ],
+        "total_page_allocation_bytes": 37111320,
+        "planner_eligible_page_count": 0,
+        "page_runs": null
+      },
+      "compiler_aot": {
+        "manifest_path": "sheep-herder-runtime/engine-bundle-manifest-v4.json",
+        "metadata_version": 4,
+        "validity": "incomplete",
+        "unknown_causes": [
+          "unbounded or dynamic for loop"
+        ]
+      },
+      "preview": {
+        "status": "planner-fallback",
+        "fallback_reason": "empty_input",
+        "evidence_mode": "bounded-runtime-histogram",
+        "unmapped_runtime_pair_count": 5,
+        "unmapped_runtime_pair_weight": 6336,
+        "baseline_metrics": null,
+        "candidate_metrics": null,
+        "page_runs": null,
+        "gpu_timing": "not-measured",
+        "report_path": "sheep-herder-runtime/SheepHerder-report.json"
+      },
+      "record_invocation": {
+        "executable": "D:\\code\\StasisLang\\build\\task623-sheepherder-run-bin\\stasis.exe",
+        "runtime_dll_path": "D:\\code\\StasisLang\\build\\task623-sheepherder-run-bin\\stasis_graphics.dll",
+        "runtime_runner_path": "D:\\code\\StasisLang\\build\\task623-sheepherder-run-bin\\stasis_runner.exe",
+        "snapshot_output": "D:\\code\\StasisLang\\build\\task623-sheepherder-gameplay129-native.json",
+        "arguments": [
+          "record",
+          "--workspace",
+          "D:\\code\\StasisLang\\build\\task623-sheepherder-runtime-copy",
+          "--input-script",
+          "D:\\code\\StasisLang\\build\\task623-sheepherder-runtime-copy\\task623-start-play-frame24-input.json",
+          "--output",
+          "D:\\code\\StasisLang\\build\\task623-sheepherder-gameplay129-frames",
+          "--width",
+          "2000",
+          "--height",
+          "900",
+          "--fps",
+          "60",
+          "--frames",
+          "129",
+          "--json"
+        ]
+      }
+    },
+    {
+      "game": "RootbeerMaze3",
+      "capture_status": "captured-unsupported-layout",
+      "capture": {
+        "frames": 129,
+        "fps": 60,
+        "resolution": [
+          2000,
+          900
+        ],
+        "presentation": "portrait-only app selected its unsupported-layout screen",
+        "render_contract": {
+          "sprites": 0,
+          "text": 0
+        },
+        "screenshot": "rootbeer-maze3-runtime/unsupported-layout-frame-000129.png",
+        "screenshot_png_sha256": "760c2d089036e9e7d9da05cb734d856e57055a57659321a9f7526610d181d0c3",
+        "screenshot_pixel_sha256_rgba": "24b57df3852d29a537aec6d7c0a886d29e9a29dc10c073add136adcdd829a008"
+      },
+      "native_snapshot": {
+        "available": false,
+        "reason": "no valid native pair window was emitted while the app was on its unsupported-layout screen",
+        "page_inventory": null,
+        "page_runs": null
+      },
+      "preview": {
+        "status": "not-run-no-native-snapshot",
+        "baseline_metrics": null,
+        "candidate_metrics": null,
+        "page_runs": null,
+        "gpu_timing": "not-measured"
+      },
+      "record_invocation": {
+        "executable": "D:\\code\\StasisLang\\build\\task623-sheepherder-run-bin\\stasis.exe",
+        "runtime_dll_path": "D:\\code\\StasisLang\\build\\task623-sheepherder-run-bin\\stasis_graphics.dll",
+        "runtime_runner_path": "D:\\code\\StasisLang\\build\\task623-sheepherder-run-bin\\stasis_runner.exe",
+        "snapshot_output": "D:\\code\\StasisLang\\build\\task623-rootbeer-idle129-native.json",
+        "arguments": [
+          "record",
+          "--workspace",
+          "D:\\code\\StasisLang\\build\\task623-rootbeer-runtime-copy",
+          "--output",
+          "D:\\code\\StasisLang\\build\\task623-rootbeer-idle129-frames",
+          "--width",
+          "2000",
+          "--height",
+          "900",
+          "--fps",
+          "60",
+          "--frames",
+          "129",
+          "--json"
+        ]
+      }
+    },
+    {
+      "game": "HamsterHavenTycoon",
+      "capture_status": "failed-before-first-frame",
+      "capture": {
+        "frames_requested": 129,
+        "fps": 60,
+        "resolution": [
+          2000,
+          900
+        ],
+        "error": "guest main() returned non-zero status 1",
+        "startup_validation": "gameplay_config_valid() returned false",
+        "native_snapshot_output_produced": false,
+        "frame_output_produced": false
+      },
+      "native_snapshot": {
+        "available": false,
+        "reason": "record exited before the first frame",
+        "page_inventory": null,
+        "page_runs": null
+      },
+      "preview": {
+        "status": "not-run-no-native-snapshot",
+        "baseline_metrics": null,
+        "candidate_metrics": null,
+        "page_runs": null,
+        "gpu_timing": "not-measured"
+      },
+      "record_invocation": {
+        "executable": "D:\\code\\StasisLang\\build\\task623-sheepherder-run-bin\\stasis.exe",
+        "runtime_dll_path": "D:\\code\\StasisLang\\build\\task623-sheepherder-run-bin\\stasis_graphics.dll",
+        "runtime_runner_path": "D:\\code\\StasisLang\\build\\task623-sheepherder-run-bin\\stasis_runner.exe",
+        "snapshot_output": "D:\\code\\StasisLang\\build\\task623-hamster-idle129-native.json",
+        "arguments": [
+          "record",
+          "--workspace",
+          "D:\\code\\StasisLang\\build\\task623-hamster-runtime-copy",
+          "--output",
+          "D:\\code\\StasisLang\\build\\task623-hamster-idle129-frames",
+          "--width",
+          "2000",
+          "--height",
+          "900",
+          "--fps",
+          "60",
+          "--frames",
+          "129",
+          "--json"
+        ]
+      }
+    }
+  ],
+  "native_fixture": {
+    "capture_resolution": [
+      200,
+      120
+    ],
+    "schema": "atlas-affinity-native-query/v1",
+    "snapshot_path": "native-fixture/atlas-affinity-native-query-v1.json",
+    "page_inventory": [
+      {
+        "page_index": 0,
+        "width": 2048,
+        "height": 2048,
+        "flags": 12,
+        "group_id": 0,
+        "allocation_bytes": 16777216
+      },
+      {
+        "page_index": 1,
+        "width": 64,
+        "height": 64,
+        "flags": 16,
+        "group_id": 6437489,
+        "allocation_bytes": 16384
+      },
+      {
+        "page_index": 2,
+        "width": 128,
+        "height": 128,
+        "flags": 16,
+        "group_id": 6437489,
+        "allocation_bytes": 65536
+      }
+    ],
+    "sprite_count": 3,
+    "directed_pairs": [
+      {
+        "from_handle": 1,
+        "to_handle": 2,
+        "weight": 63
+      },
+      {
+        "from_handle": 2,
+        "to_handle": 3,
+        "weight": 63
+      }
+    ],
+    "before_png_sha256": "381bee089b406cff7d839f953c0d3fc034f60526e21340350e3a643e02952201",
+    "after_png_sha256": "381bee089b406cff7d839f953c0d3fc034f60526e21340350e3a643e02952201",
+    "before_after_pixel_identical": true,
+    "planner_status": "accepted-plan",
+    "evidence_mode": "bounded-runtime-histogram",
+    "baseline_metrics": {
+      "baseline_page_count": 2,
+      "candidate_page_count": 2,
+      "moved_sprite_count": 0,
+      "baseline_cut_weight": 63,
+      "candidate_cut_weight": 63,
+      "cut_weight_saved": 0,
+      "candidate_texture_bytes": 81920,
+      "final_device_bytes": 16859136,
+      "peak_device_bytes": 16859136
+    },
+    "candidate_metrics": {
+      "baseline_page_count": 2,
+      "candidate_page_count": 1,
+      "moved_sprite_count": 1,
+      "baseline_cut_weight": 63,
+      "candidate_cut_weight": 0,
+      "cut_weight_saved": 63,
+      "candidate_texture_bytes": 65536,
+      "final_device_bytes": 16842752,
+      "peak_device_bytes": 16924672
+    },
+    "page_runs": null,
+    "gpu_timing": "not-measured",
+    "limitations": "real SDL residency/ABI fixture, not a representative packaged-game capture"
+  }
+}

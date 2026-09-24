@@ -45,6 +45,42 @@ typedef void (*stasis_aot_bind_runtime_globals_fn)(void);
 typedef void (*stasis_sys_set_args_fn)(int argc, const char *const *argv);
 typedef void (*stasis_host_get_frame_fn)(int32_t *out_i32, float *out_f32);
 typedef void (*stasis_gfx_submit_u8_fn)(int32_t *cmd_i32, const float *cmd_f32, const uint8_t *cmd_u8);
+typedef int (*stasis_atlas_optimize_fn)(uintptr_t query, uintptr_t stage, uintptr_t commit);
+
+/* Optional Rust policy hook: legacy graphics/dynload libraries keep their
+ * conventional atlas path. The hook itself bounds planning to one stable
+ * native inventory generation, so this pre-submit check does not repack per frame. */
+#ifdef _WIN32
+static void stasis_try_atlas_optimize(HMODULE graphics)
+{
+    if (!graphics) return;
+    HMODULE policy = GetModuleHandleA("stasis_dynload.dll");
+    if (!policy) return;
+    stasis_atlas_optimize_fn optimize =
+        (stasis_atlas_optimize_fn)GetProcAddress(policy, "stasis_atlas_optimize_v1");
+    FARPROC query = GetProcAddress(graphics, "stasis_gfx_sprite_atlas_query_v1");
+    FARPROC stage = GetProcAddress(graphics, "stasis_gfx_sprite_atlas_stage_plan_v1");
+    FARPROC commit = GetProcAddress(graphics, "stasis_gfx_sprite_atlas_commit_plan_v1");
+    if (optimize && query && stage && commit) {
+        (void)optimize((uintptr_t)query, (uintptr_t)stage, (uintptr_t)commit);
+    }
+}
+#else
+static void stasis_try_atlas_optimize(void* graphics, void* game_library)
+{
+    stasis_atlas_optimize_fn optimize = game_library
+        ? (stasis_atlas_optimize_fn)dlsym(game_library, "stasis_atlas_optimize_v1") : NULL;
+    if (!optimize) {
+        optimize = (stasis_atlas_optimize_fn)dlsym(RTLD_DEFAULT, "stasis_atlas_optimize_v1");
+    }
+    void* query = dlsym(graphics, "stasis_gfx_sprite_atlas_query_v1");
+    void* stage = dlsym(graphics, "stasis_gfx_sprite_atlas_stage_plan_v1");
+    void* commit = dlsym(graphics, "stasis_gfx_sprite_atlas_commit_plan_v1");
+    if (optimize && query && stage && commit) {
+        (void)optimize((uintptr_t)query, (uintptr_t)stage, (uintptr_t)commit);
+    }
+}
+#endif
 typedef void (*stasis_host_bulk_init_fn)(const int32_t *host_req_seq);
 typedef void (*stasis_host_bulk_apply_requests_fn)(
     const int32_t *host_req_seq,
@@ -2779,6 +2815,7 @@ int main(int argc, char **argv)
                     {
                         host_set_performance_metrics(tick_us, render_us);
                     }
+                    stasis_try_atlas_optimize(gfx);
                     gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
                 }
             }
@@ -3500,6 +3537,7 @@ int main(int argc, char **argv)
                 }
                 if (gfx_submit_u8 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
                 {
+                    stasis_try_atlas_optimize(gfx_lib, lib);
                     gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
                 }
             }

@@ -5,7 +5,10 @@ use crate::backend::compile_analysis::{
     NamedStructFieldTypeMap, TypedCollectionInfoMap,
 };
 use crate::backend::emit::*;
-use crate::backend::hot_render::HotRenderImageMetadata;
+use crate::backend::hot_render::{
+    HotRenderImageMetadata, HotRenderTransitionAnalysis, HotRenderTransitionAnalysisValidity,
+    HotRenderTransitionMetadata,
+};
 use crate::backend::program_snapshot::{
     ProgramArtifactMapping, ProgramFunction, ProgramReplayCompatibility, ProgramSnapshot,
 };
@@ -968,6 +971,15 @@ impl AotProcess {
             .program_snapshot
             .as_ref()
             .map(ProgramSnapshot::replay_compatibility);
+        let empty_transition_analysis = HotRenderTransitionAnalysis {
+            validity: HotRenderTransitionAnalysisValidity::Complete,
+            unknown_causes: Vec::new(),
+            pair_count: Some(0),
+            published_pair_count: 0,
+            omitted_pair_count: Some(0),
+            pair_limit: 4096,
+            max_pair_weight: 1_000_000_000,
+        };
         let manifest = build_engine_bundle_manifest(
             self.optimization_profile,
             entrypoints,
@@ -978,6 +990,14 @@ impl AotProcess {
             self.program_snapshot
                 .as_ref()
                 .map_or(&[], |snapshot| snapshot.hot_render_images()),
+            self.program_snapshot
+                .as_ref()
+                .map_or(&[], |snapshot| snapshot.hot_render_transitions()),
+            self.program_snapshot
+                .as_ref()
+                .map_or(&empty_transition_analysis, |snapshot| {
+                    snapshot.hot_render_transition_analysis()
+                }),
         )?;
         let exports = crate::host_exports::HostExports::from_compiler(&self.compiler);
         let export_json = serde_json::to_string(&exports).map_err(|error| error.to_string())?;
@@ -1678,6 +1698,8 @@ fn build_engine_bundle_manifest(
     collection_max_lengths: &BTreeMap<String, i32>,
     replay_compatibility: Option<&ProgramReplayCompatibility>,
     hot_render_images: &[HotRenderImageMetadata],
+    hot_render_transitions: &[HotRenderTransitionMetadata],
+    hot_render_transition_analysis: &HotRenderTransitionAnalysis,
 ) -> Result<String, String> {
     let mut out = String::new();
     out.push_str("{\n");
@@ -1795,6 +1817,16 @@ fn build_engine_bundle_manifest(
         &serde_json::to_string(hot_render_images)
             .expect("hot-render metadata contains only serializable compiler values"),
     );
+    out.push_str(",\n  \"hot_render_transitions\": ");
+    out.push_str(
+        &serde_json::to_string(hot_render_transitions)
+            .expect("hot-render transitions contain only serializable compiler values"),
+    );
+    out.push_str(",\n  \"hot_render_transition_analysis\": ");
+    out.push_str(
+        &serde_json::to_string(hot_render_transition_analysis)
+            .expect("hot-render transition analysis is serializable"),
+    );
     out.push('\n');
     out.push_str("}\n");
     Ok(out)
@@ -1815,6 +1847,16 @@ mod tests {
             &BTreeMap::new(),
             None,
             &[],
+            &[],
+            &HotRenderTransitionAnalysis {
+                validity: HotRenderTransitionAnalysisValidity::Complete,
+                unknown_causes: Vec::new(),
+                pair_count: Some(0),
+                published_pair_count: 0,
+                omitted_pair_count: Some(0),
+                pair_limit: 4096,
+                max_pair_weight: 1_000_000_000,
+            },
         )
     }
 
@@ -6195,9 +6237,35 @@ function on_code_swap(): void { return; }
             json["hot_render_images"][0]["logical_path"],
             "assets/hero.png"
         );
+        assert_eq!(json["hot_render_images"][0]["identity"], "hero");
         assert_eq!(json["hot_render_images"][0]["max_renders_per_render"], 2);
         assert_eq!(json["hot_render_images"][0]["atlas_eligible"], false);
         assert_eq!(json["hot_render_images"][0]["grouping_key"], "");
+        assert_eq!(json["hot_render_transitions"].as_array().unwrap().len(), 1);
+        assert_eq!(json["hot_render_transitions"][0]["from_identity"], "hero");
+        assert_eq!(json["hot_render_transitions"][0]["to_identity"], "hero");
+        assert_eq!(
+            json["hot_render_transitions"][0]["max_transitions_per_render"],
+            1
+        );
+        assert_eq!(json["hot_render_transitions"][0]["validity"], "finite");
+        assert_eq!(
+            json["hot_render_transitions"][0]["provenance"][0],
+            "sequence_join"
+        );
+        assert_eq!(
+            json["hot_render_transition_analysis"]["validity"],
+            "complete"
+        );
+        assert_eq!(json["hot_render_transition_analysis"]["pair_count"], 1);
+        assert_eq!(
+            json["hot_render_transition_analysis"]["published_pair_count"],
+            1
+        );
+        assert_eq!(
+            json["hot_render_transition_analysis"]["omitted_pair_count"],
+            0
+        );
         assert!(json.get("atlas_pixels").is_none());
 
         let _ = fs::remove_dir_all(&bundle_dir);

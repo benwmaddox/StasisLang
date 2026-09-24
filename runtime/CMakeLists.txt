@@ -205,6 +205,8 @@ function(configure_stasis_target target is_static)
 
     if(${is_static})
         target_compile_definitions(${target} PRIVATE STASIS_GRAPHICS_STATIC)
+    else()
+        target_compile_definitions(${target} PRIVATE STASIS_GRAPHICS_BUILDING_DLL=1)
     endif()
 endfunction()
 
@@ -304,6 +306,76 @@ if(STASIS_GRAPHICS_BUILD_TESTS AND (TARGET stasis_graphics_static OR TARGET stas
     add_test(NAME stasis_sprite_atlas_reservation_test COMMAND stasis_sprite_atlas_reservation_test)
     set_tests_properties(stasis_sprite_atlas_reservation_test PROPERTIES
         ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy")
+
+    if(NOT STASIS_MOBILE_PLATFORM)
+        get_filename_component(_stasis_repo_root "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+        get_filename_component(_stasis_code_root "${_stasis_repo_root}/.." ABSOLUTE)
+        set(_atlas_test_asset_root "${CMAKE_CURRENT_SOURCE_DIR}/../samples/sprite_sheet_animation")
+        set(_atlas_test_small_path "/assets/sprite_sheet_2x2.png")
+        set(_atlas_test_dog_path "/assets/sprite_sheet_2x2.png")
+        set(_atlas_test_dog_run_path "/assets/sprite_sheet_2x2.png")
+        set(_atlas_test_small_width 24)
+        set(_atlas_test_small_height 36)
+        set(_atlas_test_dog_width 40)
+        set(_atlas_test_dog_height 60)
+        set(_atlas_test_dog_run_width 10)
+        set(_atlas_test_dog_run_height 15)
+        if(DEFINED STASIS_ATLAS_TEST_SHEEPHERDER_ROOT AND
+           EXISTS "${STASIS_ATLAS_TEST_SHEEPHERDER_ROOT}/assets/generated/sheep.png" AND
+           EXISTS "${STASIS_ATLAS_TEST_SHEEPHERDER_ROOT}/assets/generated/dog.png" AND
+           EXISTS "${STASIS_ATLAS_TEST_SHEEPHERDER_ROOT}/assets/generated/dog-run-1.png")
+            set(_atlas_test_asset_root "${STASIS_ATLAS_TEST_SHEEPHERDER_ROOT}")
+        elseif(EXISTS "${_stasis_code_root}/SheepHerder/assets/generated/sheep.png" AND
+               EXISTS "${_stasis_code_root}/SheepHerder/assets/generated/dog.png" AND
+               EXISTS "${_stasis_code_root}/SheepHerder/assets/generated/dog-run-1.png")
+            set(_atlas_test_asset_root "${_stasis_code_root}/SheepHerder")
+        endif()
+        if(_atlas_test_asset_root MATCHES "SheepHerder")
+            set(_atlas_test_small_path "/assets/generated/sheep.png")
+            set(_atlas_test_dog_path "/assets/generated/dog.png")
+            set(_atlas_test_dog_run_path "/assets/generated/dog-run-1.png")
+            set(_atlas_test_dog_run_width 40)
+            set(_atlas_test_dog_run_height 60)
+        endif()
+        file(TO_CMAKE_PATH "${_atlas_test_asset_root}" _atlas_test_asset_root)
+        file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/atlas-affinity-native-query-v1.json"
+            _atlas_test_snapshot_path)
+        file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/atlas-affinity-native-before.png"
+            _atlas_test_before_png)
+        file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/atlas-affinity-native-after.png"
+            _atlas_test_after_png)
+        add_executable(stasis_sprite_atlas_staging_test tests/stasis_sprite_atlas_staging_test.c)
+        if(TARGET stasis_graphics_static)
+            target_link_libraries(stasis_sprite_atlas_staging_test PRIVATE stasis_graphics_static)
+            target_compile_definitions(stasis_graphics_static PRIVATE STASIS_ATLAS_TEST_HOOKS=1)
+        else()
+            target_link_libraries(stasis_sprite_atlas_staging_test PRIVATE stasis_graphics)
+            target_compile_definitions(stasis_graphics PRIVATE STASIS_ATLAS_TEST_HOOKS=1)
+            set_target_properties(stasis_sprite_atlas_staging_test PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+        endif()
+        target_link_libraries(stasis_sprite_atlas_staging_test PRIVATE $<IF:$<TARGET_EXISTS:SDL3::SDL3>,SDL3::SDL3,SDL3::SDL3-static>)
+        target_include_directories(stasis_sprite_atlas_staging_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_compile_definitions(stasis_sprite_atlas_staging_test PRIVATE
+            STASIS_ATLAS_TEST_ASSET_ROOT="${_atlas_test_asset_root}"
+            STASIS_ATLAS_TEST_SMALL_PATH="${_atlas_test_small_path}"
+            STASIS_ATLAS_TEST_DOG_PATH="${_atlas_test_dog_path}"
+            STASIS_ATLAS_TEST_DOG_RUN_PATH="${_atlas_test_dog_run_path}"
+            STASIS_ATLAS_TEST_SMALL_WIDTH=${_atlas_test_small_width}
+            STASIS_ATLAS_TEST_SMALL_HEIGHT=${_atlas_test_small_height}
+            STASIS_ATLAS_TEST_DOG_WIDTH=${_atlas_test_dog_width}
+            STASIS_ATLAS_TEST_DOG_HEIGHT=${_atlas_test_dog_height}
+            STASIS_ATLAS_TEST_DOG_RUN_WIDTH=${_atlas_test_dog_run_width}
+            STASIS_ATLAS_TEST_DOG_RUN_HEIGHT=${_atlas_test_dog_run_height}
+            STASIS_ATLAS_TEST_SNAPSHOT_PATH="${_atlas_test_snapshot_path}"
+            STASIS_ATLAS_TEST_BEFORE_PNG="${_atlas_test_before_png}"
+            STASIS_ATLAS_TEST_AFTER_PNG="${_atlas_test_after_png}")
+        add_test(NAME stasis_sprite_atlas_staging_contract COMMAND stasis_sprite_atlas_staging_test)
+        set_tests_properties(stasis_sprite_atlas_staging_contract PROPERTIES
+            ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy;STASIS_ENABLE_TEST_INPUT=1;STASIS_ASSET_ROOT=${_atlas_test_asset_root}"
+            TIMEOUT 120)
+    endif()
+
     if(WIN32)
         add_executable(stasis_console_launch_test tests/stasis_console_launch_test.c)
         if(TARGET stasis_graphics_static)

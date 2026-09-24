@@ -4,6 +4,156 @@
 #include <limits.h>
 #include <stdint.h>
 
+/* Match the graphics runtime export decoration on internal declarations. */
+#if defined(STASIS_GRAPHICS_BUILDING_DLL) && defined(_WIN32)
+#define STASIS_SPRITE_ATLAS_API __declspec(dllexport)
+#elif defined(STASIS_GRAPHICS_BUILDING_DLL) && (defined(__GNUC__) || defined(__clang__))
+#define STASIS_SPRITE_ATLAS_API __attribute__((visibility("default")))
+#else
+#define STASIS_SPRITE_ATLAS_API
+#endif
+/* Native/Rust SDL atlas planning ABI. Keep these records fixed-width and
+ * pointer-free so Rust can mirror them with #[repr(C)]. */
+#define STASIS_SPRITE_ATLAS_ABI_V1 1u
+#define STASIS_SPRITE_ATLAS_QUERY_MAX_SPRITES 65536u
+#define STASIS_SPRITE_ATLAS_QUERY_MAX_PAIRS 8192u
+#define STASIS_SPRITE_ATLAS_PAIR_WINDOW_FRAMES 64u
+#define STASIS_SPRITE_ATLAS_STAGE_PEAK_CAP_BYTES (256ull * 1024ull * 1024ull)
+
+enum {
+    STASIS_SPRITE_ATLAS_QUERY_OK = 1,
+    STASIS_SPRITE_ATLAS_QUERY_BUFFER_TOO_SMALL = 2,
+    STASIS_SPRITE_ATLAS_QUERY_UNAVAILABLE = 0
+};
+
+enum {
+    STASIS_SPRITE_ATLAS_QUERY_FLAG_PAIR_VALID = 1u << 0,
+    STASIS_SPRITE_ATLAS_QUERY_FLAG_PAIR_OVERFLOW = 1u << 1,
+    STASIS_SPRITE_ATLAS_QUERY_FLAG_INVENTORY_OVERFLOW = 1u << 2,
+    STASIS_SPRITE_ATLAS_QUERY_FLAG_FALLBACK_PRESENT = 1u << 3
+};
+
+enum {
+    STASIS_SPRITE_ATLAS_SPRITE_FLAG_AFFINITY_ELIGIBLE = 1u << 0,
+    STASIS_SPRITE_ATLAS_SPRITE_FLAG_PROTECTED = 1u << 1
+};
+
+enum {
+    STASIS_SPRITE_ATLAS_PAGE_FLAG_DEDICATED = 1u << 0,
+    STASIS_SPRITE_ATLAS_PAGE_FLAG_COLD = 1u << 1,
+    STASIS_SPRITE_ATLAS_PAGE_FLAG_FALLBACK = 1u << 2,
+    STASIS_SPRITE_ATLAS_PAGE_FLAG_PROTECTED = 1u << 3,
+    STASIS_SPRITE_ATLAS_PAGE_FLAG_PLAN_ELIGIBLE = 1u << 4
+};
+
+enum {
+    /* SDL backend pages use RGBA32, linear sampling, and alpha blending. */
+    STASIS_SPRITE_ATLAS_COMPAT_SDL_RGBA32_LINEAR_BLEND = 1u << 0
+};
+
+typedef struct {
+    int32_t handle;
+    uint32_t width;
+    uint32_t height;
+    uint32_t logical_width;
+    uint32_t logical_height;
+    uint32_t page_index;
+    uint32_t x;
+    uint32_t y;
+    uint32_t allocation_width;
+    uint32_t allocation_height;
+    uint32_t padding;
+    uint32_t flags;
+    uint64_t group_id;
+    uint64_t logical_pixel_area;
+    uint32_t member_count;
+    uint32_t max_logical_width;
+    uint32_t max_logical_height;
+    /* FNV-1a 64 of the normalized UTF-8 logical asset path; case-sensitive. */
+    uint64_t normalized_path_hash;
+} StasisSpriteAtlasResidentV1;
+
+typedef struct {
+    uint32_t page_index;
+    uint32_t width;
+    uint32_t height;
+    uint32_t usable_x;
+    uint32_t usable_y;
+    uint32_t padding;
+    uint32_t reserved_header_height;
+    uint32_t flags;
+    uint32_t compatibility_flags;
+    uint64_t group_id;
+    uint64_t allocation_bytes;
+} StasisSpriteAtlasPageV1;
+
+typedef struct {
+    int32_t from_handle;
+    int32_t to_handle;
+    uint64_t weight;
+} StasisSpriteAtlasPairV1;
+
+typedef struct {
+    uint32_t source_page_index;
+    uint32_t width;
+    uint32_t height;
+    uint32_t usable_x;
+    uint32_t usable_y;
+    uint32_t padding;
+    uint32_t reserved_header_height;
+    uint32_t flags;
+    uint32_t compatibility_flags;
+    uint64_t group_id;
+    uint64_t allocation_bytes;
+} StasisSpriteAtlasPlanPageV1;
+
+/* x/y identify the image-content origin; C accounts for the resident's
+ * padding when it validates page bounds and overlap. */
+typedef struct {
+    int32_t handle;
+    uint32_t page_index;
+    uint32_t x;
+    uint32_t y;
+} StasisSpriteAtlasPlanPlacementV1;
+
+/* Statistics from the most recently accepted presented frame. Page runs split
+ * at non-sprite order items; draw_submissions are native geometry submissions. */
+typedef struct {
+    uint64_t accepted_frame_serial;
+    uint32_t renderer_generation;
+    uint32_t ordered_sprite_segments;
+    uint32_t ordered_page_runs;
+    uint32_t draw_submissions;
+    uint32_t page_transitions;
+} StasisSpriteAtlasFrameStatsV1;
+
+STASIS_SPRITE_ATLAS_API int stasis_gfx_sprite_atlas_query_v1(
+    uint64_t* out_snapshot_token,
+    uint32_t* out_renderer_generation,
+    uint64_t* out_asset_generation,
+    uint32_t* out_flags,
+    uint64_t* out_stage_peak_cap_bytes,
+    StasisSpriteAtlasResidentV1* sprites,
+    uint32_t sprite_capacity,
+    uint32_t* out_sprite_count,
+    StasisSpriteAtlasPageV1* pages,
+    uint32_t page_capacity,
+    uint32_t* out_page_count,
+    StasisSpriteAtlasPairV1* pairs,
+    uint32_t pair_capacity,
+    uint32_t* out_pair_count);
+
+STASIS_SPRITE_ATLAS_API int stasis_gfx_sprite_atlas_stage_plan_v1(
+    uint64_t snapshot_token,
+    const StasisSpriteAtlasPlanPageV1* pages,
+    uint32_t page_count,
+    const StasisSpriteAtlasPlanPlacementV1* placements,
+    uint32_t placement_count);
+
+STASIS_SPRITE_ATLAS_API int stasis_gfx_sprite_atlas_commit_plan_v1(uint64_t snapshot_token);
+STASIS_SPRITE_ATLAS_API int stasis_gfx_sprite_atlas_last_frame_stats_v1(
+    StasisSpriteAtlasFrameStatsV1* out_stats);
+
 typedef struct {
     int eligible;
     uint64_t group_id;

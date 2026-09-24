@@ -1,0 +1,9 @@
+[package]
+name = "atlas_aot_manifest_export"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+stasis_compiler = { path = "../../crates/stasis_compiler" }

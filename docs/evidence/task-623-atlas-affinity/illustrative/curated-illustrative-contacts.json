@@ -1,0 +1,721 @@
+{
+  "schema": "atlas-affinity-curated-contacts/v1",
+  "status": "illustrative-only",
+  "catalog_path": "D:\\code\\sprite-sheet-preview\\asset_catalog.json",
+  "catalog_sha256": "17387a889dab8801fa873904905a9e88d4295780c44aa3704e29ba35a6062089",
+  "contract": {
+    "contact_width": 2000,
+    "contact_height": 900,
+    "atlas_pages_generated": false,
+    "native_placements_used": false
+  },
+  "gpu_timing": {
+    "status": "not-measured",
+    "reason": "These curated contacts do not run in a supported GPU host."
+  },
+  "note": "Catalog assets and ordered traces are curated illustrations. They are not compiler output, runtime observations, native baseline placements, planner evidence, or performance results.",
+  "games": [
+    {
+      "name": "RootbeerMaze3",
+      "project_root": "D:\\code\\RootbeerMaze3",
+      "asset_count": 17,
+      "catalog_asset_count": 17,
+      "excluded_assets": [],
+      "trace": {
+        "source": "curated-illustrative",
+        "description": "Ordered draw sequence assembled from the named render/layout roles and repeated animation/maze transitions; it is not compiler output or an observed runtime trace.",
+        "event_count": 26,
+        "events": [
+          "outer_background_pattern",
+          "maze_surface_motif",
+          "maze_wall_treatment",
+          "mouse_contact_shadow",
+          "mouse_idle_frame_0",
+          "crumb_cheese_motif",
+          "maze_wall_treatment",
+          "mouse_contact_shadow",
+          "mouse_scurry_frame_0",
+          "mouse_scurry_frame_1",
+          "cheese_goal",
+          "mouse_contact_shadow",
+          "mouse_idle_frame_1",
+          "barrier:completion_ui",
+          "completion_celebration_accent",
+          "barrier:ui_text",
+          "footer_help_treatment",
+          "title_logo_treatment",
+          "picker_panel",
+          "picker_button_unselected",
+          "picker_button_selected",
+          "loading_progress_treatment",
+          "mouse_idle_frame_0",
+          "maze_surface_motif",
+          "mouse_scurry_frame_0",
+          "cheese_goal"
+        ]
+      },
+      "assets": [
+        {
+          "id": "title_logo_treatment",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\title-logo-treatment.svg",
+          "source_sha256": "090ae73743ef3fe1ebf06d8f836898c56f3fb0e9b889e88820a214780f3a43b7",
+          "source_variant": null,
+          "role": "title",
+          "logical_width": 420,
+          "logical_height": 110,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\000-title_logo_treatment.png",
+          "rendered_sha256": "8250500f099121888aff604eebfaf44e423969f1a8905bc46b7a17375f0ed7ec"
+        },
+        {
+          "id": "outer_background_pattern",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\outer-background-pattern.svg",
+          "source_sha256": "ec7e2625cffced75069d4beabe9168e7369ff86b7e96f10088776dae9e737278",
+          "source_variant": null,
+          "role": "background",
+          "logical_width": 128,
+          "logical_height": 128,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\001-outer_background_pattern.png",
+          "rendered_sha256": "afeb16d2418e5503b27002f1ea32552b6427b360e7fa4b2e6f27060c1b072ef2"
+        },
+        {
+          "id": "picker_panel",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\picker-panel.svg",
+          "source_sha256": "1e9b54829f2584de258c8686bc3aac03526f5654ba4bf85b530c5110d3f7ac70",
+          "source_variant": null,
+          "role": "ui",
+          "logical_width": 456,
+          "logical_height": 44,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\002-picker_panel.png",
+          "rendered_sha256": "5671581f6e482daa9c1037143bbc50c6baf141911cd16714277164fdd2e3fe2e"
+        },
+        {
+          "id": "picker_button_selected",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\picker-button-selected.svg",
+          "source_sha256": "70bba9077269bcd2411fc450edeada51489eef4195df9190eec6eb6f754a12a6",
+          "source_variant": "runtime-display-geometry-over-source-load",
+          "role": "ui",
+          "logical_width": 400,
+          "logical_height": 108,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\003-picker_button_selected.png",
+          "rendered_sha256": "016cb914262f828a0e08f8aedff4842b6a86c654b0da49388dd7e89e05a2b94f"
+        },
+        {
+          "id": "picker_button_unselected",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\picker-button-unselected.svg",
+          "source_sha256": "9f6790483b9485cbb304cfb0c8cf2c5ec6ecf09cd27afad859c193da21d87ba2",
+          "source_variant": null,
+          "role": "ui",
+          "logical_width": 400,
+          "logical_height": 108,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\004-picker_button_unselected.png",
+          "rendered_sha256": "438649bbfe402a67cf99527b0779b015e7895fd54264599b0ecabd79846d3a84"
+        },
+        {
+          "id": "mouse_idle_frame_0",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\mouse-idle-frame-0.svg",
+          "source_sha256": "295ceef9276a4d7cb7c8000b5886688afab835b48de3c318bf4d0f5338b841c1",
+          "source_variant": "runtime-load-64-draw-36-cell-centered",
+          "role": "character",
+          "logical_width": 64,
+          "logical_height": 64,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\005-mouse_idle_frame_0.png",
+          "rendered_sha256": "9e9161073125df29a639daaf0583cd6fac202905e85a40e6c267713b9a02e8d6"
+        },
+        {
+          "id": "mouse_idle_frame_1",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\mouse-idle-frame-1.svg",
+          "source_sha256": "a3ce766d5867fb539b1af9ce6a5b8e3605e1e4eb7833455d2169962f25a7d0d0",
+          "source_variant": "runtime-load-64-draw-36-cell-centered",
+          "role": "character",
+          "logical_width": 64,
+          "logical_height": 64,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\006-mouse_idle_frame_1.png",
+          "rendered_sha256": "271358ce234f5b72ab52ed226f80a80980f836ad2aee5e0f02ab807e9d084abb"
+        },
+        {
+          "id": "mouse_scurry_frame_0",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\mouse-scurry-frame-0.svg",
+          "source_sha256": "5de08d21b042a225fd1c3320f4a02b8741d5cb181ae7ec2b17de3f3362c4fca7",
+          "source_variant": "runtime-load-64-draw-36-cell-centered",
+          "role": "character",
+          "logical_width": 64,
+          "logical_height": 64,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\007-mouse_scurry_frame_0.png",
+          "rendered_sha256": "3bfffcc71bb717b77276fb3c9197c64622090d947eb58943ce0629c7c80f3fed"
+        },
+        {
+          "id": "mouse_scurry_frame_1",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\mouse-scurry-frame-1.svg",
+          "source_sha256": "84f9ef177c1c4ca635b5a12caa9d1d3b787d169f9113f6b786f26f1ad6a77137",
+          "source_variant": "runtime-load-64-draw-36-cell-centered",
+          "role": "character",
+          "logical_width": 64,
+          "logical_height": 64,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\008-mouse_scurry_frame_1.png",
+          "rendered_sha256": "29edd2f6c11f4df94d6a1df635adb7443119edefe81a9389fa32a23fe4f3eae8"
+        },
+        {
+          "id": "mouse_contact_shadow",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\mouse-contact-shadow.svg",
+          "source_sha256": "c5f8eb2480414a5fbac2b968159320101bff5383fe137da0eca131d2656c6d82",
+          "source_variant": null,
+          "role": "effect",
+          "logical_width": 44,
+          "logical_height": 16,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\009-mouse_contact_shadow.png",
+          "rendered_sha256": "cf17dcfba6f122f4fa69663247a9e51be6673c84b5c61d5c12c1761525ee55ce"
+        },
+        {
+          "id": "cheese_goal",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\cheese-goal.svg",
+          "source_sha256": "e9c0ab51791826cbbaf1f8dc1d38e1467ba0547da7bdff8b07c0645aa7116449",
+          "source_variant": "runtime-load-64-draw-32",
+          "role": "collectible",
+          "logical_width": 64,
+          "logical_height": 64,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\010-cheese_goal.png",
+          "rendered_sha256": "cf4393ca66a5b399a491f6fa913fd81ef9aad4c66540d41becd12383cc1a170c"
+        },
+        {
+          "id": "crumb_cheese_motif",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\crumb-cheese-motif.svg",
+          "source_sha256": "6b8afa5012c7954ef67ad09fbf285534585c2ebe6e4193083032bbe9e4bdd1c1",
+          "source_variant": null,
+          "role": "collectible",
+          "logical_width": 48,
+          "logical_height": 48,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\011-crumb_cheese_motif.png",
+          "rendered_sha256": "5ef3d525fca4cf92d76fa54b4a47b5553542a6a4478b895d4d067b0b1cd9c810"
+        },
+        {
+          "id": "maze_surface_motif",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\maze-surface-motif.svg",
+          "source_sha256": "2eff28958c26784f9e40ce96578cbf45ccbfa163fdbcbeb416b11b6c10b72965",
+          "source_variant": null,
+          "role": "terrain",
+          "logical_width": 128,
+          "logical_height": 128,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\012-maze_surface_motif.png",
+          "rendered_sha256": "dd3695125af58cb38e63c98ca883dfdd43c8b2c2a6534e722e589fafa832d80b"
+        },
+        {
+          "id": "maze_wall_treatment",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\maze-wall-treatment.svg",
+          "source_sha256": "353398b78a426af8ba8e57decbffb0c519d0f48c0d1c34cc196991566a41c5a9",
+          "source_variant": null,
+          "role": "terrain",
+          "logical_width": 96,
+          "logical_height": 24,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\013-maze_wall_treatment.png",
+          "rendered_sha256": "6be01ebe33835a92321fde109a63fb4d0294a5151448799954f1084363efa84d"
+        },
+        {
+          "id": "loading_progress_treatment",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\loading-progress-treatment.svg",
+          "source_sha256": "c5462adc637a7a6a38bc08ecee1789aa681afafde4b20772b653cbb28fe7aba1",
+          "source_variant": null,
+          "role": "ui",
+          "logical_width": 372,
+          "logical_height": 18,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\014-loading_progress_treatment.png",
+          "rendered_sha256": "a14fb2269ab23ce138157c79e66b19952050dc0cda8c8fb2af886706fa3c2da5"
+        },
+        {
+          "id": "footer_help_treatment",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\footer-help-treatment.svg",
+          "source_sha256": "ab3ce4aeb1baaee0b721c47e92a0bdd1d12f6efb36ff8b82ebee3cdf5e8922af",
+          "source_variant": null,
+          "role": "ui",
+          "logical_width": 504,
+          "logical_height": 48,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\015-footer_help_treatment.png",
+          "rendered_sha256": "6330b441a0bd54365d1e3b8572523ea332bf39f6abab8c4856d371d6417f26ea"
+        },
+        {
+          "id": "completion_celebration_accent",
+          "source": "D:\\code\\RootbeerMaze3\\assets\\canonical\\completion-celebration-accent.svg",
+          "source_sha256": "59f9741a94876de7cdfd37cbed112b62bf8e2f18f0960af6526072b90ebe6874",
+          "source_variant": null,
+          "role": "effect",
+          "logical_width": 456,
+          "logical_height": 120,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\RootbeerMaze3\\assets\\016-completion_celebration_accent.png",
+          "rendered_sha256": "16266abf7556b53391c0924664b5863cfedb2d9a57f0d76ce2690ad8be2e893f"
+        }
+      ],
+      "contacts": [
+        {
+          "path": "RootbeerMaze3/contacts\\RootbeerMaze3-contact-00.png",
+          "width": 2000,
+          "height": 900,
+          "sha256": "6e695bbc8113f4e6f71b96533a254afa1d3fba5cc5f2dc73b4ce4aaba946528d"
+        },
+        {
+          "path": "RootbeerMaze3/contacts\\RootbeerMaze3-contact-01.png",
+          "width": 2000,
+          "height": 900,
+          "sha256": "5327faf2709532611c914e8254901cb9a9160169e44454feecbc004dd658717b"
+        }
+      ],
+      "atlas_pages": "not-generated; awaiting a native query snapshot",
+      "planner_metrics": "not-reported for curated contact sheets"
+    },
+    {
+      "name": "SheepHerder",
+      "project_root": "D:\\code\\SheepHerder",
+      "asset_count": 17,
+      "catalog_asset_count": 17,
+      "excluded_assets": [],
+      "trace": {
+        "source": "curated-illustrative",
+        "description": "Ordered draw sequence follows the gameplay roles in src/main.stasis and the manifest runtime sizes; it is an illustrative trace, not compiler output or an observed runtime trace.",
+        "event_count": 24,
+        "events": [
+          "hud_chrome",
+          "hud_digits",
+          "barrier:ui_text",
+          "fence_timber_rail",
+          "fence_timber_post",
+          "obstacle_hay_bales",
+          "sheep",
+          "sheep_walk_1",
+          "sheep_walk_2",
+          "dog",
+          "dog_run_1",
+          "dog_run_2",
+          "dog_run_3",
+          "obstacle_fieldstone",
+          "sheep",
+          "fence_timber_gate",
+          "barrier:camera_clip",
+          "obstacle_water_trough",
+          "obstacle_timber_stack",
+          "title_ornament",
+          "hud_digits",
+          "sheep_walk_1",
+          "dog_run_2",
+          "sheep_walk_2"
+        ]
+      },
+      "assets": [
+        {
+          "id": "hud_chrome",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\hud-chrome.svg",
+          "source_sha256": "7d532b7c071dddab4adcecfe22ec96623986a176e80816f3c79a0ea6df99ff30",
+          "source_variant": null,
+          "role": "ui",
+          "logical_width": 1600,
+          "logical_height": 92,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\000-hud_chrome.png",
+          "rendered_sha256": "84da9a23d5f021d70105cf4b21ac6f740717d2d7b734f5f11838893d4d6ad372"
+        },
+        {
+          "id": "hud_digits",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\hud-digits.svg",
+          "source_sha256": "862c8103b0842cb265ce82d8a6700a08cec19cf3c7be3295750121b87687892b",
+          "source_variant": null,
+          "role": "ui",
+          "logical_width": 110,
+          "logical_height": 36,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\001-hud_digits.png",
+          "rendered_sha256": "3c62922f930be6e483baf14bedc3db9784c1d5c3765a0af03a6c4ce77dce0f0e"
+        },
+        {
+          "id": "title_ornament",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\title-sheep-ornament.png",
+          "source_sha256": "ac182d97dbcececdc640b8e7e809ca6c5ec03889b931ef96bdca6fc6f2992796",
+          "source_variant": "runtime-title-sheep-sprite-64",
+          "role": "title",
+          "logical_width": 64,
+          "logical_height": 64,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\002-title_ornament.png",
+          "rendered_sha256": "b40d95ffb96177a540cb30326077c94434f6537f6fdd9e08d85f69be5b65e06f"
+        },
+        {
+          "id": "dog",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\dog.png",
+          "source_sha256": "a8b2f6e7882e70d856372d2471e058357ba8d70f88e2fd9fac5f664fad117848",
+          "source_variant": null,
+          "role": "character",
+          "logical_width": 40,
+          "logical_height": 60,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\003-dog.png",
+          "rendered_sha256": "62f7baed37ee2a507cde71d6e543929585e125a8466f3646a96ef1e0d2f66498"
+        },
+        {
+          "id": "dog_run_1",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\dog-run-1.png",
+          "source_sha256": "378bc0e69c638f5adb65640bed62868b3b826a18223be94e0d0d8c187b0946e3",
+          "source_variant": null,
+          "role": "character",
+          "logical_width": 40,
+          "logical_height": 60,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\004-dog_run_1.png",
+          "rendered_sha256": "ba3b1b6477ce7fbc030a2b12576c2ded9a45bda45b40e48fc0bcd294fa9d28d1"
+        },
+        {
+          "id": "dog_run_2",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\dog-run-2.png",
+          "source_sha256": "42fec3645a10e70f48d864c03979fa534640823240cbbaa185e7517cca638dd8",
+          "source_variant": null,
+          "role": "character",
+          "logical_width": 40,
+          "logical_height": 60,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\005-dog_run_2.png",
+          "rendered_sha256": "a8e5c02bf9ffe4b5c26666e272b426ea4f80c0a2279c15ffc8eacdec2eb89bf8"
+        },
+        {
+          "id": "dog_run_3",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\dog-run-3.png",
+          "source_sha256": "b02b549d465b089859edb8f6da2549eb5fe5e364cd10cb030ddded66349c3b16",
+          "source_variant": null,
+          "role": "character",
+          "logical_width": 40,
+          "logical_height": 60,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\006-dog_run_3.png",
+          "rendered_sha256": "17e8f1e202ac8db57215d6348389e1c6be694bd5383561fe31168ea4684ef5b5"
+        },
+        {
+          "id": "sheep",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\sheep.png",
+          "source_sha256": "4a1300dd7b3968a222ad56bfde9f5164cfc9ae8c0334b1d3ebe3af47fa8f4cf9",
+          "source_variant": null,
+          "role": "character",
+          "logical_width": 24,
+          "logical_height": 36,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\007-sheep.png",
+          "rendered_sha256": "2779f277d3e8af265fdf4af9c61f11f895a520b5c30116f8946419bf0df409c7"
+        },
+        {
+          "id": "sheep_walk_1",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\sheep-walk-1.png",
+          "source_sha256": "173b9b1f07d6cd862bca1efb19fd43388a5c36d93a75d8d2d986ec937885eda1",
+          "source_variant": null,
+          "role": "character",
+          "logical_width": 24,
+          "logical_height": 36,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\008-sheep_walk_1.png",
+          "rendered_sha256": "a0d117e711a2cf1211cb265890056d4af0a443b25e8004e00fedd9fb37a45135"
+        },
+        {
+          "id": "sheep_walk_2",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\sheep-walk-2.png",
+          "source_sha256": "c204561470c3fd7c577d4a4cda43b3abb24398c215ae4bd09afc506f9088c39b",
+          "source_variant": null,
+          "role": "character",
+          "logical_width": 24,
+          "logical_height": 36,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\009-sheep_walk_2.png",
+          "rendered_sha256": "cee5de8dbbead3f652b51b0768fb3d4049538ee5ae7e077b43a062163baaadd5"
+        },
+        {
+          "id": "fence_timber_rail",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\fence-timber-rail.png",
+          "source_sha256": "55a631d8300a9f88029ed29c1ddcba591518e664666c03ff15fb973c33310386",
+          "source_variant": null,
+          "role": "terrain",
+          "logical_width": 128,
+          "logical_height": 32,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\010-fence_timber_rail.png",
+          "rendered_sha256": "4390f8ba274fa860f80781b8de18717857cdac9fdc70a2312421e5b4f11d0770"
+        },
+        {
+          "id": "fence_timber_post",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\fence-timber-post.png",
+          "source_sha256": "e7098a1319da9a41c53f7331f2e5aa4251fe80f9126f11f8979c1a5f7b887c7e",
+          "source_variant": null,
+          "role": "terrain",
+          "logical_width": 32,
+          "logical_height": 32,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\011-fence_timber_post.png",
+          "rendered_sha256": "55a88f2a4f571153d714ea6b0b733d1d428298cb365fb2c59938fef51df289f5"
+        },
+        {
+          "id": "fence_timber_gate",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\fence-timber-gate.png",
+          "source_sha256": "4dc5c6a4aa0f9c5ef19e9ec1df6af46d71e0791f152c3ebd4d9c2e89919e71e3",
+          "source_variant": null,
+          "role": "terrain",
+          "logical_width": 64,
+          "logical_height": 32,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\012-fence_timber_gate.png",
+          "rendered_sha256": "371347bd537a20173cf1e079991314a3182f04b9ef218e2a3a708625df8184dd"
+        },
+        {
+          "id": "obstacle_hay_bales",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\obstacle-hay-bales-v1.png",
+          "source_sha256": "433e78a48dda013eae69cf5393bdba5e0bc5a0a80598f96fc4adcca4cb9d0fb9",
+          "source_variant": null,
+          "role": "obstacle",
+          "logical_width": 128,
+          "logical_height": 96,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\013-obstacle_hay_bales.png",
+          "rendered_sha256": "ba4a2bf0e4700dee8b8e8f5dc10c4240e6962a76b14d637a39895d1626cd7ac5"
+        },
+        {
+          "id": "obstacle_fieldstone",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\obstacle-fieldstone-v1.png",
+          "source_sha256": "b68a626d9dacb8fc50122fa4d8286b2f3e7eea62978b9e1cb3de8b7cad57815d",
+          "source_variant": null,
+          "role": "obstacle",
+          "logical_width": 128,
+          "logical_height": 96,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\014-obstacle_fieldstone.png",
+          "rendered_sha256": "8cc7391220e28087c77df38c4464955491eab49a0f82aecb07a507ad2aca95cc"
+        },
+        {
+          "id": "obstacle_water_trough",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\obstacle-water-trough-v1.png",
+          "source_sha256": "102f806979f7bf90f267858c8abd5298240e0170327eee8b81984c886c49f3fc",
+          "source_variant": null,
+          "role": "obstacle",
+          "logical_width": 128,
+          "logical_height": 72,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\015-obstacle_water_trough.png",
+          "rendered_sha256": "b4656fbec52f60be9eace97da89bcd8d5fe5012926537aba0976b0079859077d"
+        },
+        {
+          "id": "obstacle_timber_stack",
+          "source": "D:\\code\\SheepHerder\\assets\\generated\\obstacle-timber-stack-v1.png",
+          "source_sha256": "7556757dff28cbe23d3018660c59f605dde93cd8e5ea7879b977974f944ef7e4",
+          "source_variant": null,
+          "role": "obstacle",
+          "logical_width": 128,
+          "logical_height": 72,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\SheepHerder\\assets\\016-obstacle_timber_stack.png",
+          "rendered_sha256": "d81edcb65d63ad40a5ff3f650518b359530fb0a5eb840da37aa8bb21e7a5e845"
+        }
+      ],
+      "contacts": [
+        {
+          "path": "SheepHerder/contacts\\SheepHerder-contact-00.png",
+          "width": 2000,
+          "height": 900,
+          "sha256": "12027b234c41d6a2ebd7b5313c43fdcce81af4ef2fe92161626b593efb5d76dd"
+        }
+      ],
+      "atlas_pages": "not-generated; awaiting a native query snapshot",
+      "planner_metrics": "not-reported for curated contact sheets"
+    },
+    {
+      "name": "HamsterHavenTycoon",
+      "project_root": "D:\\code\\HamsterHavenTycoon",
+      "asset_count": 9,
+      "catalog_asset_count": 20,
+      "excluded_assets": [
+        {
+          "id": "wheel_hero",
+          "catalog_source": "assets/source/vector-premium-v9/canonical/wheel-hero.svg",
+          "source_variant": "vector-premium-v9-source",
+          "reason": "curated source variant is not present in the current project checkout"
+        },
+        {
+          "id": "water_station",
+          "catalog_source": "assets/source/vector-premium-v9/canonical/water-station.svg",
+          "source_variant": "vector-premium-v9-source",
+          "reason": "curated source variant is not present in the current project checkout"
+        },
+        {
+          "id": "tube_straight_ne_sw",
+          "catalog_source": "assets/source/vector-premium-v9/canonical/tube-straight-ne-sw.svg",
+          "source_variant": "vector-premium-v9-source",
+          "reason": "curated source variant is not present in the current project checkout"
+        },
+        {
+          "id": "tube_straight_nw_se",
+          "catalog_source": "assets/source/vector-premium-v9/canonical/tube-straight-nw-se.svg",
+          "source_variant": "vector-premium-v9-source",
+          "reason": "curated source variant is not present in the current project checkout"
+        },
+        {
+          "id": "tube_entrance",
+          "catalog_source": "assets/source/vector-premium-v9/canonical/tube-entrance.svg",
+          "source_variant": "vector-premium-v9-source",
+          "reason": "curated source variant is not present in the current project checkout"
+        },
+        {
+          "id": "tube_elbow",
+          "catalog_source": "assets/source/vector-premium-v9/canonical/tube-elbow.svg",
+          "source_variant": "vector-premium-v9-source",
+          "reason": "curated source variant is not present in the current project checkout"
+        },
+        {
+          "id": "stage_platform",
+          "catalog_source": "assets/source/vector-premium-v9/canonical/stage-platform.svg",
+          "source_variant": "vector-premium-v9-source",
+          "reason": "curated source variant is not present in the current project checkout"
+        },
+        {
+          "id": "seesaw_a",
+          "catalog_source": "assets/source/vector-premium-v9/canonical/seesaw-a.svg",
+          "source_variant": "vector-premium-v9-source",
+          "reason": "curated source variant is not present in the current project checkout"
+        },
+        {
+          "id": "seesaw_b",
+          "catalog_source": "assets/source/vector-premium-v9/canonical/seesaw-b.svg",
+          "source_variant": "vector-premium-v9-source",
+          "reason": "curated source variant is not present in the current project checkout"
+        },
+        {
+          "id": "pippin_walk_a",
+          "catalog_source": "assets/source/vector-premium-v9/pippin-walk-a-v2.png",
+          "source_variant": "vector-premium-v9-raster-source",
+          "reason": "curated source variant is not present in the current project checkout"
+        },
+        {
+          "id": "pippin_walk_b",
+          "catalog_source": "assets/source/vector-premium-v9/pippin-walk-b-v2.png",
+          "source_variant": "vector-premium-v9-raster-source",
+          "reason": "curated source variant is not present in the current project checkout"
+        }
+      ],
+      "trace": {
+        "source": "curated-illustrative",
+        "description": "Ordered sequence reflects the modular apparatus, actor, and animation families named in tools/vector_assets.json; it is illustrative and does not claim compiler or runtime observation.",
+        "event_count": 28,
+        "events": [
+          "wheel_hero",
+          "pippin",
+          "pippin_runtime_png",
+          "tube_straight_ne_sw",
+          "tube_straight_nw_se",
+          "mochi",
+          "mochi_runtime_png",
+          "tube_elbow",
+          "button",
+          "button_runtime_png",
+          "water_station",
+          "barrier:ui_text",
+          "stage_platform",
+          "seesaw_a",
+          "seesaw_b",
+          "pippin_walk_a",
+          "pippin_walk_b",
+          "tube_entrance",
+          "snack_bowl",
+          "sand_bath",
+          "hammock",
+          "barrier:camera_clip",
+          "pippin",
+          "tube_straight_ne_sw",
+          "mochi",
+          "tube_elbow",
+          "button",
+          "pippin_walk_a"
+        ]
+      },
+      "assets": [
+        {
+          "id": "pippin",
+          "source": "D:\\code\\HamsterHavenTycoon\\assets\\source\\svg-hamsters-v1\\canonical\\pippin.svg",
+          "source_sha256": "80f9aa60dc2efc879a8e5e6769cca42aa6714bc3128771d0095a68a3630c564b",
+          "source_variant": "prototype-vector-v1",
+          "role": "character",
+          "logical_width": 108,
+          "logical_height": 108,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\HamsterHavenTycoon\\assets\\000-pippin.png",
+          "rendered_sha256": "15a14d7a6258a47dddfb5242105708b53051e794afdbd1e498accbfd0e636fca"
+        },
+        {
+          "id": "mochi",
+          "source": "D:\\code\\HamsterHavenTycoon\\assets\\source\\svg-hamsters-v1\\canonical\\mochi.svg",
+          "source_sha256": "08ac4a1b07e33c03649661d6f8ee23d002e0a2dc37c782d459497267915b67f7",
+          "source_variant": "prototype-vector-v1",
+          "role": "character",
+          "logical_width": 108,
+          "logical_height": 108,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\HamsterHavenTycoon\\assets\\001-mochi.png",
+          "rendered_sha256": "457825d5a9cdd1441a753b4d44e69b747e47b0bf86eb6a4485530d325f2ff3a3"
+        },
+        {
+          "id": "button",
+          "source": "D:\\code\\HamsterHavenTycoon\\assets\\source\\svg-hamsters-v1\\canonical\\button.svg",
+          "source_sha256": "8ce21612f6de039ec16357188acfb8779efffee574312d95d0299f14ed3e5cd9",
+          "source_variant": "prototype-vector-v1",
+          "role": "character",
+          "logical_width": 108,
+          "logical_height": 108,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\HamsterHavenTycoon\\assets\\002-button.png",
+          "rendered_sha256": "eec7a37008e47d61c934dc02a98896b0e3e92905952bf23576dd98c72bf129c2"
+        },
+        {
+          "id": "pippin_runtime_png",
+          "source": "D:\\code\\HamsterHavenTycoon\\assets\\characters\\pippin.png",
+          "source_sha256": "ba7858128a238b74716359d8e74775ed5c1d16be074f2bcab3481d6700cf20d0",
+          "source_variant": "active-runtime-png",
+          "role": "character",
+          "logical_width": 108,
+          "logical_height": 108,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\HamsterHavenTycoon\\assets\\003-pippin_runtime_png.png",
+          "rendered_sha256": "61904cc377604618d467d22bed3b55c4ff948fb26cb059774f4028c39ba6c41c"
+        },
+        {
+          "id": "mochi_runtime_png",
+          "source": "D:\\code\\HamsterHavenTycoon\\assets\\characters\\mochi.png",
+          "source_sha256": "e9714a67d6983bb22cbf3e8049da11a01342908ac2324bc1a39f573047484eb8",
+          "source_variant": "active-runtime-png",
+          "role": "character",
+          "logical_width": 108,
+          "logical_height": 108,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\HamsterHavenTycoon\\assets\\004-mochi_runtime_png.png",
+          "rendered_sha256": "fb5f13a990750f3001854875c02878dddfa4b70d32c1e1be9c14161bb71e4cca"
+        },
+        {
+          "id": "button_runtime_png",
+          "source": "D:\\code\\HamsterHavenTycoon\\assets\\characters\\button.png",
+          "source_sha256": "e3c2c9e6e2db8ec6cb8ca1064d97e30024eb35da79dd5255b6f396d01c098159",
+          "source_variant": "active-runtime-png",
+          "role": "character",
+          "logical_width": 108,
+          "logical_height": 108,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\HamsterHavenTycoon\\assets\\005-button_runtime_png.png",
+          "rendered_sha256": "7fae448b21ae1c95f21ef85842c51433289e7015267f4295244dcb39f32c3cff"
+        },
+        {
+          "id": "snack_bowl",
+          "source": "D:\\code\\HamsterHavenTycoon\\assets\\amenities\\snack-bowl.png",
+          "source_sha256": "b991bd13d615fb7c475badda56b7fa7a75328b9f214168d2f356a2d9622d39b1",
+          "source_variant": null,
+          "role": "amenity",
+          "logical_width": 96,
+          "logical_height": 96,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\HamsterHavenTycoon\\assets\\015-snack_bowl.png",
+          "rendered_sha256": "a8c2eb7415c825acdc3e44be3b49f7b9bf90f9abc5260d44e6d67557d9e3bac5"
+        },
+        {
+          "id": "sand_bath",
+          "source": "D:\\code\\HamsterHavenTycoon\\assets\\amenities\\sand-bath.png",
+          "source_sha256": "0a03d3b7a765aa4d23cb1c5a40ea8f754c1859d24bc77b87710d1ff78565c5fb",
+          "source_variant": null,
+          "role": "amenity",
+          "logical_width": 96,
+          "logical_height": 96,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\HamsterHavenTycoon\\assets\\016-sand_bath.png",
+          "rendered_sha256": "e79b360d11eb2c99298b2eeb7b45d0a38dd85570425c8ef728fc2e99e4c7157c"
+        },
+        {
+          "id": "hammock",
+          "source": "D:\\code\\HamsterHavenTycoon\\assets\\amenities\\hammock.png",
+          "source_sha256": "0546c722bc2244e7ba103f92c81ac145b859c638ab9d2f9b47e3062a642ebed3",
+          "source_variant": null,
+          "role": "amenity",
+          "logical_width": 96,
+          "logical_height": 96,
+          "rendered_path": "D:\\code\\StasisLang\\docs\\evidence\\task-623-atlas-affinity\\illustrative\\HamsterHavenTycoon\\assets\\017-hammock.png",
+          "rendered_sha256": "67713fe402b69eaab87ee65a18e38110b68b309f6923ed61edd63b0b57ede249"
+        }
+      ],
+      "contacts": [
+        {
+          "path": "HamsterHavenTycoon/contacts\\HamsterHavenTycoon-contact-00.png",
+          "width": 2000,
+          "height": 900,
+          "sha256": "c8949406b71b545f3b9900d9c4818bdc93810624f8a4885f0fac69bc50af54cb"
+        }
+      ],
+      "atlas_pages": "not-generated; awaiting a native query snapshot",
+      "planner_metrics": "not-reported for curated contact sheets"
+    }
+  ]
+}

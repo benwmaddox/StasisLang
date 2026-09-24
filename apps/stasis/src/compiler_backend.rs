@@ -140,6 +140,8 @@ struct EngineBundleManifestCollectionMaxLengthRow {
 
 #[derive(Debug, Clone, Deserialize)]
 struct EngineBundleManifestHotRenderImageRow {
+    #[serde(default)]
+    identity: String,
     logical_path: String,
     logical_width: u32,
     logical_height: u32,
@@ -160,6 +162,29 @@ struct EngineBundleManifestHotRenderImageRow {
     backend_constraints: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct EngineBundleManifestHotRenderTransitionRow {
+    from_identity: String,
+    to_identity: String,
+    max_transitions_per_render: Option<u64>,
+    validity: String,
+    #[serde(default)]
+    unknown_cause: Option<String>,
+    #[serde(default)]
+    provenance: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct EngineBundleManifestHotRenderTransitionAnalysisRow {
+    validity: String,
+    #[serde(default)]
+    unknown_causes: Vec<String>,
+    pair_count: Option<u32>,
+    published_pair_count: u32,
+    omitted_pair_count: Option<u32>,
+    pair_limit: u32,
+    max_pair_weight: u64,
+}
 fn is_zero_argument_manifest_function(row: &EngineBundleManifestFunctionRow, name: &str) -> bool {
     row.name == name && row.parameter_count == 0
 }
@@ -266,6 +291,10 @@ struct EngineBundleManifest {
     hot_render_metadata_version: Option<u32>,
     #[serde(default)]
     hot_render_images: Option<Vec<EngineBundleManifestHotRenderImageRow>>,
+    #[serde(default)]
+    hot_render_transitions: Option<Vec<EngineBundleManifestHotRenderTransitionRow>>,
+    #[serde(default)]
+    hot_render_transition_analysis: Option<EngineBundleManifestHotRenderTransitionAnalysisRow>,
 }
 
 fn read_engine_bundle_manifest(path: &Path) -> Result<EngineBundleManifest, String> {
@@ -287,6 +316,8 @@ fn read_engine_bundle_manifest(path: &Path) -> Result<EngineBundleManifest, Stri
 pub(crate) struct HotRenderRuntimePolicy {
     version: u32,
     images: Vec<stasis_dynload::HotRenderRuntimeImage>,
+    transitions: Vec<stasis_dynload::HotRenderRuntimeTransition>,
+    analysis: stasis_dynload::HotRenderRuntimeTransitionAnalysis,
 }
 
 impl HotRenderRuntimePolicy {
@@ -295,11 +326,18 @@ impl HotRenderRuntimePolicy {
         Self {
             version: stasis_dynload::HOT_RENDER_METADATA_VERSION,
             images,
+            transitions: Vec::new(),
+            analysis: stasis_dynload::HotRenderRuntimeTransitionAnalysis::default(),
         }
     }
 
     pub(crate) fn publish(&self) {
-        stasis_dynload::replace_hot_render_metadata(self.version, &self.images);
+        stasis_dynload::replace_hot_render_metadata_v4(
+            self.version,
+            &self.images,
+            &self.transitions,
+            &self.analysis,
+        );
     }
 }
 
@@ -308,6 +346,7 @@ pub(crate) fn snapshot_hot_render_policy(snapshot: &ProgramSnapshot) -> HotRende
         .hot_render_images()
         .iter()
         .map(|image| stasis_dynload::HotRenderRuntimeImage {
+            identity: image.identity.clone(),
             logical_path: image.logical_path.clone(),
             logical_width: image.logical_width,
             logical_height: image.logical_height,
@@ -322,9 +361,46 @@ pub(crate) fn snapshot_hot_render_policy(snapshot: &ProgramSnapshot) -> HotRende
             backend_constraints: image.backend_constraints.clone(),
         })
         .collect::<Vec<_>>();
+    let transitions = snapshot
+        .hot_render_transitions()
+        .iter()
+        .map(|edge| stasis_dynload::HotRenderRuntimeTransition {
+            from_identity: edge.from_identity.clone(),
+            to_identity: edge.to_identity.clone(),
+            max_transitions_per_render: edge.max_transitions_per_render,
+            validity: match edge.validity {
+                stasis_compiler::backend::hot_render::HotRenderTransitionValidity::Finite =>
+                    "finite".to_string(),
+                stasis_compiler::backend::hot_render::HotRenderTransitionValidity::Unknown =>
+                    "unknown".to_string(),
+            },
+            unknown_cause: edge.unknown_cause.clone(),
+            provenance: edge.provenance.iter().map(|source| match source {
+                stasis_compiler::backend::hot_render::HotRenderTransitionProvenance::SequenceJoin => "sequence_join",
+                stasis_compiler::backend::hot_render::HotRenderTransitionProvenance::BranchMaximum => "branch_maximum",
+                stasis_compiler::backend::hot_render::HotRenderTransitionProvenance::FixedRepeatInternal => "fixed_repeat_internal",
+                stasis_compiler::backend::hot_render::HotRenderTransitionProvenance::FixedRepeatBoundary => "fixed_repeat_boundary",
+            }.to_string()).collect(),
+        })
+        .collect();
+    let summary = snapshot.hot_render_transition_analysis();
+    let analysis = stasis_dynload::HotRenderRuntimeTransitionAnalysis {
+        validity: match summary.validity {
+            stasis_compiler::backend::hot_render::HotRenderTransitionAnalysisValidity::Complete => "complete".to_string(),
+            stasis_compiler::backend::hot_render::HotRenderTransitionAnalysisValidity::Incomplete => "incomplete".to_string(),
+        },
+        unknown_causes: summary.unknown_causes.clone(),
+        pair_count: summary.pair_count,
+        published_pair_count: summary.published_pair_count,
+        omitted_pair_count: summary.omitted_pair_count,
+        pair_limit: summary.pair_limit,
+        max_pair_weight: summary.max_pair_weight,
+    };
     HotRenderRuntimePolicy {
         version: stasis_compiler::backend::hot_render::HOT_RENDER_METADATA_VERSION,
         images,
+        transitions,
+        analysis,
     }
 }
 
@@ -335,6 +411,7 @@ fn manifest_hot_render_policy(manifest: &EngineBundleManifest) -> HotRenderRunti
         .unwrap_or_default()
         .iter()
         .map(|image| stasis_dynload::HotRenderRuntimeImage {
+            identity: image.identity.clone(),
             logical_path: image.logical_path.clone(),
             logical_width: image.logical_width,
             logical_height: image.logical_height,
@@ -349,12 +426,42 @@ fn manifest_hot_render_policy(manifest: &EngineBundleManifest) -> HotRenderRunti
             backend_constraints: image.backend_constraints.clone().unwrap_or_default(),
         })
         .collect::<Vec<_>>();
+    let transitions = manifest
+        .hot_render_transitions
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|edge| stasis_dynload::HotRenderRuntimeTransition {
+            from_identity: edge.from_identity.clone(),
+            to_identity: edge.to_identity.clone(),
+            max_transitions_per_render: edge.max_transitions_per_render,
+            validity: edge.validity.clone(),
+            unknown_cause: edge.unknown_cause.clone(),
+            provenance: edge.provenance.clone(),
+        })
+        .collect();
+    let analysis = manifest
+        .hot_render_transition_analysis
+        .as_ref()
+        .map_or_else(
+            stasis_dynload::HotRenderRuntimeTransitionAnalysis::default,
+            |summary| stasis_dynload::HotRenderRuntimeTransitionAnalysis {
+                validity: summary.validity.clone(),
+                unknown_causes: summary.unknown_causes.clone(),
+                pair_count: summary.pair_count,
+                published_pair_count: summary.published_pair_count,
+                omitted_pair_count: summary.omitted_pair_count,
+                pair_limit: summary.pair_limit,
+                max_pair_weight: summary.max_pair_weight,
+            },
+        );
     HotRenderRuntimePolicy {
         version: manifest.hot_render_metadata_version.unwrap_or_default(),
         images,
+        transitions,
+        analysis,
     }
 }
-
 pub(crate) fn load_manifest_hot_render_policy(
     path: &Path,
 ) -> Result<HotRenderRuntimePolicy, String> {
@@ -5077,16 +5184,31 @@ mod tests {
             stasis_dynload::HOT_RENDER_METADATA_VERSION
         );
         let manifest: EngineBundleManifest = serde_json::from_str(
-            r#"{"functions":[],"hot_render_metadata_version":3,"hot_render_images":[{"logical_path":"assets/hero.png","logical_width":32,"logical_height":24,"max_renders_per_render":3,"atlas_eligible":true,"grouping_key":"batch-v3:test","estimated_distinct_transitions":4,"group_member_count":2,"group_logical_pixel_area":1536,"group_max_logical_width":32,"group_max_logical_height":24,"backend_constraints":"desktop-gl"}]}"#,
+            r#"{"functions":[],"hot_render_metadata_version":4,"hot_render_images":[{"logical_path":"assets/hero.png","logical_width":32,"logical_height":24,"max_renders_per_render":3,"atlas_eligible":true,"grouping_key":"batch-v3:test","estimated_distinct_transitions":4,"group_member_count":2,"group_logical_pixel_area":1536,"group_max_logical_width":32,"group_max_logical_height":24,"backend_constraints":"desktop-gl"}]}"#,
         )
         .expect("parse hot-render manifest");
-        assert_eq!(manifest.hot_render_metadata_version, Some(3));
+        assert_eq!(manifest.hot_render_metadata_version, Some(4));
         let image = &manifest.hot_render_images.expect("image rows")[0];
         assert_eq!(image.max_renders_per_render, Some(3));
         assert!(image.atlas_eligible);
         assert_eq!(image.backend_constraints.as_deref(), Some("desktop-gl"));
     }
 
+    #[test]
+    fn engine_manifest_v4_pair_evidence_reaches_host_policy() {
+        let manifest: EngineBundleManifest = serde_json::from_str(
+            r#"{"functions":[],"hot_render_metadata_version":4,"hot_render_images":[{"identity":"hero","logical_path":"assets/hero.png","logical_width":32,"logical_height":24,"max_renders_per_render":3,"atlas_eligible":true,"grouping_key":"batch-v3:test","backend_constraints":"desktop-gl"},{"identity":"enemy","logical_path":"assets/enemy.png","logical_width":32,"logical_height":24,"max_renders_per_render":3,"atlas_eligible":true,"grouping_key":"batch-v3:test","backend_constraints":"desktop-gl"}],"hot_render_transitions":[{"from_identity":"hero","to_identity":"enemy","max_transitions_per_render":4,"validity":"finite","provenance":["sequence_join"]}],"hot_render_transition_analysis":{"validity":"complete","unknown_causes":[],"pair_count":1,"published_pair_count":1,"omitted_pair_count":0,"pair_limit":4096,"max_pair_weight":1000000000}}"#,
+        )
+        .expect("parse v4 manifest");
+        let policy = manifest_hot_render_policy(&manifest);
+        assert_eq!(policy.version, stasis_dynload::HOT_RENDER_METADATA_VERSION);
+        assert_eq!(policy.images.len(), 2);
+        assert_eq!(policy.transitions.len(), 1);
+        assert_eq!(policy.transitions[0].max_transitions_per_render, Some(4));
+        assert_eq!(policy.transitions[0].provenance, ["sequence_join"]);
+        assert_eq!(policy.analysis.validity, "complete");
+        assert_eq!(policy.analysis.omitted_pair_count, Some(0));
+    }
     #[test]
     fn packaged_frame_callbacks_require_zero_arguments() {
         let manifest: EngineBundleManifest = serde_json::from_str(
