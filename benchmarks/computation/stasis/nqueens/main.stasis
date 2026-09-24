@@ -1,0 +1,32 @@
+global columns: i32[12];
+
+extern function print_i32(value: i32): void;
+
+function solve(row: i32): i32 {
+    if (row == 12) {
+        return 1;
+    }
+    let count: i32 = 0;
+    for (let col: i32 = 0; col < 12; col += 1) {
+        let allowed: bool = true;
+        for (let prior: i32 = 0; prior < row; prior += 1) {
+            let distance: i32 = col - columns[prior];
+            if (distance < 0) {
+                distance = 0 - distance;
+            }
+            if (columns[prior] == col || distance == row - prior) {
+                allowed = false;
+            }
+        }
+        if (allowed) {
+            columns[row] = col;
+            count += solve(row + 1);
+        }
+    }
+    return count;
+}
+
+function main(): i32 {
+    print_i32(solve(0));
+    return 0;
+}

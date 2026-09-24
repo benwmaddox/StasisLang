@@ -1,0 +1,25 @@
+extern function print_i32(value: i32): void;
+
+function main(): i32 {
+    let total: i32 = 0;
+    for (let pass: i32 = 0; pass < 15; pass += 1) {
+        for (let y: i32 = 0; y < 240; y += 1) {
+            let ci: f64 =(y + 0.0) * 2.0 / 240.0 - 1.0;
+            for (let x: i32 = 0; x < 320; x += 1) {
+                let cr: f64 =(x + 0.0) * 3.0 / 320.0 - 2.0;
+                let zr: f64 = 0.0;
+                let zi: f64 = 0.0;
+                for (let steps: i32 = 0; steps < 50 && zr * zr + zi * zi <= 4.0; steps += 1) {
+                    let next: f64 = zr * zr - zi * zi + cr;
+                    zi = 2.0 * zr * zi + ci;
+                    zr = next;
+                    if (steps == 49) {
+                        total += 1;
+                    }
+                }
+            }
+        }
+    }
+    print_i32(total);
+    return 0;
+}

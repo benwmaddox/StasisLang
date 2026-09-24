@@ -1,0 +1,14 @@
+extern function print_i32(value: i32): void;
+
+function fib(n: i32): i32 {
+    if (n < 2) {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+function main(): i32 {
+    let result: i32 = fib(38);
+    print_i32(result);
+    return 0;
+}

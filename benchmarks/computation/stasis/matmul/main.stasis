@@ -1,0 +1,36 @@
+global a: i32[4096];
+global b: i32[4096];
+global c: i32[4096];
+
+extern function print_i32(value: i32): void;
+
+function main(): i32 {
+    for (let i: i32 = 0; i < 64; i += 1) {
+        for (let j: i32 = 0; j < 64; j += 1) {
+            a[i * 64 + j] =(i + j) % 17;
+            b[i * 64 + j] =(i * 3 + j) % 19;
+        }
+    }
+    for (let pass: i32 = 0; pass < 100; pass += 1) {
+        for (let i: i32 = 0; i < 64; i += 1) {
+            for (let j: i32 = 0; j < 64; j += 1) {
+                b[i * 64 + j] =(i * 3 + j + pass) % 19;
+            }
+        }
+        for (let i: i32 = 0; i < 64; i += 1) {
+            for (let j: i32 = 0; j < 64; j += 1) {
+                let sum: i32 = 0;
+                for (let k: i32 = 0; k < 64; k += 1) {
+                    sum += a[i * 64 + k] * b[k * 64 + j];
+                }
+                c[i * 64 + j] = sum;
+            }
+        }
+    }
+    let diagonal: i32 = 0;
+    for (let i: i32 = 0; i < 64; i += 1) {
+        diagonal += c[i * 64 + i];
+    }
+    print_i32(diagonal);
+    return 0;
+}

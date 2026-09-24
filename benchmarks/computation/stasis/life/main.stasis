@@ -1,0 +1,45 @@
+global cells: u8[16384];
+global next_cells: u8[16384];
+
+extern function print_i32(value: i32): void;
+
+function main(): i32 {
+    for (let y: i32 = 0; y < 128; y += 1) {
+        for (let x: i32 = 0; x < 128; x += 1) {
+            if ((x * 17 + y * 31 + x * y) % 11 < 4) {
+                cells[y * 128 + x] = 1;
+            }
+        }
+    }
+    for (let generation: i32 = 0; generation < 100; generation += 1) {
+        for (let y: i32 = 0; y < 128; y += 1) {
+            for (let x: i32 = 0; x < 128; x += 1) {
+                let neighbors: i32 = 0;
+                for (let dy: i32 = 0 - 1; dy <= 1; dy += 1) {
+                    for (let dx: i32 = 0 - 1; dx <= 1; dx += 1) {
+                        if (dx != 0 || dy != 0) {
+                            let nx: i32 =(x + dx + 128) % 128;
+                            let ny: i32 =(y + dy + 128) % 128;
+                            neighbors += cells[ny * 128 + nx];
+                        }
+                    }
+                }
+                let index: i32 = y * 128 + x;
+                if (neighbors == 3 ||(cells[index] != 0 && neighbors == 2)) {
+                    next_cells[index] = 1;
+                } else {
+                    next_cells[index] = 0;
+                }
+            }
+        }
+        for (let i: i32 = 0; i < 16384; i += 1) {
+            cells[i] = next_cells[i];
+        }
+    }
+    let alive: i32 = 0;
+    for (let i: i32 = 0; i < 16384; i += 1) {
+        alive += cells[i];
+    }
+    print_i32(alive);
+    return 0;
+}
