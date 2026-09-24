@@ -282,6 +282,44 @@ fn run_wasm_node(module: &WasmProcess, script: &str, label: &str) -> String {
     String::from_utf8(output.stdout).expect("focused Wasm fixture output is UTF-8")
 }
 
+const STRUCT_COPY_SOURCE_BOUNDS: &str = r#"
+struct CopyItem {
+    first: i32;
+    second: i32;
+    third: i32;
+}
+
+global copy_items: CopyItem[3];
+global empty_items: CopyItem[0];
+
+function main(): i32 {
+    copy_items[0].first = 1;
+    copy_items[0].second = 2;
+    copy_items[0].third = 3;
+    copy_items[1].first = 10;
+    copy_items[1].second = 20;
+    copy_items[1].third = 30;
+    return tick();
+}
+
+function tick(): i32 {
+    return copy_items[0].first + copy_items[0].second + copy_items[0].third;
+}
+
+function render(index: i32): i32 {
+    if (index == 42) {
+        copy_items[0] = empty_items[0];
+    } else if (index == 43) {
+        copy_items[index - 44] = copy_items[1];
+    } else if (index == 44) {
+        copy_items[index - 41] = copy_items[1];
+    } else {
+        copy_items[0] = copy_items[index];
+    }
+    return tick();
+}
+"#;
+
 const STATIC_NAMED_STRUCT_VIEW_BOUNDS: &str = r#"
 struct StaticItem {
     score: i32;
@@ -817,6 +855,35 @@ fn static_named_struct_views_trap_at_bounds_including_copy_sources() {
         "static named-struct view bounds",
     );
     assert_eq!(output, "10,12,true,true");
+}
+
+#[test]
+fn indexed_struct_copy_validates_source_once_before_any_field_write() {
+    let wasm = compile_wasm_fixture(
+        "focused/struct_copy_source_bounds.stasis",
+        STRUCT_COPY_SOURCE_BOUNDS,
+        &["main", "tick", "render"],
+        &[],
+    );
+    let output = run_wasm_node(
+        &wasm,
+        r#"const fs=require('node:fs');
+WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => {
+  const e=instance.exports;
+  const trapped=(call)=>{try{call();return false;}catch(error){return error instanceof WebAssembly.RuntimeError;}};
+  const values=[e.main(),e.render(1),e.tick(),e.render(0),
+    trapped(()=>e.render(-1)),trapped(()=>e.render(3)),trapped(()=>e.render(4)),
+    trapped(()=>e.render(2147483647)),trapped(()=>e.render(42)),
+    trapped(()=>e.render(-2147483648)),trapped(()=>e.render(43)),
+    trapped(()=>e.render(44)),e.tick()];
+  process.stdout.write(values.join(','));
+}).catch((error)=>{console.error(error);process.exit(1);});"#,
+        "indexed struct copy bounds",
+    );
+    assert_eq!(
+        output,
+        "6,60,60,60,true,true,true,true,true,true,true,true,60"
+    );
 }
 
 #[test]
