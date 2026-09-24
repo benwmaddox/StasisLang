@@ -41,7 +41,6 @@ fn matmul() -> i32 {
     for i in 0..64 {
         for j in 0..64 {
             a[i * 64 + j] = ((i + j) % 17) as i32;
-            b[i * 64 + j] = ((i * 3 + j) % 19) as i32;
         }
     }
     for pass in 0..100 {

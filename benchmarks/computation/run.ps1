@@ -15,6 +15,7 @@ $expected = @{
 $artifactDir = Join-Path $root 'artifacts'
 New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
 $rustExe = Join-Path $artifactDir 'rust_baseline.exe'
+$stasisExe = (Get-Command stasis -ErrorAction Stop).Source
 
 function Invoke-Timed([string]$Exe, [string[]]$Arguments) {
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -43,7 +44,7 @@ function Get-Median([double[]]$Values) {
 if (-not $SkipBuild) {
     foreach ($name in $names) {
         $project = Join-Path $root "stasis/$name"
-        & stasis build --workspace $project --mode release --out "build/$name.exe" --signing optional
+        & $stasisExe build --workspace $project --mode release --out "build/$name.exe" --signing optional
         if ($LASTEXITCODE -ne 0) { throw "Stasis build failed: $name" }
     }
     & rustc --edition=2021 -C opt-level=3 -C target-cpu=native (Join-Path $root 'rust_baseline.rs') -o $rustExe
@@ -52,32 +53,50 @@ if (-not $SkipBuild) {
 
 $rows = @()
 foreach ($name in $names) {
-    $stasisExe = Join-Path $root "stasis/$name/build/$name.exe"
-    $paths = @{ stasis = $stasisExe; rust = $rustExe }
-    $arguments = @{ stasis = @(); rust = @($name) }
-    $times = @{ stasis = @(); rust = @() }
+    $project = Join-Path $root "stasis/$name"
+    $aotExe = Join-Path $project "build/$name.exe"
+    $paths = @{ aot = $aotExe; jit = $stasisExe; rust = $rustExe }
+    $arguments = @{ aot = @(); jit = @('run', '--workspace', $project, '--json'); rust = @($name) }
+    $times = @{ aot = @(); jit = @(); rust = @() }
     for ($round = 0; $round -lt $Warmups + $Samples; $round++) {
-        $order = if ($round % 2 -eq 0) { @('stasis', 'rust') } else { @('rust', 'stasis') }
+        $order = switch ($round % 3) {
+            0 { @('aot', 'jit', 'rust') }
+            1 { @('jit', 'rust', 'aot') }
+            2 { @('rust', 'aot', 'jit') }
+        }
         foreach ($language in $order) {
             $result = Invoke-Timed $paths[$language] $arguments[$language]
-            if ($result.output -ne $expected[$name]) {
+            $actual = $result.output
+            if ($language -eq 'jit') {
+                $jsonStart = $actual.IndexOf('{')
+                if ($jsonStart -lt 0) { throw "$name JIT result did not contain JSON: $actual" }
+                $jitResult = $actual.Substring($jsonStart) | ConvertFrom-Json
+                if (-not $jitResult.ok -or $jitResult.result.backend -ne 'jit' -or $jitResult.result.exit_code -ne 0) {
+                    throw "$name JIT result was unsuccessful: $actual"
+                }
+                $actual = $actual.Substring(0, $jsonStart)
+            }
+            if ($actual -ne $expected[$name]) {
                 throw "$name $language output '$($result.output)', expected '$($expected[$name])'"
             }
             if ($round -ge $Warmups) { $times[$language] += [double]$result.ms }
         }
     }
-    $stasisMedian = Get-Median $times.stasis
+    $aotMedian = Get-Median $times.aot
+    $jitMedian = Get-Median $times.jit
     $rustMedian = Get-Median $times.rust
     $row = [ordered]@{
         name = $name; expected = $expected[$name]
-        stasis_ms = [Math]::Round($stasisMedian, 3)
+        aot_ms = [Math]::Round($aotMedian, 3)
+        jit_ms = [Math]::Round($jitMedian, 3)
         rust_ms = [Math]::Round($rustMedian, 3)
-        stasis_over_rust = [Math]::Round($stasisMedian / $rustMedian, 3)
-        stasis_samples_ms = $times.stasis
+        aot_over_rust = [Math]::Round($aotMedian / $rustMedian, 3)
+        aot_samples_ms = $times.aot
+        jit_samples_ms = $times.jit
         rust_samples_ms = $times.rust
     }
     $rows += $row
-    Write-Output ("{0,-14} Stasis {1,9:N2} ms  Rust {2,9:N2} ms  ratio {3,7:N2}x" -f $name, $stasisMedian, $rustMedian, $row.stasis_over_rust)
+    Write-Output ("{0,-14} AOT {1,9:N2} ms  JIT {2,9:N2} ms  Rust {3,9:N2} ms" -f $name, $aotMedian, $jitMedian, $rustMedian)
 }
 
 $report = [ordered]@{
@@ -85,10 +104,10 @@ $report = [ordered]@{
     computer = $env:COMPUTERNAME
     cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1 -ExpandProperty Name)
     os = [System.Environment]::OSVersion.VersionString
-    stasis_version = (& stasis version | Out-String).Trim()
+    stasis_version = (& $stasisExe version | Out-String).Trim()
     rust_version = (& rustc --version | Out-String).Trim()
     samples = $Samples; warmups = $Warmups
-    method = 'AOT executable process elapsed time, alternating order; compilation excluded'
+    method = 'Whole-process elapsed time, rotating order: AOT and Rust compilation excluded; each JIT launch includes fresh compilation'
     results = $rows
 }
 $reportPath = Join-Path $artifactDir 'latest.json'

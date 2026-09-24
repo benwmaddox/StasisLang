@@ -8,7 +8,6 @@ function main(): i32 {
     for (let i: i32 = 0; i < 64; i += 1) {
         for (let j: i32 = 0; j < 64; j += 1) {
             a[i * 64 + j] =(i + j) % 17;
-            b[i * 64 + j] =(i * 3 + j) % 19;
         }
     }
     for (let pass: i32 = 0; pass < 100; pass += 1) {
