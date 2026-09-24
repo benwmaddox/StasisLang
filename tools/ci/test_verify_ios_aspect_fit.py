@@ -45,17 +45,20 @@ def receipt(stage: str, injected_x: float, injected_w: float, generation: int) -
     }
 
 
-def write_png_header(path: Path, width: int, height: int) -> None:
+def write_png_header(path: Path, width: int, height: int, marker: bytes) -> None:
     path.write_bytes(
         b"\x89PNG\r\n\x1a\n"
         + struct.pack(">I", 13)
         + b"IHDR"
         + struct.pack(">II", width, height)
+        + marker
     )
 
 
 class VerifyIosAspectFitTests(unittest.TestCase):
-    def run_fixture(self, mutate=None) -> subprocess.CompletedProcess[str]:
+    def run_fixture(
+        self, mutate=None, mutate_screenshots=None
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             values = {
@@ -81,8 +84,10 @@ class VerifyIosAspectFitTests(unittest.TestCase):
                 paths[name] = path
             left_png = root / "left.png"
             right_png = root / "right.png"
-            write_png_header(left_png, 2622, 1206)
-            write_png_header(right_png, 2622, 1206)
+            write_png_header(left_png, 1206, 2622, b"left")
+            write_png_header(right_png, 1206, 2622, b"right")
+            if mutate_screenshots:
+                mutate_screenshots(left_png, right_png)
             output = root / "evidence.json"
             result = subprocess.run(
                 [
@@ -112,6 +117,10 @@ class VerifyIosAspectFitTests(unittest.TestCase):
                 self.assertFalse(evidence["physical_device_qualified"])
                 self.assertTrue(evidence["injected_safe_area_qualified"])
                 self.assertFalse(evidence["actual_simulator_safe_area_inset_observed"])
+                self.assertEqual(
+                    evidence["screenshots"]["landscape_left"]["encoding"],
+                    "hardware-native-portrait",
+                )
             return result
 
     def test_accepts_fitted_cutout_and_pointer_receipts(self) -> None:
@@ -133,6 +142,15 @@ class VerifyIosAspectFitTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("injected safe drawable", result.stderr)
+
+    def test_rejects_byte_identical_stage_screenshots(self) -> None:
+        result = self.run_fixture(
+            mutate_screenshots=lambda left, right: right.write_bytes(
+                left.read_bytes()
+            )
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("byte-identical", result.stderr)
 
     def test_slow_ci_owns_arm64_simulator_evidence(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "pr-ci.yml").read_text(
@@ -175,6 +193,9 @@ class VerifyIosAspectFitTests(unittest.TestCase):
         self.assertIn("STASIS_RENDER_FLAG_CLEAR | STASIS_RENDER_FLAG_PRESENT", fixture)
         self.assertIn("hash_path(\"gfx_cmd_i32\")", fixture)
         self.assertIn("frame == 91 && !write_receipt(\"pointer\")", fixture)
+        self.assertIn("frame == 600", fixture)
+        self.assertIn("frame == 630 && !write_receipt(\"landscape-right\")", fixture)
+        self.assertIn("const int right_stage = frame >= 600;", fixture)
 
 
 if __name__ == "__main__":

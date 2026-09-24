@@ -97,6 +97,20 @@ def png_size(path: Path) -> tuple[int, int]:
     return struct.unpack(">II", data[16:24])
 
 
+def screenshot_encoding(
+    pixels: tuple[int, int], drawable: list[int], label: str
+) -> str:
+    expected = (int(drawable[0]), int(drawable[1]))
+    if pixels == expected:
+        return "app-landscape"
+    if pixels == (expected[1], expected[0]):
+        return "hardware-native-portrait"
+    raise SystemExit(
+        f"{label}: screenshot pixels {pixels!r} do not match drawable {expected!r} "
+        "or its hardware-native transpose"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--actual", type=Path, required=True)
@@ -148,8 +162,14 @@ def main() -> None:
 
     left_png = png_size(args.left_screenshot)
     right_png = png_size(args.right_screenshot)
-    if left_png[0] <= left_png[1] or right_png[0] <= right_png[1]:
-        raise SystemExit("simulator screenshots are not landscape")
+    left_encoding = screenshot_encoding(
+        left_png, left["drawable"], "left screenshot"
+    )
+    right_encoding = screenshot_encoding(
+        right_png, right["drawable"], "right screenshot"
+    )
+    if args.left_screenshot.read_bytes() == args.right_screenshot.read_bytes():
+        raise SystemExit("simulator stage screenshots are byte-identical")
 
     evidence = {
         "schema": "stasis.ios.aspect_fit.evidence.v1",
@@ -162,10 +182,12 @@ def main() -> None:
             "landscape_left": {
                 "path": str(args.left_screenshot),
                 "pixels": list(left_png),
+                "encoding": left_encoding,
             },
             "landscape_right": {
                 "path": str(args.right_screenshot),
                 "pixels": list(right_png),
+                "encoding": right_encoding,
             },
         },
         "actual_simulator_safe_area_inset_observed": has_inset(

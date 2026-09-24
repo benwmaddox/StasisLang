@@ -191,7 +191,7 @@ int32_t stasis_mobile_tick_entry(void) {
         }
     }
     if (frame == 91 && !write_receipt("pointer")) return 75;
-    if (frame == 150) {
+    if (frame == 600) {
         if (!stasis_test_push_input_event(5, 723, 160.0f, 72.0f)) return 76;
         left_safe_x = 0;
         if (!stasis_test_push_display_event(
@@ -200,7 +200,7 @@ int32_t stasis_mobile_tick_entry(void) {
             return 77;
         }
     }
-    if (frame == 180 && !write_receipt("landscape-right")) return 78;
+    if (frame == 630 && !write_receipt("landscape-right")) return 78;
     return 0;
 }
 
@@ -210,9 +210,10 @@ int32_t stasis_mobile_render_entry(void) {
     gfx_cmd_i32[STASIS_RENDER_I_VERSION] = STASIS_RENDER_VERSION;
     gfx_cmd_i32[STASIS_RENDER_I_FLAGS] =
         STASIS_RENDER_FLAG_CLEAR | STASIS_RENDER_FLAG_PRESENT;
-    gfx_cmd_f32[STASIS_RENDER_F_CLEAR_BASE] = 0.035f;
-    gfx_cmd_f32[STASIS_RENDER_F_CLEAR_BASE + 1] = 0.075f;
-    gfx_cmd_f32[STASIS_RENDER_F_CLEAR_BASE + 2] = 0.125f;
+    const int right_stage = frame >= 600;
+    gfx_cmd_f32[STASIS_RENDER_F_CLEAR_BASE] = right_stage ? 0.125f : 0.035f;
+    gfx_cmd_f32[STASIS_RENDER_F_CLEAR_BASE + 1] = right_stage ? 0.055f : 0.075f;
+    gfx_cmd_f32[STASIS_RENDER_F_CLEAR_BASE + 2] = right_stage ? 0.035f : 0.125f;
     gfx_cmd_f32[STASIS_RENDER_F_CLEAR_BASE + 3] = 1.0f;
     return 0;
 }

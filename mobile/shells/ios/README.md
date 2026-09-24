@@ -40,8 +40,12 @@ replaces its device-only AOT objects with a simulator qualification fixture,
 and builds the same shared SDL/mobile runtime for an arm64 iOS simulator. The
 fixture fixes the logical canvas at 1600x720 and records the live safe-area fit,
 an injected resize/orientation-safe-area transition, and logical pointer
-round-trip receipts. The job uploads both landscape screenshots, exact
+round-trip receipts. The job uploads both landscape-stage screenshots, exact
 Xcode/runtime/device identifiers, logs, and the machine-checked receipt.
+The receipt is authoritative for app-window orientation. `simctl io screenshot`
+may encode those landscape stages in hardware-native portrait pixel order, so
+the verifier accepts only the exact drawable dimensions or their exact
+transpose, labels that encoding, and requires distinct stage colors.
 The live receipt preserves the simulator's actual safe area, including a
 truthful zero-inset result. The injected receipts separately exercise the
 production mobile safe target, left/right cutout math, display generation, and
