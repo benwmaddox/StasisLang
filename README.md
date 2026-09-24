@@ -50,6 +50,8 @@ Stasis favors fixed-size arrays, explicit loops, static layouts, and bounded wor
 
 The goal is not merely speed. It is being able to explain where time and memory go.
 
+A [2026-09-24 computation benchmark](benchmarks/computation/results_2026-09-24.md) found Stasis AOT faster than Rust Cranelift on four of seven matched kernels and about 7-14% slower on the other three on one Windows host. The report includes Rust LLVM and Stasis JIT comparisons, methods, and limits.
+
 ### Live editing is a transaction
 
 Development uses an in-process Cranelift JIT. Changed code is compiled in the background, checked for signature and layout compatibility, and committed between ticks. A swap either succeeds as a whole or the running program keeps its previous code and data.

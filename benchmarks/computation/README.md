@@ -31,20 +31,6 @@ The Stasis implementations use fixed-capacity global arrays, indexed `for` loops
 
 The [Computer Language Benchmarks Game](https://benchmarksgame-team.pages.debian.net/benchmarksgame/description/nbodyinprocess.html) includes Mandelbrot among its established tasks. [Programming Language Benchmark v2](https://github.com/attractivechaos/plb2) uses N queens and matrix multiplication and emphasizes the same algorithm across languages. The [multi-language Game of Life implementations](https://github.com/KieranP/Game-Of-Life-Implementations) provide another comparison precedent. The [Rust Cranelift backend](https://github.com/rust-lang/rustc_codegen_cranelift) is a preview rustc backend. Sizes and outputs here are defined by this directory and do not claim compatibility with those suites' official inputs.
 
-## Local result, 2026-09-24
+## Recorded result
 
-Windows 10.0.26200.0, Intel Core Ultra 9 185H, Stasis 0.1.0, rustc 1.100.0-nightly. Ten measured process launches per implementation; lower is faster.
-
-| Kernel | Stasis AOT ms | Stasis JIT ms* | Rust LLVM ms | Rust Cranelift ms |
-| --- | ---: | ---: | ---: | ---: |
-| fib | 159.76 | 213.44 | 138.32 | 189.82 |
-| mandelbrot | 59.21 | 123.36 | 41.27 | 55.37 |
-| matmul | 41.73 | 118.36 | 12.04 | 39.11 |
-| nqueens | 359.47 | 478.23 | 67.66 | 314.76 |
-| sieve | 103.48 | 181.52 | 61.29 | 138.74 |
-| partial_sums | 95.84 | 179.09 | 96.37 | 407.12 |
-| life | 43.34 | 119.10 | 8.94 | 130.38 |
-
-*Stasis JIT includes fresh compilation on every launch, so its column measures a different path from the three built executables. The Rust LLVM/Cranelift gap on identical source is direct evidence that backend choice matters for these kernels. Stasis and Rust Cranelift still use different frontends and storage representations. Results varied between runs on this hybrid CPU; small differences should be treated as near parity.
-
-A preliminary 300-generation Life variant produced different counts (Stasis 663, Rust 838), so the checked suite uses the 100-generation variant where both agree. That longer-run discrepancy needs investigation before using it as performance evidence.
+See the [fixed 2026-09-24 measurement snapshot](results_2026-09-24.md). Local reruns update the ignored artifacts/latest.json report; they do not change that dated snapshot.
