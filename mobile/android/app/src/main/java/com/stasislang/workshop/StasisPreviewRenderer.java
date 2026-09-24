@@ -139,7 +139,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
         default void onFrameStart() {}
 
-        default void onDisplayMetricsChanged(float rasterScale, int densityGeneration) {}
+        default void onDisplayMetricsChanged(float rasterScale, float textRasterScale,
+                int densityGeneration) {}
 
         int textureFor(int handle);
 
@@ -231,15 +232,17 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         final int height;
         final float contentScale;
         final float rasterScale;
+        final float textRasterScale;
 
         DisplayViewport(int x, int y, int width, int height,
-                float contentScale, float rasterScale) {
+                float contentScale, float rasterScale, float textRasterScale) {
             this.x = x;
             this.y = y;
             this.width = width;
             this.height = height;
             this.contentScale = contentScale;
             this.rasterScale = rasterScale;
+            this.textRasterScale = textRasterScale;
         }
     }
 
@@ -362,7 +365,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private int surfaceHeight = 1;
     private int logicalWidth = 1;
     private int logicalHeight = 1;
-    private DisplayViewport displayViewport = new DisplayViewport(0, 0, 1, 1, 1.0f, 1.0f);
+    private DisplayViewport displayViewport = new DisplayViewport(
+            0, 0, 1, 1, 1.0f, 1.0f, 1.0f);
     private int displayGeneration = -1;
     private int densityGeneration = -1;
     private CaptureCallback pendingCapture;
@@ -1162,6 +1166,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     private void updateDisplayMetrics() {
         float previousRasterScale = displayViewport.rasterScale;
+        float previousTextRasterScale = displayViewport.textRasterScale;
         int nextLogicalWidth = frameI32.get(I_LOGICAL_W);
         int nextLogicalHeight = frameI32.get(I_LOGICAL_H);
         if (nextLogicalWidth <= 0 || nextLogicalHeight <= 0) {
@@ -1182,9 +1187,13 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     + " generation=" + displayGeneration);
         }
         if (densityGeneration != nextDensityGeneration
-                || Math.abs(previousRasterScale - displayViewport.rasterScale) >= 0.001f) {
+                || Float.floatToIntBits(previousRasterScale)
+                    != Float.floatToIntBits(displayViewport.rasterScale)
+                || Float.floatToIntBits(previousTextRasterScale)
+                    != Float.floatToIntBits(displayViewport.textRasterScale)) {
             densityGeneration = nextDensityGeneration;
-            textures.onDisplayMetricsChanged(displayViewport.rasterScale, densityGeneration);
+            textures.onDisplayMetricsChanged(displayViewport.rasterScale,
+                    displayViewport.textRasterScale, densityGeneration);
         }
     }
 
@@ -1202,8 +1211,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         int y = (drawableHeight - height) / 2;
         float contentScale = Math.min((float)width / logicalWidth,
                 (float)height / logicalHeight);
+        float textRasterScale = Math.max(1.0f, Math.max(
+                (float)width / logicalWidth, (float)height / logicalHeight));
         return new DisplayViewport(x, y, width, height, contentScale,
-                Math.max(1.0f, Math.min(8.0f, contentScale)));
+                Math.max(1.0f, Math.min(8.0f, contentScale)), textRasterScale);
     }
 
     static String formatResourceFailure(String stage, int handle, String path,
