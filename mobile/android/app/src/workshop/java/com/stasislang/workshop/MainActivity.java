@@ -262,6 +262,11 @@ public final class MainActivity extends Activity {
         if (nativeSetStorageRoot(new File(getFilesDir(), "stasis_preferences").getAbsolutePath()) == 0) {
             throw new IllegalStateException("Unable to initialize preference storage");
         }
+        try {
+            RetiredAiStateMigration.migrate(this);
+        } catch (IOException error) {
+            throw new IllegalStateException("Unable to clean up retired AI storage", error);
+        }
         AndroidCrashStore.install(this);
         JSONObject crashState = AndroidCrashStore.noteLaunch(this);
         restartLoopRecoveryActive = crashState.optBoolean("restart_loop_detected", false);

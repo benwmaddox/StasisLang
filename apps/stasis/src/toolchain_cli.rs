@@ -1321,6 +1321,8 @@ fn is_toolchain_invocation(args: &[OsString]) -> bool {
         || first == "--json"
         || first == "--workspace"
         || COMMANDS.contains(&first)
+        // Retired commands must reach Clap rejection, never the legacy runtime.
+        || matches!(first, "ai" | "editor" | "tui" | "gauntlet")
 }
 
 fn command_name(command: &ToolchainCommand) -> &'static str {

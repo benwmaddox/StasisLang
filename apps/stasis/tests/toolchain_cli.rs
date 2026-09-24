@@ -40,6 +40,32 @@ fn native_release_executes_explicit_same_name_call_without_swap_hook() {
     fs::remove_dir_all(project).unwrap();
 }
 
+#[test]
+fn retired_ai_commands_fail_before_runtime_dispatch() {
+    let project = temp_dir("retired_commands");
+    fs::create_dir_all(&project).unwrap();
+    for command in ["ai", "editor", "tui", "gauntlet"] {
+        for suffix in [vec![], vec!["--help"], vec!["--ticks", "1"]] {
+            let mut args = vec![command];
+            args.extend(suffix);
+            let output = stasis(&args, &project);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert_eq!(output.status.code(), Some(2), "{args:?}: {stderr}");
+            assert!(
+                stderr.contains("unrecognized subcommand"),
+                "{args:?}: {stderr}"
+            );
+            assert!(stderr.contains(command), "{args:?}: {stderr}");
+            assert!(
+                output.stdout.is_empty(),
+                "retired command started runtime output"
+            );
+        }
+    }
+    assert_eq!(fs::read_dir(&project).unwrap().count(), 0);
+    fs::remove_dir_all(project).unwrap();
+}
+
 fn temp_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "stasis_cli_integration_{name}_{}_{}",

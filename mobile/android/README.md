@@ -184,3 +184,12 @@ Privacy & Data provides GitHub credential revocation, redacted crash/support exp
 and confirmed deletion of non-bundled projects. The onboarding guide follows the manual
 project/run/edit/test/review/revert workflow. AI editing, providers, prompts, voice
 commands, image generation, queues, and AI traces have been removed.
+
+## Upgrade from AI-enabled Workshop
+
+Startup removes the retired `ai_settings` preferences (including the encrypted API key),
+`files/codex`, `workshop_ai_queue`, `workshop_ai_sessions`, `workshop_ai_transactions`,
+`ai_trace.jsonl` and `ai_usage.jsonl`. Cleanup runs after native preference storage initialization
+and records completion only after all deletions succeed. Interrupted cleanup retries on next launch.
+The shared credential encryption key remains because GitHub credentials still use it. Project source,
+assets, baselines, manual settings and GitHub preferences are outside the cleanup allowlist.

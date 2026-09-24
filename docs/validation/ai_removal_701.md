@@ -28,3 +28,38 @@ Theory gained: project snapshot transactions and compiler semantic edits are sha
 Good: consumer audits preserved shared snapshots, semantic editing and runtime font assets.
 Bad: persisted emulator content and local desktop build provenance complicated broad validation.
 Adjustment: use a current additive sample project and report exact startup prerequisites separately from focused suite results.
+
+## PR review follow-up
+
+Merged main's #833 release callback policy, retaining its compiler/package behavior and workflow.
+Retired command names now enter Clap's rejection path before legacy runner dispatch. A process-level
+test checks all four names with no options, `--help`, and runtime `--ticks 1`, requiring exit 2,
+subcommand diagnostics, no runtime stdout, and no project writes. This passes on Windows and Linux.
+
+The retained test-only winit dependency now explicitly enables X11. Linux CI's
+`cargo test -p stasis --bin stasis --no-run` passed locally in WSL (explicit Linux target).
+Removed the stale seam test for the deleted Codex loader; negative provider/removal guards remain.
+The complete affected Python preflight group plus workflow placement guard passed 123 tests;
+18 Cargo policy/nightly/unsafe-boundary tests and runtime ABI/host/JIT contracts also passed.
+
+Android startup now performs a selective migration immediately after native preference storage setup.
+It removes only the old AI preferences, Codex home, queue/session/transaction directories and two AI
+logs. It does not follow directory symlinks. Completion is written after successful deletion, so
+failures retry; subsequent launches are a no-op. The shared credential encryption key is retained
+for GitHub. Three new populated-upgrade/failure-retry/fresh-install tests pass with all 141 JVM tests.
+
+Theory gained: command removal must cover dispatch ownership, and feature removal must cover retained
+private state. Process invocation and populated upgrade storage are the relevant regression boundaries;
+parser-only and fresh-install tests alone cannot establish those guarantees.
+
+Fresh ARM64/x86_64 release bridges and final Workshop APK assembly/install passed after the merge.
+On emulator-5554, an in-place upgrade removed all eight seeded retired paths (including preference
+backup), preserved 51 source/assets/settings file hashes, and did not follow a Codex symlink into
+projects. The same oracle passed again after lifecycle relaunch. Receipt:
+`../evidence/task701-ai-removal/upgrade-cleanup.json`; local lifecycle receipt:
+`artifacts/android_device_acceptance/workshop_20260924T003234Z.json`.
+
+Visual evidence: inspected `../evidence/task701-ai-removal/upgraded-preview.png` after bringing
+Workshop forward; it shows the retained Exploration Garden preview after migration. The JSON receipt
+and hash comparisons establish data preservation. The full repository gate was not repeated in this
+follow-up; the focused checks above cover the changed boundaries.
