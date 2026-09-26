@@ -69,6 +69,7 @@ function Invoke-BoundedScript([string]$Path, [string[]]$Arguments, [string]$Phas
     $startInfo.RedirectStandardError = $true
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
+    $phaseTimer = [System.Diagnostics.Stopwatch]::StartNew()
     if (-not $process.Start()) { throw "$Phase could not start" }
     $outputTask = $process.StandardOutput.ReadToEndAsync()
     $errorTask = $process.StandardError.ReadToEndAsync()
@@ -84,13 +85,28 @@ function Invoke-BoundedScript([string]$Path, [string[]]$Arguments, [string]$Phas
         }
     }
     $process.WaitForExit()
+    $phaseTimer.Stop()
     $outputTask.Result | Set-Content -LiteralPath $stdout -Encoding UTF8
     $errorTask.Result | Set-Content -LiteralPath $stderr -Encoding UTF8
+    $phaseElapsedSeconds = [math]::Round($phaseTimer.Elapsed.TotalSeconds, 3)
+    $phaseTimingPath = Join-Path $artifactRoot "${Phase}-timing.json"
+    @{
+        phase = $Phase
+        elapsed_seconds = $phaseElapsedSeconds
+        limit_seconds = $stepSeconds
+        timed_out = $timedOut
+        exit_code = $process.ExitCode
+        stdout_log = $stdout
+        stderr_log = $stderr
+    } | ConvertTo-Json | Set-Content -LiteralPath $phaseTimingPath -Encoding UTF8
+    Write-Host "$Phase elapsed ${phaseElapsedSeconds}s (limit ${stepSeconds}s; timed_out=$timedOut)"
     $output = @($outputTask.Result -split '\r?\n') | Where-Object { $_ }
     $errors = @($errorTask.Result -split '\r?\n') | Where-Object { $_ }
     if ($output) { $output | Write-Output }
     if ($errors) { $errors | Write-Warning }
-    if ($timedOut) { throw "$Phase exceeded its ${stepSeconds}s limit; child processes were stopped" }
+    if ($timedOut) {
+        throw "$Phase exceeded its ${stepSeconds}s limit after ${phaseElapsedSeconds}s; child processes were stopped"
+    }
     if ($process.ExitCode -ne 0) { throw "$Phase failed with exit code $($process.ExitCode)" }
     return $output
 }
@@ -554,14 +570,33 @@ try {
         $_ -match "^$([regex]::Escape($serial))\s+device(?:\s|$)"
     }
     $startedEmulator = -not [bool]$runningBefore
-    if ($startedEmulator) {
+    if ($runningBefore) {
+        $observedAvdLine = @(& $adb -s $serial emu avd name 2>$null | Select-Object -First 1)
+        $observedAvd = if ($LASTEXITCODE -eq 0 -and $observedAvdLine) {
+            $observedAvdLine[0].ToString().Trim()
+        } else {
+            ""
+        }
+        if (-not $observedAvd) {
+            $observedAvdLine = @(& $adb -s $serial shell getprop ro.boot.qemu.avd_name 2>$null |
+                Select-Object -First 1)
+            if ($LASTEXITCODE -eq 0 -and $observedAvdLine) {
+                $observedAvd = $observedAvdLine[0].ToString().Trim()
+            }
+        }
+        if ($observedAvd -ne $AvdName) {
+            $identity = if ($observedAvd) { "'$observedAvd'" } else { "unknown" }
+            throw "Android emulator serial $serial runs AVD $identity; requested '$AvdName'."
+        }
+        Write-Host "Reusing ready Android emulator $serial for AVD $AvdName"
+    } elseif ($runningOnWindows) {
         $emulatorArguments = @("-AvdName", $AvdName, "-Port", "$Port")
         if ($Headless) { $emulatorArguments += "-Headless" }
         $serial = Invoke-BoundedScript (Join-Path $scriptRoot "start_emulator.ps1") `
             $emulatorArguments "start-emulator"
         $serial = @($serial) | Select-Object -Last 1
     } else {
-        Write-Host "Reusing ready Android emulator $serial"
+        throw "Workshop seam expects the platform runner to provide a ready Android emulator on non-Windows hosts."
     }
 
     if (-not $SkipBuild) {
@@ -573,10 +608,28 @@ try {
         Assert-In-Time "Workshop build"
     }
 
-    Assert-RenderedVariant "workshop" "com.stasislang.workshop" `
-        $workshopApk `
-        "Interactive Stasis game preview. Touch the game to control it." $true
-    Assert-In-Time "render acceptance"
+    $renderAcceptanceTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $renderAcceptanceSucceeded = $false
+    try {
+        Assert-RenderedVariant "workshop" "com.stasislang.workshop" `
+            $workshopApk `
+            "Interactive Stasis game preview. Touch the game to control it." $true
+        Assert-In-Time "render acceptance"
+        $renderAcceptanceSucceeded = $true
+    } finally {
+        $renderAcceptanceTimer.Stop()
+        $renderAcceptanceElapsed = [math]::Round($renderAcceptanceTimer.Elapsed.TotalSeconds, 3)
+        $renderAcceptanceTimingPath = Join-Path $artifactRoot "render-acceptance-timing.json"
+        @{
+            phase = "render-acceptance"
+            elapsed_seconds = $renderAcceptanceElapsed
+            render_timeout_seconds = $RenderTimeoutSeconds
+            total_elapsed_seconds = [math]::Round($startedAt.Elapsed.TotalSeconds, 3)
+            total_timeout_seconds = $TotalTimeoutSeconds
+            completed = $renderAcceptanceSucceeded
+        } | ConvertTo-Json | Set-Content -LiteralPath $renderAcceptanceTimingPath -Encoding UTF8
+        Write-Host "render-acceptance elapsed ${renderAcceptanceElapsed}s (render limit ${RenderTimeoutSeconds}s; total $([math]::Round($startedAt.Elapsed.TotalSeconds, 3))/${TotalTimeoutSeconds}s; completed=$renderAcceptanceSucceeded)"
+    }
 
     @{
         status = "passed"

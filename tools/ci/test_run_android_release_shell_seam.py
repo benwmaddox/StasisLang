@@ -1526,6 +1526,110 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             (810, 1740),
         )
 
+    def test_touch_injection_uses_reported_non_fullscreen_native_viewport(self):
+        marker = {
+            "schema": seam.SCHEMA,
+            "test_id": "IT-018",
+            "event": "stable",
+            "frame": 30,
+            "input_presentation": {
+                "native_viewport": [966.0, 72.0, 468.0, 936.0],
+            },
+        }
+        markers = seam.parse_markers(
+            f"Stasis seam: {json.dumps(marker)}", "IT-018"
+        )
+        surface = (2400, 1080)
+        viewport = seam.native_input_viewport(markers, surface)
+
+        self.assertEqual((966.0, 72.0, 468.0, 936.0), viewport)
+        self.assertEqual(
+            seam.logical_to_native([90, 180], [360, 720], surface, viewport),
+            (1083, 306),
+        )
+        outside = seam.outside_letterbox_point([360, 720], surface, viewport)
+        self.assertEqual((483, 540), outside)
+        self.assertLess(outside[0], viewport[0])
+
+    def test_touch_injection_requires_a_valid_native_presentation_receipt(self):
+        with self.assertRaisesRegex(
+            seam.SeamError, "missing its native input viewport"
+        ):
+            seam.native_input_viewport(
+                [{"event": "stable", "input_presentation": None}], (2400, 1080)
+            )
+        with self.assertRaisesRegex(seam.SeamError, "outside the captured surface"):
+            seam.native_input_viewport(
+                [
+                    {
+                        "event": "stable",
+                        "input_presentation": {
+                            "native_viewport": [2300.0, 0.0, 200.0, 1080.0],
+                        },
+                    }
+                ],
+                (2400, 1080),
+            )
+
+    def test_touch_visual_oracle_uses_the_same_native_viewport_receipt(self):
+        marker = {
+            "schema": seam.SCHEMA,
+            "test_id": "IT-018",
+            "event": "stable",
+            "input_presentation": {
+                "native_viewport": [49.925, 3.7, 23.05, 46.1],
+            },
+        }
+        markers = seam.parse_markers(
+            f"Stasis seam: {json.dumps(marker)}", "IT-018"
+        )
+        surface = (120, 54)
+        viewport = seam.native_input_viewport(markers, surface)
+        touch_point = seam.logical_to_native([90, 180], [360, 720], surface, viewport)
+        outside = seam.outside_letterbox_point([360, 720], surface, viewport)
+        center = seam.logical_to_native([270, 540], [360, 720], surface, viewport)
+        expectations = seam.expectations_with_fitted_viewport(
+            {
+                "logical_size": [360, 720],
+                "regions": [
+                    {
+                        "name": "pointer_marker",
+                        "center": [270, 540],
+                        "rgb": [242, 51, 204],
+                        "tolerance": 0,
+                    }
+                ],
+            },
+            viewport,
+        )
+
+        self.assertEqual((56, 15), touch_point)
+        self.assertLess(outside[0], viewport[0])
+        self.assertEqual(viewport, expectations["fitted_viewport"])
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "capture.png"
+            rows = [[(25, 31, 41)] * surface[0] for _ in range(surface[1])]
+            for y in range(center[1] - 2, center[1] + 3):
+                for x in range(center[0] - 2, center[0] + 3):
+                    rows[y][x] = (242, 51, 204)
+            write_rgb_png(path, surface[0], surface[1], rows)
+
+            observed = seam.validate_regions(path, expectations)
+
+            self.assertEqual([center[0], center[1]], observed[0]["pixel"])
+            self.assertEqual([242, 51, 204], observed[0]["rgb"])
+            with self.assertRaisesRegex(
+                seam.SeamError, "pointer_marker color mismatch"
+            ):
+                seam.validate_regions(
+                    path,
+                    {
+                        key: value
+                        for key, value in expectations.items()
+                        if key != "fitted_viewport"
+                    },
+                )
+
     def test_validates_ordered_android_touch_probes(self):
         markers = [
             {

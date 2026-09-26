@@ -1528,18 +1528,94 @@ def logical_to_native(
     )
 
 
+def expectations_with_fitted_viewport(
+    expectations: dict,
+    viewport: tuple[float, float, float, float],
+) -> dict:
+    """Use the runtime presentation receipt as the compositor-pixel oracle."""
+    return {**expectations, "fitted_viewport": viewport}
+
+
+def native_input_viewport(
+    markers: list[dict], native_size: tuple[int, int]
+) -> tuple[float, float, float, float]:
+    """Read the runtime's test-gated native presentation viewport from stable."""
+    stable = next(
+        (item for item in reversed(markers) if item.get("event") == "stable"),
+        None,
+    )
+    if stable is None:
+        raise SeamError(
+            "Android touch seam has no stable marker for its input viewport"
+        )
+    presentation = stable.get("input_presentation")
+    viewport = (
+        presentation.get("native_viewport")
+        if isinstance(presentation, dict)
+        else None
+    )
+    if not isinstance(viewport, list) or len(viewport) != 4:
+        raise SeamError(
+            "Android touch seam stable marker is missing its native input viewport"
+        )
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        for value in viewport
+    ):
+        raise SeamError(
+            f"Android touch seam native input viewport is not finite numeric data: {viewport}"
+        )
+    x, y, width, height = (float(value) for value in viewport)
+    native_width, native_height = native_size
+    if (
+        x < 0
+        or y < 0
+        or width <= 0
+        or height <= 0
+        or x + width > native_width + 1
+        or y + height > native_height + 1
+    ):
+        raise SeamError(
+            "Android touch seam native input viewport is outside the captured surface: "
+            f"viewport={viewport} surface={native_size}"
+        )
+    return x, y, width, height
+
+
 def outside_letterbox_point(
-    logical_size: list[int], native_size: tuple[int, int]
+    logical_size: list[int],
+    native_size: tuple[int, int],
+    viewport: tuple[float, float, float, float] | None = None,
 ) -> tuple[int, int]:
     logical_width, logical_height = logical_size
     native_width, native_height = native_size
-    scale = min(native_width / logical_width, native_height / logical_height)
-    offset_x = (native_width - logical_width * scale) / 2.0
-    offset_y = (native_height - logical_height * scale) / 2.0
+    if viewport is None:
+        scale = min(native_width / logical_width, native_height / logical_height)
+        viewport = (
+            (native_width - logical_width * scale) / 2.0,
+            (native_height - logical_height * scale) / 2.0,
+            logical_width * scale,
+            logical_height * scale,
+        )
+    offset_x, offset_y, fitted_width, fitted_height = viewport
+    right = native_width - (offset_x + fitted_width)
+    bottom = native_height - (offset_y + fitted_height)
     if offset_x >= 2.0:
-        return round(offset_x / 2.0), native_height // 2
+        return round(offset_x / 2.0), round(offset_y + fitted_height / 2.0)
+    if right >= 2.0:
+        return (
+            round(offset_x + fitted_width + right / 2.0),
+            round(offset_y + fitted_height / 2.0),
+        )
     if offset_y >= 2.0:
-        return native_width // 2, round(offset_y / 2.0)
+        return round(offset_x + fitted_width / 2.0), round(offset_y / 2.0)
+    if bottom >= 2.0:
+        return (
+            round(offset_x + fitted_width / 2.0),
+            round(offset_y + fitted_height + bottom / 2.0),
+        )
     raise SeamError(
         "Android touch fixture requires a real letterbox bar on the captured surface"
     )
@@ -1634,7 +1710,7 @@ def validate_regions(capture: Path, expectations: dict) -> list[dict]:
     for region in expectations["regions"]:
         if region.get("location") == "outside_letterbox":
             x, y = outside_letterbox_point(
-                expectations["logical_size"], (width, height)
+                expectations["logical_size"], (width, height), viewport
             )
         else:
             x = max(
@@ -2508,6 +2584,7 @@ def main() -> int:
         touch_probes = []
         orientation_probes = []
         orientation_evidence = []
+        region_expectations = expectations
         if "touch" in expectations:
             initial_capture_path.write_bytes(
                 _run(args.adb, args.serial, "exec-out", "screencap", "-p", text=False)
@@ -2518,12 +2595,23 @@ def main() -> int:
                 "width": native_width,
                 "height": native_height,
             }
+            input_viewport = native_input_viewport(
+                markers, (native_width, native_height)
+            )
+            evidence["native_input_viewport"] = list(input_viewport)
+            evidence["native_input_viewport_source"] = (
+                "stable_marker_test_gated_presentation_receipt"
+            )
+            region_expectations = expectations_with_fitted_viewport(
+                expectations, input_viewport
+            )
             injected_gestures = []
             for gesture in expectations["touch"]["gestures"]:
                 if gesture.get("location") == "outside_letterbox":
                     start_x, start_y = outside_letterbox_point(
                         expectations["logical_size"],
                         (native_width, native_height),
+                        input_viewport,
                     )
                     end_x, end_y = start_x, start_y
                 else:
@@ -2531,11 +2619,13 @@ def main() -> int:
                         gesture["start"],
                         expectations["logical_size"],
                         (native_width, native_height),
+                        input_viewport,
                     )
                     end_x, end_y = logical_to_native(
                         gesture["end"],
                         expectations["logical_size"],
                         (native_width, native_height),
+                        input_viewport,
                     )
                 _run(
                     args.adb,
@@ -2722,7 +2812,7 @@ def main() -> int:
                 args.adb,
                 args.serial,
                 capture_path,
-                expectations,
+                region_expectations,
                 min(deadline, time.monotonic() + 10),
                 package_id,
                 component,

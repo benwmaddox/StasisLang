@@ -158,8 +158,11 @@ named for the injected failure, and leave the production path unchanged.
 
 ### Determinism and flake policy
 
-- Each command remains bounded by 900 seconds; normal PR tests should finish in
-  under 120 seconds.
+- Each test command remains bounded by 900 seconds unless a platform-specific
+  cold-build lane has an explicit, independently timed ceiling. The Android
+  Workshop nightly is that exception: a 1200-second child and 1500-second
+  script budget under its 75-minute job ceiling, with phase timing receipts;
+  normal PR tests should finish in under 120 seconds.
 - Wait on explicit markers, frame counters, generation changes, or process
   state. Fixed sleeps may be used only as a polling interval under a deadline.
 - Record the random seed, but prefer fixed inputs and ticks.
@@ -174,7 +177,7 @@ named for the injected failure, and leave the production path unchanged.
 |---|---|---:|---|
 | Fast contract | every PR and `tools/validate_repo.sh` | 2 min | descriptor parity, JIT HostFrame, buffer bounds, diagnostic schemas |
 | Native integration | nightly, platform-sharded | 15 min | desktop real runtime, linked AOT/C runtime, package link and symbol audit |
-| Android emulator | nightly | 15 min/test shard | Two concurrent isolated API35 x86_64 shards: generated release-shell IT-017-IT-023 and Workshop JNI/JIT IT-025-IT-027 |
+| Android emulator | nightly | Release-shell: 15 min/test shard; Workshop cold build: 1200-second child / 1500-second script under a 75-minute job ceiling | Two concurrent isolated API35 x86_64 shards: generated release-shell IT-017-IT-023 and Workshop JNI/JIT IT-025-IT-027 |
 | Physical device | optional release candidate and scheduled farm | 15 min/test shard | Supplemental OEM driver, density, lifecycle, and representative rendering evidence |
 
 Tests should be promoted toward the faster lane when a deterministic lower

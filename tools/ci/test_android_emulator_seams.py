@@ -22,6 +22,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.emulator_script = read("mobile/android/test_release_shell_emulator.ps1")
         cls.strategy = read("docs/integration_seam_testing_strategy.md")
         cls.checklist = read("docs/build_checklist.md")
+        cls.android_readme = read("mobile/android/README.md")
         cls.touch_expectations = json.loads(
             read("samples/android_touch_seam/android_seam_expectations.json")
         )
@@ -247,10 +248,12 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertEqual(2, self.workflow.count("cores: 2"))
         release_body = job_bodies["release-shell-seams"]
         workshop_body = job_bodies["workshop-seams"]
+        self.assertIn("timeout-minutes: 75", workshop_body)
         release_script = "pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1"
         workshop_script = (
             "pwsh -NoProfile -File ./mobile/android/test_render_emulator.ps1 "
-            "-Headless -AvdName test -StepTimeoutSeconds 600 -RenderTimeoutSeconds 90 "
+            "-Headless -AvdName test -StepTimeoutSeconds 1200 -TotalTimeoutSeconds 1500 "
+            "-RenderTimeoutSeconds 90 "
             "-MaxRenderP50Millis 1.05 -MaxRenderP95Millis 8.94"
         )
         self.assertEqual(1, release_body.count(release_script))
@@ -287,6 +290,33 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertLess(
             script.index("taskkill.exe /PID $emulatorProcess.Id /T /F"),
             script.index('throw "Android emulator did not finish booting'),
+        )
+
+    def test_emulator_start_rejects_a_ready_serial_for_the_wrong_avd(self):
+        script = read("mobile/android/start_emulator.ps1")
+        self.assertIn('$adb -s $serial emu avd name', script)
+        self.assertIn('getprop ro.boot.qemu.avd_name', script)
+        self.assertIn('$observedAvd -ne $AvdName', script)
+        self.assertIn("Use the matching AVD or another port.", script)
+        self.assertLess(
+            script.index("$observedAvd -ne $AvdName"),
+            script.index('Write-Host "$AvdName is ready"'),
+        )
+        self.assertIn('"start-emulator"', self.workshop_script)
+        self.assertIn('if ($runningBefore) {', self.workshop_script)
+        self.assertIn('$adb -s $serial emu avd name', self.workshop_script)
+        self.assertIn('getprop ro.boot.qemu.avd_name', self.workshop_script)
+        workshop_identity_check = self.workshop_script.index('$observedAvd -ne $AvdName')
+        workshop_reuse = self.workshop_script.index('Reusing ready Android emulator')
+        workshop_start = self.workshop_script.index(
+            'Invoke-BoundedScript (Join-Path $scriptRoot "start_emulator.ps1")'
+        )
+        self.assertLess(workshop_identity_check, workshop_reuse)
+        self.assertLess(workshop_reuse, workshop_start)
+        self.assertIn('elseif ($runningOnWindows) {', self.workshop_script)
+        self.assertIn(
+            'Workshop seam expects the platform runner to provide a ready Android emulator on non-Windows hosts.',
+            self.workshop_script,
         )
 
     def test_release_wrapper_uses_platform_appropriate_tools_and_paths(self):
@@ -660,6 +690,25 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
 
     def test_workshop_it025_isolated_from_release_shells(self):
         self.assertIn("[int]$StepTimeoutSeconds = 300", self.workshop_script)
+        self.assertIn("timeout-minutes: 75", self.workflow_job_body("workshop-seams"))
+        self.assertIn("-StepTimeoutSeconds 1200 -TotalTimeoutSeconds 1500", self.workflow)
+        self.assertIn('"${Phase}-timing.json"', self.workshop_script)
+        self.assertIn("elapsed_seconds = $phaseElapsedSeconds", self.workshop_script)
+        self.assertIn("timed_out = $timedOut", self.workshop_script)
+        self.assertIn('"render-acceptance-timing.json"', self.workshop_script)
+        self.assertIn("completed = $renderAcceptanceSucceeded", self.workshop_script)
+        self.assertIn("after ${phaseElapsedSeconds}s", self.workshop_script)
+        self.assertIn("1200 seconds per", self.android_readme)
+        self.assertIn("1500 seconds for the full script", self.android_readme)
+        self.assertIn("build-workshop-timing.json", self.android_readme)
+        self.assertIn("1500-second", self.strategy)
+        self.assertIn("1500 seconds", self.checklist)
+
+    def test_workshop_rust_bridge_provenance_pins_utility_module_to_host(self):
+        self.assertIn("Join-Path $PSHOME", self.provenance_script)
+        self.assertIn("Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1", self.provenance_script)
+        self.assertIn("Import-Module $utilityModule -ErrorAction Stop", self.provenance_script)
+        self.assertIn("Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256", self.provenance_script)
 
     def test_workshop_capture_uses_bounded_vertical_viewport_refinement(self):
         self.assertIn("--viewport-y-search-radius=32", self.workshop_script)
@@ -725,7 +774,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("[math]::Min($StepTimeoutSeconds, $remainingSeconds)", self.workshop_script)
         self.assertIn("verify_android_workshop_seam.py", self.workshop_script)
         self.assertIn('Join-Path (Join-Path (Join-Path $repoRoot "artifacts") "android_workshop_seam") "e"', self.workshop_script)
-        self.assertIn("Reusing ready Android emulator", self.workshop_script)
+        self.assertIn('"start-emulator"', self.workshop_script)
         self.assertIn('GetMethod("Kill", [Type[]]@([bool]))', self.workshop_script)
         self.assertIn('$process.Kill()', self.workshop_script)
         self.assertIn('taskkill.exe /PID $process.Id /T /F', self.workshop_script)
