@@ -648,12 +648,14 @@ impl JitProcess {
             // generic expansion pass can rebuild every module consistently.
             candidate.upsert_file(file.path.clone(), file.original_content.clone());
         }
+        if let Some(configuration) = self.project_configuration.as_ref() {
+            candidate.set_project_configuration(configuration.clone());
+        }
         candidate.active_compiler = self.active_compiler.clone();
         candidate.artifacts = self.artifacts.clone();
         candidate.modules = self.modules.clone();
         candidate.program_snapshot = self.program_snapshot.clone();
         candidate.active_program_snapshot = self.active_program_snapshot.clone();
-        candidate.project_configuration = self.project_configuration.clone();
         candidate.generation_metadata = self.generation_metadata.clone();
         candidate.accepted_program = self.accepted_program.clone();
         candidate.accepted_lowering_references = self.accepted_lowering_references.clone();
@@ -12289,6 +12291,46 @@ function main(): i32 { batch.update(0); return 0; }
             &snapshot.data_flow_summaries_shared(),
             &active.compiler.data_flow_summaries_shared(),
         ));
+    }
+
+    #[test]
+    fn staged_candidate_preserves_project_settings_api_configuration() {
+        let configuration = ProjectConfiguration {
+            target: "web".to_string(),
+            settings: BTreeMap::new(),
+            digest: [7; 32],
+            generated_api_enabled: true,
+        };
+        let generated_path = crate::frontend::module_graph::GENERATED_PROJECT_SETTINGS_PATH;
+        let mut active = JitProcess::new();
+        active.set_project_configuration(configuration.clone());
+        active.set_required_emit_roots(&["main".to_string()]);
+        active.upsert_file(
+            generated_path,
+            "function @inline project_setting_feature(): bool { return true; }\n",
+        );
+        active.upsert_file(
+            "src/main.stasis",
+            "function main(): i32 { if (project_setting_feature()) { return 1; } return 0; }\n",
+        );
+        active.compile().expect("settings baseline compiles");
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "src/main.stasis",
+            "function main(): i32 { if (project_setting_feature()) { return 2; } return 0; }\n",
+        );
+        candidate
+            .compile()
+            .expect("staged settings candidate compiles");
+        assert_eq!(candidate.execute_i32_noarg_by_name("main"), Ok(2));
+        assert_eq!(
+            candidate
+                .program_snapshot()
+                .expect("candidate snapshot")
+                .project_configuration(),
+            Some(&configuration)
+        );
     }
 
     #[test]
