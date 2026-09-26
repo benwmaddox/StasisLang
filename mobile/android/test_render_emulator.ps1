@@ -315,12 +315,14 @@ function Fit-LogicalViewport([int[]]$Surface) {
     $width = $Surface[2]
     $height = $Surface[3]
     if ($width * $logicalHeight -gt $height * $logicalWidth) {
-        $viewportWidth = [int][math]::Floor($height * $logicalWidth / $logicalHeight)
+        # Match Java Math.round for the drawable width; GL's x origin is also screenshot-left.
+        $viewportWidth = [int][math]::Floor(($height * $logicalWidth / $logicalHeight) + 0.5)
         $viewportLeft = $Surface[0] + [int][math]::Floor(($width - $viewportWidth) / 2)
         return @($viewportLeft, $Surface[1], $viewportWidth, $height)
     }
-    $viewportHeight = [int][math]::Floor($width * $logicalHeight / $logicalWidth)
-    $viewportTop = $Surface[1] + [int][math]::Floor(($height - $viewportHeight) / 2)
+    # Match renderer Math.round for height and convert its bottom-origin GL y to screenshot top-origin.
+    $viewportHeight = [int][math]::Floor(($width * $logicalHeight / $logicalWidth) + 0.5)
+    $viewportTop = $Surface[1] + [int][math]::Ceiling(($height - $viewportHeight) / 2.0)
     return @($Surface[0], $viewportTop, $width, $viewportHeight)
 }
 
