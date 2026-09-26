@@ -414,13 +414,13 @@ jobs:
           ) | ForEach-Object {
             if (-not (Test-Path $_)) { throw "extracted Windows editor toolchain is missing $_" }
           }
-          $editorInfo = & "$validationRoot/stasis.exe" --json editor-info | ConvertFrom-Json
+          $editorInfoJson = & "$validationRoot/stasis.exe" --json editor-info
+          if ($LASTEXITCODE -ne 0) { throw "extracted editor-info probe failed" }
+          $editorInfo = $editorInfoJson | ConvertFrom-Json
           if (-not $editorInfo.ok) { throw "extracted editor-info probe failed" }
           if ($editorInfo.result.release_id -ne "${{ needs.detect.outputs.nightly_tag }}") { throw "extracted editor release ID mismatch" }
           if ($editorInfo.result.source_commit -ne "${{ github.sha }}") { throw "extracted editor source commit mismatch" }
           if ($editorInfo.result.build_fingerprint -ne $editorInfo.result.graphics_runtime.build_fingerprint) { throw "extracted editor fingerprint mismatch" }
-          & "$validationRoot/stasis.exe" editor --help
-          if ($LASTEXITCODE -ne 0) { throw "extracted editor help probe failed" }
           powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_network_supervision.ps1 `
             -Toolchain "$validationRoot/stasis.exe" `
             -Supervisor "$validationRoot/stasis-network-supervise.exe" `

@@ -7,6 +7,15 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# A pwsh parent can prepend PowerShell 7 module paths to a nested Windows
+# PowerShell process. Pin Utility to the active host so Get-FileHash resolves
+# from the matching edition instead of a parent-host module path.
+$utilityModule = Join-Path $PSHOME "Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1"
+if (-not (Test-Path -LiteralPath $utilityModule -PathType Leaf)) {
+    throw "Microsoft.PowerShell.Utility module was not found for the active PowerShell host: $utilityModule"
+}
+Import-Module $utilityModule -ErrorAction Stop
+
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent (Split-Path -Parent $scriptRoot)
 $jniRoot = Join-Path (Join-Path (Join-Path (Join-Path $scriptRoot "app") "src") "workshop") "jniLibs"

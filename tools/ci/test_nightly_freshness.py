@@ -70,6 +70,22 @@ class NightlyFreshnessContractTests(unittest.TestCase):
         self.assertIn("windows_signing_manifest.py verify-files", self.release)
         self.assertIn("stasis.exe live --help", self.release)
 
+    def test_extracted_windows_toolchain_uses_supported_editor_info_probe(self):
+        extracted = self.release.split(
+            "Verify extracted Windows editor toolchain", 1
+        )[1].split("Smoke test bundled graphics runtime (windows)", 1)[0]
+        self.assertIn(
+            '$editorInfoJson = & "$validationRoot/stasis.exe" --json editor-info',
+            extracted,
+        )
+        self.assertIn(
+            'if ($LASTEXITCODE -ne 0) { throw "extracted editor-info probe failed" }',
+            extracted,
+        )
+        self.assertIn("$editorInfo = $editorInfoJson | ConvertFrom-Json", extracted)
+        self.assertIn("$editorInfo.result.release_id", extracted)
+        self.assertNotIn('"$validationRoot/stasis.exe" editor --help', extracted)
+
     def test_vsix_secret_scan_skips_only_provenance_bound_native_binaries(self):
         package = (ROOT / "vscode-stasis/package.json").read_text(encoding="utf-8")
         self.assertIn("npm run scan:package-secrets && vsce package", package)

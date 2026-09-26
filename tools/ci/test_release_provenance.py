@@ -297,6 +297,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
                     "package_id": "com.example.demo",
                     "network": mode == "network",
                     "network_client": mode == "network_client",
+                    "android_launcher_resources": "branding/android/res",
                     "project_configuration": self.project_configuration(
                         "android-arm64"
                     ),
@@ -305,6 +306,11 @@ class ReleaseProvenanceTests(unittest.TestCase):
                     json.dumps(receipt), encoding="utf-8"
                 )
                 expected = template.decode("utf-8").replace("@STASIS_APP_NAME@", "demo")
+                expected = expected.replace(
+                    "@STASIS_ANDROID_ICON_ATTRIBUTES@",
+                    '        android:icon="@mipmap/ic_launcher"\n'
+                    '        android:roundIcon="@mipmap/ic_launcher"',
+                )
                 expected = expected.replace(
                     "@STASIS_ANDROID_ORIENTATION@", "sensorLandscape"
                 )
@@ -332,6 +338,9 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 (destination.parent / "client.txt").write_bytes(
                     {"offline": b"0 0", "network": b"1 0", "network_client": b"0 1"}[mode]
                 )
+                launcher = package / "android/app/src/main/res/mipmap-mdpi/ic_launcher.png"
+                launcher.parent.mkdir(parents=True)
+                launcher.write_bytes(b"project-owned launcher resource")
                 if mode != "offline":
                     network = package / "android/app/src/main/cpp/network"
                     (network / "include").mkdir(parents=True)

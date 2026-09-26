@@ -51,7 +51,7 @@ Boundary rule:
 5. Update docs in the same PR when behavior changes.
 6. Preserve deterministic tick-based behavior.
 7. No ambient host API paths; each new host interaction must ship with explicit host-set contract docs/tests.
-8. Test command budget is strict: no single test command should exceed 15 minutes (900 seconds); split/shard test runs if needed and treat overruns as stability issues.
+8. The default test-command budget is strict: no single test command should exceed 15 minutes (900 seconds); split/shard test runs if needed and treat overruns as stability issues. The Android Workshop nightly cold-build wrapper is an explicit exception: 1200 seconds per child and 1500 seconds total under a 75-minute job cap, with per-phase timing receipts.
 
 ## Tooling Note
 

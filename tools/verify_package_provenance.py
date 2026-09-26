@@ -324,8 +324,19 @@ def verify_mobile_shells(
     package_id = receipt.get("package_id") or mobile_package_id(receipt["name"])
     network_enabled = receipt.get("network") is True
     network_client_enabled = receipt.get("network_client") is True
+    launcher_resources = receipt.get("android_launcher_resources")
+    if launcher_resources is not None and (
+        not isinstance(launcher_resources, str) or not launcher_resources
+    ):
+        parser.error("mobile package Android launcher resources path is malformed")
     replacements = {
         "@STASIS_APP_NAME@": receipt.get("app_name") or receipt["name"],
+        "@STASIS_ANDROID_ICON_ATTRIBUTES@": (
+            '        android:icon="@mipmap/ic_launcher"\n'
+            '        android:roundIcon="@mipmap/ic_launcher"'
+            if launcher_resources
+            else ""
+        ),
         "@STASIS_PACKAGE_ID@": package_id,
         "@STASIS_JNI_PACKAGE@": package_id.replace(".", "_"),
         "@STASIS_ASSET_BASE@": ".",
@@ -386,6 +397,16 @@ def verify_mobile_shells(
     expected_paths.add(("common", "stasis_package_provenance.h"))
     if target == "ios-arm64":
         expected_paths.add(("ios", "StasisMobile.xcconfig"))
+    if launcher_resources:
+        android_resource_root = package_root / "android/app/src/main/res"
+        expected_paths.update(
+            (
+                "android",
+                path.relative_to(package_root / "android").as_posix(),
+            )
+            for path in sorted(android_resource_root.rglob("*"))
+            if path.is_file()
+        )
     if network_enabled or network_client_enabled:
         if target == "ios-arm64":
             expected_paths.update(

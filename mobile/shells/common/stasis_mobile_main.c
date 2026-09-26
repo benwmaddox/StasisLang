@@ -111,6 +111,7 @@ static void stasis_desktop_network_present_join_card(void) {
 #if defined(STASIS_ENABLE_SEAM_TESTS)
 int stasis_test_get_render_submission_state(int32_t *out_i32, int32_t capacity);
 int stasis_gfx_get_resource_lifecycle(int32_t *out_i32, int count);
+int stasis_test_get_display_presentation(float *out_f32, int32_t capacity);
 
 static int32_t hash_global_path(const char *path) {
     uint32_t hash = 2166136261U;
@@ -198,9 +199,23 @@ static void collect_it021_audio_telemetry(void) {
 static void log_seam_marker(const char *test_id, const char *event, int32_t frame) {
     int32_t render[7] = {0};
     int32_t lifecycle[6] = {0};
+    float presentation[14] = {0};
     int has_render = stasis_test_get_render_submission_state(render, 7);
     int has_lifecycle = stasis_gfx_get_resource_lifecycle(lifecycle, 6);
+    int has_presentation = stasis_test_get_display_presentation(presentation, 14);
     int32_t checksum = seam_i32("seam_state_checksum");
+    char input_presentation[192] = "null";
+    if (has_presentation) {
+        snprintf(
+            input_presentation,
+            sizeof(input_presentation),
+            "{\"native_viewport\":[%.3f,%.3f,%.3f,%.3f]}",
+            presentation[0],
+            presentation[1],
+            presentation[2],
+            presentation[3]
+        );
+    }
     SDL_Log(
         "Stasis seam: {\"schema\":\"stasis.seam_test.v1\",\"test_id\":\"%s\","
         "\"event\":\"%s\",\"frame\":%d,\"state_checksum\":%d,"
@@ -213,6 +228,7 @@ static void log_seam_marker(const char *test_id, const char *event, int32_t fram
         "\"input_phase\":%d,\"x\":%.3f,\"y\":%.3f,"
         "\"dx\":%.3f,\"dy\":%.3f,\"x_n\":%.4f,\"y_n\":%.4f,"
         "\"safe_x\":%.3f,\"safe_y\":%.3f,\"safe_w\":%.3f,\"safe_h\":%.3f,"
+        "\"input_presentation\":%s,"
         "\"logical_w\":%.3f,\"logical_h\":%.3f,"
         "\"native_w\":%d,\"native_h\":%d,"
         "\"drawable_w\":%d,\"drawable_h\":%d,"
@@ -265,6 +281,7 @@ static void log_seam_marker(const char *test_id, const char *event, int32_t fram
         seam_f32("seam_safe_y"),
         seam_f32("seam_safe_w"),
         seam_f32("seam_safe_h"),
+        input_presentation,
         seam_f32("seam_logical_w"),
         seam_f32("seam_logical_h"),
         seam_i32("seam_native_w"),

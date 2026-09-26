@@ -74,6 +74,24 @@ do {
     Start-Sleep -Seconds 2
 } while ($true)
 
+$observedAvdLine = @(& $adb -s $serial emu avd name 2>$null | Select-Object -First 1)
+$observedAvd = if ($LASTEXITCODE -eq 0 -and $observedAvdLine) {
+    $observedAvdLine[0].ToString().Trim()
+} else {
+    ""
+}
+if (-not $observedAvd) {
+    $observedAvdLine = @(& $adb -s $serial shell getprop ro.boot.qemu.avd_name 2>$null |
+        Select-Object -First 1)
+    if ($LASTEXITCODE -eq 0 -and $observedAvdLine) {
+        $observedAvd = $observedAvdLine[0].ToString().Trim()
+    }
+}
+if ($observedAvd -ne $AvdName) {
+    $identity = if ($observedAvd) { "'$observedAvd'" } else { "unknown" }
+    throw "Android emulator serial $serial runs AVD $identity; requested '$AvdName'. Use the matching AVD or another port."
+}
+
 & $adb -s $serial shell input keyevent 82 | Out-Null
 Write-Host "$AvdName is ready"
 Write-Output $serial
