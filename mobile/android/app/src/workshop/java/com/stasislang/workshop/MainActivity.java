@@ -1036,6 +1036,8 @@ public final class MainActivity extends Activity {
                         }
                     }
                 }
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && !jniFrameAbiAcceptanceRun) {
                     String abiResult = WorkshopJniFrameAbiAcceptance.run(projectRootPath());
                     jniFrameAbiAcceptanceRun = true;
                     boolean abiPassed = false;
