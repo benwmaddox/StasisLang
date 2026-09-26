@@ -2780,6 +2780,11 @@
           if (error !== (gl.NO_ERROR ?? 0)) throw gpuFailure(`WebGL error (${error})`);
         }
       };
+      const drainPendingErrors = () => {
+        failIfLost();
+        if (typeof gl.getError !== "function") return;
+        while (gl.getError() !== (gl.NO_ERROR ?? 0)) failIfLost();
+      };
       let disposed = false;
       const dispose = () => {
         if (disposed) return;
@@ -2843,6 +2848,7 @@
           255, 255, 255, 255, 255, 255, 255, 255
         ]);
         try {
+          drainPendingErrors();
           texture = gl.createTexture();
           if (!texture) throw gpuFailure("WebGL atlas texture allocation failed");
           gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -2850,8 +2856,12 @@
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          failIfBad();
+          drainPendingErrors();
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, size, size, 0,
             gl.RGBA, gl.UNSIGNED_BYTE, null);
+          failIfBad();
+          drainPendingErrors();
           gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 2, 2, gl.RGBA, gl.UNSIGNED_BYTE, solidPixels);
           failIfBad();
         } catch (error) {
@@ -2994,7 +3004,10 @@
         stagingContext.drawImage(variant.drawable, width - 1, height - 1, 1, 1,
           ATLAS_PADDING + width, ATLAS_PADDING + height, ATLAS_PADDING, ATLAS_PADDING);
         try {
+          drainPendingErrors();
           gl.bindTexture(gl.TEXTURE_2D, page.texture);
+          failIfBad();
+          drainPendingErrors();
           gl.texSubImage2D(gl.TEXTURE_2D, 0, entry.x - ATLAS_PADDING, entry.y - ATLAS_PADDING,
             gl.RGBA, gl.UNSIGNED_BYTE, stagingCanvas);
           failIfBad();

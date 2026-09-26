@@ -11092,9 +11092,19 @@ mod tests {
             .next()
             .expect("end of WebGL atlas upload function");
         assert!(upload.contains("gl.texSubImage2D"));
+        assert!(upload.contains("drainPendingErrors();"));
         assert!(upload.contains("failIfBad();"));
-        assert_eq!(WEB_RUNTIME_JS.matches("failIfBad();").count(), 2);
-        assert_eq!(WEB_RUNTIME_JS.matches("gl.getError()").count(), 1);
+
+        let allocation = WEB_RUNTIME_JS
+            .split("const createAtlasPage = size => {")
+            .nth(1)
+            .and_then(|source| source.split("const deleteAtlasPage = page =>").next())
+            .expect("WebGL atlas allocation function");
+        assert!(allocation.contains("drainPendingErrors();"));
+        assert!(allocation.contains("gl.texImage2D"));
+        assert_eq!(WEB_RUNTIME_JS.matches("drainPendingErrors();").count(), 5);
+        assert_eq!(WEB_RUNTIME_JS.matches("failIfBad();").count(), 5);
+        assert_eq!(WEB_RUNTIME_JS.matches("gl.getError()").count(), 2);
     }
 
     #[test]

@@ -26,8 +26,9 @@ test("sprite loader publishes the opaque reference field", () => {
 });
 
 function fakeGl(stats, available = true, throwing = false, textureThrow = false,
-  maxTextureSize = 4096, textureFailureAt = 0, glErrorAt = 0) {
+  maxTextureSize = 4096, textureFailureAt = 0, drawError = false, textureGlErrorAt = 0) {
   if (!available) return null;
+  const pendingErrors = [];
   const gl = {
     VERTEX_SHADER: 1, FRAGMENT_SHADER: 2, COMPILE_STATUS: 3, LINK_STATUS: 4,
     ARRAY_BUFFER: 5, STATIC_DRAW: 6, DYNAMIC_DRAW: 7, FLOAT: 8,
@@ -50,17 +51,18 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false,
     viewport(_x, _y, width, height) { stats.viewports.push([width, height]); }, clearColor() {}, clear() {}, useProgram() {}, uniform2f(_location, width, height) {
       stats.uniforms.push([width, height]);
     }, uniform1i() {},
-    texParameteri() {}, pixelStorei() {}, texImage2D(_target, _level, _internal, width, height) { stats.texImageCalls += 1; stats.pageSizes.push([width, height]); if (textureThrow || (textureFailureAt && stats.texImageCalls === textureFailureAt)) throw new Error("fake texture failure"); }, texSubImage2D(...args) { stats.texSubImageCalls += 1; const source = args[args.length - 1]; stats.textureUploads.push({ width: Number(source?.width) || 0, height: Number(source?.height) || 0 }); if (textureThrow) throw new Error("fake texture failure"); }, generateMipmap() {}, activeTexture() {}, bindTexture() {}, getError: () => { stats.getErrorCalls += 1; return glErrorAt && stats.getErrorCalls === glErrorAt ? 1280 : 0; },
+    texParameteri() {}, pixelStorei() {}, texImage2D(_target, _level, _internal, width, height) { stats.texImageCalls += 1; stats.pageSizes.push([width, height]); if (textureThrow || (textureFailureAt && stats.texImageCalls === textureFailureAt)) throw new Error("fake texture failure"); }, texSubImage2D(...args) { stats.texSubImageCalls += 1; const source = args[args.length - 1]; stats.textureUploads.push({ width: Number(source?.width) || 0, height: Number(source?.height) || 0 }); if (textureThrow) throw new Error("fake texture failure"); if (textureGlErrorAt && stats.texSubImageCalls === textureGlErrorAt) pendingErrors.push(1280); }, generateMipmap() {}, activeTexture() {}, bindTexture() {}, getError() { stats.getErrorCalls += 1; return pendingErrors.shift() ?? 0; },
     isContextLost: () => stats.contextLost, getParameter: () => maxTextureSize,
     enable() {}, disable() {}, scissor(x, y, width, height) { stats.scissors.push([x, y, width, height]); }, blendFunc() {}, blendFuncSeparate() {}, drawArraysInstanced(_mode, _first, _vertices, count) {
       stats.instanced += 1;
       stats.instances.push(count);
+      if (drawError) pendingErrors.push(1280);
     }
   };
   return gl;
 }
 
-async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], spriteXOffset = null, spritePivot = [4, 5], spriteScale = [1, 1], instanceFlags = 0, runMetadata = [0, 0, 0, 0, 0], webgl = true, throwing = false, textureThrow = false, textureFailureAt = 0, glErrorAt = 0, imageReady = true, timing = false, realTime = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null, hudQuery = "", atlasBudgetBytes = undefined, maxTextureSize = 4096, expectReady = true } = {}) {
+async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], spriteXOffset = null, spritePivot = [4, 5], spriteScale = [1, 1], instanceFlags = 0, runMetadata = [0, 0, 0, 0, 0], webgl = true, throwing = false, textureThrow = false, textureFailureAt = 0, drawError = false, textureGlErrorAt = 0, imageReady = true, timing = false, realTime = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null, hudQuery = "", atlasBudgetBytes = undefined, maxTextureSize = 4096, expectReady = true } = {}) {
   const memory = new WebAssembly.Memory({ initial: 16 });
   const i32 = new Int32Array(memory.buffer, 0, I32_COUNT);
   const f32 = new Float32Array(memory.buffer, F32_OFFSET, F32_COUNT);
@@ -86,7 +88,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     setTransform(...args) { rasterStats.transforms.push(args); },
     save() { rasterStats.saves += 1; }, restore() { rasterStats.restores += 1; }
   };
-  const gl = fakeGl(stats, true, throwing, textureThrow, maxTextureSize, textureFailureAt, glErrorAt);
+  const gl = fakeGl(stats, true, throwing, textureThrow, maxTextureSize, textureFailureAt, drawError, textureGlErrorAt);
   const canvasListeners = new Map();
   const canvas = {
     width: 640, height: 360, style: {}, parentElement: { style: {} },
@@ -1664,8 +1666,21 @@ test("a successful frame preserves an unrelated resource GPU error", async () =>
   assert.equal(runtime.body.dataset.gpuError, undefined);
 });
 
-test("a one-shot atlas upload WebGL error is visible and deletes its new texture", async () => {
-  const runtime = await loadRuntime({ sprites: 1, spriteHandles: [1], glErrorAt: 2 });
+test("stale ordinary draw errors are drained before a targeted atlas upload", async () => {
+  const runtime = await loadRuntime({ rects: 64, drawError: true });
+  runtime.frame();
+  assert.equal(runtime.body.dataset.gpuError, undefined);
+  const pollsAfterDraw = runtime.stats.getErrorCalls;
+
+  runtime.env.gfx_load_sprite(0, 16, 16);
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(runtime.stats.getErrorCalls > pollsAfterDraw);
+  assert.equal(runtime.body.dataset.gpuError, undefined);
+});
+
+test("a targeted atlas upload WebGL error is visible and deletes its new texture", async () => {
+  const runtime = await loadRuntime({ sprites: 1, spriteHandles: [1], textureGlErrorAt: 2 });
   runtime.frame();
   assert.match(runtime.body.dataset.gpuError, /WebGL error \(1280\)/);
   assert.equal(runtime.stats.instanced, 0);
