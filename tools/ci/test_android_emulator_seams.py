@@ -742,7 +742,11 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             # Renderer y is bottom-origin and integer-divided; flip that fitted rect to screen top-origin.
             viewport_top = surface[1] + (height - viewport_height + 1) // 2
             viewport = (surface[0], viewport_top, width, viewport_height)
-        reported_pre_fix_viewport = (0, 933, 1080, 607)
+        # Preserve the failed run's floor-based diagnostic as a historical fixture.
+        reported_height = width * logical_height // logical_width
+        reported_top = surface[1] + (height - reported_height) // 2
+        reported_pre_fix_viewport = (surface[0], reported_top, width, reported_height)
+        self.assertEqual((0, 933, 1080, 607), reported_pre_fix_viewport)
         self.assertEqual((0, 933, 1080, 608), viewport)
         self.assertNotEqual(reported_pre_fix_viewport, viewport)
         self.assertIn("-Headless -AvdName test", self.workflow)
