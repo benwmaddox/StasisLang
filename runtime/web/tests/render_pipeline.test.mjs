@@ -286,6 +286,15 @@ test("large ordered rectangle run uses one visible WebGL2 submission and no comp
   assert.equal(runtime.stats.fills, 0);
 });
 
+test("WebGL rendering avoids ordinary getError polling around warmed draws", async () => {
+  const runtime = await loadRuntime({ rects: 64 });
+  runtime.frame();
+  const before = runtime.stats.getErrorCalls;
+  runtime.frame();
+  assert.equal(runtime.stats.instanced, 2);
+  assert.equal(runtime.stats.getErrorCalls - before, 0);
+});
+
 test("visible WebGL2 uses the physical framebuffer with logical shader dimensions", async () => {
   const runtime = await loadRuntime({ rects: 64, cssExtent: [800, 450], dpr: 2 });
   runtime.frame();

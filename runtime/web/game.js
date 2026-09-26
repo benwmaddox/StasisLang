@@ -3117,7 +3117,7 @@
         const height = display.backingHeight;
         const logicalWidth = Math.max(1, display.logicalWidth);
         const logicalHeight = Math.max(1, display.logicalHeight);
-        failIfBad();
+        failIfLost();
         gl.viewport(0, 0, width, height);
         gl.useProgram(spriteProgram.program);
         gl.uniform2f(spriteSize, logicalWidth, logicalHeight);
@@ -3134,7 +3134,7 @@
         lastTexture = texture;
         gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
         gl.bindVertexArray(null);
-        failIfBad();
+        failIfLost();
       };
       return (gpuBatcher = {
         target,
