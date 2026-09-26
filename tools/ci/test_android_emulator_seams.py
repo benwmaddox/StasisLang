@@ -734,15 +734,26 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         logical_width, logical_height = 640, 360
         width, height = surface[2], surface[3]
         if width * logical_height > height * logical_width:
-            viewport_width = (height * logical_width) // logical_height
+            viewport_width = int(height * logical_width / logical_height + 0.5)
             viewport_left = surface[0] + (width - viewport_width) // 2
             viewport = (viewport_left, surface[1], viewport_width, height)
         else:
-            viewport_height = (width * logical_height) // logical_width
-            viewport_top = surface[1] + (height - viewport_height) // 2
+            viewport_height = int(width * logical_height / logical_width + 0.5)
+            # Renderer y is bottom-origin and integer-divided; flip that fitted rect to screen top-origin.
+            viewport_top = surface[1] + (height - viewport_height + 1) // 2
             viewport = (surface[0], viewport_top, width, viewport_height)
-        self.assertEqual((0, 933, 1080, 607), viewport)
+        reported_pre_fix_viewport = (0, 933, 1080, 607)
+        self.assertEqual((0, 933, 1080, 608), viewport)
+        self.assertNotEqual(reported_pre_fix_viewport, viewport)
         self.assertIn("-Headless -AvdName test", self.workflow)
+        self.assertIn(
+            "$viewportHeight = [int][math]::Floor(($width * $logicalHeight / $logicalWidth) + 0.5)",
+            self.workshop_script,
+        )
+        self.assertIn(
+            "$viewportTop = $Surface[1] + [int][math]::Ceiling(($height - $viewportHeight) / 2.0)",
+            self.workshop_script,
+        )
 
         android_regions = self.capture_manifest["capture_profiles"]["android_emulator"]["regions"]
         atlas = next(region for region in android_regions if region["name"] == "atlas_canvas_sprite")
