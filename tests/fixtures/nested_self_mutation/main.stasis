@@ -1,0 +1,76 @@
+// A receiver method mutates `self` reached through a nested global field path.
+// Mirrors a tick-owned draw list stored inside game presentation state.
+struct SmallList {
+    count: i32;
+    values: i32[8];
+}
+
+struct LargeList {
+    count: i32;
+    kinds: i32[256];
+    x: f32[256];
+    y: f32[256];
+    width: f32[256];
+    height: f32[256];
+    alpha: i32[256];
+}
+
+struct Presentation {
+    before: i32;
+    small: SmallList;
+    large: LargeList;
+    after: i32;
+}
+
+struct State {
+    presentation: Presentation;
+}
+
+global state: State;
+global direct_small: SmallList;
+
+function push(self: SmallList, value: i32): void {
+    let index: i32 = self.count;
+    self.values[index] = value;
+    self.count = index + 1;
+}
+
+function append(self: LargeList, kind: i32, x: f32): bool {
+    if (self.count >= 256) {
+        return false;
+    }
+    let index: i32 = self.count;
+    self.kinds[index] = kind;
+    self.x[index] = x;
+    self.count = index + 1;
+    return true;
+}
+
+function reset(self: LargeList): void {
+    self.count = 0;
+}
+
+function sum(self: LargeList): i32 {
+    let total: i32 = 0;
+    for (let index: i32 = 0; index < self.count; index += 1) {
+        total += self.kinds[index];
+    }
+    return total;
+}
+
+function score(): i32 {
+    direct_small.count = 0;
+    direct_small.push(1);
+    state.presentation.small.count = 0;
+    state.presentation.small.push(3);
+    state.presentation.small.push(4);
+    state.presentation.large.reset();
+    state.presentation.large.append(5, 1.0);
+    state.presentation.large.append(6, 2.0);
+    return direct_small.count + state.presentation.small.count * 10 + state.presentation.small.values[0] + state.presentation.small.values[1] + state.presentation.large.count * 100 + state.presentation.large.sum(
+    );
+}
+
+function main(): i32 {
+    return score();
+}

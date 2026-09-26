@@ -3,6 +3,8 @@ param(
     [string]$OutputPath = "",
     [string]$ProjectPath = "samples/android_aot_seam",
     [string]$ExpectationsPath = "",
+    [string]$RequiredScalarBindingSymbol = "",
+    [int]$MinimumScalarBindingOrdinal = 0,
     [ValidateSet("android-arm64", "android-x86_64")]
     [string]$Target = "android-arm64",
     [int]$TotalTimeoutSeconds = 900
@@ -114,6 +116,29 @@ try {
         --target $Target --out d --development-build
     if ($LASTEXITCODE -ne 0) { throw "$testId package-mobile failed with exit code $LASTEXITCODE" }
     Assert-In-Time "package-mobile"
+
+    if ($RequiredScalarBindingSymbol) {
+        $publishedBindings = Join-Path $packageRoot "aot/published_aot_bindings.c"
+        if (-not (Test-Path $publishedBindings)) {
+            throw "$testId generated AOT bindings are missing: $publishedBindings"
+        }
+        $scalarBindings = @(Select-String -Path $publishedBindings `
+            -Pattern 'stasis_jit_register_global_(i32|f32|f64)_ptr\(')
+        if ($scalarBindings.Count -lt $MinimumScalarBindingOrdinal) {
+            throw "$testId generated only $($scalarBindings.Count) scalar bindings; expected at least $MinimumScalarBindingOrdinal"
+        }
+        $targetBindings = @($scalarBindings | Where-Object {
+            $_.Line.Contains($RequiredScalarBindingSymbol)
+        })
+        if ($targetBindings.Count -ne 1) {
+            throw "$testId expected one scalar binding for '$RequiredScalarBindingSymbol', found $($targetBindings.Count)"
+        }
+        $targetOrdinal = [Array]::IndexOf($scalarBindings, $targetBindings[0]) + 1
+        if ($targetOrdinal -lt $MinimumScalarBindingOrdinal) {
+            throw "$testId scalar binding '$RequiredScalarBindingSymbol' was ordinal $targetOrdinal; expected at least $MinimumScalarBindingOrdinal"
+        }
+        Write-Output "$testId generated $($scalarBindings.Count) scalar bindings; '$RequiredScalarBindingSymbol' is ordinal $targetOrdinal"
+    }
 
     $gradle = Resolve-Gradle
     if ($testId -ne "IT-022") {

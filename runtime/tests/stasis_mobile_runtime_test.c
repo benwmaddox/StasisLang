@@ -58,6 +58,7 @@ static int32_t game_host_req_flags;
 static int32_t game_host_req_window_w_px;
 static int32_t game_host_req_window_h_px;
 static char game_string_literals[640][32];
+static int32_t overflow_binding_value;
 
 #if defined(STASIS_NETWORK_ENABLED)
 typedef struct StasisNetworkHost {
@@ -385,6 +386,14 @@ static void bind_runtime(void) {
     stasis_jit_profile_configure(1, 2);
 }
 
+static void bind_runtime_overflow(void) {
+    int index;
+    for (index = 0; index <= 512; index += 1) {
+        stasis_jit_register_global_i32_array(
+            200000 + index, 0, &overflow_binding_value, 1);
+    }
+}
+
 static int32_t game_tick(void) {
     if (replay_test_active) {
         assert(replay_order == 1);
@@ -608,6 +617,27 @@ static void test_rejects_invalid_configuration(void) {
     assert(init_window_calls == 0);
 }
 
+static void test_rejects_incomplete_global_registration(void) {
+    StasisMobileRuntimeConfig valid_config = config();
+    StasisMobileGameEntries overflow_entries = entries();
+    StasisMobileGameEntries valid_entries = entries();
+    overflow_entries.bind_runtime_entry = bind_runtime_overflow;
+
+    assert(stasis_mobile_runtime_initialize(&valid_config, &overflow_entries) ==
+        STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT);
+    assert(init_window_calls == 1);
+    assert(shutdown_calls == 1);
+    assert(main_calls == 0);
+    assert(stasis_mobile_runtime_is_initialized() == 0);
+    assert(stasis_mobile_aot_registration_succeeded());
+
+    assert(stasis_mobile_runtime_initialize(&valid_config, &valid_entries) ==
+        STASIS_MOBILE_RUNTIME_OK);
+    assert(init_window_calls == 2);
+    assert(main_calls == 1);
+    stasis_mobile_runtime_shutdown();
+}
+
 static void test_runs_mobile_lifecycle(void) {
     StasisMobileRuntimeConfig valid_config = config();
     StasisMobileGameEntries valid_entries = entries();
@@ -803,6 +833,8 @@ int main(void) {
 #endif
     reset_fakes();
     test_rejects_invalid_configuration();
+    test_rejects_incomplete_global_registration();
+    reset_fakes();
     test_runs_mobile_lifecycle();
     reset_fakes();
     test_replay_orders_tick_verify_render_and_isolates_input();

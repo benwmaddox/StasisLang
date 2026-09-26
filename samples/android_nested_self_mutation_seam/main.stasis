@@ -1,0 +1,153 @@
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+
+// Sixty-four blocks keep the receiver scalar beyond the former 2,048-slot
+// mobile AOT registry limit without requiring thousands of source lines.
+struct ScalarBlock {
+    f00: i32;
+    f01: i32;
+    f02: i32;
+    f03: i32;
+    f04: i32;
+    f05: i32;
+    f06: i32;
+    f07: i32;
+    f08: i32;
+    f09: i32;
+    f10: i32;
+    f11: i32;
+    f12: i32;
+    f13: i32;
+    f14: i32;
+    f15: i32;
+    f16: i32;
+    f17: i32;
+    f18: i32;
+    f19: i32;
+    f20: i32;
+    f21: i32;
+    f22: i32;
+    f23: i32;
+    f24: i32;
+    f25: i32;
+    f26: i32;
+    f27: i32;
+    f28: i32;
+    f29: i32;
+    f30: i32;
+    f31: i32;
+}
+
+struct ScalarPadding {
+    b00: ScalarBlock;
+    b01: ScalarBlock;
+    b02: ScalarBlock;
+    b03: ScalarBlock;
+    b04: ScalarBlock;
+    b05: ScalarBlock;
+    b06: ScalarBlock;
+    b07: ScalarBlock;
+    b08: ScalarBlock;
+    b09: ScalarBlock;
+    b10: ScalarBlock;
+    b11: ScalarBlock;
+    b12: ScalarBlock;
+    b13: ScalarBlock;
+    b14: ScalarBlock;
+    b15: ScalarBlock;
+    b16: ScalarBlock;
+    b17: ScalarBlock;
+    b18: ScalarBlock;
+    b19: ScalarBlock;
+    b20: ScalarBlock;
+    b21: ScalarBlock;
+    b22: ScalarBlock;
+    b23: ScalarBlock;
+    b24: ScalarBlock;
+    b25: ScalarBlock;
+    b26: ScalarBlock;
+    b27: ScalarBlock;
+    b28: ScalarBlock;
+    b29: ScalarBlock;
+    b30: ScalarBlock;
+    b31: ScalarBlock;
+    b32: ScalarBlock;
+    b33: ScalarBlock;
+    b34: ScalarBlock;
+    b35: ScalarBlock;
+    b36: ScalarBlock;
+    b37: ScalarBlock;
+    b38: ScalarBlock;
+    b39: ScalarBlock;
+    b40: ScalarBlock;
+    b41: ScalarBlock;
+    b42: ScalarBlock;
+    b43: ScalarBlock;
+    b44: ScalarBlock;
+    b45: ScalarBlock;
+    b46: ScalarBlock;
+    b47: ScalarBlock;
+    b48: ScalarBlock;
+    b49: ScalarBlock;
+    b50: ScalarBlock;
+    b51: ScalarBlock;
+    b52: ScalarBlock;
+    b53: ScalarBlock;
+    b54: ScalarBlock;
+    b55: ScalarBlock;
+    b56: ScalarBlock;
+    b57: ScalarBlock;
+    b58: ScalarBlock;
+    b59: ScalarBlock;
+    b60: ScalarBlock;
+    b61: ScalarBlock;
+    b62: ScalarBlock;
+    b63: ScalarBlock;
+}
+
+struct PresentationListProbe {
+    count: i32;
+    values: i32[4];
+}
+
+struct PresentationState {
+    padding: ScalarPadding;
+    zzz_commands: PresentationListProbe;
+}
+
+global seam_state_checksum: i32;
+global state: PresentationState;
+
+function append(self: PresentationListProbe, value: i32): void {
+    let index: i32 = self.count;
+    self.values[index] = value;
+    self.count = index + 1;
+}
+
+function main(): i32 {
+    init_window(640, 360, "Stasis Nested Receiver Seam");
+    seam_state_checksum = 0;
+    state.padding.b63.f31 = 32;
+    return 0;
+}
+
+function tick(): i32 {
+    state.zzz_commands.count = 0;
+    state.zzz_commands.append(725);
+    return 0;
+}
+
+function render(): i32 {
+    clear(0.04, 0.07, 0.12, 1.0);
+    if (state.zzz_commands.count == 1 && state.zzz_commands.values[0] == 725) {
+        seam_state_checksum = 725;
+        fill_rect(96.0, 72.0, 448.0, 216.0, 0.10, 0.80, 0.32, 1.0);
+    } else {
+        seam_state_checksum = -725;
+        fill_rect(96.0, 72.0, 448.0, 216.0, 0.90, 0.12, 0.16, 1.0);
+    }
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

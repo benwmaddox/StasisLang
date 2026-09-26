@@ -15,6 +15,8 @@
     } \
 } while (0)
 
+#define STRESS_SCALAR_COUNT 2100
+
 static int32_t add_two(int32_t left, int32_t right) {
     return left + right;
 }
@@ -301,6 +303,9 @@ int main(void) {
     int stress_index;
     char escaped_json[64];
     const char json_controls[] = {'"', '\\', '\b', '\f', '\n', '\r', '\t', 1, 'A', 0};
+    int32_t stress_i32[STRESS_SCALAR_COUNT / 3] = {0};
+    float stress_f32[STRESS_SCALAR_COUNT / 3] = {0};
+    double stress_f64[STRESS_SCALAR_COUNT / 3] = {0};
 
     CHECK(stasis_mobile_json_escape(json_controls, escaped_json, sizeof(escaped_json)) == 1);
     CHECK(strcmp(escaped_json, "\\\"\\\\\\b\\f\\n\\r\\t\\u0001A") == 0);
@@ -321,6 +326,43 @@ int main(void) {
     stasis_jit_register_global_i32_ptr(11, &external);
     stasis_jit_global_i32_store(11, 6);
     CHECK(external == 6);
+
+    stasis_mobile_aot_reset();
+    for (stress_index = 0; stress_index < STRESS_SCALAR_COUNT; stress_index += 1) {
+        int lane = stress_index / 3;
+        int32_t hash = 100000 + stress_index;
+        if (stress_index % 3 == 0) {
+            stasis_jit_register_global_i32_ptr(hash, &stress_i32[lane]);
+        } else if (stress_index % 3 == 1) {
+            stasis_jit_register_global_f32_ptr(hash, &stress_f32[lane]);
+        } else {
+            stasis_jit_register_global_f64_ptr(hash, &stress_f64[lane]);
+        }
+    }
+    CHECK(stasis_mobile_aot_registration_succeeded());
+    stasis_jit_global_i32_store(100000, 17);
+    stasis_jit_global_f32_store(100001, 18.5f);
+    stasis_jit_global_f64_store(100000 + STRESS_SCALAR_COUNT - 1, 19.5);
+    CHECK(stress_i32[0] == 17);
+    CHECK(stress_f32[0] == 18.5f);
+    CHECK(stress_f64[(STRESS_SCALAR_COUNT - 1) / 3] == 19.5);
+    CHECK(stasis_jit_global_i32_load(100000) == 17);
+    CHECK(stasis_jit_global_f32_load(100001) == 18.5f);
+    CHECK(stasis_jit_global_f64_load(100000 + STRESS_SCALAR_COUNT - 1) == 19.5);
+
+    stasis_mobile_aot_reset();
+    CHECK(stasis_mobile_aot_registration_succeeded());
+    CHECK(stasis_jit_global_i32_load(100000) == 0);
+    CHECK(stasis_jit_global_f64_load(100000 + STRESS_SCALAR_COUNT - 1) == 0.0);
+    stress_f64[(STRESS_SCALAR_COUNT - 1) / 3] = 21.5;
+    stasis_jit_register_global_f64_ptr(
+        100000 + STRESS_SCALAR_COUNT - 1,
+        &stress_f64[(STRESS_SCALAR_COUNT - 1) / 3]);
+    CHECK(stasis_jit_global_f64_load(100000 + STRESS_SCALAR_COUNT - 1) == 21.5);
+
+    stasis_mobile_aot_reset();
+    stasis_jit_global_i32_store(10, 42);
+    stasis_jit_register_global_i32_ptr(11, &external);
 
     stasis_jit_register_global_i32_array(20, 0, external_array, 3);
     CHECK(stasis_jit_global_i32_array_load(20, 0, 1) == 8);

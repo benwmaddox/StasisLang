@@ -14,7 +14,7 @@
 #include <windows.h>
 #endif
 
-#define STASIS_MOBILE_MAX_SCALARS 2048
+#define STASIS_MOBILE_INITIAL_SCALAR_CAPACITY 2048
 #define STASIS_MOBILE_MAX_ARRAYS 512
 #define STASIS_MOBILE_MAX_FUNCTIONS 1024
 #define STASIS_MOBILE_INITIAL_STRING_CAPACITY 512
@@ -119,8 +119,10 @@ enum {
     STASIS_VALUE_U16 = 5
 };
 
-static StasisScalar scalars[STASIS_MOBILE_MAX_SCALARS];
+static StasisScalar *scalars;
 static size_t scalar_count;
+static size_t scalar_capacity;
+static int registration_failed;
 static StasisArray arrays[STASIS_MOBILE_MAX_ARRAYS];
 static size_t array_count;
 static StasisCodePtr code_ptrs[STASIS_MOBILE_MAX_FUNCTIONS];
@@ -359,6 +361,45 @@ static size_t value_size(int kind) {
     return 0;
 }
 
+static void record_registration_failure(const char *storage, size_t required) {
+    if (!registration_failed) {
+        fprintf(stderr,
+            "Stasis mobile AOT could not provision %s registration %zu\n",
+            storage, required);
+    }
+    registration_failed = 1;
+}
+
+static int ensure_scalar_capacity(size_t required) {
+    size_t next_capacity;
+    StasisScalar *next;
+    if (required <= scalar_capacity) return 1;
+    next_capacity = scalar_capacity == 0
+        ? STASIS_MOBILE_INITIAL_SCALAR_CAPACITY
+        : scalar_capacity;
+    while (next_capacity < required) {
+        if (next_capacity > SIZE_MAX / 2) {
+            record_registration_failure("scalar", required);
+            return 0;
+        }
+        next_capacity *= 2;
+    }
+    if (next_capacity > SIZE_MAX / sizeof(*scalars)) {
+        record_registration_failure("scalar", required);
+        return 0;
+    }
+    next = (StasisScalar *)realloc(scalars, next_capacity * sizeof(*scalars));
+    if (next == NULL) {
+        record_registration_failure("scalar", required);
+        return 0;
+    }
+    memset(next + scalar_capacity, 0,
+        (next_capacity - scalar_capacity) * sizeof(*next));
+    scalars = next;
+    scalar_capacity = next_capacity;
+    return 1;
+}
+
 static StasisScalar *find_scalar(int32_t hash, int kind, int create) {
     size_t index;
     for (index = 0; index < scalar_count; index += 1) {
@@ -366,7 +407,12 @@ static StasisScalar *find_scalar(int32_t hash, int kind, int create) {
             return &scalars[index];
         }
     }
-    if (!create || scalar_count >= STASIS_MOBILE_MAX_SCALARS) return NULL;
+    if (!create) return NULL;
+    if (scalar_count == SIZE_MAX) {
+        record_registration_failure("scalar", SIZE_MAX);
+        return NULL;
+    }
+    if (!ensure_scalar_capacity(scalar_count + 1)) return NULL;
     scalars[scalar_count].hash = hash;
     scalars[scalar_count].kind = kind;
     return &scalars[scalar_count++];
@@ -383,7 +429,11 @@ static StasisArray *find_array(
             return entry;
         }
     }
-    if (!create || array_count >= STASIS_MOBILE_MAX_ARRAYS) return NULL;
+    if (!create) return NULL;
+    if (array_count >= STASIS_MOBILE_MAX_ARRAYS) {
+        record_registration_failure("array", array_count + 1);
+        return NULL;
+    }
     arrays[array_count].collection_hash = collection_hash;
     arrays[array_count].field_hash = field_hash;
     arrays[array_count].kind = kind;
@@ -432,17 +482,24 @@ void stasis_mobile_aot_reset(void) {
     for (index = 0; index < array_count; index += 1) {
         if (!arrays[index].external) free(arrays[index].data);
     }
-    memset(scalars, 0, sizeof(scalars));
+    free(scalars);
+    scalars = NULL;
     memset(arrays, 0, sizeof(arrays));
     memset(code_ptrs, 0, sizeof(code_ptrs));
     free(strings);
     strings = NULL;
     scalar_count = 0;
+    scalar_capacity = 0;
+    registration_failed = 0;
     array_count = 0;
     code_ptr_count = 0;
     string_count = 0;
     string_capacity = 0;
     stasis_platform_service_reset();
+}
+
+int stasis_mobile_aot_registration_succeeded(void) {
+    return !registration_failed;
 }
 
 void stasis_jit_register_global_i32_ptr(int32_t hash, int32_t *ptr) {
