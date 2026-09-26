@@ -303,7 +303,21 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             script.index('Write-Host "$AvdName is ready"'),
         )
         self.assertIn('"start-emulator"', self.workshop_script)
-        self.assertNotIn("Reusing ready Android emulator", self.workshop_script)
+        self.assertIn('if ($runningBefore) {', self.workshop_script)
+        self.assertIn('$adb -s $serial emu avd name', self.workshop_script)
+        self.assertIn('getprop ro.boot.qemu.avd_name', self.workshop_script)
+        workshop_identity_check = self.workshop_script.index('$observedAvd -ne $AvdName')
+        workshop_reuse = self.workshop_script.index('Reusing ready Android emulator')
+        workshop_start = self.workshop_script.index(
+            'Invoke-BoundedScript (Join-Path $scriptRoot "start_emulator.ps1")'
+        )
+        self.assertLess(workshop_identity_check, workshop_reuse)
+        self.assertLess(workshop_reuse, workshop_start)
+        self.assertIn('elseif ($runningOnWindows) {', self.workshop_script)
+        self.assertIn(
+            'Workshop seam expects the platform runner to provide a ready Android emulator on non-Windows hosts.',
+            self.workshop_script,
+        )
 
     def test_release_wrapper_uses_platform_appropriate_tools_and_paths(self):
         self.assertIn('"adb$executableSuffix"', self.release_script)
