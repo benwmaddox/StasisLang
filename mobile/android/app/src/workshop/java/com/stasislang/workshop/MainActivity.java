@@ -113,6 +113,7 @@ public final class MainActivity extends Activity {
     private static final int MAX_GITHUB_BACKUP_BYTES = 32 * 1024 * 1024;
     private static final int TOP_CONTROL_END_MARGIN_DP = 10;
     private static final long STABLE_LAUNCH_DELAY_MS = 60_000L;
+    private static final long RENDER_ACCEPTANCE_SURFACE_READY_TIMEOUT_MS = 30_000L;
     private static final int AUDIO_RECORD_PERMISSION_REQUEST = 42;
     private static final int EXPORT_PROJECT_REQUEST = 71;
     private static final int IMPORT_PROJECT_REQUEST = 72;
@@ -214,6 +215,7 @@ public final class MainActivity extends Activity {
     private boolean workshopTestRunnerAcceptanceRun;
     private boolean workshopDiagnosticSeamAcceptanceRun;
     private boolean workshopSoakAcceptanceRun;
+    private long renderAcceptanceSurfaceWaitStartedAtMillis;
     private boolean gameRuntimeActive;
     private String lastCompileResult = "CompileNotRun";
     private long lastDebugUpdateNanos;
@@ -1002,7 +1004,38 @@ public final class MainActivity extends Activity {
                     compileAttempted = true;
                     setStatusText(compileResult);
                 }
-                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady && !jniFrameAbiAcceptanceRun) {
+                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                        && !jniFrameAbiAcceptanceRun) {
+                    if (gamePreview != null && gamePreview.isAcceptanceSurfaceReady()) {
+                        renderAcceptanceSurfaceWaitStartedAtMillis = 0L;
+                    } else {
+                        long nowMillis = SystemClock.uptimeMillis();
+                        if (renderAcceptanceSurfaceWaitStartedAtMillis == 0L) {
+                            renderAcceptanceSurfaceWaitStartedAtMillis = nowMillis;
+                            android.util.Log.i("StasisWorkshop",
+                                    "Waiting for usable render acceptance surface: "
+                                            + (gamePreview == null ? "layout=missing drawable=missing"
+                                                    : gamePreview.acceptanceSurfaceDiagnostics()));
+                        }
+                        long waitedMillis = nowMillis - renderAcceptanceSurfaceWaitStartedAtMillis;
+                        if (WorkshopRenderSurfaceReadiness.hasTimedOut(
+                                renderAcceptanceSurfaceWaitStartedAtMillis, nowMillis,
+                                RENDER_ACCEPTANCE_SURFACE_READY_TIMEOUT_MS)) {
+                            compileReady = false;
+                            gameRuntimeActive = false;
+                            String failure = "Android render acceptance surface readiness timed out "
+                                    + "after " + RENDER_ACCEPTANCE_SURFACE_READY_TIMEOUT_MS + "ms "
+                                    + "(waited " + waitedMillis + "ms): "
+                                    + (gamePreview == null ? "layout=missing drawable=missing"
+                                            : gamePreview.acceptanceSurfaceDiagnostics());
+                            setStatusText(failure);
+                            android.util.Log.e("StasisWorkshop", failure);
+                        } else {
+                            gameLoopHandler.postDelayed(this, DEFAULT_TICK_INTERVAL_MS);
+                            return;
+                        }
+                    }
+                }
                     String abiResult = WorkshopJniFrameAbiAcceptance.run(projectRootPath());
                     jniFrameAbiAcceptanceRun = true;
                     boolean abiPassed = false;
@@ -3279,8 +3312,13 @@ public final class MainActivity extends Activity {
         if (gamePreview == null) {
             return "{\"status\":\"failed\",\"error\":\"preview unavailable\"}";
         }
-        int screenWidth = Math.max(1, gamePreview.getWidth());
-        int screenHeight = Math.max(1, gamePreview.getHeight());
+        if (!gamePreview.isAcceptanceSurfaceReady()) {
+            return "{\"status\":\"failed\",\"error\":"
+                    + JSONObject.quote("preview surface is not ready: "
+                            + gamePreview.acceptanceSurfaceDiagnostics()) + "}";
+        }
+        int screenWidth = gamePreview.getWidth();
+        int screenHeight = gamePreview.getHeight();
         float scale = Math.min(screenWidth / 640.0f, screenHeight / 360.0f);
         int viewportWidth = Math.max(1, Math.round(640.0f * scale));
         int viewportHeight = Math.max(1, Math.round(360.0f * scale));
@@ -6481,6 +6519,16 @@ public final class MainActivity extends Activity {
             setRenderer(renderer);
             setRenderMode(GLSurfaceView.RENDERMODE_WHEN_DIRTY);
             setFocusable(true);
+        }
+
+        boolean isAcceptanceSurfaceReady() {
+            return WorkshopRenderSurfaceReadiness.isReady(
+                    getWidth(), getHeight(), renderer.drawableWidth(), renderer.drawableHeight());
+        }
+
+        String acceptanceSurfaceDiagnostics() {
+            return "layout=" + getWidth() + "x" + getHeight()
+                    + " drawable=" + renderer.drawableWidth() + "x" + renderer.drawableHeight();
         }
 
         int touchX() {
