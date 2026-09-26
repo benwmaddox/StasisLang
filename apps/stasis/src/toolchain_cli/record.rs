@@ -1,10 +1,11 @@
-use super::{CommandResult, Workspace};
+use super::{project_compilation_configuration, CommandResult, Workspace};
 use clap::Args;
 use image::GenericImageView;
 use serde_json::json;
 use stasis::{
-    run_play_in_process_with_input_script_window_title_profile_and_capture,
-    run_play_in_process_with_replay, PlayFrameCaptureConfig, PlayReplayConfig,
+    run_play_in_process_with_input_script_window_title_profile_capture_and_project_configuration,
+    run_play_in_process_with_replay_and_project_configuration, PlayFrameCaptureConfig,
+    PlayReplayConfig,
 };
 use std::fs;
 use std::io::Read;
@@ -176,7 +177,7 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
         before_tick_function: args.before_tick.clone(),
     };
     let result = if let Some(replay) = replay {
-        run_play_in_process_with_replay(
+        run_play_in_process_with_replay_and_project_configuration(
             &entry,
             Some(&workspace.root),
             None,
@@ -188,9 +189,10 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
             None,
             Some(capture),
             replay,
+            project_compilation_configuration(workspace)?,
         )
     } else {
-        run_play_in_process_with_input_script_window_title_profile_and_capture(
+        run_play_in_process_with_input_script_window_title_profile_capture_and_project_configuration(
             &entry,
             Some(&workspace.root),
             None,
@@ -201,6 +203,7 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
             Some(&workspace.manifest.name),
             None,
             capture,
+            project_compilation_configuration(workspace)?,
         )
     };
     if let Err(error) = result {

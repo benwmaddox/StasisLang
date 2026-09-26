@@ -1,0 +1,28 @@
+{
+  "manifest_version": 2,
+  "name": "target_settings",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "android": {
+    "application_id": "org.stasislang.targetsettings",
+    "label": "Target Settings",
+    "orientation": "sensorLandscape",
+    "version_code": 1,
+    "version_name": "1.0.0"
+  },
+  "settings": {
+    "schema_version": 1,
+    "definitions": {
+      "channel": { "type": "string", "required": true, "default": "desktop", "allowed": ["desktop", "web", "mobile"] },
+      "touch_controls": { "type": "bool", "default": false },
+      "ui_scale": { "type": "number", "default": 1.0, "minimum": 0.5, "maximum": 2.0 }
+    },
+    "targets": {
+      "web": { "channel": "web", "ui_scale": 1.25 },
+      "android-arm64": { "channel": "mobile", "touch_controls": true },
+      "android-x86_64": { "channel": "mobile", "touch_controls": true },
+      "ios-arm64": { "channel": "mobile", "touch_controls": true }
+    }
+  }
+}

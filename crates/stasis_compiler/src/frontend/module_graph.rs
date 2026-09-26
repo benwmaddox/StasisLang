@@ -9,6 +9,9 @@ use crate::frontend::parser::{
 };
 use crate::{SourceDiagnostic, SourceDiagnosticCode, SourceDiagnosticEdit, SourceDiagnosticFix};
 
+pub const GENERATED_PROJECT_SETTINGS_PATH: &str =
+    ".stasis/generated/__stasis_project_settings_v1.stasis";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleImport {
     pub path: String,
@@ -38,13 +41,14 @@ impl ModuleGraph {
         roots: impl IntoIterator<Item = String>,
         load_source: impl FnMut(&str) -> Result<String, String>,
     ) -> Result<(Self, BTreeMap<String, String>), SourceDiagnostic> {
-        Self::load_with_graphics_test_seams(roots, load_source, cfg!(test))
+        Self::load_with_graphics_test_seams(roots, load_source, cfg!(test), None)
     }
 
     pub(crate) fn load_with_graphics_test_seams(
         roots: impl IntoIterator<Item = String>,
         mut load_source: impl FnMut(&str) -> Result<String, String>,
         allow_graphics_test_seams: bool,
+        synthetic_import: Option<&str>,
     ) -> Result<(Self, BTreeMap<String, String>), SourceDiagnostic> {
         let roots: BTreeSet<String> = roots.into_iter().collect();
         let mut pending: Vec<(String, Option<(String, Range<usize>, Range<usize>, String)>)> =
@@ -78,7 +82,18 @@ impl ModuleGraph {
                         .with_fix(fix)
                 }
             })?;
-            let imports = parse_imports(&path, &source)?;
+            let mut imports = parse_imports(&path, &source)?;
+            if let Some(target) = synthetic_import.filter(|target| *target != path) {
+                if !imports.iter().any(|import| import.target == target) {
+                    imports.push(ModuleImport {
+                        path: target.to_string(),
+                        target: target.to_string(),
+                        alias: module_alias(target),
+                        span: source.len()..source.len(),
+                        declaration_span: source.len()..source.len(),
+                    });
+                }
+            }
             validate_graphics_internal_source_policy(
                 &path,
                 &source,
@@ -1149,6 +1164,7 @@ mod tests {
             ["tests/stasis/seams/gfx_probe.stasis".to_string()],
             |_| Ok("global gfx_cmd_i32: i32[4];".to_string()),
             false,
+            None,
         )
         .expect_err("ordinary project roots cannot claim the repository test seam");
         assert!(error.message.contains("graphics internal identifier"));

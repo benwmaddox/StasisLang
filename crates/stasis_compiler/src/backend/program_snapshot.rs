@@ -304,6 +304,31 @@ pub struct ProgramCollectionMetadata {
     pub fully_migratable: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProjectSettingValue {
+    String(String),
+    Bool(bool),
+    Number(f64),
+}
+
+impl ProjectSettingValue {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::String(_) => "string",
+            Self::Bool(_) => "bool",
+            Self::Number(_) => "number",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectConfiguration {
+    pub target: String,
+    pub settings: BTreeMap<String, ProjectSettingValue>,
+    pub digest: [u8; 32],
+    pub generated_api_enabled: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProgramSnapshot {
     reachability_policy: ReachabilityPolicy,
@@ -329,6 +354,7 @@ pub struct ProgramSnapshot {
     typed_collection_descriptors: BTreeMap<String, TypedCollectionDescriptor>,
     literal_table: BTreeMap<i32, String>,
     struct_field_type_ids: BTreeMap<u16, BTreeMap<String, u16>>,
+    project_configuration: Option<ProjectConfiguration>,
     types: TypeTable,
     artifact_mappings: BTreeMap<FunctionId, ProgramArtifactMapping>,
     // Lowering-only detail remains private to the backend. Public consumers use the
@@ -432,6 +458,7 @@ impl ProgramSnapshot {
         required_emit_roots: &[String],
         function_hirs: &BTreeMap<FunctionId, FunctionHIR>,
         analysis: CompileAnalysisCache,
+        project_configuration: Option<ProjectConfiguration>,
     ) -> Result<Self, String> {
         let state_layout = build_state_layout(
             &analysis.global_path_types,
@@ -563,6 +590,7 @@ impl ProgramSnapshot {
             typed_collection_descriptors: analysis.typed_collection_descriptors.clone(),
             literal_table,
             struct_field_type_ids: analysis.named_struct_field_types.clone(),
+            project_configuration,
             types: types.clone(),
             artifact_mappings: BTreeMap::new(),
             analysis,
@@ -575,6 +603,9 @@ impl ProgramSnapshot {
 
     pub fn source_revision(&self) -> u64 {
         self.source_revision
+    }
+    pub fn project_configuration(&self) -> Option<&ProjectConfiguration> {
+        self.project_configuration.as_ref()
     }
     pub fn files(&self) -> &[SourceFile] {
         &self.files
@@ -825,6 +856,7 @@ fn canonical_layout_digest_with_root(
         &[],
         &function_hirs,
         analysis,
+        None,
     )
     .map(|snapshot| snapshot.layout_digest())
 }

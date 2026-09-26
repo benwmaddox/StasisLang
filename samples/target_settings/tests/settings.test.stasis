@@ -1,0 +1,3 @@
+test `host settings resolve`(): bool {
+    return project_setting_touch_controls() == false;
+}

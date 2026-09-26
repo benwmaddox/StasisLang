@@ -12,7 +12,9 @@ use crate::backend::patch_plan::{
     capture_accepted_program, plan_patch, AcceptedProgram, FunctionKey, PatchReason,
     PatchReasonChain,
 };
-use crate::backend::program_snapshot::{ProgramArtifactMapping, ProgramFunction, ProgramSnapshot};
+use crate::backend::program_snapshot::{
+    ProgramArtifactMapping, ProgramFunction, ProgramSnapshot, ProjectConfiguration,
+};
 use crate::backend::reachability::matches_root;
 use crate::backend::state_layout::{build_state_memory_report, is_named_scalar_state_path};
 use crate::backend::state_query::{
@@ -461,6 +463,7 @@ pub struct JitProcess {
     source_disk_probe_cache: BTreeMap<String, SourceDiskProbe>,
     program_snapshot: Option<Arc<ProgramSnapshot>>,
     active_program_snapshot: Option<Arc<ProgramSnapshot>>,
+    project_configuration: Option<ProjectConfiguration>,
     generation_metadata: Option<JitGenerationMetadata>,
     accepted_program: Option<AcceptedProgram>,
     accepted_lowering_references: BTreeMap<FunctionKey, FunctionLoweringReferences>,
@@ -569,6 +572,7 @@ impl JitProcess {
             source_disk_probe_cache: BTreeMap::new(),
             program_snapshot: None,
             active_program_snapshot: None,
+            project_configuration: None,
             generation_metadata: None,
             accepted_program: None,
             accepted_lowering_references: BTreeMap::new(),
@@ -649,6 +653,7 @@ impl JitProcess {
         candidate.modules = self.modules.clone();
         candidate.program_snapshot = self.program_snapshot.clone();
         candidate.active_program_snapshot = self.active_program_snapshot.clone();
+        candidate.project_configuration = self.project_configuration.clone();
         candidate.generation_metadata = self.generation_metadata.clone();
         candidate.accepted_program = self.accepted_program.clone();
         candidate.accepted_lowering_references = self.accepted_lowering_references.clone();
@@ -679,6 +684,13 @@ impl JitProcess {
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
         self.compiler.upsert_file(path, content);
+    }
+
+    pub fn set_project_configuration(&mut self, configuration: ProjectConfiguration) {
+        self.compiler
+            .set_project_settings_api_enabled(configuration.generated_api_enabled);
+        self.project_configuration = Some(configuration);
+        self.program_snapshot = None;
     }
 
     pub fn retain_files(&mut self, paths: &BTreeSet<String>) {
@@ -920,6 +932,7 @@ impl JitProcess {
                     &self.required_emit_roots,
                     &function_hirs,
                     next_cache,
+                    self.project_configuration.clone(),
                 )
                 .map_err(crate::compiler::CompileError::Backend)?,
             ));

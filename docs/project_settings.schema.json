@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stasislang.org/schema/project-settings-v1.json",
+  "title": "Stasis manifest v2 project settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "definitions"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "definitions": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": { "$ref": "#/$defs/settingName" },
+      "additionalProperties": { "$ref": "#/$defs/definition" }
+    },
+    "targets": {
+      "type": "object",
+      "propertyNames": {
+        "enum": ["web", "windows-x86_64", "windows-arm64", "linux-x86_64", "linux-arm64", "macos-x86_64", "macos-arm64", "android-arm64", "android-x86_64", "ios-arm64"]
+      },
+      "additionalProperties": {
+        "type": "object",
+        "maxProperties": 128,
+        "propertyNames": { "$ref": "#/$defs/settingName" },
+        "additionalProperties": { "type": ["string", "boolean", "number"] }
+      }
+    }
+  },
+  "$defs": {
+    "settingName": {
+      "allOf": [
+        { "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+        { "not": { "pattern": "(secret|password|credential|api_key|private_key|signing_key|token)" } }
+      ]
+    },
+    "definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["string", "bool", "number"] },
+        "required": { "type": "boolean", "default": false },
+        "default": { "type": ["string", "boolean", "number"] },
+        "allowed": { "type": "array", "maxItems": 128, "uniqueItems": true, "items": { "type": "string" } },
+        "minimum": { "type": "number" },
+        "maximum": { "type": "number" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "string" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "default": { "type": "string" },
+              "minimum": false,
+              "maximum": false
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "bool" } }, "required": ["type"] },
+          "then": {
+            "properties": {
+              "default": { "type": "boolean" },
+              "allowed": false,
+              "minimum": false,
+              "maximum": false
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "number" } }, "required": ["type"] },
+          "then": {
+            "required": ["minimum", "maximum"],
+            "properties": {
+              "default": { "type": "number" },
+              "allowed": false
+            }
+          }
+        }
+      ]
+    }
+  }
+}

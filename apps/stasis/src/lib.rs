@@ -28,8 +28,9 @@ pub use compiler_backend::run_self_host_aot_cli_with_desktop_network;
 pub use compiler_backend::run_self_host_aot_cli_with_desktop_network_and_artifact_root;
 pub use compiler_backend::run_self_host_aot_cli_with_options;
 pub use compiler_backend::run_self_host_aot_cli_with_options_and_artifact_root;
+pub use compiler_backend::run_self_host_aot_cli_with_project_configuration;
 pub use compiler_backend::sign_output_artifact_if_configured;
-pub use compiler_backend::DesktopNetworkMode;
+pub use compiler_backend::{DesktopNetworkMode, ProjectCompilationConfiguration};
 pub use events::RunnerEvent;
 pub use live_workspace::{
     run_project_tests_bounded, run_project_tests_bounded_with_receipt,
@@ -2255,6 +2256,7 @@ pub fn run_play_in_process(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -2293,6 +2295,35 @@ pub fn run_play_in_process_with_window_title(
         None,
         None,
         None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_play_in_process_with_window_title_and_project_configuration(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    window_title: &str,
+    project_configuration: ProjectCompilationConfiguration,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        None,
+        tick_sleep_micros,
+        max_ticks,
+        Some(window_title),
+        None,
+        None,
+        None,
+        None,
+        Some(project_configuration),
     )
 }
 
@@ -2367,6 +2398,38 @@ pub fn run_play_in_process_with_input_script_window_title_profile_and_capture(
         None,
         Some(capture),
         None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_play_in_process_with_input_script_window_title_profile_capture_and_project_configuration(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    window_title: Option<&str>,
+    profile: Option<PlayProfileConfig>,
+    capture: PlayFrameCaptureConfig,
+    project_configuration: ProjectCompilationConfiguration,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        input_script,
+        tick_sleep_micros,
+        max_ticks,
+        window_title,
+        profile,
+        None,
+        Some(capture),
+        None,
+        Some(project_configuration),
     )
 }
 
@@ -2395,6 +2458,37 @@ pub fn run_play_in_process_with_input_script_window_title_and_profile(
         None,
         None,
         None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_play_in_process_with_input_script_window_title_profile_and_project_configuration(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    window_title: Option<&str>,
+    profile: Option<PlayProfileConfig>,
+    project_configuration: ProjectCompilationConfiguration,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        input_script,
+        tick_sleep_micros,
+        max_ticks,
+        window_title,
+        profile,
+        None,
+        None,
+        None,
+        Some(project_configuration),
     )
 }
 
@@ -2425,6 +2519,39 @@ pub fn run_play_in_process_with_replay(
         None,
         capture,
         Some(replay),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_play_in_process_with_replay_and_project_configuration(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    input_script: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    window_title: Option<&str>,
+    profile: Option<PlayProfileConfig>,
+    capture: Option<PlayFrameCaptureConfig>,
+    replay: PlayReplayConfig,
+    project_configuration: ProjectCompilationConfiguration,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        input_script,
+        tick_sleep_micros,
+        max_ticks,
+        window_title,
+        profile,
+        None,
+        capture,
+        Some(replay),
+        Some(project_configuration),
     )
 }
 
@@ -2472,6 +2599,36 @@ pub fn run_live_in_process_with_data(
         Some((server, config)),
         None,
         None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_live_in_process_with_data_and_project_configuration(
+    watch_file: &Path,
+    watch_dir: Option<&Path>,
+    data_bind_json: Option<&Path>,
+    data_bind_struct_meta: Option<&Path>,
+    tick_sleep_micros: u64,
+    max_ticks: Option<u64>,
+    server: stasis_runner::live::LiveSessionServer,
+    config: LiveRunConfig,
+    project_configuration: ProjectCompilationConfiguration,
+) -> Result<(), String> {
+    run_play_in_process_inner(
+        watch_file,
+        watch_dir,
+        data_bind_json,
+        data_bind_struct_meta,
+        None,
+        tick_sleep_micros,
+        max_ticks,
+        None,
+        None,
+        Some((server, config)),
+        None,
+        None,
+        Some(project_configuration),
     )
 }
 
@@ -2489,6 +2646,7 @@ fn run_play_in_process_inner(
     live: Option<(stasis_runner::live::LiveSessionServer, LiveRunConfig)>,
     capture: Option<PlayFrameCaptureConfig>,
     replay: Option<PlayReplayConfig>,
+    project_configuration: Option<ProjectCompilationConfiguration>,
 ) -> Result<(), String> {
     let watch_dir = resolve_play_watch_dir(watch_file, watch_dir);
     let launch_dir = std::env::current_dir()
@@ -2713,6 +2871,15 @@ fn run_play_in_process_inner(
     let mut play_error_toasts = PlayErrorToasts::new(toast_font_handle);
 
     let mut jit = JitProcess::new();
+    if let Some(configuration) = project_configuration.as_ref() {
+        jit.set_project_configuration(configuration.configuration.clone());
+        if !configuration.generated_source.is_empty() {
+            jit.upsert_file(
+                configuration.generated_path.clone(),
+                configuration.generated_source.clone(),
+            );
+        }
+    }
     if let Some(profile) = profile.as_ref() {
         jit.set_profile_functions(profile.functions.clone())?;
     }

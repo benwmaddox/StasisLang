@@ -17,6 +17,7 @@ from tools.generate_release_provenance import (
 )
 from tools.verify_package_provenance import (
     validate_desktop_package_receipt,
+    validate_project_configuration,
     verify_asset_package_identities,
     verify_mobile_shells,
     verify_network_guest_bundles,
@@ -28,6 +29,33 @@ VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 
 class ReleaseProvenanceTests(unittest.TestCase):
+    @staticmethod
+    def project_configuration(target="windows-x86_64"):
+        return {
+            "target": target,
+            "settings_sha256": hashlib.sha256(b"project settings").hexdigest(),
+            "settings": {"channel": "string", "touch_controls": "bool"},
+        }
+
+    def test_project_configuration_rejects_malformed_targets_and_sensitive_keys(self):
+        class Parser:
+            @staticmethod
+            def error(message):
+                raise ValueError(message)
+
+        valid = self.project_configuration()
+        self.assertEqual(validate_project_configuration(Parser(), valid), valid)
+
+        malformed_target = dict(valid)
+        malformed_target["target"] = ["windows-x86_64"]
+        with self.assertRaisesRegex(ValueError, "target is invalid"):
+            validate_project_configuration(Parser(), malformed_target)
+
+        sensitive = dict(valid)
+        sensitive["settings"] = {"api_token": "string"}
+        with self.assertRaisesRegex(ValueError, "setting summary is malformed"):
+            validate_project_configuration(Parser(), sensitive)
+
     @staticmethod
     def desktop_package_receipt(manifest=b"{}\n"):
         digest = hashlib.sha256(manifest).hexdigest()
@@ -171,6 +199,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             packaged_manifest = b'{"name":"ci_smoke"}\n'
             (package / "stasis.json").write_bytes(packaged_manifest)
             packaged = dict(manifest)
+            packaged["project_configuration"] = self.project_configuration()
             packaged["desktop_package"] = self.desktop_package_receipt(
                 packaged_manifest
             )
@@ -225,7 +254,15 @@ class ReleaseProvenanceTests(unittest.TestCase):
             self.assertIn("does not exactly match", mismatch.stderr)
 
             (package / "stasis_provenance.json").write_text(
-                json.dumps(manifest), encoding="utf-8"
+                json.dumps(
+                    manifest
+                    | {
+                        "project_configuration": self.project_configuration(
+                            "android-arm64"
+                        )
+                    }
+                ),
+                encoding="utf-8",
             )
             missing_receipt = subprocess.run(
                 command, check=False, capture_output=True, text=True
@@ -254,11 +291,15 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 destination.parent.mkdir(parents=True)
                 source.write_bytes(template)
                 receipt = {
+                    "schema": "stasis.mobile_package.v2",
                     "target": "android-arm64",
                     "name": "demo",
                     "package_id": "com.example.demo",
                     "network": mode == "network",
                     "network_client": mode == "network_client",
+                    "project_configuration": self.project_configuration(
+                        "android-arm64"
+                    ),
                 }
                 (package / "stasis_mobile_package.json").write_text(
                     json.dumps(receipt), encoding="utf-8"
@@ -312,14 +353,36 @@ class ReleaseProvenanceTests(unittest.TestCase):
                         for path in (source, activity_source)
                     },
                 }
-                verify_mobile_shells(Parser(), release, package, manifest)
+                project_configuration = self.project_configuration("android-arm64")
+                verify_mobile_shells(
+                    Parser(), release, package, manifest, project_configuration
+                )
+                mismatched_configuration = self.project_configuration("web")
+                receipt["project_configuration"] = mismatched_configuration
+                (package / "stasis_mobile_package.json").write_text(
+                    json.dumps(receipt), encoding="utf-8"
+                )
+                with self.assertRaisesRegex(ValueError, "target differs from receipt target"):
+                    verify_mobile_shells(
+                        Parser(),
+                        release,
+                        package,
+                        manifest,
+                        mismatched_configuration,
+                    )
+                receipt["project_configuration"] = project_configuration
+                (package / "stasis_mobile_package.json").write_text(
+                    json.dumps(receipt), encoding="utf-8"
+                )
                 destination.write_bytes(
                     expected.replace(
                         'android:exported="true"', 'android:exported="false"'
                     ).encode("utf-8")
                 )
                 with self.assertRaisesRegex(ValueError, "does not match release transform"):
-                    verify_mobile_shells(Parser(), release, package, manifest)
+                    verify_mobile_shells(
+                        Parser(), release, package, manifest, project_configuration
+                    )
 
     def test_desktop_network_artifact_hashes_are_exact_and_complete(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -889,7 +952,15 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 json.dumps(manifest), encoding="utf-8"
             )
             (package / "stasis_provenance.json").write_text(
-                json.dumps(manifest), encoding="utf-8"
+                json.dumps(
+                    manifest
+                    | {
+                        "project_configuration": self.project_configuration(
+                            "android-arm64"
+                        )
+                    }
+                ),
+                encoding="utf-8",
             )
             (package / "runtime/stasis_graphics.c").write_bytes(runtime)
             (release / "mobile/shells/common/main.c").write_bytes(common_shell)
@@ -902,6 +973,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             (package / "stasis_mobile_package.json").write_text(
                 json.dumps(
                     {
+                        "schema": "stasis.mobile_package.v2",
                         "target": "android-arm64",
                         "name": "demo",
                         "app_name": "Demo App",
@@ -909,6 +981,9 @@ class ReleaseProvenanceTests(unittest.TestCase):
                         "android_orientation": "sensorPortrait",
                         "android_version_code": "7",
                         "android_version_name": "2.1.0",
+                        "project_configuration": self.project_configuration(
+                            "android-arm64"
+                        ),
                     }
                 ),
                 encoding="utf-8",
@@ -933,6 +1008,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             ]
             self.assertEqual(subprocess.run(command, check=False).returncode, 0)
             network_client_receipt = {
+                "schema": "stasis.mobile_package.v2",
                 "target": "android-arm64",
                 "name": "demo",
                 "app_name": "Demo App",
@@ -941,6 +1017,9 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 "android_version_code": "7",
                 "android_version_name": "2.1.0",
                 "network_client": True,
+                "project_configuration": self.project_configuration(
+                    "android-arm64"
+                ),
             }
             (package / "stasis_mobile_package.json").write_text(
                 json.dumps(network_client_receipt), encoding="utf-8"
@@ -976,7 +1055,14 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 json.dumps(legacy), encoding="utf-8"
             )
             (package / "stasis_provenance.json").write_text(
-                json.dumps(legacy), encoding="utf-8"
+                json.dumps(
+                    legacy
+                    | {
+                        "project_configuration": self.project_configuration(
+                            "android-arm64"
+                        )
+                    }
+                ),
             )
             legacy_failed = subprocess.run(command, check=False, capture_output=True, text=True)
             self.assertNotEqual(legacy_failed.returncode, 0)
@@ -987,7 +1073,14 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 json.dumps(unsupported), encoding="utf-8"
             )
             (package / "stasis_provenance.json").write_text(
-                json.dumps(unsupported), encoding="utf-8"
+                json.dumps(
+                    unsupported
+                    | {
+                        "project_configuration": self.project_configuration(
+                            "android-arm64"
+                        )
+                    }
+                ),
             )
             contract_failed = subprocess.run(
                 command, check=False, capture_output=True, text=True
@@ -1000,7 +1093,14 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 json.dumps(numeric_type), encoding="utf-8"
             )
             (package / "stasis_provenance.json").write_text(
-                json.dumps(numeric_type), encoding="utf-8"
+                json.dumps(
+                    numeric_type
+                    | {
+                        "project_configuration": self.project_configuration(
+                            "android-arm64"
+                        )
+                    }
+                ),
             )
             numeric_failed = subprocess.run(
                 command, check=False, capture_output=True, text=True
@@ -1011,7 +1111,14 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 json.dumps(manifest), encoding="utf-8"
             )
             (package / "stasis_provenance.json").write_text(
-                json.dumps(manifest), encoding="utf-8"
+                json.dumps(
+                    manifest
+                    | {
+                        "project_configuration": self.project_configuration(
+                            "android-arm64"
+                        )
+                    }
+                ),
             )
             (release / "mobile/shells/android/main.c").write_bytes(b"substituted shell\n")
             shell_failed = subprocess.run(command, check=False, capture_output=True, text=True)

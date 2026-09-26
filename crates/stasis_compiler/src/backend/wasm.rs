@@ -10,7 +10,7 @@ use crate::backend::compile_analysis::{
     ConstantValue,
 };
 use crate::backend::emit::hash_global_path;
-use crate::backend::program_snapshot::ProgramSnapshot;
+use crate::backend::program_snapshot::{ProgramSnapshot, ProjectConfiguration};
 use crate::backend::reachability::matches_root;
 use crate::backend::state_layout::{
     build_state_layout, collection_field_element_count, is_replay_host_or_presentation_path,
@@ -64,6 +64,7 @@ pub struct WasmProcess {
     global_types: BTreeMap<String, TypeId>,
     imported_symbols: BTreeSet<String>,
     program_snapshot: Option<ProgramSnapshot>,
+    project_configuration: Option<ProjectConfiguration>,
     replay_state_snapshot_supported: bool,
 }
 
@@ -91,6 +92,13 @@ impl WasmProcess {
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
         self.compiler.upsert_file(path, content);
+    }
+
+    pub fn set_project_configuration(&mut self, configuration: ProjectConfiguration) {
+        self.compiler
+            .set_project_settings_api_enabled(configuration.generated_api_enabled);
+        self.project_configuration = Some(configuration);
+        self.program_snapshot = None;
     }
 
     pub fn host_exports(&self) -> crate::host_exports::HostExports {
@@ -264,6 +272,7 @@ impl WasmProcess {
                 &self.required_roots,
                 &function_hirs,
                 analysis,
+                self.project_configuration.clone(),
             )
             .map_err(CompileError::Backend)?,
         );

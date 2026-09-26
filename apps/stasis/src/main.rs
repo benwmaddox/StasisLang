@@ -21,8 +21,10 @@ use stasis::{
     mobile_aot_function_for, packaged_replay_compatibility, replay_snapshot_bridge_can_emit,
     run_jit_tests_in_directory_with_session,
     run_play_in_process_with_input_script_window_title_and_profile,
-    run_play_in_process_with_replay, run_self_host_aot_cli_with_options, run_with_default_backend,
-    run_with_real_backend, write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot,
+    run_play_in_process_with_input_script_window_title_profile_and_project_configuration,
+    run_play_in_process_with_replay, run_play_in_process_with_replay_and_project_configuration,
+    run_self_host_aot_cli_with_options, run_with_default_backend, run_with_real_backend,
+    write_mobile_aot_bindings_source_with_profile_and_assets_and_snapshot,
     write_mobile_aot_replay_identity, PlayProfileConfig, PlayReplayConfig, RunnerConfig,
     StasisTestRunSession,
 };
@@ -140,6 +142,7 @@ struct ResolvedPlayLaunch {
     watch_file: PathBuf,
     watch_dir: PathBuf,
     window_title: Option<String>,
+    project_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -771,16 +774,8 @@ fn resolve_existing_play_directory(path: &Path, launch_dir: &Path) -> Result<Pat
 
 fn load_play_manifest_details(root: &Path) -> Result<(PathBuf, Option<String>), String> {
     let manifest_path = root.join("stasis.json");
-    let source = fs::read_to_string(&manifest_path)
-        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
-    let manifest: serde_json::Value = serde_json::from_str(&source)
-        .map_err(|error| format!("invalid {}: {error}", manifest_path.display()))?;
-    let entry = manifest
-        .get("entry")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| format!("{} has no non-empty entry", manifest_path.display()))?;
-    let entry = Path::new(entry);
+    let (entry, name) = toolchain_cli::load_manifest_entry_and_name(root)?;
+    let entry = Path::new(&entry);
     if entry.is_absolute() {
         return Err(format!(
             "{} entry must be project-relative",
@@ -798,13 +793,7 @@ fn load_play_manifest_details(root: &Path) -> Result<(PathBuf, Option<String>), 
             canonical_root.display()
         ));
     }
-    let title = manifest
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    Ok((resolved_entry, title))
+    Ok((resolved_entry, Some(name)))
 }
 
 fn resolve_play_launch(
@@ -825,7 +814,8 @@ fn resolve_play_launch(
     let (watch_file, window_title) = if let Some(entry) = explicit_entry {
         let title = manifest_root
             .as_deref()
-            .and_then(|root| load_play_manifest_details(root).ok())
+            .map(load_play_manifest_details)
+            .transpose()?
             .and_then(|(_, title)| title);
         (entry, title)
     } else {
@@ -845,16 +835,28 @@ fn resolve_play_launch(
     {
         Some(path) => resolve_existing_play_directory(path, launch_dir)?,
         None => manifest_root
+            .clone()
             .or_else(|| watch_file.parent().map(Path::to_path_buf))
             .ok_or_else(|| format!("play entry has no parent: {}", watch_file.display()))?
             .canonicalize()
             .map_err(|error| format!("failed to resolve play watch directory: {error}"))?,
     };
 
+    let project_root = manifest_root
+        .map(|root| {
+            root.canonicalize().map_err(|error| {
+                format!(
+                    "failed to resolve play project root {}: {error}",
+                    root.display()
+                )
+            })
+        })
+        .transpose()?;
     Ok(ResolvedPlayLaunch {
         watch_file,
         watch_dir,
         window_title,
+        project_root,
     })
 }
 
@@ -983,7 +985,41 @@ fn try_run_play_subcommand() -> Option<i32> {
         .clone()
         .map(PlayReplayConfig::Record)
         .or_else(|| parsed.replay.clone().map(PlayReplayConfig::Replay));
-    let play_result = if let Some(replay) = replay {
+    let project_configuration = launch
+        .project_root
+        .as_deref()
+        .map(|root| {
+            toolchain_cli::load_project_compilation_configuration(
+                root,
+                toolchain_cli::project_settings::CanonicalTarget::host(),
+            )
+        })
+        .transpose();
+    let project_configuration = match project_configuration {
+        Ok(value) => value,
+        Err(message) => {
+            eprintln!("{message}");
+            return Some(1);
+        }
+    };
+    let play_result = if let (Some(replay), Some(configuration)) =
+        (replay.clone(), project_configuration.clone())
+    {
+        run_play_in_process_with_replay_and_project_configuration(
+            &launch.watch_file,
+            Some(&launch.watch_dir),
+            parsed.data_bind_json.as_deref(),
+            parsed.data_bind_struct_meta.as_deref(),
+            parsed.input_script.as_deref(),
+            parsed.tick_sleep_micros,
+            parsed.ticks,
+            launch.window_title.as_deref(),
+            profile,
+            None,
+            replay,
+            configuration,
+        )
+    } else if let Some(replay) = replay {
         run_play_in_process_with_replay(
             &launch.watch_file,
             Some(&launch.watch_dir),
@@ -996,6 +1032,19 @@ fn try_run_play_subcommand() -> Option<i32> {
             profile,
             None,
             replay,
+        )
+    } else if let Some(configuration) = project_configuration {
+        run_play_in_process_with_input_script_window_title_profile_and_project_configuration(
+            &launch.watch_file,
+            Some(&launch.watch_dir),
+            parsed.data_bind_json.as_deref(),
+            parsed.data_bind_struct_meta.as_deref(),
+            parsed.input_script.as_deref(),
+            parsed.tick_sleep_micros,
+            parsed.ticks,
+            launch.window_title.as_deref(),
+            profile,
+            configuration,
         )
     } else {
         run_play_in_process_with_input_script_window_title_and_profile(
@@ -1890,11 +1939,35 @@ fn write_mobile_aot_engine_bundle(
     profile_warmup_frames: u32,
     profile_sample_frames: u32,
 ) -> Result<MobileAotBundleSummary, String> {
+    let canonical_target = match target {
+        MobileAotTarget::AndroidArm64 => {
+            toolchain_cli::project_settings::CanonicalTarget::AndroidArm64
+        }
+        MobileAotTarget::AndroidX86_64 => {
+            toolchain_cli::project_settings::CanonicalTarget::AndroidX86_64
+        }
+        MobileAotTarget::IosArm64 => toolchain_cli::project_settings::CanonicalTarget::IosArm64,
+    };
+    let project_settings = if project_dir.join("stasis.json").is_file() {
+        toolchain_cli::load_project_configuration(project_dir, canonical_target)?
+    } else {
+        // Internal/mobile compiler callers historically accepted a source directory without a
+        // project manifest. Preserve that non-project API while still stamping an exact target
+        // into the bundle; only manifest v2 projects receive the generated guest settings API.
+        toolchain_cli::resolve_manifestless_project_configuration(canonical_target)?
+    };
     let mut process = AotProcess::with_optimization_profile(AotOptimizationProfile::SpeedAndSize);
+    process.set_project_configuration(project_settings.configuration.clone());
     process.set_reachability_policy(ReachabilityPolicy::Release);
     process.set_import_base_dir(project_dir);
     process.set_target(target.aot_target());
     process.set_profile_functions(profile_functions.iter().cloned())?;
+    if !project_settings.generated_source.is_empty() {
+        process.upsert_file(
+            toolchain_cli::project_settings::GENERATED_SETTINGS_FILE,
+            project_settings.generated_source.clone(),
+        );
+    }
     let sources = collect_mobile_aot_sources(project_dir, entry_file)?;
     for (path, source) in &sources {
         process.upsert_file(path.clone(), source.clone());
@@ -1987,6 +2060,7 @@ fn write_mobile_aot_engine_bundle(
         cmake_file.as_deref(),
         replay_state_snapshot.is_some(),
         portable_replay_compatibility,
+        toolchain_cli::project_settings::provenance_summary(&project_settings.configuration),
         output_dir,
     )?;
     Ok(MobileAotBundleSummary {
@@ -2204,6 +2278,7 @@ fn write_mobile_aot_package_manifest(
     cmake_file: Option<&Path>,
     replay_state_snapshot_supported: bool,
     portable_replay_compatibility: serde_json::Value,
+    project_configuration: serde_json::Value,
     output_dir: &Path,
 ) -> Result<PathBuf, String> {
     let manifest_functions = engine_manifest["functions"]
@@ -2235,10 +2310,11 @@ fn write_mobile_aot_package_manifest(
             serde_json::Value::String("canonical_bytes".to_string());
     }
     let mut manifest = serde_json::json!({
-        "schema": "stasis.mobile_aot_bundle.v1",
+        "schema": "stasis.mobile_aot_bundle.v2",
         "render_contract_version": 8,
         "render_construction_lifecycle_version": engine_manifest["render_construction_lifecycle_version"],
         "target": target.as_str(),
+        "project_configuration": project_configuration,
         "engine_manifest": mobile_aot_relative_path(output_dir, engine_manifest_path)?,
         "symbols_header": mobile_aot_relative_path(output_dir, symbols_header)?,
         "host_exports_header": "stasis_host_exports.h",
@@ -2345,12 +2421,30 @@ fn try_run_aot_cli_subcommand() -> Option<i32> {
         }
     }
     let _ = parsed.quality_gate;
-    let result = run_self_host_aot_cli_with_options(
-        &parsed.project_dir,
-        &parsed.output_exe,
-        parsed.summary_file.as_deref(),
-        parsed.entry_file.as_deref(),
-    );
+    let result = if parsed.project_dir.join("stasis.json").is_file() {
+        let configuration = toolchain_cli::load_project_compilation_configuration(
+            &parsed.project_dir,
+            toolchain_cli::project_settings::CanonicalTarget::host(),
+        );
+        configuration.and_then(|configuration| {
+            stasis::run_self_host_aot_cli_with_project_configuration(
+                &parsed.project_dir,
+                &parsed.output_exe,
+                parsed.summary_file.as_deref(),
+                parsed.entry_file.as_deref(),
+                None,
+                None,
+                configuration,
+            )
+        })
+    } else {
+        run_self_host_aot_cli_with_options(
+            &parsed.project_dir,
+            &parsed.output_exe,
+            parsed.summary_file.as_deref(),
+            parsed.entry_file.as_deref(),
+        )
+    };
 
     match result {
         Ok(summary) => {
@@ -2546,7 +2640,7 @@ mod tests {
         fs::create_dir_all(&nested_dir).expect("create project directories");
         fs::write(
             project.join("stasis.json"),
-            r#"{"manifest_version":1,"name":"Manifest Game","entry":"src/main.stasis"}"#,
+            r#"{"manifest_version":1,"name":"Manifest Game","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
         )
         .expect("write manifest");
         fs::write(
@@ -2569,6 +2663,10 @@ mod tests {
             project.canonicalize().expect("canonical project")
         );
         assert_eq!(resolved.window_title.as_deref(), Some("Manifest Game"));
+        assert_eq!(
+            resolved.project_root,
+            Some(project.canonicalize().expect("canonical project root"))
+        );
         fs::remove_dir_all(&project).ok();
     }
 
@@ -2583,7 +2681,7 @@ mod tests {
         fs::create_dir_all(&source_dir).expect("create source directory");
         fs::write(
             project.join("stasis.json"),
-            r#"{"manifest_version":1,"name":"Explicit Game","entry":"src/main.stasis"}"#,
+            r#"{"manifest_version":1,"name":"Explicit Game","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
         )
         .expect("write manifest");
         fs::write(
@@ -2599,6 +2697,10 @@ mod tests {
             project.canonicalize().expect("canonical project")
         );
         assert_eq!(resolved.window_title.as_deref(), Some("Explicit Game"));
+        assert_eq!(
+            resolved.project_root,
+            Some(project.canonicalize().expect("canonical project root"))
+        );
         fs::remove_dir_all(&project).ok();
     }
 
@@ -3817,7 +3919,7 @@ function frame_width(): i32 { return 360; }
         )
         .expect("parse package manifest");
         assert_eq!(package_manifest["target"], "ios-arm64");
-        assert_eq!(package_manifest["schema"], "stasis.mobile_aot_bundle.v1");
+        assert_eq!(package_manifest["schema"], "stasis.mobile_aot_bundle.v2");
         assert_eq!(
             package_manifest["engine_manifest"],
             "engine_bundle_manifest.json"

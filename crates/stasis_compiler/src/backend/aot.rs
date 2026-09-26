@@ -11,6 +11,7 @@ use crate::backend::hot_render::{
 };
 use crate::backend::program_snapshot::{
     ProgramArtifactMapping, ProgramFunction, ProgramReplayCompatibility, ProgramSnapshot,
+    ProjectConfiguration,
 };
 use crate::backend::reachability::matches_root;
 use crate::backend::state_layout::{
@@ -61,6 +62,7 @@ pub struct AotProcess {
     referenced_string_literals: BTreeMap<FunctionId, BTreeSet<i32>>,
     collection_max_lengths: BTreeMap<String, i32>,
     program_snapshot: Option<ProgramSnapshot>,
+    project_configuration: Option<ProjectConfiguration>,
     last_failed_source_diagnostic: Option<crate::SourceDiagnostic>,
     required_emit_roots: Vec<String>,
     profile_function_names: BTreeSet<String>,
@@ -108,6 +110,7 @@ impl AotProcess {
             referenced_string_literals: BTreeMap::new(),
             collection_max_lengths: BTreeMap::new(),
             program_snapshot: None,
+            project_configuration: None,
             last_failed_source_diagnostic: None,
             required_emit_roots: Vec::new(),
             profile_function_names: BTreeSet::new(),
@@ -116,6 +119,13 @@ impl AotProcess {
 
     pub fn upsert_file(&mut self, path: impl Into<String>, content: impl Into<String>) {
         self.compiler.upsert_file(path, content);
+    }
+
+    pub fn set_project_configuration(&mut self, configuration: ProjectConfiguration) {
+        self.compiler
+            .set_project_settings_api_enabled(configuration.generated_api_enabled);
+        self.project_configuration = Some(configuration);
+        self.program_snapshot = None;
     }
 
     pub fn set_import_base_dir(&mut self, path: impl Into<PathBuf>) {
@@ -244,6 +254,7 @@ impl AotProcess {
                     &self.required_emit_roots,
                     &function_hirs,
                     next_cache,
+                    self.project_configuration.clone(),
                 )
                 .map_err(crate::compiler::CompileError::Backend)?,
             );
