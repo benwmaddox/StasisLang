@@ -1611,6 +1611,9 @@ fn command_configuration_target(command: &ToolchainCommand) -> Option<CanonicalT
     match command {
         ToolchainCommand::Package { target, .. } => Some(target.canonical()),
         ToolchainCommand::PackageMobile { target, .. } => Some(target.package_target().canonical()),
+        ToolchainCommand::Symbol { command } if !command.is_read_only() => {
+            Some(CanonicalTarget::host())
+        }
         ToolchainCommand::Check
         | ToolchainCommand::Test { .. }
         | ToolchainCommand::Validate { .. }
@@ -9338,6 +9341,7 @@ fn validate_semantic_files(
 ) -> Result<(), String> {
     let files = workshop_reachable_files(files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
+    configure_jit_project(workspace, &mut jit)?;
     jit.set_project_root(display_path(&workspace.root))?;
     jit.set_local_runtime_helper_trampolines(true);
     jit.set_required_emit_roots(&[
