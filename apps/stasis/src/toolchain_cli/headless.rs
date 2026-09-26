@@ -762,6 +762,14 @@ mod tests {
         Workspace {
             root,
             manifest: super::super::ProjectManifest::new("headless_test".to_string()),
+            resolved_settings: Some(
+                super::super::project_settings::resolve(
+                    None,
+                    super::super::project_settings::CanonicalTarget::host(),
+                    true,
+                )
+                .expect("resolve test project settings"),
+            ),
         }
     }
 

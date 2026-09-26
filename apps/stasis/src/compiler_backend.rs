@@ -4,7 +4,7 @@ use stasis_assets::{prepare_asset_bundle, sha256_bytes, DEFAULT_ASSET_MANIFEST_P
 use stasis_compiler::backend::aot::{AotEngineBundle, AotProcess};
 use stasis_compiler::backend::jit::{JitEnginePackage, JitProcess};
 use stasis_compiler::backend::program_snapshot::{
-    ProgramReplayStateEntry, ProgramReplayStateSnapshot, ProgramSnapshot,
+    ProgramReplayStateEntry, ProgramReplayStateSnapshot, ProgramSnapshot, ProjectConfiguration,
 };
 use stasis_compiler::backend::state_layout::{
     aot_storage_symbol, AotStorageSymbolKind, StateLayout,
@@ -45,6 +45,7 @@ pub struct IncrementalCompilerBackend {
     last_program_snapshot: Option<ProgramSnapshot>,
     last_jit_source_diagnostic: Option<stasis_compiler::SourceDiagnostic>,
     last_aot_source_diagnostic: Option<stasis_compiler::SourceDiagnostic>,
+    project_configuration: Option<ProjectConfiguration>,
 }
 
 fn stable_absolute_path(path: &Path) -> PathBuf {
@@ -548,6 +549,14 @@ pub struct SelfHostedAotCliOptions {
     entry_file: Option<PathBuf>,
     desktop_network: Option<DesktopNetworkLink>,
     artifact_root: Option<PathBuf>,
+    project_configuration: Option<ProjectCompilationConfiguration>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectCompilationConfiguration {
+    pub configuration: ProjectConfiguration,
+    pub generated_path: String,
+    pub generated_source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -579,6 +588,7 @@ impl SelfHostedAotCliOptions {
             entry_file,
             desktop_network: None,
             artifact_root: None,
+            project_configuration: None,
         }
     }
 
@@ -598,6 +608,14 @@ impl SelfHostedAotCliOptions {
             include_dir,
             mode,
         });
+        self
+    }
+
+    fn with_project_configuration(
+        mut self,
+        project_configuration: ProjectCompilationConfiguration,
+    ) -> Self {
+        self.project_configuration = Some(project_configuration);
         self
     }
 }
@@ -667,6 +685,7 @@ impl IncrementalCompilerBackend {
             last_program_snapshot: None,
             last_jit_source_diagnostic: None,
             last_aot_source_diagnostic: None,
+            project_configuration: None,
         }
     }
 
@@ -720,6 +739,7 @@ impl IncrementalCompilerBackend {
             last_program_snapshot: None,
             last_jit_source_diagnostic: None,
             last_aot_source_diagnostic: None,
+            project_configuration: None,
         }
     }
 
@@ -746,7 +766,22 @@ impl IncrementalCompilerBackend {
             last_program_snapshot: None,
             last_jit_source_diagnostic: None,
             last_aot_source_diagnostic: None,
+            project_configuration: None,
         }
+    }
+
+    pub fn set_project_configuration(
+        &mut self,
+        configuration: ProjectConfiguration,
+        generated_path: String,
+        generated_source: String,
+    ) {
+        self.project_configuration = Some(configuration.clone());
+        if !generated_source.is_empty() {
+            self.source_by_path.insert(generated_path, generated_source);
+        }
+        self.jit_process.set_project_configuration(configuration);
+        self.jit_process_seeded = false;
     }
 }
 
@@ -1498,6 +1533,10 @@ impl IncrementalCompilerBackend {
                         .to_string_lossy(),
                 )
                 .expect("validated backend root remains valid");
+            if let Some(configuration) = self.project_configuration.as_ref() {
+                self.jit_process
+                    .set_project_configuration(configuration.clone());
+            }
             for (path, source) in &self.source_by_path {
                 self.jit_process.upsert_file(path.clone(), source.clone());
             }
@@ -1563,6 +1602,9 @@ impl IncrementalCompilerBackend {
                 .ok_or_else(|| "compiler project root is not initialized".to_string())?
                 .to_string_lossy(),
         )?;
+        if let Some(configuration) = self.project_configuration.as_ref() {
+            process.set_project_configuration(configuration.clone());
+        }
         for (path, source) in &self.source_by_path {
             process.upsert_file(path.clone(), source.clone());
         }
@@ -9012,6 +9054,13 @@ fn run_self_host_aot_cli_with_backend_and_options(
     } else {
         backend.project_root = Some(project_root);
     }
+    if let Some(configuration) = options.project_configuration.as_ref() {
+        backend.set_project_configuration(
+            configuration.configuration.clone(),
+            configuration.generated_path.clone(),
+            configuration.generated_source.clone(),
+        );
+    }
     let changed_files = collect_stasis_files_for_self_host_project_with_entry(
         project_dir,
         options.entry_file.as_deref(),
@@ -9162,6 +9211,31 @@ pub fn run_self_host_aot_cli_with_options(
             entry_file.map(PathBuf::from),
         ),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run_self_host_aot_cli_with_project_configuration(
+    project_dir: &Path,
+    output_exe: &Path,
+    summary_file_path: Option<&Path>,
+    entry_file: Option<&Path>,
+    artifact_root: Option<&Path>,
+    desktop_network: Option<(&Path, &Path, DesktopNetworkMode)>,
+    project_configuration: ProjectCompilationConfiguration,
+) -> Result<SelfHostedAotCliSummary, String> {
+    let mut options = SelfHostedAotCliOptions::new(
+        summary_file_path.map(PathBuf::from),
+        entry_file.map(PathBuf::from),
+    )
+    .with_project_configuration(project_configuration);
+    if let Some(artifact_root) = artifact_root {
+        options = options.with_artifact_root(artifact_root.to_path_buf());
+    }
+    if let Some((library, include_dir, mode)) = desktop_network {
+        options =
+            options.with_desktop_network(library.to_path_buf(), include_dir.to_path_buf(), mode);
+    }
+    run_self_host_aot_cli_with_cli_options(project_dir, output_exe, options)
 }
 
 fn default_self_host_aot_artifact_root(project_dir: &Path, output_exe: &Path) -> PathBuf {

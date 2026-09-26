@@ -352,6 +352,7 @@ pub struct Compiler {
     module_resolution: ModuleResolutionIndex,
     entry_roots: BTreeSet<String>,
     indexed_file_hashes: BTreeMap<String, u64>,
+    project_settings_api_enabled: bool,
 }
 
 impl Compiler {
@@ -440,6 +441,10 @@ impl Compiler {
             .iter()
             .map(|file| (file.path.clone(), file.original_content.clone()))
             .collect();
+        let synthetic_import = (self.project_settings_api_enabled
+            && available
+                .contains_key(crate::frontend::module_graph::GENERATED_PROJECT_SETTINGS_PATH))
+        .then_some(crate::frontend::module_graph::GENERATED_PROJECT_SETTINGS_PATH);
         let project_root = self.project_root.clone();
         let mut confined_root = None;
         let allow_graphics_test_seams = cfg!(test)
@@ -473,6 +478,7 @@ impl Compiler {
                 confined_root.as_ref().unwrap().read_source(path)
             },
             allow_graphics_test_seams,
+            synthetic_import,
         );
         let (mut graph, loaded_sources) = match result {
             Ok(result) => result,
@@ -751,6 +757,29 @@ impl Compiler {
                         || body_changed
                         || reverse_invalidated.contains(&self.files[file_id].path),
                 });
+            }
+        }
+        if self.project_settings_api_enabled {
+            let generated_path = crate::frontend::module_graph::GENERATED_PROJECT_SETTINGS_PATH;
+            if let Some(function) = self.functions.iter().find(|function| {
+                let path = &self.files[function.file_id as usize].path;
+                path != generated_path
+                    && (function.name == "project_target"
+                        || function.name.starts_with("project_setting_"))
+            }) {
+                let path = self.files[function.file_id as usize].path.clone();
+                let message = format!(
+                    "function '{}' uses a name reserved by the manifest v2 project settings API",
+                    function.name
+                );
+                self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+                    path,
+                    function.signature_range.start as usize,
+                    function.signature_range.end as usize,
+                    function.name.clone(),
+                    message.clone(),
+                ));
+                return Err(CompileError::Frontend(message));
             }
         }
         let mut host_names = BTreeSet::new();
@@ -1230,6 +1259,10 @@ impl Compiler {
     pub fn set_analysis_required_roots(&mut self, roots: &[String]) {
         self.analysis_required_roots.clear();
         self.analysis_required_roots.extend_from_slice(roots);
+    }
+
+    pub(crate) fn set_project_settings_api_enabled(&mut self, enabled: bool) {
+        self.project_settings_api_enabled = enabled;
     }
 
     pub fn types(&self) -> &TypeTable {

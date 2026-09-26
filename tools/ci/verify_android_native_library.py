@@ -111,10 +111,21 @@ def audit(
         raise AuditError(f"Android llvm-readelf is missing: {readelf}")
 
     bundle = _load_json(bundle_manifest_path, "mobile AOT bundle manifest")
-    if bundle.get("schema") != "stasis.mobile_aot_bundle.v1":
-        raise AuditError(f"unexpected mobile AOT bundle schema: {bundle.get('schema')!r}")
+    schema = bundle.get("schema")
+    if schema not in ("stasis.mobile_aot_bundle.v1", "stasis.mobile_aot_bundle.v2"):
+        raise AuditError(f"unexpected mobile AOT bundle schema: {schema!r}")
     if bundle.get("target") != "android-arm64":
         raise AuditError(f"mobile AOT bundle target must be android-arm64, got {bundle.get('target')!r}")
+    project_configuration = bundle.get("project_configuration")
+    if schema == "stasis.mobile_aot_bundle.v2" and project_configuration is None:
+        raise AuditError("mobile AOT bundle v2 is missing project configuration")
+    if project_configuration is not None and (not isinstance(project_configuration, dict) \
+            or set(project_configuration) != {"target", "settings_sha256", "settings"} \
+            or project_configuration.get("target") != bundle.get("target") \
+            or not isinstance(project_configuration.get("settings_sha256"), str) \
+            or re.fullmatch(r"[0-9a-f]{64}", project_configuration["settings_sha256"]) is None \
+            or not isinstance(project_configuration.get("settings"), dict)):
+        raise AuditError("mobile AOT bundle project configuration is malformed")
     aot_root = bundle_manifest_path.parent
     engine_path = _relative_file(aot_root, bundle.get("engine_manifest"), "engine_manifest")
     bindings_path = _relative_file(aot_root, bundle.get("bindings_source"), "bindings_source")

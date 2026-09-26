@@ -74,7 +74,7 @@ game window.
 
 ```json
 {
-  "manifest_version": 1,
+  "manifest_version": 2,
   "name": "brick_game",
   "entry": "src/main.stasis",
   "tests": "tests",
@@ -92,6 +92,51 @@ game window.
   }
 }
 ```
+
+Manifest v1 remains readable for compatibility. Manifest v2 is strict: unknown fields and duplicate
+JSON keys (including nested duplicates) are errors. v2 may declare a versioned `settings` object:
+
+```json
+"settings": {
+  "schema_version": 1,
+  "definitions": {
+    "channel": {
+      "type": "string",
+      "required": true,
+      "default": "desktop",
+      "allowed": ["desktop", "web", "mobile"]
+    },
+    "touch_controls": { "type": "bool", "default": false },
+    "ui_scale": { "type": "number", "default": 1.0, "minimum": 0.5, "maximum": 2.0 }
+  },
+  "targets": {
+    "web": { "channel": "web" },
+    "android-arm64": { "channel": "mobile", "touch_controls": true },
+    "ios-arm64": { "channel": "mobile", "touch_controls": true }
+  }
+}
+```
+
+Definitions accept only typed `string`, `bool`, or bounded `number` values. String definitions may
+use `allowed`; number definitions must provide finite `minimum` and `maximum`. A required setting must
+have a default or an override for the exact selected target. Overrides do not inherit across target
+families. Canonical targets are `web`, `windows-x86_64`, `windows-arm64`, `linux-x86_64`,
+`linux-arm64`, `macos-x86_64`, `macos-arm64`, `android-arm64`, `android-x86_64`, and `ios-arm64`.
+Host commands resolve the exact OS/architecture target; package commands resolve their explicit target.
+
+Guest code reads the immutable snapshot through the compiler-owned `project_target()` and generated
+typed accessors such as `project_setting_channel()`,
+`project_setting_touch_controls()`, and `project_setting_ui_scale()`.
+The same snapshot is used by check, test, run/play/live/replay/record, JIT, AOT, Web, desktop and mobile
+packaging. `.stasis/generated/__stasis_project_settings_v1.stasis` is reserved in v2. Package provenance records
+only the canonical target, setting names/types, and deterministic SHA-256 digest—never setting values.
+Secret-like keys (`secret`, `password`, `credential`, `api_key`, `private_key`, `signing_key`, or
+`token`) are rejected. The machine-readable settings fragment schema is
+[`project_settings.schema.json`](project_settings.schema.json), and `samples/target_settings` is a
+complete cross-target example.
+The JSON Schema encodes type-specific fields and the secret-like key denylist. Runtime validation
+additionally enforces finite ordered numeric bounds, `allowed` membership, and the 1024 UTF-8-byte
+string limit (JSON Schema string lengths count Unicode characters rather than bytes).
 
 The optional `web.loading_font` value must identify an existing `.ttf`, `.otf`, `.woff`, or
 `.woff2` file under the project `assets/` directory. Both `/assets/...` and `assets/...` forms are

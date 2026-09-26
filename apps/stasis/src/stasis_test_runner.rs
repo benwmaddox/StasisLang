@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use stasis_compiler::backend::jit::JitProcess;
+use stasis_compiler::backend::program_snapshot::ProjectConfiguration;
 use stasis_compiler::frontend::indexer::hash_text;
 use stasis_compiler::frontend::parser::{
     parse_top_level_test_declarations, rewrite_top_level_test_declarations, ParsedTestDeclaration,
@@ -35,6 +36,8 @@ pub fn run_jit_tests_in_directory(root: &Path) -> Result<StasisTestRunSummary, S
 pub struct StasisTestRunSession {
     by_path: BTreeMap<PathBuf, CachedTestProcess>,
     last_active_path: Option<PathBuf>,
+    project_configuration: Option<ProjectConfiguration>,
+    generated_source: Option<(String, String)>,
 }
 
 struct CachedTestProcess {
@@ -48,7 +51,27 @@ impl StasisTestRunSession {
         Self {
             by_path: BTreeMap::new(),
             last_active_path: None,
+            project_configuration: None,
+            generated_source: None,
         }
+    }
+
+    pub fn set_project_configuration(
+        &mut self,
+        configuration: ProjectConfiguration,
+        generated_path: String,
+        generated_source: String,
+    ) {
+        let next_generated_source =
+            (!generated_source.is_empty()).then_some((generated_path, generated_source));
+        let changed = self.project_configuration.as_ref() != Some(&configuration)
+            || self.generated_source != next_generated_source;
+        if changed {
+            self.by_path.clear();
+            self.last_active_path = None;
+        }
+        self.project_configuration = Some(configuration);
+        self.generated_source = next_generated_source;
     }
 }
 
@@ -154,6 +177,12 @@ pub fn run_jit_tests_in_directory_with_project_root_session_and_validator(
         } else {
             let mut process = JitProcess::new();
             process.set_project_root(project_root.to_string_lossy())?;
+            if let Some(configuration) = session.project_configuration.as_ref() {
+                process.set_project_configuration(configuration.clone());
+            }
+            if let Some((path, source)) = session.generated_source.as_ref() {
+                process.upsert_file(path.clone(), source.clone());
+            }
             session.by_path.insert(
                 file_path.clone(),
                 CachedTestProcess {

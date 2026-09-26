@@ -57,8 +57,13 @@ class AndroidNativeLibraryAuditTests(unittest.TestCase):
             json.dumps(engine), encoding="utf-8"
         )
         bundle = {
-            "schema": "stasis.mobile_aot_bundle.v1",
+            "schema": "stasis.mobile_aot_bundle.v2",
             "target": "android-arm64",
+            "project_configuration": {
+                "target": "android-arm64",
+                "settings_sha256": "0" * 64,
+                "settings": {},
+            },
             "engine_manifest": "engine_bundle_manifest.json",
             "bindings_source": "published_aot_bindings.c",
             "android_cmake_file": "published_aot_objects.cmake",
@@ -95,6 +100,26 @@ class AndroidNativeLibraryAuditTests(unittest.TestCase):
         self.assertEqual(evidence["test_id"], "IT-016")
         self.assertEqual(evidence["generated_objects"], 2)
         self.assertEqual(evidence["unresolved_stasis_symbols"], [])
+
+    @mock.patch.object(verifier, "_run_readelf")
+    def test_audit_rejects_project_configuration_target_mismatch(self, run_readelf):
+        run_readelf.side_effect = self.readelf_output
+        bundle = json.loads(self.bundle.read_text(encoding="utf-8"))
+        bundle["project_configuration"]["target"] = "android-x86_64"
+        self.bundle.write_text(json.dumps(bundle), encoding="utf-8")
+        with self.assertRaisesRegex(
+            verifier.AuditError, "project configuration is malformed"
+        ):
+            verifier.audit(self.library, self.bundle, self.link_map, self.readelf)
+
+    @mock.patch.object(verifier, "_run_readelf")
+    def test_legacy_v1_bundle_without_configuration_remains_readable(self, run_readelf):
+        run_readelf.side_effect = self.readelf_output
+        bundle = json.loads(self.bundle.read_text(encoding="utf-8"))
+        bundle["schema"] = "stasis.mobile_aot_bundle.v1"
+        bundle.pop("project_configuration")
+        self.bundle.write_text(json.dumps(bundle), encoding="utf-8")
+        verifier.audit(self.library, self.bundle, self.link_map, self.readelf)
 
     @mock.patch.object(verifier, "_run_readelf")
     def test_missing_manifest_object_names_the_link_map_gap(self, run_readelf):

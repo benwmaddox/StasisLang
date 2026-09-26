@@ -929,6 +929,14 @@ mod tests {
         let workspace = Workspace {
             root: root.clone(),
             manifest,
+            resolved_settings: Some(
+                super::super::project_settings::resolve(
+                    None,
+                    super::super::project_settings::CanonicalTarget::host(),
+                    true,
+                )
+                .expect("resolve test project settings"),
+            ),
         };
         let mut session = DapSession::new(workspace);
         let mut bytes = Vec::new();

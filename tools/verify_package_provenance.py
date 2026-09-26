@@ -14,6 +14,10 @@ COMMAND_BUFFER_NAME = "gfx_cmd"
 CURRENT_COMMAND_BUFFER_VERSION = 8
 LEGACY_VENDOR_HASH_VERSION = 1
 CANONICAL_LF_VENDOR_HASH_VERSION = 2
+CANONICAL_PROJECT_TARGETS = {
+    "web", "windows-x86_64", "windows-arm64", "linux-x86_64", "linux-arm64",
+    "macos-x86_64", "macos-arm64", "android-arm64", "android-x86_64", "ios-arm64",
+}
 ASSET_PACKAGE_IDENTITY_NAME = "stasis_asset_package.json"
 ASSET_MANIFEST_RELATIVE_PATH = pathlib.PurePosixPath("assets/manifest.json")
 ASSET_PACKAGE_IDENTITY_SCHEMA = "stasis.asset_package"
@@ -132,6 +136,34 @@ def validate_receipt_sha256(
 ) -> str:
     if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
         parser.error(f"desktop package provenance has invalid {label} sha256")
+    return value
+
+
+def validate_project_configuration(
+    parser: argparse.ArgumentParser, value: object
+) -> dict:
+    expected = {"target", "settings_sha256", "settings"}
+    if not isinstance(value, dict) or set(value) != expected:
+        parser.error("project configuration provenance is malformed")
+    if not isinstance(value["target"], str) or value["target"] not in CANONICAL_PROJECT_TARGETS:
+        parser.error(f"project configuration target is invalid: {value['target']!r}")
+    validate_receipt_sha256(parser, value["settings_sha256"], "project settings")
+    settings = value["settings"]
+    sensitive_parts = (
+        "secret", "password", "credential", "api_key", "private_key", "signing_key", "token"
+    )
+    if (
+        not isinstance(settings, dict)
+        or len(settings) > 128
+        or any(
+            not isinstance(key, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key) is None
+            or any(part in key for part in sensitive_parts)
+            or kind not in ("string", "bool", "number")
+            for key, kind in settings.items()
+        )
+    ):
+        parser.error("project configuration setting summary is malformed")
     return value
 
 
@@ -258,6 +290,7 @@ def verify_mobile_shells(
     release_root: pathlib.Path,
     package_root: pathlib.Path,
     manifest: dict,
+    project_configuration: dict | None,
 ) -> None:
     shell_root = release_root / "mobile" / "shells"
     actual_shell_hashes = {
@@ -270,9 +303,23 @@ def verify_mobile_shells(
     receipt = json.loads(
         (package_root / "stasis_mobile_package.json").read_text(encoding="utf-8")
     )
+    receipt_schema = receipt.get("schema")
+    if receipt_schema not in (None, "stasis.mobile_package.v1", "stasis.mobile_package.v2"):
+        parser.error(f"unsupported mobile package schema: {receipt_schema!r}")
     target = receipt.get("target")
     if target not in ("android-arm64", "ios-arm64"):
         parser.error(f"unsupported mobile package target: {target!r}")
+    receipt_configuration = receipt.get("project_configuration")
+    if receipt_schema == "stasis.mobile_package.v2" and receipt_configuration is None:
+        parser.error("mobile package v2 is missing project configuration")
+    if receipt_configuration is not None and project_configuration is None:
+        parser.error("mobile package configuration is missing from provenance")
+    if receipt_configuration is not None \
+            and receipt_configuration != project_configuration:
+        parser.error("mobile package project configuration differs from provenance")
+    if receipt_configuration is not None \
+            and receipt_configuration.get("target") != target:
+        parser.error("mobile package project configuration target differs from receipt target")
     platform = target.split("-", 1)[0]
     package_id = receipt.get("package_id") or mobile_package_id(receipt["name"])
     network_enabled = receipt.get("network") is True
@@ -420,12 +467,27 @@ def main() -> int:
     desktop_package = packaged_release.pop(
         "desktop_package", desktop_package_missing
     )
+    project_configuration_value = packaged_release.pop("project_configuration", None)
+    project_configuration = (
+        validate_project_configuration(parser, project_configuration_value)
+        if project_configuration_value is not None
+        else None
+    )
+    project_manifest_path = args.package_root / "stasis.json"
+    if project_manifest_path.is_file():
+        project_manifest = json.loads(project_manifest_path.read_text(encoding="utf-8"))
+        if project_manifest.get("manifest_version") == 2 and project_configuration is None:
+            parser.error("manifest_version 2 package is missing project configuration")
     if args.expect_desktop_package:
         if desktop_package is desktop_package_missing:
             parser.error("packaged provenance is missing desktop package receipt")
         validate_desktop_package_receipt(
             parser, desktop_package, args.package_root
         )
+        if project_configuration is not None and not project_configuration["target"].startswith(
+            ("windows-", "linux-", "macos-")
+        ):
+            parser.error("desktop package has a non-desktop project configuration target")
     elif desktop_package is not desktop_package_missing:
         parser.error("packaged provenance unexpectedly contains desktop package receipt")
     if release != packaged_release:
@@ -444,7 +506,9 @@ def main() -> int:
                 f"packaged runtime hash mismatch for {relative}: expected {expected}, found {actual}"
             )
     if args.expect_runtime_sources:
-        verify_mobile_shells(parser, args.release_root, args.package_root, release)
+        verify_mobile_shells(
+            parser, args.release_root, args.package_root, release, project_configuration
+        )
     print(f"verified {args.package_root}")
     return 0
 

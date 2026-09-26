@@ -10,13 +10,13 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stasis::{
     load_and_apply_play_data_bindings_for_test, packaged_replay_compatibility,
-    provision_local_certificate, resolve_play_data_binding_paths, run_live_in_process_with_data,
-    run_play_in_process_with_replay, run_play_in_process_with_window_title,
-    run_self_host_aot_cli_with_desktop_network,
-    run_self_host_aot_cli_with_desktop_network_and_artifact_root,
-    run_self_host_aot_cli_with_options, run_self_host_aot_cli_with_options_and_artifact_root,
-    sign_artifacts, signing_status, verify_artifacts, DesktopNetworkMode, LiveRunConfig,
-    PlayReplayConfig, SigningOptions, StasisTestRunSession,
+    provision_local_certificate, resolve_play_data_binding_paths,
+    run_live_in_process_with_data_and_project_configuration,
+    run_play_in_process_with_replay_and_project_configuration,
+    run_play_in_process_with_window_title_and_project_configuration,
+    run_self_host_aot_cli_with_project_configuration, sign_artifacts, signing_status,
+    verify_artifacts, DesktopNetworkMode, LiveRunConfig, PlayReplayConfig,
+    ProjectCompilationConfiguration, SigningOptions, StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, write_asset_package_identity, AssetFormat,
@@ -25,7 +25,7 @@ use stasis_assets::{
 };
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::{JitExternProfile, JitProcess};
-use stasis_compiler::backend::program_snapshot::ProgramSnapshot;
+use stasis_compiler::backend::program_snapshot::{ProgramSnapshot, ProjectConfiguration};
 use stasis_compiler::backend::state_migration::MAX_STATE_SNAPSHOT_BYTES;
 use stasis_compiler::backend::wasm::{
     WasmProcess, COLLECTION_VIEW_ABI_VERSION, STRING_LITERAL_TABLE_VERSION,
@@ -64,10 +64,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod dap;
 mod headless;
+pub(crate) mod project_settings;
 mod record;
 
+use project_settings::{CanonicalTarget, ProjectSettingsManifest, ResolvedProjectSettings};
+
 const MANIFEST_NAME: &str = "stasis.json";
-const MANIFEST_VERSION: u32 = 1;
+const MANIFEST_VERSION: u32 = 2;
 const RELEASE_PROVENANCE_NAME: &str = "stasis_release_provenance.json";
 const PACKAGE_PROVENANCE_NAME: &str = "stasis_provenance.json";
 const COMPILER_DIAGNOSTIC_PREFIX: &str = "__STASIS_COMPILER_DIAGNOSTIC__:";
@@ -314,7 +317,11 @@ const TARGET_BUILD_HELP: &str = r#"Build targets:
 
 Desktop builds target the operating system running stasis. Web output is a static bundle to
 serve over HTTP. Mobile commands create Gradle or Xcode projects for final SDK builds; source
-toolchains create local release packages when official provenance is absent."#;
+toolchains create local release packages when official provenance is absent.
+
+Manifest v2 project settings use exact canonical targets: web, windows-x86_64,
+windows-arm64, linux-x86_64, linux-arm64, macos-x86_64, macos-arm64,
+android-arm64, android-x86_64, and ios-arm64. See docs/toolchain_cli.md."#;
 const COMMANDS: &[&str] = &[
     "new",
     "init",
@@ -848,9 +855,20 @@ impl PackageTarget {
             Self::Desktop | Self::Web | Self::IosArm64 => None,
         }
     }
+
+    fn canonical(self) -> CanonicalTarget {
+        match self {
+            Self::Desktop => CanonicalTarget::host(),
+            Self::Web => CanonicalTarget::Web,
+            Self::AndroidArm64 => CanonicalTarget::AndroidArm64,
+            Self::AndroidX86_64 => CanonicalTarget::AndroidX86_64,
+            Self::IosArm64 => CanonicalTarget::IosArm64,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 struct ProjectManifest {
     manifest_version: u32,
     name: String,
@@ -867,9 +885,126 @@ struct ProjectManifest {
     capabilities: Option<ProjectCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     web: Option<WebProjectManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settings: Option<ProjectSettingsManifest>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyProjectManifest {
+    manifest_version: u32,
+    name: String,
+    entry: String,
+    tests: String,
+    output: String,
+    #[serde(default)]
+    stdlib: Option<String>,
+    #[serde(default)]
+    vendor: Option<LegacyVendorManifest>,
+    #[serde(default)]
+    android: Option<LegacyAndroidProjectManifest>,
+    #[serde(default)]
+    capabilities: Option<LegacyProjectCapabilities>,
+    #[serde(default)]
+    web: Option<LegacyWebProjectManifest>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyProjectCapabilities {
+    #[serde(default)]
+    network: bool,
+    #[serde(default)]
+    network_client: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyWebProjectManifest {
+    #[serde(default)]
+    entry: String,
+    #[serde(default)]
+    replay: bool,
+    #[serde(default)]
+    loading_font: Option<String>,
+    #[serde(default)]
+    viewport: Option<LegacyWebViewportManifest>,
+    #[serde(default, deserialize_with = "deserialize_optional_json_value")]
+    atlas_budget_bytes: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct LegacyWebViewportManifest {
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyVendorManifest {
+    stasis: LegacyStasisVendorManifest,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyStasisVendorManifest {
+    release_id: String,
+    sha256: String,
+    #[serde(default)]
+    hash_version: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyAndroidProjectManifest {
+    application_id: String,
+    label: String,
+    orientation: String,
+    version_code: u32,
+    version_name: String,
+    #[serde(default)]
+    launcher_resources: Option<String>,
+}
+
+impl From<LegacyProjectManifest> for ProjectManifest {
+    fn from(value: LegacyProjectManifest) -> Self {
+        Self {
+            manifest_version: value.manifest_version,
+            name: value.name,
+            entry: value.entry,
+            tests: value.tests,
+            output: value.output,
+            stdlib: value.stdlib,
+            vendor: value.vendor.map(|vendor| VendorManifest {
+                stasis: StasisVendorManifest {
+                    release_id: vendor.stasis.release_id,
+                    sha256: vendor.stasis.sha256,
+                    hash_version: vendor.stasis.hash_version,
+                },
+            }),
+            android: value.android.map(|android| AndroidProjectManifest {
+                application_id: android.application_id,
+                label: android.label,
+                orientation: android.orientation,
+                version_code: android.version_code,
+                version_name: android.version_name,
+                launcher_resources: android.launcher_resources,
+            }),
+            capabilities: value.capabilities.map(|capabilities| ProjectCapabilities {
+                network: capabilities.network,
+                network_client: capabilities.network_client,
+            }),
+            web: value.web.map(|web| WebProjectManifest {
+                entry: web.entry,
+                replay: web.replay,
+                loading_font: web.loading_font,
+                viewport: web.viewport.map(|viewport| WebViewportManifest {
+                    width: viewport.width,
+                    height: viewport.height,
+                }),
+                atlas_budget_bytes: web.atlas_budget_bytes,
+            }),
+            settings: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
 struct ProjectCapabilities {
     #[serde(default)]
     network: bool,
@@ -878,6 +1013,7 @@ struct ProjectCapabilities {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct WebProjectManifest {
     #[serde(default)]
     entry: String,
@@ -896,6 +1032,7 @@ struct WebProjectManifest {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct WebViewportManifest {
     width: u32,
     height: u32,
@@ -908,11 +1045,13 @@ const DEFAULT_WEB_VIEWPORT: WebViewportManifest = WebViewportManifest {
 const WEB_VIEWPORT_MAX_DIMENSION: u32 = 8192;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct VendorManifest {
     stasis: StasisVendorManifest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct StasisVendorManifest {
     release_id: String,
     sha256: String,
@@ -930,6 +1069,7 @@ const VENDOR_HASH_VERSION_LEGACY_RAW: u32 = 1;
 const VENDOR_HASH_VERSION_CANONICAL_LF: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct AndroidProjectManifest {
     application_id: String,
     label: String,
@@ -953,15 +1093,22 @@ impl ProjectManifest {
             android: None,
             capabilities: None,
             web: None,
+            settings: None,
         }
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.manifest_version != MANIFEST_VERSION {
+        if !(1..=MANIFEST_VERSION).contains(&self.manifest_version) {
             return Err(format!(
-                "unsupported manifest_version {}; expected {}",
+                "unsupported manifest_version {}; expected 1..={}",
                 self.manifest_version, MANIFEST_VERSION
             ));
+        }
+        if self.manifest_version == 1 && self.settings.is_some() {
+            return Err("project settings require manifest_version 2".to_string());
+        }
+        if let Some(settings) = self.settings.as_ref() {
+            project_settings::validate_manifest(settings)?;
         }
         validate_project_name(&self.name)?;
         for (field, value) in [
@@ -1132,6 +1279,32 @@ fn validate_android_application_id(value: &str) -> Result<(), String> {
 struct Workspace {
     root: PathBuf,
     manifest: ProjectManifest,
+    resolved_settings: Option<ResolvedProjectSettings>,
+}
+
+impl Workspace {
+    fn resolve_for(mut self, target: CanonicalTarget) -> Result<Self, String> {
+        self.resolved_settings = Some(project_settings::resolve(
+            self.manifest.settings.as_ref(),
+            target,
+            self.manifest.manifest_version >= 2,
+        )?);
+        Ok(self)
+    }
+
+    fn project_configuration(&self) -> Result<&ProjectConfiguration, String> {
+        self.resolved_settings
+            .as_ref()
+            .map(|settings| &settings.configuration)
+            .ok_or_else(|| "project target was not resolved before compilation".to_string())
+    }
+
+    fn generated_settings_source(&self) -> Result<&str, String> {
+        self.resolved_settings
+            .as_ref()
+            .map(|settings| settings.generated_source.as_str())
+            .ok_or_else(|| "project target was not resolved before compilation".to_string())
+    }
 }
 
 #[derive(Debug)]
@@ -1434,6 +1607,28 @@ fn signing_command(command: SigningCommand) -> Result<CommandResult, String> {
     }
 }
 
+fn command_configuration_target(command: &ToolchainCommand) -> Option<CanonicalTarget> {
+    match command {
+        ToolchainCommand::Package { target, .. } => Some(target.canonical()),
+        ToolchainCommand::PackageMobile { target, .. } => Some(target.package_target().canonical()),
+        ToolchainCommand::Symbol { command } if !command.is_read_only() => {
+            Some(CanonicalTarget::host())
+        }
+        ToolchainCommand::Check
+        | ToolchainCommand::Test { .. }
+        | ToolchainCommand::Validate { .. }
+        | ToolchainCommand::ValidateRuntime { .. }
+        | ToolchainCommand::Run { .. }
+        | ToolchainCommand::Record { .. }
+        | ToolchainCommand::Replay { .. }
+        | ToolchainCommand::Dap { .. }
+        | ToolchainCommand::Live { .. }
+        | ToolchainCommand::Build { .. }
+        | ToolchainCommand::Inspect { .. } => Some(CanonicalTarget::host()),
+        _ => None,
+    }
+}
+
 fn execute(
     command: ToolchainCommand,
     workspace_arg: Option<PathBuf>,
@@ -1515,6 +1710,10 @@ fn execute(
                 _ => VendorGate::Sync,
             };
             let workspace = load_workspace_with_vendor_gate(workspace_path, vendor_gate)?;
+            let workspace = match command_configuration_target(&other) {
+                Some(target) => workspace.resolve_for(target)?,
+                None => workspace,
+            };
             match other {
                 ToolchainCommand::Fmt { check, .. } => format_workspace(&workspace, check),
                 ToolchainCommand::Check => check_workspace(&workspace),
@@ -1991,6 +2190,131 @@ fn load_workspace(explicit: Option<&Path>) -> Result<Workspace, String> {
     load_workspace_with_vendor_gate(explicit, VendorGate::Sync)
 }
 
+fn parse_project_manifest(bytes: &[u8]) -> Result<ProjectManifest, String> {
+    let value = project_settings::parse_strict_json(bytes)?;
+    let version = value
+        .get("manifest_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "invalid stasis.json: manifest_version must be an unsigned integer".to_string()
+        })?;
+    let manifest = match version {
+        1 => {
+            if value.get("settings").is_some() {
+                return Err("project settings require manifest_version 2".to_string());
+            }
+            serde_json::from_value::<LegacyProjectManifest>(value)
+                .map(ProjectManifest::from)
+                .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?
+        }
+        2 => serde_json::from_value::<ProjectManifest>(value)
+            .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?,
+        _ => {
+            return Err(format!(
+                "unsupported manifest_version {version}; expected 1..={MANIFEST_VERSION}"
+            ))
+        }
+    };
+    manifest.validate()?;
+    Ok(manifest)
+}
+
+pub(super) fn load_project_configuration(
+    project_dir: &Path,
+    target: CanonicalTarget,
+) -> Result<ResolvedProjectSettings, String> {
+    let bytes = fs::read(project_dir.join(MANIFEST_NAME))
+        .map_err(|error| format!("failed to read {MANIFEST_NAME}: {error}"))?;
+    let manifest = parse_project_manifest(&bytes)?;
+    validate_generated_settings_path(project_dir, &manifest)?;
+    project_settings::resolve(
+        manifest.settings.as_ref(),
+        target,
+        manifest.manifest_version >= 2,
+    )
+}
+
+pub(super) fn resolve_manifestless_project_configuration(
+    target: CanonicalTarget,
+) -> Result<ResolvedProjectSettings, String> {
+    project_settings::resolve(None, target, false)
+}
+
+fn validate_generated_settings_path(
+    project_dir: &Path,
+    manifest: &ProjectManifest,
+) -> Result<(), String> {
+    if manifest.manifest_version < 2 {
+        return Ok(());
+    }
+    let reserved_name = Path::new(project_settings::GENERATED_SETTINGS_FILE)
+        .file_name()
+        .expect("generated settings path has a basename");
+    fn find_reserved(
+        dir: &Path,
+        reserved_name: &std::ffi::OsStr,
+    ) -> Result<Option<PathBuf>, String> {
+        let entries = fs::read_dir(dir)
+            .map_err(|error| format!("failed to scan workspace {}: {error}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "failed to scan workspace entry in {}: {error}",
+                    dir.display()
+                )
+            })?;
+            let file_type = entry.file_type().map_err(|error| {
+                format!(
+                    "failed to inspect workspace path {}: {error}",
+                    entry.path().display()
+                )
+            })?;
+            if (file_type.is_file() || file_type.is_symlink()) && entry.file_name() == reserved_name
+            {
+                return Ok(Some(entry.path()));
+            }
+            if file_type.is_dir()
+                && !matches!(
+                    entry.file_name().to_str(),
+                    Some(".git" | ".stasis_cache" | "build" | "target" | "node_modules")
+                )
+            {
+                if let Some(found) = find_reserved(&entry.path(), reserved_name)? {
+                    return Ok(Some(found));
+                }
+            }
+        }
+        Ok(None)
+    }
+    if let Some(reserved) = find_reserved(project_dir, reserved_name)? {
+        return Err(format!(
+            "manifest_version 2 reserves the filename '{}' for the generated project settings API; found {}",
+            reserved_name.to_string_lossy(),
+            reserved.display()
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn load_project_compilation_configuration(
+    project_dir: &Path,
+    target: CanonicalTarget,
+) -> Result<ProjectCompilationConfiguration, String> {
+    let resolved = load_project_configuration(project_dir, target)?;
+    Ok(ProjectCompilationConfiguration {
+        configuration: resolved.configuration,
+        generated_path: project_settings::GENERATED_SETTINGS_FILE.to_string(),
+        generated_source: resolved.generated_source,
+    })
+}
+
+pub(super) fn load_manifest_entry_and_name(root: &Path) -> Result<(String, String), String> {
+    let bytes = fs::read(root.join(MANIFEST_NAME))
+        .map_err(|error| format!("failed to read {MANIFEST_NAME}: {error}"))?;
+    let manifest = parse_project_manifest(&bytes)?;
+    Ok((manifest.entry, manifest.name))
+}
+
 fn load_workspace_with_vendor_gate(
     explicit: Option<&Path>,
     vendor_gate: VendorGate,
@@ -2021,9 +2345,8 @@ fn load_workspace_with_vendor_gate(
     let root = canonical_workspace_root(&discovered_root)?;
     let bytes = fs::read(root.join(MANIFEST_NAME))
         .map_err(|error| format!("failed to read {MANIFEST_NAME}: {error}"))?;
-    let mut manifest: ProjectManifest = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
-    manifest.validate()?;
+    let mut manifest = parse_project_manifest(&bytes)?;
+    validate_generated_settings_path(&root, &manifest)?;
     if let Some(web) = manifest.web.as_ref() {
         if let Some(path) = web.loading_font.as_deref() {
             let normalized = normalize_web_loading_font_path(path)?;
@@ -2057,7 +2380,11 @@ fn load_workspace_with_vendor_gate(
             }
         }
     }
-    Ok(Workspace { root, manifest })
+    Ok(Workspace {
+        root,
+        manifest,
+        resolved_settings: None,
+    })
 }
 
 fn bundled_stdlib_source_tree() -> Result<PathBuf, String> {
@@ -2913,6 +3240,76 @@ fn validate_program_snapshot_assets(
     Ok(manifest)
 }
 
+fn generated_settings_path(workspace: &Workspace) -> String {
+    let _ = workspace;
+    project_settings::GENERATED_SETTINGS_FILE.to_string()
+}
+
+fn project_compilation_configuration(
+    workspace: &Workspace,
+) -> Result<ProjectCompilationConfiguration, String> {
+    Ok(ProjectCompilationConfiguration {
+        configuration: workspace.project_configuration()?.clone(),
+        generated_path: generated_settings_path(workspace),
+        generated_source: workspace.generated_settings_source()?.to_string(),
+    })
+}
+
+fn project_configuration_provenance(workspace: &Workspace) -> Result<Value, String> {
+    Ok(project_settings::provenance_summary(
+        workspace.project_configuration()?,
+    ))
+}
+
+fn validate_snapshot_project_configuration(
+    workspace: &Workspace,
+    snapshot: &ProgramSnapshot,
+    context: &str,
+) -> Result<(), String> {
+    if snapshot.project_configuration() != Some(workspace.project_configuration()?) {
+        return Err(format!(
+            "{context} ProgramSnapshot project configuration differs from the resolved workspace target"
+        ));
+    }
+    Ok(())
+}
+
+fn configure_jit_project(workspace: &Workspace, process: &mut JitProcess) -> Result<(), String> {
+    process.set_project_configuration(workspace.project_configuration()?.clone());
+    let generated_source = workspace.generated_settings_source()?;
+    if !generated_source.is_empty() {
+        process.upsert_file(
+            generated_settings_path(workspace),
+            generated_source.to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn configure_aot_project(workspace: &Workspace, process: &mut AotProcess) -> Result<(), String> {
+    process.set_project_configuration(workspace.project_configuration()?.clone());
+    let generated_source = workspace.generated_settings_source()?;
+    if !generated_source.is_empty() {
+        process.upsert_file(
+            generated_settings_path(workspace),
+            generated_source.to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn configure_wasm_project(workspace: &Workspace, process: &mut WasmProcess) -> Result<(), String> {
+    process.set_project_configuration(workspace.project_configuration()?.clone());
+    let generated_source = workspace.generated_settings_source()?;
+    if !generated_source.is_empty() {
+        process.upsert_file(
+            generated_settings_path(workspace),
+            generated_source.to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn compile_workspace_jit(workspace: &Workspace) -> Result<JitProcess, String> {
     compile_workspace_jit_with_options(workspace, false, None)
 }
@@ -2935,6 +3332,7 @@ fn compile_workspace_jit_with_options(
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
+    configure_jit_project(workspace, &mut jit)?;
     jit.set_debug_instrumentation(debug_instrumentation)?;
     if let Some(profile) = extern_profile {
         jit.set_extern_profile(profile)?;
@@ -2963,6 +3361,12 @@ fn compile_workspace_jit_with_options(
             format!("{error:?}")
         }
     })?;
+    validate_snapshot_project_configuration(
+        workspace,
+        jit.program_snapshot()
+            .ok_or_else(|| "JIT compile produced no ProgramSnapshot".to_string())?,
+        "JIT compile",
+    )?;
     Ok(jit)
 }
 
@@ -2971,6 +3375,7 @@ fn compile_workspace_mobile_costs(workspace: &Workspace) -> Result<(u64, u64), S
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut aot = AotProcess::new();
+    configure_aot_project(workspace, &mut aot)?;
     aot.set_project_root(display_path(&workspace.root))?;
     aot.set_target(AotTarget::android_arm64_default());
     aot.set_required_emit_roots(&runtime_analysis_roots());
@@ -2980,6 +3385,12 @@ fn compile_workspace_mobile_costs(workspace: &Workspace) -> Result<(u64, u64), S
         aot.upsert_file(path.to_string_lossy().to_string(), file.source);
     }
     aot.compile().map_err(|error| format!("{error:?}"))?;
+    validate_snapshot_project_configuration(
+        workspace,
+        aot.program_snapshot()
+            .ok_or_else(|| "mobile cost compile produced no ProgramSnapshot".to_string())?,
+        "mobile cost compile",
+    )?;
     let code_bytes = aot
         .artifacts()
         .iter()
@@ -3036,6 +3447,7 @@ fn validate_fresh_runtime(
     let source = fs::read_to_string(&entry)
         .map_err(|error| format!("failed to read entry {}: {error}", entry.display()))?;
     let mut jit = JitProcess::new();
+    configure_jit_project(workspace, &mut jit)?;
     jit.set_project_root(display_path(&workspace.root))?;
     jit.set_required_emit_roots(&[setup.to_string(), tick.to_string(), render.to_string()]);
     jit.upsert_file(display_path(&entry), source);
@@ -3165,6 +3577,11 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
         None,
     )?;
     let mut session = StasisTestRunSession::new();
+    session.set_project_configuration(
+        workspace.project_configuration()?.clone(),
+        generated_settings_path(workspace),
+        workspace.generated_settings_source()?.to_string(),
+    );
     let summary = stasis::run_jit_tests_in_directory_with_project_root_session_and_validator(
         &directory,
         &workspace.root,
@@ -3257,7 +3674,7 @@ fn run_workspace(
 
 fn run_workspace_watch(workspace: &Workspace) -> Result<CommandResult, String> {
     let entry = workspace.root.join(&workspace.manifest.entry);
-    run_play_in_process_with_window_title(
+    run_play_in_process_with_window_title_and_project_configuration(
         &entry,
         Some(&workspace.root),
         None,
@@ -3265,6 +3682,7 @@ fn run_workspace_watch(workspace: &Workspace) -> Result<CommandResult, String> {
         16_000,
         None,
         &workspace.manifest.name,
+        project_compilation_configuration(workspace)?,
     )?;
     Ok(CommandResult::success(
         "graphical watch session ended",
@@ -3283,7 +3701,7 @@ fn replay_workspace(
     let entry = workspace.root.join(entry);
     validate_workspace_destination(workspace, "replay entry", &entry)?;
     let recording = absolute_path(recording)?;
-    run_play_in_process_with_replay(
+    run_play_in_process_with_replay_and_project_configuration(
         &entry,
         Some(&workspace.root),
         None,
@@ -3295,6 +3713,7 @@ fn replay_workspace(
         None,
         None,
         PlayReplayConfig::Replay(recording.clone()),
+        project_compilation_configuration(workspace)?,
     )?;
     Ok(CommandResult::success(
         format!("replayed {}", recording.display()),
@@ -3342,7 +3761,7 @@ fn run_workspace_live(
         PathBuf::from(&workspace.manifest.output),
     )
     .with_window_title(&workspace.manifest.name);
-    let run_result = run_live_in_process_with_data(
+    let run_result = run_live_in_process_with_data_and_project_configuration(
         &entry_path,
         watch_dir.as_deref(),
         data_json.as_deref(),
@@ -3351,6 +3770,7 @@ fn run_workspace_live(
         max_ticks,
         server,
         config,
+        project_compilation_configuration(workspace)?,
     );
     if !wait_for_live_terminal_shutdown(&terminal, run_result.is_ok()) {
         return match run_result {
@@ -4324,6 +4744,7 @@ fn build_workspace_with_desktop_network(
                 "backend": "jit",
                 "entry": workspace.manifest.entry,
                 "functions_emitted": jit.artifacts().len(),
+                "project_configuration": project_configuration_provenance(workspace)?,
             });
             let mut contents = serde_json::to_string_pretty(&data)
                 .map_err(|error| format!("failed to serialize dev build receipt: {error}"))?;
@@ -4364,43 +4785,26 @@ fn build_workspace_with_desktop_network(
                     .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
             }
             let entry = Path::new(&workspace.manifest.entry);
-            let summary = if let Some(network) = desktop_network.as_ref() {
-                if let Some(artifact_root) = aot_artifact_root {
-                    run_self_host_aot_cli_with_desktop_network_and_artifact_root(
-                        &workspace.root,
-                        &output,
-                        entry,
-                        network.library,
-                        network.include_dir,
-                        network.mode,
-                        artifact_root,
-                    )?
-                } else {
-                    run_self_host_aot_cli_with_desktop_network(
-                        &workspace.root,
-                        &output,
-                        entry,
-                        network.library,
-                        network.include_dir,
-                        network.mode,
-                    )?
-                }
-            } else {
-                if let Some(artifact_root) = aot_artifact_root {
-                    run_self_host_aot_cli_with_options_and_artifact_root(
-                        &workspace.root,
-                        &output,
-                        None,
-                        Some(entry),
-                        artifact_root,
-                    )?
-                } else {
-                    run_self_host_aot_cli_with_options(&workspace.root, &output, None, Some(entry))?
-                }
-            };
+            let summary = run_self_host_aot_cli_with_project_configuration(
+                &workspace.root,
+                &output,
+                None,
+                Some(entry),
+                aot_artifact_root,
+                desktop_network
+                    .as_ref()
+                    .map(|network| (network.library, network.include_dir, network.mode)),
+                project_compilation_configuration(workspace)?,
+            )?;
             let build_snapshot = summary.program_snapshot.as_ref().ok_or_else(|| {
                 "release build did not publish its authoritative ProgramSnapshot".to_string()
             })?;
+            validate_snapshot_project_configuration(
+                workspace,
+                validation_snapshot,
+                "release preflight",
+            )?;
+            validate_snapshot_project_configuration(workspace, build_snapshot, "release build")?;
             if build_snapshot.asset_references() != validation_snapshot.asset_references() {
                 return Err(
                     "release build asset roots changed after successful preflight validation"
@@ -4436,6 +4840,7 @@ fn build_workspace_with_desktop_network(
                     "output": display_path(&summary.linked_image_path),
                     "source_files": summary.source_file_count,
                     "entry_symbol": summary.entry_symbol,
+                    "project_configuration": project_configuration_provenance(workspace)?,
                 }),
             ))
         }
@@ -4447,6 +4852,7 @@ fn compile_workspace_release_preflight(workspace: &Workspace) -> Result<AotProce
         load_workshop_edit_workspace(&workspace.root, Path::new(&workspace.manifest.entry))?;
     let files = workshop_reachable_files(&files, Path::new(&workspace.manifest.entry))?;
     let mut validation_aot = AotProcess::new();
+    configure_aot_project(workspace, &mut validation_aot)?;
     validation_aot.set_reachability_policy(ReachabilityPolicy::Release);
     validation_aot.set_project_root(display_path(&workspace.root))?;
     for file in files {
@@ -4455,6 +4861,13 @@ fn compile_workspace_release_preflight(workspace: &Workspace) -> Result<AotProce
     validation_aot
         .compile()
         .map_err(|error| format!("release preflight compile failed: {error:?}"))?;
+    validate_snapshot_project_configuration(
+        workspace,
+        validation_aot
+            .program_snapshot()
+            .ok_or_else(|| "release preflight produced no ProgramSnapshot".to_string())?,
+        "release preflight",
+    )?;
     Ok(validation_aot)
 }
 
@@ -4588,7 +5001,8 @@ fn stage_desktop_network_guest(
     development_build: bool,
 ) -> Result<(), String> {
     let web_root = staging_root.join(".network-web");
-    package_web_workspace(workspace, &web_root, development_build)?;
+    let web_workspace = workspace.clone().resolve_for(CanonicalTarget::Web)?;
+    package_web_workspace(&web_workspace, &web_root, development_build)?;
     for name in ["network_guest.bundle", "network_guest.bundle.json"] {
         let source = web_root.join(name);
         if !source.is_file() {
@@ -4770,8 +5184,7 @@ fn package_workspace(
             manifest_path.display()
         )
     })?;
-    let manifest_snapshot: ProjectManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
+    let manifest_snapshot = parse_project_manifest(&manifest_bytes)?;
     if manifest_snapshot != workspace.manifest {
         return Err(format!(
             "desktop package manifest changed after workspace load: {}",
@@ -4779,6 +5192,7 @@ fn package_workspace(
         ));
     }
     let mut provenance = resolve_package_provenance(development_build)?;
+    provenance["project_configuration"] = project_configuration_provenance(workspace)?;
     let network_enabled = workspace
         .manifest
         .capabilities
@@ -5377,6 +5791,7 @@ fn capture_desktop_package_workspace(
     Ok(Workspace {
         root: canonical_workspace_root(snapshot_root)?,
         manifest: workspace.manifest.clone(),
+        resolved_settings: workspace.resolved_settings.clone(),
     })
 }
 
@@ -5428,8 +5843,7 @@ fn package_web_workspace(
             manifest_path.display()
         )
     })?;
-    let manifest_snapshot: ProjectManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?;
+    let manifest_snapshot = parse_project_manifest(&manifest_bytes)?;
     if manifest_snapshot != workspace.manifest {
         return Err(format!(
             "Web package manifest changed after workspace load: {}",
@@ -5451,6 +5865,7 @@ fn package_web_workspace(
         ));
     }
     let mut provenance = resolve_package_provenance(development_build)?;
+    provenance["project_configuration"] = project_configuration_provenance(workspace)?;
     let development_build = provenance["development_build"].as_bool() == Some(true);
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
@@ -5504,6 +5919,7 @@ fn package_web_workspace(
             })
             .transpose()?;
         let mut process = WasmProcess::new();
+        configure_wasm_project(workspace, &mut process)?;
         process.set_reachability_policy(if development_build {
             ReachabilityPolicy::Development
         } else {
@@ -5543,6 +5959,7 @@ fn package_web_workspace(
         let snapshot = process
             .program_snapshot()
             .ok_or_else(|| "web compile produced no ProgramSnapshot".to_string())?;
+        validate_snapshot_project_configuration(workspace, snapshot, "Web compile")?;
         let resolved = if development_build {
             validate_program_snapshot_assets(workspace, snapshot)?
         } else {
@@ -5829,6 +6246,7 @@ fn package_web_workspace(
             "wasm_output_bytes": wasm_output_bytes,
             "web_size_metrics": web_size_metrics,
             "provenance": PACKAGE_PROVENANCE_NAME,
+            "project_configuration": provenance["project_configuration"],
             "development_build": provenance["development_build"],
             "web_entry": workspace
                 .manifest
@@ -6708,7 +7126,8 @@ fn package_mobile_workspace(
             staging_root.display()
         ));
     }
-    let provenance = resolve_package_provenance(development_build)?;
+    let mut provenance = resolve_package_provenance(development_build)?;
+    provenance["project_configuration"] = project_configuration_provenance(workspace)?;
     fs::create_dir_all(&staging_root)
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
     let child_result = (|| -> Result<(), String> {
@@ -6746,6 +7165,20 @@ fn package_mobile_workspace(
                 String::from_utf8_lossy(&child.stderr).trim()
             ));
         }
+        let aot_manifest_path = aot_root.join("mobile_aot_bundle_manifest.json");
+        let aot_manifest: Value =
+            serde_json::from_slice(&fs::read(&aot_manifest_path).map_err(|error| {
+                format!(
+                    "failed to read mobile AOT bundle manifest {}: {error}",
+                    aot_manifest_path.display()
+                )
+            })?)
+            .map_err(|error| format!("failed to parse mobile AOT bundle manifest: {error}"))?;
+        validate_mobile_aot_child_manifest(
+            &aot_manifest,
+            target,
+            &provenance["project_configuration"],
+        )?;
         let web_guest_bundle = if workspace
             .manifest
             .capabilities
@@ -6753,7 +7186,8 @@ fn package_mobile_workspace(
             .is_some_and(|capabilities| capabilities.network)
         {
             let web_guest_root = staging_root.join("web-guest");
-            package_web_workspace(workspace, &web_guest_root, development_build)?;
+            let web_workspace = workspace.clone().resolve_for(CanonicalTarget::Web)?;
+            package_web_workspace(&web_workspace, &web_guest_root, development_build)?;
             Some(web_guest_root.join("network_guest.bundle"))
         } else {
             None
@@ -6802,6 +7236,24 @@ fn package_mobile_workspace(
             "development_build": provenance["development_build"],
         }),
     ))
+}
+
+fn validate_mobile_aot_child_manifest(
+    manifest: &Value,
+    target: PackageTarget,
+    expected_configuration: &Value,
+) -> Result<(), String> {
+    if manifest.get("schema").and_then(Value::as_str) != Some("stasis.mobile_aot_bundle.v2")
+        || manifest.get("target").and_then(Value::as_str) != Some(target.as_str())
+    {
+        return Err("mobile AOT child returned an unexpected schema or target".to_string());
+    }
+    if manifest.get("project_configuration") != Some(expected_configuration) {
+        return Err(
+            "mobile AOT child project configuration differs from package provenance".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn stage_mobile_network_library(staging_root: &Path, target: PackageTarget) -> Result<(), String> {
@@ -7730,7 +8182,7 @@ fn assemble_mobile_shell(
     fs::write(
         staging_root.join("stasis_mobile_package.json"),
         serde_json::to_string_pretty(&json!({
-            "schema": "stasis.mobile_package.v1",
+            "schema": "stasis.mobile_package.v2",
             "target": target.as_str(),
             "name": workspace.manifest.name,
             "app_name": app_name,
@@ -7740,6 +8192,7 @@ fn assemble_mobile_shell(
             "android_version_name": android_version_name,
             "aot_manifest": "aot/mobile_aot_bundle_manifest.json",
             "provenance": PACKAGE_PROVENANCE_NAME,
+            "project_configuration": provenance["project_configuration"],
             "development_build": provenance["development_build"],
             "android_launcher_resources": android_launcher_resources,
             "assets": match target {
@@ -8888,6 +9341,7 @@ fn validate_semantic_files(
 ) -> Result<(), String> {
     let files = workshop_reachable_files(files, Path::new(&workspace.manifest.entry))?;
     let mut jit = JitProcess::new();
+    configure_jit_project(workspace, &mut jit)?;
     jit.set_project_root(display_path(&workspace.root))?;
     jit.set_local_runtime_helper_trampolines(true);
     jit.set_required_emit_roots(&[
@@ -9861,9 +10315,170 @@ mod tests {
     fn new_project_manifest_has_no_desktop_ai_settings() {
         let manifest = serde_json::to_value(ProjectManifest::new("demo".into())).unwrap();
         assert!(manifest.get("ai").is_none());
+        assert_eq!(manifest["manifest_version"], MANIFEST_VERSION);
     }
 
     use super::*;
+
+    #[test]
+    fn manifest_v1_remains_permissive_but_cannot_silently_ignore_settings() {
+        let legacy = br#"{
+            "manifest_version": 1,
+            "name": "legacy",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build",
+            "legacy_top_level": true,
+            "capabilities": {"network": false, "legacy_nested": true},
+            "web": {
+                "entry": "src/web.stasis",
+                "viewport": {"width": 640, "height": 360, "legacy_viewport": true},
+                "legacy_web": true
+            }
+        }"#;
+        let parsed = parse_project_manifest(legacy).expect("read legacy v1 extensions");
+        assert_eq!(parsed.manifest_version, 1);
+        assert_eq!(parsed.web.unwrap().viewport.unwrap().width, 640);
+
+        let with_settings = br#"{
+            "manifest_version": 1,
+            "name": "legacy",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build",
+            "settings": {"schema_version": 1, "definitions": {}}
+        }"#;
+        assert_eq!(
+            parse_project_manifest(with_settings).unwrap_err(),
+            "project settings require manifest_version 2"
+        );
+    }
+
+    #[test]
+    fn manifest_v2_rejects_unknown_and_duplicate_fields() {
+        let unknown = br#"{
+            "manifest_version": 2,
+            "name": "strict",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build",
+            "web": {"entry": "src/web.stasis", "unknown": true}
+        }"#;
+        let error = parse_project_manifest(unknown).unwrap_err();
+        assert!(error.contains("unknown field `unknown`"), "{error}");
+
+        let duplicate = br#"{
+            "manifest_version": 2,
+            "name": "strict",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build",
+            "settings": {
+                "schema_version": 1,
+                "definitions": {
+                    "channel": {"type": "string", "default": "first", "default": "second"}
+                }
+            }
+        }"#;
+        let error = parse_project_manifest(duplicate).unwrap_err();
+        assert!(error.contains("duplicate JSON key 'default'"), "{error}");
+    }
+
+    #[test]
+    fn manifest_v1_guest_project_target_does_not_collide_with_generated_api() {
+        let root = temp_dir("legacy_project_target");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join(MANIFEST_NAME),
+            r#"{
+                "manifest_version": 1,
+                "name": "legacy_target",
+                "entry": "src/main.stasis",
+                "tests": "tests",
+                "output": "build"
+            }"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/main.stasis"),
+            "function project_target(): string { return \"guest-owned\"; }\nfunction main(): i32 { return 0; }\n",
+        )
+        .unwrap();
+        let workspace = load_workspace(Some(&root))
+            .unwrap()
+            .resolve_for(CanonicalTarget::host())
+            .unwrap();
+        assert!(workspace.generated_settings_source().unwrap().is_empty());
+        compile_workspace_jit(&workspace).expect("legacy guest-defined project_target compiles");
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn manifest_v2_rejects_reserved_generated_path_and_invalid_settings_before_output() {
+        let reserved_root = temp_dir("reserved_project_settings_path");
+        fs::create_dir_all(reserved_root.join("src")).unwrap();
+        fs::write(
+            reserved_root.join("src/main.stasis"),
+            "function main(): i32 { return 0; }\n",
+        )
+        .unwrap();
+        fs::write(
+            reserved_root.join("src").join(
+                Path::new(project_settings::GENERATED_SETTINGS_FILE)
+                    .file_name()
+                    .unwrap(),
+            ),
+            "function project_target(): string { return \"shadowed\"; }\n",
+        )
+        .unwrap();
+        fs::write(
+            reserved_root.join(MANIFEST_NAME),
+            r#"{
+                "manifest_version": 2,
+                "name": "reserved_path",
+                "entry": "src/main.stasis",
+                "tests": "tests",
+                "output": "build"
+            }"#,
+        )
+        .unwrap();
+        let error = load_workspace(Some(&reserved_root)).unwrap_err();
+        assert!(error.contains("reserves"), "{error}");
+        remove_temp(&reserved_root);
+
+        let invalid_root = temp_dir("settings_fail_before_output");
+        fs::create_dir_all(invalid_root.join("src")).unwrap();
+        fs::write(
+            invalid_root.join("src/main.stasis"),
+            "function main(): i32 { return 0; }\n",
+        )
+        .unwrap();
+        fs::write(
+            invalid_root.join(MANIFEST_NAME),
+            r#"{
+                "manifest_version": 2,
+                "name": "invalid_settings",
+                "entry": "src/main.stasis",
+                "tests": "tests",
+                "output": "build",
+                "settings": {
+                    "schema_version": 1,
+                    "definitions": {
+                        "channel": {"type": "string", "required": true}
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let error = load_workspace(Some(&invalid_root))
+            .unwrap()
+            .resolve_for(CanonicalTarget::Web)
+            .unwrap_err();
+        assert!(error.contains("required setting 'channel'"), "{error}");
+        assert!(!invalid_root.join("dist").exists());
+        assert!(!invalid_root.join("build").exists());
+        remove_temp(&invalid_root);
+    }
 
     #[test]
     fn diagnostic_source_lookup_resolves_project_relative_path_against_absolute_map() {
@@ -10017,7 +10632,10 @@ mod tests {
             atlas_budget_bytes: None,
         });
         write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write network manifest");
-        let workspace = load_workspace(Some(&root)).expect("load network workspace");
+        let workspace = load_workspace(Some(&root))
+            .expect("load network workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("read manifest snapshot");
         let before = desktop_package_project_provenance(&workspace, &manifest_bytes)
             .expect("capture desktop provenance");
@@ -10055,7 +10673,10 @@ mod tests {
         fs::write(root.join("assets/marker.png"), b"asset-a").expect("write asset");
         fs::write(root.join("data/config.json"), b"data-a").expect("write data");
         fs::write(root.join("src/main/config.json"), b"support-a").expect("write entry support");
-        let workspace = load_workspace(Some(&root)).expect("load generated workspace");
+        let workspace = load_workspace(Some(&root))
+            .expect("load generated workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("read manifest snapshot");
         let before = package_project_provenance(
             &workspace,
@@ -10151,7 +10772,10 @@ mod tests {
             atlas_budget_bytes: None,
         });
         write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write network manifest");
-        let workspace = load_workspace(Some(&root)).expect("load network workspace");
+        let workspace = load_workspace(Some(&root))
+            .expect("load network workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("read manifest snapshot");
         let snapshot_root = root.join(".desktop-source-snapshot");
         let snapshot =
@@ -10229,7 +10853,10 @@ mod tests {
             1
         );
         assert!(!source.contains("function @effects(state, graphics)"));
-        let workspace = load_workspace(Some(&root)).expect("load generated workspace");
+        let workspace = load_workspace(Some(&root))
+            .expect("load generated workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         check_workspace(&workspace).expect("generated project checks");
         remove_temp(&root);
     }
@@ -10307,6 +10934,10 @@ mod tests {
         let workspace = Workspace {
             root: root.clone(),
             manifest,
+            resolved_settings: Some(
+                project_settings::resolve(None, CanonicalTarget::Web, true)
+                    .expect("resolve test project settings"),
+            ),
         };
         let output = root.join("dist/sheep-herder-web");
 
@@ -10352,6 +10983,10 @@ mod tests {
         let workspace = Workspace {
             root: root.clone(),
             manifest,
+            resolved_settings: Some(
+                project_settings::resolve(None, CanonicalTarget::Web, true)
+                    .expect("resolve test project settings"),
+            ),
         };
         let staging = root.join("desktop-stage");
         fs::create_dir_all(&staging).expect("desktop staging directory");
@@ -10778,7 +11413,10 @@ mod tests {
     #[test]
     fn inspect_exposes_compiler_function_data_flow() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/function_data_flow");
-        let workspace = load_workspace(Some(&root)).expect("load sample workspace");
+        let workspace = load_workspace(Some(&root))
+            .expect("load sample workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         let result = inspect_workspace(&workspace, &[], MAX_STATE_SNAPSHOT_BYTES as u64)
             .expect("inspect sample workspace");
         let functions = result.data["function_data_flow"]["functions"]
@@ -11177,6 +11815,10 @@ mod tests {
                 }),
                 ..ProjectManifest::new("launcher_test".to_string())
             },
+            resolved_settings: Some(
+                project_settings::resolve(None, CanonicalTarget::AndroidArm64, true)
+                    .expect("resolve test project settings"),
+            ),
         }
     }
 
@@ -11226,7 +11868,10 @@ mod tests {
             "global State { value: i32; rendered: i32; }\nfunction main(): i32 { State.value = 1; State.rendered = 0; return 0; }\nfunction tick(): i32 { State.value += 1; return 0; }\nfunction render(): i32 { State.rendered = 1; return 0; }\n",
         )
         .expect("write source");
-        let workspace = load_workspace(Some(&root)).expect("workspace");
+        let workspace = load_workspace(Some(&root))
+            .expect("workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         let requirements = serde_json::to_string(&vec![
             RuntimeValidationRequirement {
                 path: "State.value".into(),
@@ -11273,7 +11918,10 @@ mod tests {
         fs::create_dir_all(&alias_parent).expect("create alias parent");
         symlink(&real_root, &alias_root).expect("create workspace alias");
 
-        let workspace = load_workspace(Some(&alias_root)).expect("load workspace through alias");
+        let workspace = load_workspace(Some(&alias_root))
+            .expect("load workspace through alias")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         assert_eq!(workspace.root, real_root.canonicalize().expect("real root"));
         let jit = compile_workspace_jit(&workspace).expect("compile aliased workspace");
         let main = jit
@@ -11313,7 +11961,10 @@ mod tests {
             );
         }
         assert_eq!(source.matches("import \"").count(), 3);
-        let workspace = load_workspace(Some(&root)).expect("load workspace");
+        let workspace = load_workspace(Some(&root))
+            .expect("load workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         check_workspace(&workspace).expect("check project");
         test_workspace(&workspace, None).expect("test project");
         let run = run_workspace(&workspace, true, 0, false).expect("run project");
@@ -11364,7 +12015,10 @@ mod tests {
             Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9]}}"#),
             Some(DATA_BINDING_META),
         );
-        let workspace = load_workspace(Some(&root)).expect("workspace");
+        let workspace = load_workspace(Some(&root))
+            .expect("workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         test_workspace(&workspace, None).expect("bound test project");
         remove_temp(&root);
     }
@@ -11382,7 +12036,10 @@ mod tests {
             "global independent_value: i32;\ntest `independent test omits project globals`(): bool { return independent_value == 0; }\n",
         )
         .expect("write independent test");
-        let workspace = load_workspace(Some(&root)).expect("workspace");
+        let workspace = load_workspace(Some(&root))
+            .expect("workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         let result = test_workspace(&workspace, None).expect("scoped binding test project");
         assert_eq!(result.data["tests_run"], 2);
         assert_eq!(result.data["tests_passed"], 2);
@@ -11397,7 +12054,10 @@ mod tests {
             Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9],"extra":1}}"#),
             Some(DATA_BINDING_META),
         );
-        let workspace = load_workspace(Some(&root)).expect("workspace");
+        let workspace = load_workspace(Some(&root))
+            .expect("workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         let error = test_workspace(&workspace, None).expect_err("extra data property rejected");
         assert!(
             error.contains("binding source property config.extra"),
@@ -11414,7 +12074,10 @@ mod tests {
             Some("{not-json"),
             Some(DATA_BINDING_META),
         );
-        let malformed_workspace = load_workspace(Some(&malformed_root)).expect("workspace");
+        let malformed_workspace = load_workspace(Some(&malformed_root))
+            .expect("workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         let malformed =
             test_workspace(&malformed_workspace, None).expect_err("malformed data rejected");
         assert!(
@@ -11429,7 +12092,10 @@ mod tests {
             Some(r#"{"config":{"loaded":true,"scalar":17,"values":[4,9]}}"#),
             None,
         );
-        let missing_workspace = load_workspace(Some(&missing_root)).expect("workspace");
+        let missing_workspace = load_workspace(Some(&missing_root))
+            .expect("workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         let missing =
             test_workspace(&missing_workspace, None).expect_err("missing metadata rejected");
         assert!(missing.contains("requires matching metadata"), "{missing}");
@@ -11449,7 +12115,10 @@ mod tests {
             "import \"../src/main.stasis\";\ntest `no data leaves defaults`(): bool { return value == 0; }\n",
         )
         .expect("write test");
-        let workspace = load_workspace(Some(&root)).expect("workspace");
+        let workspace = load_workspace(Some(&root))
+            .expect("workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         test_workspace(&workspace, None).expect("no-data test project");
         remove_temp(&root);
     }
@@ -12680,7 +13349,10 @@ mod tests {
             root.join("vendor/stasis/stdlib/network_client.stasis"),
         )
         .expect("vendor network client stdlib");
-        let workspace = load_workspace(Some(&root)).expect("load network client workspace");
+        let workspace = load_workspace(Some(&root))
+            .expect("load network client workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
 
         let default_error = match compile_workspace_jit(&workspace) {
             Ok(_) => panic!("ordinary native JIT must not acquire browser mailbox shims"),
@@ -12744,6 +13416,10 @@ mod tests {
                 }),
                 ..ProjectManifest::new("mobile_smoke".to_string())
             },
+            resolved_settings: Some(
+                project_settings::resolve(None, CanonicalTarget::AndroidArm64, true)
+                    .expect("resolve test project settings"),
+            ),
         };
 
         let android = root.join("android-package");
@@ -13302,6 +13978,42 @@ mod tests {
             .exists());
 
         remove_temp(&root);
+    }
+
+    #[test]
+    fn mobile_child_manifest_must_match_parent_target_and_configuration() {
+        let configuration = json!({
+            "target": "android-arm64",
+            "settings_sha256": "0".repeat(64),
+            "settings": {"channel": "string"},
+        });
+        let manifest = json!({
+            "schema": "stasis.mobile_aot_bundle.v2",
+            "target": "android-arm64",
+            "project_configuration": configuration,
+        });
+        validate_mobile_aot_child_manifest(&manifest, PackageTarget::AndroidArm64, &configuration)
+            .expect("matching child receipt");
+
+        let mut wrong_target = manifest.clone();
+        wrong_target["target"] = json!("android-x86_64");
+        assert!(validate_mobile_aot_child_manifest(
+            &wrong_target,
+            PackageTarget::AndroidArm64,
+            &configuration,
+        )
+        .unwrap_err()
+        .contains("unexpected schema or target"));
+
+        let mut stale_configuration = manifest;
+        stale_configuration["project_configuration"]["settings_sha256"] = json!("1".repeat(64));
+        assert!(validate_mobile_aot_child_manifest(
+            &stale_configuration,
+            PackageTarget::AndroidArm64,
+            &configuration,
+        )
+        .unwrap_err()
+        .contains("differs from package provenance"));
     }
 
     #[test]
@@ -14494,7 +15206,10 @@ mod tests {
             remove_temp(&outside);
             return;
         }
-        let workspace = load_workspace(Some(&root)).expect("load workspace");
+        let workspace = load_workspace(Some(&root))
+            .expect("load workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
         assert!(build_workspace(&workspace, BuildMode::Dev, None)
             .expect_err("reject escaped default output")
             .contains("outside the workspace"));
