@@ -570,11 +570,34 @@ try {
         $_ -match "^$([regex]::Escape($serial))\s+device(?:\s|$)"
     }
     $startedEmulator = -not [bool]$runningBefore
-    $emulatorArguments = @("-AvdName", $AvdName, "-Port", "$Port")
-    if ($Headless) { $emulatorArguments += "-Headless" }
-    $serial = Invoke-BoundedScript (Join-Path $scriptRoot "start_emulator.ps1") `
-        $emulatorArguments "start-emulator"
-    $serial = @($serial) | Select-Object -Last 1
+    if ($runningBefore) {
+        $observedAvdLine = @(& $adb -s $serial emu avd name 2>$null | Select-Object -First 1)
+        $observedAvd = if ($LASTEXITCODE -eq 0 -and $observedAvdLine) {
+            $observedAvdLine[0].ToString().Trim()
+        } else {
+            ""
+        }
+        if (-not $observedAvd) {
+            $observedAvdLine = @(& $adb -s $serial shell getprop ro.boot.qemu.avd_name 2>$null |
+                Select-Object -First 1)
+            if ($LASTEXITCODE -eq 0 -and $observedAvdLine) {
+                $observedAvd = $observedAvdLine[0].ToString().Trim()
+            }
+        }
+        if ($observedAvd -ne $AvdName) {
+            $identity = if ($observedAvd) { "'$observedAvd'" } else { "unknown" }
+            throw "Android emulator serial $serial runs AVD $identity; requested '$AvdName'."
+        }
+        Write-Host "Reusing ready Android emulator $serial for AVD $AvdName"
+    } elseif ($runningOnWindows) {
+        $emulatorArguments = @("-AvdName", $AvdName, "-Port", "$Port")
+        if ($Headless) { $emulatorArguments += "-Headless" }
+        $serial = Invoke-BoundedScript (Join-Path $scriptRoot "start_emulator.ps1") `
+            $emulatorArguments "start-emulator"
+        $serial = @($serial) | Select-Object -Last 1
+    } else {
+        throw "Workshop seam expects the platform runner to provide a ready Android emulator on non-Windows hosts."
+    }
 
     if (-not $SkipBuild) {
         $gradle = Resolve-Gradle
