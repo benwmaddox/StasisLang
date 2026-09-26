@@ -1,0 +1,11 @@
+{
+  "schema": "stasis.android_seam_expectations.v1",
+  "test_id": "IT-032",
+  "stable_frame": 30,
+  "state_checksum": 725,
+  "require_command_trace": true,
+  "logical_size": [640, 360],
+  "regions": [
+    {"name": "receiver_scalar_green", "center": [320, 180], "rgb": [26, 204, 82], "tolerance": 30}
+  ]
+}

@@ -168,6 +168,14 @@ int32_t stasis_mobile_runtime_initialize(
     runtime_state.initialized = 1;
     runtime_state.paused = 0;
     runtime_state.entries.bind_runtime_entry();
+    if (!stasis_mobile_aot_registration_succeeded()) {
+        fprintf(stderr, "Stasis mobile runtime could not bind all guest globals\n");
+        dispose_replay();
+        stasis_shutdown();
+        stasis_mobile_aot_reset();
+        runtime_state = (StasisMobileRuntimeState){0};
+        return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+    }
 #if defined(STASIS_NETWORK_ENABLED)
     if (stasis_mobile_network_start_from_asset_root() < 0) {
         dispose_replay();

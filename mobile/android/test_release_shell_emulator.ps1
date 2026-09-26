@@ -96,6 +96,13 @@ $seams = @(
         TestId = "IT-024"
         Project = "samples/android_lifecycle_failure_seam/render"
         Output = "android_entry_failures/render"
+    },
+    @{
+        TestId = "IT-032"
+        Project = "samples/android_nested_self_mutation_seam"
+        Output = "android_nested_self_mutation"
+        RequiredScalarBindingSymbol = "stasis_state_scalar__state__zzz_commands__count"
+        MinimumScalarBindingOrdinal = 2049
     }
 )
 
@@ -123,6 +130,12 @@ foreach ($seam in $selectedSeams) {
         -Target android-x86_64 `
         -OutputPath (Join-Path $artifactRootPath $seam.Output) `
         -ExpectationsPath $(if ($seam.Expectations) { $seam.Expectations } else { "" }) `
+        -RequiredScalarBindingSymbol $(if ($seam.RequiredScalarBindingSymbol) {
+            $seam.RequiredScalarBindingSymbol
+        } else { "" }) `
+        -MinimumScalarBindingOrdinal $(if ($seam.MinimumScalarBindingOrdinal) {
+            $seam.MinimumScalarBindingOrdinal
+        } else { 0 }) `
         -TotalTimeoutSeconds $seamTimeout
     if ($LASTEXITCODE -ne 0) {
         throw "Android emulator seam $($seam.Project) failed with exit code $LASTEXITCODE"
