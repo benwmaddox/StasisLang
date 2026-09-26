@@ -11072,6 +11072,42 @@ mod tests {
     }
 
     #[test]
+    fn web_draw_checks_context_without_polling_gl_errors() {
+        let draw = WEB_RUNTIME_JS
+            .split("const draw = (values, count, texture) => {")
+            .nth(1)
+            .expect("WebGL draw function")
+            .split("return (gpuBatcher = {")
+            .next()
+            .expect("end of WebGL draw function");
+        assert!(draw.contains("failIfLost();"));
+        assert!(!draw.contains("failIfBad();"));
+        assert!(!draw.contains("getError"));
+
+        let upload = WEB_RUNTIME_JS
+            .split("const uploadAtlasEntry = ")
+            .nth(1)
+            .expect("WebGL atlas upload function")
+            .split("const atlasFor = ")
+            .next()
+            .expect("end of WebGL atlas upload function");
+        assert!(upload.contains("gl.texSubImage2D"));
+        assert!(upload.contains("drainPendingErrors();"));
+        assert!(upload.contains("failIfBad();"));
+
+        let allocation = WEB_RUNTIME_JS
+            .split("const createAtlasPage = size => {")
+            .nth(1)
+            .and_then(|source| source.split("const deleteAtlasPage = page =>").next())
+            .expect("WebGL atlas allocation function");
+        assert!(allocation.contains("drainPendingErrors();"));
+        assert!(allocation.contains("gl.texImage2D"));
+        assert_eq!(WEB_RUNTIME_JS.matches("drainPendingErrors();").count(), 5);
+        assert_eq!(WEB_RUNTIME_JS.matches("failIfBad();").count(), 5);
+        assert_eq!(WEB_RUNTIME_JS.matches("gl.getError()").count(), 2);
+    }
+
+    #[test]
     fn release_web_runtime_keeps_only_required_host_interop() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/windows_launch_smoke");
         let workspace = load_workspace(Some(&root)).expect("load web sample workspace");
