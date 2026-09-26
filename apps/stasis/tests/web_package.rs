@@ -1251,6 +1251,45 @@ function render(): i32 { return 0; }
 }
 
 #[test]
+fn web_packages_keep_gl_error_polling_only_for_targeted_gpu_operations() {
+    let workspace = repo_root().join("samples/windows_launch_smoke");
+    for development in [false, true] {
+        let relative_output = PathBuf::from(format!(
+            "build/webgl-error-polling-{}-{}",
+            if development { "development" } else { "release" },
+            stamp()
+        ));
+        let output = package_with_mode(&workspace, &relative_output, development);
+        let runtime = fs::read_to_string(output.join("game.js")).expect("read packaged runtime");
+
+        assert_eq!(
+            runtime.matches("gl.getError()").count(),
+            1,
+            "ordinary draw paths must not add WebGL error polls (development={development})"
+        );
+        assert_eq!(
+            runtime.matches("failIfBad").count(),
+            3,
+            "only the helper and two targeted upload checks should remain (development={development})"
+        );
+        assert!(runtime.contains("isContextLost"), "context-loss detection was removed");
+        assert!(runtime.contains("texSubImage2D"), "targeted atlas upload check was removed");
+        if development {
+            let draw = runtime
+                .split("const draw = (values, count, texture) => {")
+                .nth(1)
+                .and_then(|runtime| runtime.split("return (gpuBatcher = {").next())
+                .expect("development WebGL draw function");
+            assert!(draw.contains("failIfLost();"));
+            assert!(!draw.contains("failIfBad();"));
+            assert!(!draw.contains("getError"));
+        }
+
+        fs::remove_dir_all(output).expect("clean WebGL error polling package");
+    }
+}
+
+#[test]
 fn development_web_package_remains_readable_and_retains_asset_diagnostics() {
     let workspace = repo_root().join("samples/windows_launch_smoke");
     let relative_output = PathBuf::from(format!("build/web-development-test-{}", stamp()));
