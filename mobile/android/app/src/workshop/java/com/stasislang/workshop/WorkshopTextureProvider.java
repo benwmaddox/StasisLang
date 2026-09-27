@@ -84,6 +84,15 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private long acceptanceTextureBytes;
     private long acceptanceMaximumCacheBytes;
     private int acceptanceUnderprovisionedSprites;
+    private boolean profileResourceLookups;
+    private long cachedTextResolveNanos;
+    private long cachedTextIdentityNanos;
+    private long fontResolveNanos;
+    private long fontIdentityNanos;
+    private int cachedTextResolveCalls;
+    private int cachedTextIdentityCalls;
+    private int fontResolveCalls;
+    private int fontIdentityCalls;
 
     WorkshopTextureProvider(MainActivity activity) {
         this.activity = activity;
@@ -358,10 +367,37 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     }
 
     @Override
+    public void beginPerformanceSampling() {
+        profileResourceLookups = true;
+        cachedTextResolveNanos = 0L;
+        cachedTextIdentityNanos = 0L;
+        fontResolveNanos = 0L;
+        fontIdentityNanos = 0L;
+        cachedTextResolveCalls = 0;
+        cachedTextIdentityCalls = 0;
+        fontResolveCalls = 0;
+        fontIdentityCalls = 0;
+    }
+
+    @Override
+    public String finishPerformanceSampling() {
+        profileResourceLookups = false;
+        return "resource_lookup_profile cached_text_resolve_calls=" + cachedTextResolveCalls
+                + " cached_text_resolve_us_total=" + cachedTextResolveNanos / 1_000L
+                + " cached_text_identity_calls=" + cachedTextIdentityCalls
+                + " cached_text_identity_us_total=" + cachedTextIdentityNanos / 1_000L
+                + " font_resolve_calls=" + fontResolveCalls
+                + " font_resolve_us_total=" + fontResolveNanos / 1_000L
+                + " font_identity_calls=" + fontIdentityCalls
+                + " font_identity_us_total=" + fontIdentityNanos / 1_000L;
+    }
+
+    @Override
     public long cachedTextTextureFor(int runHandle) {
         ensureCurrentProject();
         TextTexture cached = textTextures.get(runHandle);
         JSONObject resolved;
+        long resolveStarted = profileResourceLookups ? System.nanoTime() : 0L;
         try {
             resolved = new JSONObject(MainActivity.nativeResolveCachedText(
                     activity.projectRootPath(), runHandle));
@@ -375,16 +411,27 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             }
             recordFailure("cached_text", runHandle, "<resolved-cached-text>", 0, 0, error);
             return 0L;
+        } finally {
+            if (profileResourceLookups) {
+                cachedTextResolveCalls += 1;
+                cachedTextResolveNanos += System.nanoTime() - resolveStarted;
+            }
         }
         File fontFile = new File(resolved.optString("font_path", ""));
         String text = resolved.optString("text", "");
         String fontIdentity;
+        long identityStarted = profileResourceLookups ? System.nanoTime() : 0L;
         try {
             fontIdentity = fontFile.getCanonicalPath() + ":" + fontFile.length() + ":"
                     + fontFile.lastModified() + ":" + resolved.getInt("font_size");
         } catch (Exception error) {
             recordFailure("cached_text", runHandle, "<resolved-cached-text>", 0, 0, error);
             return 0L;
+        } finally {
+            if (profileResourceLookups) {
+                cachedTextIdentityCalls += 1;
+                cachedTextIdentityNanos += System.nanoTime() - identityStarted;
+            }
         }
         String exactIdentity = textIdentity(fontIdentity, text, textRasterScale);
         if (cached != null && cached.matches(surfaceGeneration, rendererGeneration)
@@ -486,16 +533,26 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     }
 
     private FontInfo fontInfo(int handle) throws Exception {
+        long resolveStarted = profileResourceLookups ? System.nanoTime() : 0L;
         JSONObject resolved = new JSONObject(MainActivity.nativeResolveFont(projectRootPath, handle));
+        if (profileResourceLookups) {
+            fontResolveCalls += 1;
+            fontResolveNanos += System.nanoTime() - resolveStarted;
+        }
         if (!"ok".equals(resolved.optString("status"))) {
             invalidateFontCaches(handle);
             throw new IOException(resolved.optString("error", "font resolution failed"));
         }
         File fontFile = new File(resolved.getString("font_path"));
+        long identityStarted = profileResourceLookups ? System.nanoTime() : 0L;
         String identity = fontFile.getCanonicalPath() + ":"
                 + fontFile.length() + ":" + fontFile.lastModified() + ":"
                 + resolved.optString("content_sha256", "") + ":"
                 + resolved.getInt("font_size");
+        if (profileResourceLookups) {
+            fontIdentityCalls += 1;
+            fontIdentityNanos += System.nanoTime() - identityStarted;
+        }
         FontInfo cached = fonts.get(handle);
         if (cached != null && cached.identity.equals(identity)) return cached;
         if (cached != null) invalidateFontCaches(handle);

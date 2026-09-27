@@ -176,6 +176,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
         default String atlasMetrics() { return "atlas_metrics=unavailable"; }
 
+        default void beginPerformanceSampling() {}
+
+        default String finishPerformanceSampling() { return ""; }
+
         // Packed as texture:u32, width:u16, height:u16. Zero means unavailable.
         default long textTextureFor(int font, ByteBuffer utf8, int offset, int length) {
             return 0L;
@@ -746,6 +750,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                         + " texture_binds=" + frameTextureBinds
                         + " submitted_quads=" + frameSubmittedQuads + " "
                         + textures.atlasMetrics());
+                String resourceLookupMetrics = textures.finishPerformanceSampling();
+                if (!resourceLookupMetrics.isEmpty()) {
+                    Log.i(LOG_TAG, resourceLookupMetrics);
+                }
             }
         }
         timing.onRendered(totalNanos);
@@ -755,6 +763,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         if (!BuildConfig.STASIS_RENDER_ACCEPTANCE) return;
         performanceSamples = new FramePerformanceSamples(
                 PERFORMANCE_WARMUP_FRAMES, PERFORMANCE_SAMPLE_FRAMES);
+        textures.beginPerformanceSampling();
     }
 
     synchronized boolean isPerformanceSamplingForAcceptanceActive() {
