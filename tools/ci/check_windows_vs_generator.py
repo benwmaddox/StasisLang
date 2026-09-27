@@ -13,12 +13,20 @@ CALLERS = (
     ".github/workflows/nightly-release.yml",
     "scripts/build_local_editor_release.ps1",
 )
+PACKAGER = "apps/stasis/src/compiler_backend.rs"
 HELPER_MARKERS = (
     "vswhere.exe",
     "Microsoft.Component.MSBuild Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
     "Visual Studio 18 2026",
     "Visual Studio 17 2022",
     "cmake -E capabilities",
+)
+PACKAGER_MARKERS = (
+    "Microsoft.Component.MSBuild",
+    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+    "CMAKE_GENERATOR_INSTANCE",
+    "normalize_windows_environment",
+    "CMakeConfigureLog.yaml",
 )
 
 
@@ -42,6 +50,15 @@ def validate(root: pathlib.Path = ROOT) -> list[str]:
             errors.append(f"{relative}: does not use the installed-instance helper")
         if "cmake --help" in text:
             errors.append(f"{relative}: treats advertised CMake generators as installed")
+
+    packager = root / PACKAGER
+    if not packager.is_file():
+        errors.append(f"missing Windows desktop packager: {PACKAGER}")
+    else:
+        packager_text = packager.read_text(encoding="utf-8")
+        for marker in PACKAGER_MARKERS:
+            if marker not in packager_text:
+                errors.append(f"{PACKAGER}: missing {marker!r}")
     return errors
 
 
