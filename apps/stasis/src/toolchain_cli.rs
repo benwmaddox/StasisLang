@@ -315,13 +315,16 @@ const TARGET_BUILD_HELP: &str = r#"Build targets:
   iPhone and iPad (64-bit ARM app project)
     stasis package-mobile --target ios-arm64
 
+  iPhone and iPad simulator (64-bit ARM development project)
+    stasis package-mobile --target ios-simulator-arm64 --development-build
+
 Desktop builds target the operating system running stasis. Web output is a static bundle to
 serve over HTTP. Mobile commands create Gradle or Xcode projects for final SDK builds; source
 toolchains create local release packages when official provenance is absent.
 
 Manifest v2 project settings use exact canonical targets: web, windows-x86_64,
 windows-arm64, linux-x86_64, linux-arm64, macos-x86_64, macos-arm64,
-android-arm64, android-x86_64, and ios-arm64. See docs/toolchain_cli.md."#;
+android-arm64, android-x86_64, ios-arm64, and ios-simulator-arm64. See docs/toolchain_cli.md."#;
 const COMMANDS: &[&str] = &[
     "new",
     "init",
@@ -806,6 +809,7 @@ enum PackageTarget {
     #[value(name = "android-x86_64")]
     AndroidX86_64,
     IosArm64,
+    IosSimulatorArm64,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -814,6 +818,7 @@ enum MobilePackageTarget {
     #[value(name = "android-x86_64")]
     AndroidX86_64,
     IosArm64,
+    IosSimulatorArm64,
 }
 
 impl MobilePackageTarget {
@@ -822,6 +827,7 @@ impl MobilePackageTarget {
             Self::AndroidArm64 => PackageTarget::AndroidArm64,
             Self::AndroidX86_64 => PackageTarget::AndroidX86_64,
             Self::IosArm64 => PackageTarget::IosArm64,
+            Self::IosSimulatorArm64 => PackageTarget::IosSimulatorArm64,
         }
     }
 }
@@ -834,6 +840,7 @@ impl PackageTarget {
             Self::AndroidArm64 => "android-arm64",
             Self::AndroidX86_64 => "android-x86_64",
             Self::IosArm64 => "ios-arm64",
+            Self::IosSimulatorArm64 => "ios-simulator-arm64",
         }
     }
 
@@ -844,7 +851,7 @@ impl PackageTarget {
     fn is_mobile(self) -> bool {
         matches!(
             self,
-            Self::AndroidArm64 | Self::AndroidX86_64 | Self::IosArm64
+            Self::AndroidArm64 | Self::AndroidX86_64 | Self::IosArm64 | Self::IosSimulatorArm64
         )
     }
 
@@ -852,7 +859,7 @@ impl PackageTarget {
         match self {
             Self::AndroidArm64 => Some("arm64-v8a"),
             Self::AndroidX86_64 => Some("x86_64"),
-            Self::Desktop | Self::Web | Self::IosArm64 => None,
+            Self::Desktop | Self::Web | Self::IosArm64 | Self::IosSimulatorArm64 => None,
         }
     }
 
@@ -863,6 +870,7 @@ impl PackageTarget {
             Self::AndroidArm64 => CanonicalTarget::AndroidArm64,
             Self::AndroidX86_64 => CanonicalTarget::AndroidX86_64,
             Self::IosArm64 => CanonicalTarget::IosArm64,
+            Self::IosSimulatorArm64 => CanonicalTarget::IosSimulatorArm64,
         }
     }
 }
@@ -7075,12 +7083,14 @@ fn package_mobile_workspace(
 ) -> Result<CommandResult, String> {
     validate_network_client_target(&workspace.manifest, target)?;
     validate_mobile_network_guest_contract(&workspace.manifest, target)?;
-    if matches!(target, PackageTarget::IosArm64)
-        && workspace
-            .manifest
-            .capabilities
-            .as_ref()
-            .is_some_and(|capabilities| capabilities.network)
+    if matches!(
+        target,
+        PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64
+    ) && workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network)
         && !cfg!(target_os = "macos")
     {
         return Err(
@@ -7091,6 +7101,12 @@ fn package_mobile_workspace(
     if matches!(target, PackageTarget::AndroidX86_64) && !development_build {
         return Err(
             "android-x86_64 is a test-only emulator target; pass --development-build".to_string(),
+        );
+    }
+    if matches!(target, PackageTarget::IosSimulatorArm64) && !development_build {
+        return Err(
+            "ios-simulator-arm64 is a test-only simulator target; pass --development-build"
+                .to_string(),
         );
     }
     if !profile_functions.is_empty() && !development_build {
@@ -7229,7 +7245,9 @@ fn package_mobile_workspace(
             "entry": display_path(entry),
             "project": match target {
                 PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => "android",
-                PackageTarget::IosArm64 => "ios/StasisMobile.xcodeproj",
+                PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
+                    "ios/StasisMobile.xcodeproj"
+                }
                 PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
             },
             "provenance": PACKAGE_PROVENANCE_NAME,
@@ -7258,7 +7276,9 @@ fn validate_mobile_aot_child_manifest(
 
 fn stage_mobile_network_library(staging_root: &Path, target: PackageTarget) -> Result<(), String> {
     match target {
-        PackageTarget::IosArm64 => stage_ios_network_library(staging_root),
+        PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
+            stage_ios_network_library(staging_root, target)
+        }
         PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
             stage_android_network_library(staging_root, target)
         }
@@ -7273,6 +7293,7 @@ fn network_support_target(target: PackageTarget) -> Option<&'static str> {
         PackageTarget::AndroidArm64 => Some("android-arm64"),
         PackageTarget::AndroidX86_64 => Some("android-x86_64"),
         PackageTarget::IosArm64 => Some("ios-arm64"),
+        PackageTarget::IosSimulatorArm64 => Some("ios-simulator-arm64"),
         PackageTarget::Desktop if cfg!(windows) => Some("windows-x86_64"),
         PackageTarget::Desktop if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") => {
             Some("macos-arm64")
@@ -7319,7 +7340,9 @@ fn stage_network_artifacts(
     header: &Path,
 ) -> Result<(), String> {
     let destination = match target {
-        PackageTarget::IosArm64 => staging_root.join("ios/network"),
+        PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
+            staging_root.join("ios/network")
+        }
         PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
             staging_root.join("android/app/src/main/cpp/network")
         }
@@ -7422,7 +7445,7 @@ fn stage_android_network_library(staging_root: &Path, target: PackageTarget) -> 
     )
 }
 
-fn stage_ios_network_library(staging_root: &Path) -> Result<(), String> {
+fn stage_ios_network_library(staging_root: &Path, target: PackageTarget) -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Err(
             "network-enabled iOS packaging requires a macOS host with Xcode and the iOS Rust toolchain"
@@ -7432,37 +7455,48 @@ fn stage_ios_network_library(staging_root: &Path) -> Result<(), String> {
     if let Some((library, header)) = bundled_network_artifacts_for_executable(
         &env::current_exe()
             .map_err(|error| format!("failed to locate stasis executable: {error}"))?,
-        PackageTarget::IosArm64,
+        target,
     )? {
-        return stage_network_artifacts(staging_root, PackageTarget::IosArm64, &library, &header);
+        return stage_network_artifacts(staging_root, target, &library, &header);
     }
     let source_root = source_network_workspace().ok_or_else(|| {
         "installed toolchain is missing prebuilt mobile/network network libraries; reinstall the complete release archive"
             .to_string()
     })?;
-    let rust_target = "aarch64-apple-ios";
+    let simulator = matches!(target, PackageTarget::IosSimulatorArm64);
+    let rust_target = if simulator {
+        "aarch64-apple-ios-sim"
+    } else {
+        "aarch64-apple-ios"
+    };
+    let sdk = if simulator {
+        "iphonesimulator"
+    } else {
+        "iphoneos"
+    };
     let xcrun = Command::new("xcrun")
-        .args(["--sdk", "iphoneos", "--find", "clang"])
+        .args(["--sdk", sdk, "--find", "clang"])
         .output()
         .map_err(|error| {
             format!(
-                "network-enabled iOS packaging requires Xcode's iphoneos clang (run xcrun --sdk iphoneos --find clang): {error}"
+                "network-enabled iOS packaging requires Xcode's {sdk} clang (run xcrun --sdk {sdk} --find clang): {error}"
             )
         })?;
     if !xcrun.status.success() {
         return Err(format!(
-            "network-enabled iOS packaging requires Xcode's iphoneos clang (xcrun failed): {}",
+            "network-enabled iOS packaging requires Xcode's {sdk} clang (xcrun failed): {}",
             String::from_utf8_lossy(&xcrun.stderr).trim()
         ));
     }
     let clang = String::from_utf8_lossy(&xcrun.stdout).trim().to_string();
     if clang.is_empty() {
         return Err(
-            "network-enabled iOS packaging requires Xcode's iphoneos clang (xcrun returned no path)"
+            "network-enabled iOS packaging requires Xcode's selected iOS SDK clang (xcrun returned no path)"
                 .to_string(),
         );
     }
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let rust_target_env = rust_target.replace('-', "_");
     let mut command = Command::new(cargo);
     command
         .current_dir(&source_root)
@@ -7474,9 +7508,15 @@ fn stage_ios_network_library(staging_root: &Path) -> Result<(), String> {
             rust_target,
             "--release",
         ])
-        .env("CARGO_TARGET_AARCH64_APPLE_IOS_LINKER", &clang)
-        .env("CC_aarch64_apple_ios", &clang)
-        .env("CXX_aarch64_apple_ios", &clang);
+        .env(
+            format!(
+                "CARGO_TARGET_{}_LINKER",
+                rust_target_env.to_ascii_uppercase()
+            ),
+            &clang,
+        )
+        .env(format!("CC_{rust_target_env}"), &clang)
+        .env(format!("CXX_{rust_target_env}"), &clang);
     let output = command
         .output()
         .map_err(|error| format!("failed to build stasis_network for iOS: {error}"))?;
@@ -7497,7 +7537,7 @@ fn stage_ios_network_library(staging_root: &Path) -> Result<(), String> {
     }
     stage_network_artifacts(
         staging_root,
-        PackageTarget::IosArm64,
+        target,
         &library,
         &source_root.join("crates/stasis_network/include/stasis_network.h"),
     )
@@ -7982,7 +8022,7 @@ fn assemble_mobile_shell(
     let runtime = bundled_mobile_runtime_dir()?;
     let platform = match target {
         PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => "android",
-        PackageTarget::IosArm64 => "ios",
+        PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => "ios",
         PackageTarget::Desktop | PackageTarget::Web => {
             return Err("selected target is not a mobile package target".to_string())
         }
@@ -7999,14 +8039,18 @@ fn assemble_mobile_shell(
         PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
             aot_root.join("apk_assets/stasis_game")
         }
-        PackageTarget::IosArm64 => aot_root.join("ios_assets/stasis_game"),
+        PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
+            aot_root.join("ios_assets/stasis_game")
+        }
         PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
     };
     let asset_destination = match target {
         PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
             staging_root.join("android/app/src/main/assets/stasis_game")
         }
-        PackageTarget::IosArm64 => staging_root.join("ios/StasisMobile/stasis_game"),
+        PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
+            staging_root.join("ios/StasisMobile/stasis_game")
+        }
         PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
     };
     let android_manifest = if target.is_android() {
@@ -8056,7 +8100,11 @@ fn assemble_mobile_shell(
         .as_ref()
         .is_some_and(|capabilities| capabilities.network_client);
     let native_network_enabled = network_enabled || network_client_enabled;
-    let local_network_usage = if network_enabled && matches!(target, PackageTarget::IosArm64) {
+    let local_network_usage = if network_enabled
+        && matches!(
+            target,
+            PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64
+        ) {
         format!(
             "    <key>NSLocalNetworkUsageDescription</key><string>{} uses your local network so nearby friends can join games hosted on this device.</string>\n",
             app_name
@@ -8139,11 +8187,15 @@ fn assemble_mobile_shell(
             asset_destination.join("assets/manifest.json").display()
         ));
     }
-    if matches!(target, PackageTarget::IosArm64) {
+    if matches!(
+        target,
+        PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64
+    ) {
         write_ios_object_config(
             aot_root,
             &staging_root.join("ios/StasisMobile.xcconfig"),
             network_enabled,
+            target,
         )?;
     }
     let network_library = if native_network_enabled {
@@ -8151,7 +8203,9 @@ fn assemble_mobile_shell(
             PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
                 "android/app/src/main/cpp/network/libstasis_network.a"
             }
-            PackageTarget::IosArm64 => "ios/network/libstasis_network.a",
+            PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
+                "ios/network/libstasis_network.a"
+            }
             PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
         })
     } else {
@@ -8162,7 +8216,9 @@ fn assemble_mobile_shell(
             PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
                 "android/app/src/main/cpp/network/include/stasis_network.h"
             }
-            PackageTarget::IosArm64 => "ios/network/include/stasis_network.h",
+            PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
+                "ios/network/include/stasis_network.h"
+            }
             PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
         })
     } else {
@@ -8173,7 +8229,9 @@ fn assemble_mobile_shell(
             PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
                 "android/app/src/main/assets/stasis_game/network_guest.bundle"
             }
-            PackageTarget::IosArm64 => "ios/StasisMobile/stasis_game/network_guest.bundle",
+            PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
+                "ios/StasisMobile/stasis_game/network_guest.bundle"
+            }
             PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
         })
     } else {
@@ -8199,7 +8257,9 @@ fn assemble_mobile_shell(
                 PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
                     "android/app/src/main/assets/stasis_game"
                 }
-                PackageTarget::IosArm64 => "ios/StasisMobile/stasis_game",
+                PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
+                    "ios/StasisMobile/stasis_game"
+                }
                 PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
             },
             "network": network_enabled,
@@ -8722,6 +8782,7 @@ fn write_ios_object_config(
     aot_root: &Path,
     output: &Path,
     network_enabled: bool,
+    target: PackageTarget,
 ) -> Result<(), String> {
     let mut objects = Vec::new();
     for entry in fs::read_dir(aot_root)
@@ -8763,10 +8824,27 @@ fn write_ios_object_config(
     } else {
         ""
     };
+    let (sdl_platform, sdk_root, supported_platforms) = match target {
+        PackageTarget::IosArm64 => ("ios-arm64", "iphoneos", "iphoneos"),
+        PackageTarget::IosSimulatorArm64 => (
+            "ios-arm64_x86_64-simulator",
+            "iphonesimulator",
+            "iphonesimulator",
+        ),
+        PackageTarget::Desktop
+        | PackageTarget::Web
+        | PackageTarget::AndroidArm64
+        | PackageTarget::AndroidX86_64 => {
+            return Err("iOS object config requires an iOS target".to_string())
+        }
+    };
     fs::write(
         output,
         format!(
-            "STASIS_SDL_PLATFORM = ios-arm64\nGCC_PREPROCESSOR_DEFINITIONS = $(inherited){network_flags}\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/$(STASIS_SDL_PLATFORM) $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/$(STASIS_SDL_PLATFORM)\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/$(STASIS_SDL_PLATFORM)/SDL3.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/$(STASIS_SDL_PLATFORM)/SDL3_image.framework/Headers{network_headers}\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework UIKit -framework SDL3 -framework SDL3_image{network_library} {object_flags}\n",
+            "STASIS_SDL_PLATFORM = {sdl_platform}\nSDKROOT = {sdk_root}\nSUPPORTED_PLATFORMS = {supported_platforms}\nGCC_PREPROCESSOR_DEFINITIONS = $(inherited){network_flags}\nFRAMEWORK_SEARCH_PATHS = $(inherited) $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/$(STASIS_SDL_PLATFORM) $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/$(STASIS_SDL_PLATFORM)\nHEADER_SEARCH_PATHS = $(inherited) $(PROJECT_DIR)/../aot $(PROJECT_DIR)/../runtime $(STASIS_SDL_FRAMEWORKS)/SDL3.xcframework/$(STASIS_SDL_PLATFORM)/SDL3.framework/Headers $(STASIS_SDL_FRAMEWORKS)/SDL3_image.xcframework/$(STASIS_SDL_PLATFORM)/SDL3_image.framework/Headers{network_headers}\nLD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks\nOTHER_LDFLAGS = $(inherited) -framework UIKit -framework SDL3 -framework SDL3_image{network_library} {object_flags}\n",
+            sdl_platform = sdl_platform,
+            sdk_root = sdk_root,
+            supported_platforms = supported_platforms,
             network_flags = network_flags,
             network_headers = network_headers,
             network_library = network_library,
@@ -13040,6 +13118,32 @@ mod tests {
     }
 
     #[test]
+    fn package_mobile_cli_accepts_ios_simulator_development_target() {
+        let parsed = ToolchainCli::try_parse_from([
+            "stasis",
+            "--workspace",
+            "samples/generics_collections",
+            "package-mobile",
+            "--target",
+            "ios-simulator-arm64",
+            "--entry",
+            "src/main.stasis",
+            "--out",
+            "dist/ios-simulator",
+            "--development-build",
+        ])
+        .expect("parse simulator package-mobile flags");
+        assert!(matches!(
+            parsed.command,
+            ToolchainCommand::PackageMobile {
+                target: MobilePackageTarget::IosSimulatorArm64,
+                development_build: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn local_release_provenance_keeps_release_behavior_without_claiming_official_status() {
         let provenance = local_provenance(false).expect("local release provenance");
         assert_eq!(provenance["build_class"], "local_release");
@@ -13344,7 +13448,11 @@ mod tests {
         assert!(
             validate_mobile_network_guest_contract(&manifest, PackageTarget::AndroidArm64).is_ok()
         );
-        for target in [PackageTarget::Web, PackageTarget::IosArm64] {
+        for target in [
+            PackageTarget::Web,
+            PackageTarget::IosArm64,
+            PackageTarget::IosSimulatorArm64,
+        ] {
             let error = validate_network_client_target(&manifest, target)
                 .expect_err("reject unsupported native client package target");
             assert!(error.contains("capabilities.network_client is not supported"));
@@ -13771,6 +13879,23 @@ mod tests {
         assert!(!config.contains("network/libstasis_network.a"));
         assert!(!project.contains("@STASIS_"));
 
+        let ios_simulator = root.join("ios-simulator-package");
+        fs::create_dir_all(&ios_simulator).expect("create iOS simulator staging");
+        assemble_mobile_shell(
+            &workspace,
+            PackageTarget::IosSimulatorArm64,
+            &aot,
+            &ios_simulator,
+            &provenance,
+            None,
+        )
+        .expect("assemble iOS simulator shell");
+        let simulator_config = fs::read_to_string(ios_simulator.join("ios/StasisMobile.xcconfig"))
+            .expect("read iOS simulator config");
+        assert!(simulator_config.contains("STASIS_SDL_PLATFORM = ios-arm64_x86_64-simulator"));
+        assert!(simulator_config.contains("SDKROOT = iphonesimulator"));
+        assert!(simulator_config.contains("SUPPORTED_PLATFORMS = iphonesimulator"));
+
         let mut network_workspace = workspace.clone();
         network_workspace.manifest.capabilities = Some(ProjectCapabilities {
             network: true,
@@ -14059,6 +14184,8 @@ mod tests {
         let support = root.join("mobile/network");
         fs::create_dir_all(support.join("ios-arm64"))
             .expect("create relocated iOS support directory");
+        fs::create_dir_all(support.join("ios-simulator-arm64"))
+            .expect("create relocated iOS simulator support directory");
         fs::create_dir_all(support.join("include"))
             .expect("create relocated network include directory");
         fs::create_dir_all(executable.parent().expect("executable parent"))
@@ -14069,6 +14196,11 @@ mod tests {
             b"relocated iOS network library",
         )
         .expect("write relocated network library");
+        fs::write(
+            support.join("ios-simulator-arm64/libstasis_network.a"),
+            b"relocated iOS simulator network library",
+        )
+        .expect("write relocated simulator network library");
         fs::write(
             support.join("include/stasis_network.h"),
             b"/* relocated network header */\n",
@@ -14087,6 +14219,20 @@ mod tests {
             fs::canonicalize(header).expect("canonicalize relocated header"),
             fs::canonicalize(support.join("include/stasis_network.h"))
                 .expect("canonicalize expected header")
+        );
+        let (simulator_library, simulator_header) =
+            bundled_network_artifacts_for_executable(&executable, PackageTarget::IosSimulatorArm64)
+                .expect("resolve relocated iOS simulator support")
+                .expect("relocated simulator support artifacts");
+        assert_eq!(
+            fs::canonicalize(simulator_library).expect("canonicalize relocated simulator library"),
+            fs::canonicalize(support.join("ios-simulator-arm64/libstasis_network.a"))
+                .expect("canonicalize expected simulator library")
+        );
+        assert_eq!(
+            fs::canonicalize(simulator_header).expect("canonicalize relocated simulator header"),
+            fs::canonicalize(support.join("include/stasis_network.h"))
+                .expect("canonicalize expected simulator header")
         );
         remove_temp(&root);
     }

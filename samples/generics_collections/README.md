@@ -12,6 +12,8 @@ stasis --workspace samples/generics_collections run --headless --ticks 1
 stasis --workspace samples/generics_collections package --target desktop --development-build
 stasis --workspace samples/generics_collections package --target web --development-build
 stasis --workspace samples/generics_collections package-mobile --target android-arm64 --out build/android-arm64 --development-build
+stasis --workspace samples/generics_collections package-mobile --target ios-arm64 --out build/ios-arm64 --development-build
+stasis --workspace samples/generics_collections package-mobile --target ios-simulator-arm64 --out build/ios-simulator-arm64 --development-build
 ```
 
 The production compiler seam checks the canonical `src/main.stasis` entry
@@ -22,6 +24,12 @@ post-run state digest through `generics_collections_state_digest()`, while
 captured digest through the supported global accessor. The Web acceptance also verifies the
 real browser's WebGL2 frame and the fixed-array bounds trap. Android uses this
 same full entry and valid frame lifecycle.
+The iOS acceptance packages the same unchanged entry separately for device and
+arm64 Simulator ABIs. Hosted Simulator execution requires lifecycle result `0`,
+reads the packaged digest global as `507`, inspects the teal frame, and runs
+low/high bounds probes as isolated fatal-trap processes. Device package
+architecture, frameworks, symbols, assets, provenance, and hashes are recorded
+separately; unsigned CI output is never reported as physical-device evidence.
 The desktop acceptance runs the shared semantic oracle through production JIT
 and a freshly linked native AOT executable on each desktop host, including
 isolated bounds-trap children. It then packages and launches this canonical

@@ -181,6 +181,7 @@ fn help_explains_how_to_build_each_supported_target() {
         "stasis package-mobile --target android-arm64",
         "stasis package-mobile --target android-x86_64 --development-build",
         "stasis package-mobile --target ios-arm64",
+        "stasis package-mobile --target ios-simulator-arm64 --development-build",
         "prepare",
         "Mobile commands create Gradle or Xcode projects",
     ] {

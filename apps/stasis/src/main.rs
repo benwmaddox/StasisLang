@@ -69,6 +69,7 @@ enum MobileAotTarget {
     AndroidArm64,
     AndroidX86_64,
     IosArm64,
+    IosSimulatorArm64,
 }
 
 impl MobileAotTarget {
@@ -77,8 +78,9 @@ impl MobileAotTarget {
             "android-arm64" | "android" => Ok(Self::AndroidArm64),
             "android-x86_64" => Ok(Self::AndroidX86_64),
             "ios-arm64" | "ios" => Ok(Self::IosArm64),
+            "ios-simulator-arm64" => Ok(Self::IosSimulatorArm64),
             _ => Err(format!(
-                "invalid mobile AOT target '{value}'. Use android-arm64, android-x86_64, or ios-arm64"
+                "invalid mobile AOT target '{value}'. Use android-arm64, android-x86_64, ios-arm64, or ios-simulator-arm64"
             )),
         }
     }
@@ -88,6 +90,7 @@ impl MobileAotTarget {
             Self::AndroidArm64 => "android-arm64",
             Self::AndroidX86_64 => "android-x86_64",
             Self::IosArm64 => "ios-arm64",
+            Self::IosSimulatorArm64 => "ios-simulator-arm64",
         }
     }
 
@@ -96,13 +99,14 @@ impl MobileAotTarget {
             Self::AndroidArm64 => AotTarget::android_arm64_default(),
             Self::AndroidX86_64 => AotTarget::android_x86_64_default(),
             Self::IosArm64 => AotTarget::ios_arm64_default(),
+            Self::IosSimulatorArm64 => AotTarget::ios_simulator_arm64_default(),
         }
     }
 
     fn asset_root_dir(self) -> &'static str {
         match self {
             Self::AndroidArm64 | Self::AndroidX86_64 => "apk_assets",
-            Self::IosArm64 => "ios_assets",
+            Self::IosArm64 | Self::IosSimulatorArm64 => "ios_assets",
         }
     }
 }
@@ -1760,7 +1764,7 @@ fn parse_mobile_aot_bundle_args(args: &[String]) -> Result<MobileAotBundleArgs, 
     }
     let Some(target) = target else {
         return Err(
-            "missing required --target <android-arm64|android-x86_64|ios-arm64>".to_string(),
+            "missing required --target <android-arm64|android-x86_64|ios-arm64|ios-simulator-arm64>".to_string(),
         );
     };
     let Some(project_dir) = project_dir else {
@@ -1947,6 +1951,9 @@ fn write_mobile_aot_engine_bundle(
             toolchain_cli::project_settings::CanonicalTarget::AndroidX86_64
         }
         MobileAotTarget::IosArm64 => toolchain_cli::project_settings::CanonicalTarget::IosArm64,
+        MobileAotTarget::IosSimulatorArm64 => {
+            toolchain_cli::project_settings::CanonicalTarget::IosSimulatorArm64
+        }
     };
     let project_settings = if project_dir.join("stasis.json").is_file() {
         toolchain_cli::load_project_configuration(project_dir, canonical_target)?
@@ -3211,6 +3218,28 @@ mod tests {
         );
         assert_eq!(parsed.entry_file, Some(PathBuf::from("src/main.stasis")));
         assert_eq!(parsed.output_dir, PathBuf::from("target/mobile-aot"));
+    }
+
+    #[test]
+    fn parse_mobile_aot_bundle_args_accepts_ios_simulator_target() {
+        let args = vec![
+            "--target".to_string(),
+            "ios-simulator-arm64".to_string(),
+            "--project-dir".to_string(),
+            "samples/generics_collections".to_string(),
+            "--entry-file".to_string(),
+            "src/main.stasis".to_string(),
+            "--out-dir".to_string(),
+            "target/mobile-aot-simulator".to_string(),
+        ];
+        let parsed = parse_mobile_aot_bundle_args(&args).expect("parse should succeed");
+        assert_eq!(parsed.target, MobileAotTarget::IosSimulatorArm64);
+        assert_eq!(parsed.target.as_str(), "ios-simulator-arm64");
+        assert_eq!(
+            parsed.target.aot_target(),
+            AotTarget::ios_simulator_arm64_default()
+        );
+        assert_eq!(parsed.target.asset_root_dir(), "ios_assets");
     }
 
     #[test]

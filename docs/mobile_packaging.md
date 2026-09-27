@@ -6,6 +6,7 @@ Stasis-specific command is:
 ```text
 stasis --workspace path/to/game package-mobile --target android-arm64
 stasis --workspace path/to/game package-mobile --target ios-arm64
+stasis --workspace path/to/game package-mobile --target ios-simulator-arm64 --development-build
 ```
 
 Official release archives verify their compiler and runtime sources against
@@ -21,6 +22,11 @@ activity orientation, release version, and launcher artwork. Use `--entry path/t
 select another project-relative import root and `--out path` to select a new,
 nonexistent output directory. Packaging is atomic: compiler or file failures do
 not publish a partial app project.
+
+`ios-simulator-arm64` is a development-only arm64 Simulator package. It emits
+native `aarch64-apple-ios-sim` AOT objects, selects the SDL simulator slice,
+and uses the `iphonesimulator` SDK. It is an execution and CI target, not a
+device-signing substitute; production device packages remain `ios-arm64`.
 
 ```json
 "android": {

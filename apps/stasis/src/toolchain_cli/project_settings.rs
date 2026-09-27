@@ -24,10 +24,11 @@ pub(crate) enum CanonicalTarget {
     AndroidArm64,
     AndroidX86_64,
     IosArm64,
+    IosSimulatorArm64,
 }
 
 impl CanonicalTarget {
-    pub(super) const ALL: [Self; 10] = [
+    pub(super) const ALL: [Self; 11] = [
         Self::Web,
         Self::WindowsX86_64,
         Self::WindowsArm64,
@@ -38,6 +39,7 @@ impl CanonicalTarget {
         Self::AndroidArm64,
         Self::AndroidX86_64,
         Self::IosArm64,
+        Self::IosSimulatorArm64,
     ];
 
     pub(crate) fn host() -> Self {
@@ -68,6 +70,7 @@ impl CanonicalTarget {
             Self::AndroidArm64 => "android-arm64",
             Self::AndroidX86_64 => "android-x86_64",
             Self::IosArm64 => "ios-arm64",
+            Self::IosSimulatorArm64 => "ios-simulator-arm64",
         }
     }
 
@@ -666,6 +669,7 @@ mod tests {
                 "android-arm64",
                 "android-x86_64",
                 "ios-arm64",
+                "ios-simulator-arm64",
             ]
         );
         let expected_host = if cfg!(all(target_os = "windows", target_arch = "aarch64")) {

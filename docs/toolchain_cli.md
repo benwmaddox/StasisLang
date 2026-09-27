@@ -41,6 +41,7 @@ stasis build --mode release
 stasis package --target desktop
 stasis package-mobile --target android-arm64
 stasis package-mobile --target ios-arm64
+stasis package-mobile --target ios-simulator-arm64 --development-build
 stasis prepare
 stasis inspect
 stasis inspect --capacity state.enemies=512
@@ -121,7 +122,8 @@ Definitions accept only typed `string`, `bool`, or bounded `number` values. Stri
 use `allowed`; number definitions must provide finite `minimum` and `maximum`. A required setting must
 have a default or an override for the exact selected target. Overrides do not inherit across target
 families. Canonical targets are `web`, `windows-x86_64`, `windows-arm64`, `linux-x86_64`,
-`linux-arm64`, `macos-x86_64`, `macos-arm64`, `android-arm64`, `android-x86_64`, and `ios-arm64`.
+`linux-arm64`, `macos-x86_64`, `macos-arm64`, `android-arm64`, `android-x86_64`,
+`ios-arm64`, and `ios-simulator-arm64`.
 Host commands resolve the exact OS/architecture target; package commands resolve their explicit target.
 
 Guest code reads the immutable snapshot through the compiler-owned `project_target()` and generated
@@ -352,7 +354,7 @@ restore release assets.
 - `package --target desktop`: create a standalone directory with the AOT executable, manifest,
   assets, graphics runtime when present, and verified release provenance. Windows packages keep
   the game-named executable as the only root file and place all support files under `app/`.
-- `package-mobile --target android-arm64|ios-arm64 [--entry PATH]`: atomically assemble the
+- `package-mobile --target android-arm64|ios-arm64|ios-simulator-arm64 [--entry PATH]`: atomically assemble the
   shared AOT output, SDL-only runtime, bundled assets, verified provenance, and thin Gradle or
   Xcode app shell. Network-enabled iOS packages require macOS/Xcode, stage and link the
   `stasis_network` arm64 static library, and include the local-network privacy declaration;
@@ -360,6 +362,9 @@ restore release assets.
   prebuilt network libraries from `mobile/network/<target>/` beside the installed executable;
   nightly archives contain all Android arm64/x86_64 and iOS arm64 support libraries, while source
   checkouts may build them from the workspace as a development fallback.
+  `ios-simulator-arm64` requires `--development-build`, emits simulator-native
+  AOT/network objects, selects the SDL simulator slice, and never qualifies a
+  physical-device release.
 - `package --target android-arm64|ios-arm64`: compatibility spelling that uses the manifest entry.
 - Successful human-readable `build`, `package`, and `package-mobile` commands end with a
   `Completed in ...` line. Durations use milliseconds for sub-second work, seconds for work under

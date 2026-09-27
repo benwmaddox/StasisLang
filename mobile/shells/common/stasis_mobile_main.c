@@ -130,6 +130,42 @@ static float seam_f32(const char *path) {
     return stasis_jit_global_f32_load(hash_global_path(path));
 }
 
+static int write_ios_generics_receipt(int frame) {
+#if defined(__APPLE__) && !defined(__ANDROID__)
+    const char *home = SDL_getenv("HOME");
+    if (home == NULL || home[0] == '\0') return 0;
+    char path[1024];
+    int written = snprintf(
+        path, sizeof(path), "%s/Documents/stasis-ios-generics-result.json", home);
+    if (written < 0 || (size_t)written >= sizeof(path)) return 0;
+    char temporary_path[1060];
+    written = snprintf(temporary_path, sizeof(temporary_path), "%s.tmp", path);
+    if (written < 0 || (size_t)written >= sizeof(temporary_path)) return 0;
+    FILE *file = fopen(temporary_path, "wb");
+    if (file == NULL) return 0;
+    int32_t digest = seam_i32("generics_collections_digest_value");
+    int ok = fprintf(
+        file,
+        "{\"schema\":\"stasis.ios.generics.v1\","
+        "\"main_result\":0,\"tick_result\":0,\"render_result\":0,"
+        "\"digest\":%d,\"frame\":%d}\n",
+        digest,
+        frame) > 0;
+    ok = fclose(file) == 0 && ok;
+    if (ok) ok = rename(temporary_path, path) == 0;
+    if (!ok) remove(temporary_path);
+    if (ok) {
+        SDL_Log(
+            "Stasis iOS generics acceptance digest=%d frame=%d receipt=%s",
+            digest, frame, path);
+    }
+    return ok;
+#else
+    (void)frame;
+    return 0;
+#endif
+}
+
 static int seam_it021_audio = 0;
 static int seam_it021_audio_collected = 0;
 static int seam_audio_queued_before = 0;
@@ -673,6 +709,24 @@ int SDL_main(int argc, char **argv) {
     int32_t frame = 0;
     int32_t last_probe_sequence = 0;
     int32_t last_lifecycle[6] = {-1, -1, -1, -1, -1, -1};
+    int ios_generics_acceptance =
+        seam_test_id != NULL && strcmp(seam_test_id, "IOS-GENERICS") == 0;
+    if (ios_generics_acceptance) {
+        const char *bounds_index = SDL_getenv("STASIS_IOS_GENERICS_BOUNDS_INDEX");
+        if (bounds_index != NULL && bounds_index[0] != '\0') {
+            char *end = NULL;
+            long parsed = strtol(bounds_index, &end, 10);
+            if (end == bounds_index || *end != '\0' || parsed < INT32_MIN ||
+                    parsed > INT32_MAX) {
+                SDL_Log("Stasis iOS generics invalid bounds index: %s", bounds_index);
+                status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+            } else {
+                stasis_jit_global_i32_store(
+                    hash_global_path("web_bounds_probe_index"), (int32_t)parsed);
+                SDL_Log("Stasis iOS generics bounds probe index=%ld", parsed);
+            }
+        }
+    }
 #endif
     stasis_mobile_frame_pacer_reset(&frame_pacer, SDL_GetTicksNS());
     while (status == STASIS_MOBILE_RUNTIME_OK) {
@@ -688,6 +742,11 @@ int SDL_main(int argc, char **argv) {
 #endif
 #if defined(STASIS_ENABLE_SEAM_TESTS)
             frame++;
+            if (ios_generics_acceptance && frame == 1 &&
+                    !write_ios_generics_receipt(frame)) {
+                SDL_Log("Stasis iOS generics acceptance could not write its receipt");
+                status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+            }
             if (seam_it021_audio && !seam_it021_audio_collected &&
                     seam_i32("seam_audio_handle") > 0 &&
                     seam_i32("seam_voice_handle") > 0) {

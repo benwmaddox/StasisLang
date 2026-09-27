@@ -16,7 +16,7 @@
     "targets": {
       "type": "object",
       "propertyNames": {
-        "enum": ["web", "windows-x86_64", "windows-arm64", "linux-x86_64", "linux-arm64", "macos-x86_64", "macos-arm64", "android-arm64", "android-x86_64", "ios-arm64"]
+        "enum": ["web", "windows-x86_64", "windows-arm64", "linux-x86_64", "linux-arm64", "macos-x86_64", "macos-arm64", "android-arm64", "android-x86_64", "ios-arm64", "ios-simulator-arm64"]
       },
       "additionalProperties": {
         "type": "object",
