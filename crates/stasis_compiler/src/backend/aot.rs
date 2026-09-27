@@ -1480,6 +1480,13 @@ type ClifDumpHook =
 static CLIF_DUMP_HOOK: OnceLock<Mutex<Option<ClifDumpHook>>> = OnceLock::new();
 
 #[cfg(test)]
+static CLIF_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+#[path = "aot/simd_characterization.rs"]
+mod simd_characterization;
+
+#[cfg(test)]
 fn clif_dump_hook() -> &'static Mutex<Option<ClifDumpHook>> {
     CLIF_DUMP_HOOK.get_or_init(|| Mutex::new(None))
 }
@@ -1990,8 +1997,6 @@ mod tests {
     use std::process::Command;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    static CLIF_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
 
     const STRUCT_LENGTH_FIELDS_FIXTURE: &str = "struct WallRun { x: i32; length: i32; }\n\
          struct WallCache<N: i32> { runs: WallRun[N]; }\n\
