@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(debug_assertions), deny(warnings))]
+#![cfg_attr(not(feature = "native"), allow(dead_code))]
+
+#[cfg(not(any(feature = "native", feature = "browser-core")))]
+compile_error!("stasis_compiler requires either the native or browser-core feature");
 
 pub mod backend;
 pub mod compiler;

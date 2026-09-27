@@ -1,0 +1,15 @@
+[package]
+name = "stasis_browser_compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+stasis_compiler = { path = "../stasis_compiler", default-features = false, features = ["browser-core"] }

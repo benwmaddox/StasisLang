@@ -1,6 +1,8 @@
 //! Source-derived compiler analysis shared by all target backends.
 #![allow(clippy::type_complexity)]
 
+#[cfg(feature = "native")]
+use crate::backend::hash::hash_string_literal;
 use crate::backend::runtime_exports::is_aot_runtime_export_symbol;
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::frontend::body_parser::*;
@@ -1024,8 +1026,8 @@ pub(crate) fn parse_top_level_constant_literal(
         TypeCategory::AsciiView | TypeCategory::Utf8View
     ) {
         let value = parse_constant_string_initializer(name, initializer)?;
-        let literal_id = hash_string_literal(&value);
-        stasis_dynload::upsert_jit_string_literal(literal_id, &value);
+        #[cfg(feature = "native")]
+        stasis_dynload::upsert_jit_string_literal(hash_string_literal(&value), &value);
         return Ok(Some(ConstantValue::String { value, type_id }));
     }
     Ok(None)
@@ -1726,16 +1728,6 @@ pub(crate) fn are_call_argument_and_param_compatible(
         return argument == parameter;
     }
     type_table.is_argument_compatible_with_param(argument, parameter)
-}
-// String literals use the same stable FNV-1a path hash as runtime global paths. Keep this
-// helper private here so source analysis remains independent of lowering/runtime emission.
-fn hash_string_literal(value: &str) -> i32 {
-    let mut hash: u32 = 2166136261;
-    for byte in value.bytes() {
-        hash ^= u32::from(byte);
-        hash = hash.wrapping_mul(16777619);
-    }
-    hash as i32
 }
 
 #[cfg(test)]
