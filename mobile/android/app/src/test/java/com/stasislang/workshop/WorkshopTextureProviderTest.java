@@ -4,6 +4,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertEquals;
 
+import java.nio.ByteBuffer;
+
 import org.junit.Test;
 
 public final class WorkshopTextureProviderTest {
@@ -92,5 +94,166 @@ public final class WorkshopTextureProviderTest {
         assertFalse(base.equals(WorkshopTextureProvider.textIdentity(
                 "font-a", "label", 2.0005f)));
         assertEquals(base, WorkshopTextureProvider.textIdentity("font-a", "label", 2.0f));
+    }
+
+    @Test
+    public void fontMetadataCacheHitsUntilCatalogGenerationChanges() throws Exception {
+        WorkshopTextureProvider.MetadataCache<String> cache =
+                new WorkshopTextureProvider.MetadataCache<>();
+        int[] resolverCalls = {0};
+
+        WorkshopTextureProvider.MetadataLookup<String> first =
+                WorkshopTextureProvider.resolveImmutableMetadata(cache, 17, 5L, () -> {
+                    resolverCalls[0] += 1;
+                    return "font metadata";
+                });
+        WorkshopTextureProvider.MetadataLookup<String> hit =
+                WorkshopTextureProvider.resolveImmutableMetadata(cache, 17, 5L, () -> {
+                    resolverCalls[0] += 1;
+                    return "unexpected";
+                });
+        WorkshopTextureProvider.MetadataLookup<String> refreshed =
+                WorkshopTextureProvider.resolveImmutableMetadata(cache, 17, 6L, () -> {
+                    resolverCalls[0] += 1;
+                    return "new catalog metadata";
+                });
+
+        assertFalse(first.cacheHit);
+        assertTrue(hit.cacheHit);
+        assertFalse(refreshed.cacheHit);
+        assertEquals("new catalog metadata", refreshed.value);
+        assertEquals(2, resolverCalls[0]);
+    }
+
+    @Test
+    public void cachedTextMetadataCachesImmutableRunsButAlwaysResolvesReplaceableRuns()
+            throws Exception {
+        WorkshopTextureProvider.MetadataCache<WorkshopTextureProvider.CachedTextMetadata> cache =
+                new WorkshopTextureProvider.MetadataCache<>();
+        int[] immutableCalls = {0};
+        int[] replaceableCalls = {0};
+
+        WorkshopTextureProvider.MetadataLookup<WorkshopTextureProvider.CachedTextMetadata> fixed =
+                WorkshopTextureProvider.resolveCachedTextMetadata(cache, 9, 12L, () -> {
+                    immutableCalls[0] += 1;
+                    return new WorkshopTextureProvider.CachedTextMetadata(
+                            "/fonts/fixed.ttf", "Fixed", 18, false);
+                });
+        WorkshopTextureProvider.MetadataLookup<WorkshopTextureProvider.CachedTextMetadata> fixedHit =
+                WorkshopTextureProvider.resolveCachedTextMetadata(cache, 9, 12L, () -> {
+                    immutableCalls[0] += 1;
+                    return new WorkshopTextureProvider.CachedTextMetadata(
+                            "/fonts/fixed.ttf", "unexpected", 18, false);
+                });
+        WorkshopTextureProvider.MetadataLookup<WorkshopTextureProvider.CachedTextMetadata> dynamicOne =
+                WorkshopTextureProvider.resolveCachedTextMetadata(cache, 10, 12L, () -> {
+                    replaceableCalls[0] += 1;
+                    return new WorkshopTextureProvider.CachedTextMetadata(
+                            "/fonts/fixed.ttf", "score 1", 18, true);
+                });
+        WorkshopTextureProvider.MetadataLookup<WorkshopTextureProvider.CachedTextMetadata> dynamicTwo =
+                WorkshopTextureProvider.resolveCachedTextMetadata(cache, 10, 12L, () -> {
+                    replaceableCalls[0] += 1;
+                    return new WorkshopTextureProvider.CachedTextMetadata(
+                            "/fonts/fixed.ttf", "score 2", 18, true);
+                });
+
+        assertFalse(fixed.cacheHit);
+        assertTrue(fixedHit.cacheHit);
+        assertEquals(1, immutableCalls[0]);
+        assertEquals(fixed.value.immutableTextSha256,
+                fixedHit.value.immutableTextSha256);
+        assertFalse(fixed.value.immutableTextSha256.isEmpty());
+        String fixedIdentity = WorkshopTextureProvider.textIdentityFromDigest(
+                "font-a", fixed.value.immutableTextSha256, 2.0f);
+        assertEquals(WorkshopTextureProvider.textIdentity("font-a", "Fixed", 2.0f),
+                fixedIdentity);
+        assertFalse(fixedIdentity.equals(WorkshopTextureProvider.textIdentityFromDigest(
+                "font-b", fixed.value.immutableTextSha256, 2.0f)));
+        assertFalse(fixedIdentity.equals(WorkshopTextureProvider.textIdentityFromDigest(
+                "font-a", fixed.value.immutableTextSha256, 2.0005f)));
+        assertFalse(dynamicOne.cacheHit);
+        assertFalse(dynamicTwo.cacheHit);
+        assertEquals("score 1", dynamicOne.value.text);
+        assertEquals("score 2", dynamicTwo.value.text);
+        assertEquals(null, dynamicOne.value.immutableTextSha256);
+        assertEquals(null, dynamicTwo.value.immutableTextSha256);
+        assertFalse(WorkshopTextureProvider.textIdentity(
+                "font-a", dynamicOne.value.text, 2.0f).equals(
+                WorkshopTextureProvider.textIdentity(
+                        "font-a", dynamicTwo.value.text, 2.0f)));
+        assertEquals(2, replaceableCalls[0]);
+    }
+
+    @Test
+    public void catalogGenerationInvalidatesCachedTextMetadata() throws Exception {
+        WorkshopTextureProvider.MetadataCache<WorkshopTextureProvider.CachedTextMetadata> cache =
+                new WorkshopTextureProvider.MetadataCache<>();
+        int[] resolverCalls = {0};
+
+        WorkshopTextureProvider.resolveCachedTextMetadata(cache, 23, 31L, () -> {
+            resolverCalls[0] += 1;
+            return new WorkshopTextureProvider.CachedTextMetadata(
+                    "/fonts/old.ttf", "label", 18, false);
+        });
+        WorkshopTextureProvider.MetadataLookup<WorkshopTextureProvider.CachedTextMetadata> nextGeneration =
+                WorkshopTextureProvider.resolveCachedTextMetadata(cache, 23, 32L, () -> {
+                    resolverCalls[0] += 1;
+                    return new WorkshopTextureProvider.CachedTextMetadata(
+                            "/fonts/new.ttf", "label", 18, false);
+                });
+
+        assertFalse(nextGeneration.cacheHit);
+        assertEquals("/fonts/new.ttf", nextGeneration.value.fontPath);
+        assertEquals(2, resolverCalls[0]);
+    }
+
+    @Test
+    public void directAndCachedTextShareFileIdentityWithinFrameAndRefreshNextFrame()
+            throws Exception {
+        WorkshopTextureProvider.FontFileIdentityCache cache =
+                new WorkshopTextureProvider.FontFileIdentityCache();
+        int[] statCalls = {0};
+
+        WorkshopTextureProvider.FileIdentity directTextFont = cache.getOrResolve(
+                "/fonts/shared.ttf", () -> {
+                    statCalls[0] += 1;
+                    return new WorkshopTextureProvider.FileIdentity(
+                            "/fonts/shared.ttf", 4096L, 123L);
+                });
+        WorkshopTextureProvider.FileIdentity cachedTextFont = cache.getOrResolve(
+                "/fonts/shared.ttf", () -> {
+                    statCalls[0] += 1;
+                    return new WorkshopTextureProvider.FileIdentity(
+                            "/fonts/unexpected.ttf", 8192L, 456L);
+                });
+
+        assertTrue(directTextFont == cachedTextFont);
+        assertEquals(1, statCalls[0]);
+        cache.beginFrame();
+        WorkshopTextureProvider.FileIdentity nextFrame = cache.getOrResolve(
+                "/fonts/shared.ttf", () -> {
+                    statCalls[0] += 1;
+                    return new WorkshopTextureProvider.FileIdentity(
+                            "/fonts/shared.ttf", 8192L, 789L);
+                });
+
+        assertFalse(directTextFont == nextFrame);
+        assertEquals(8192L, nextFrame.length);
+        assertEquals(789L, nextFrame.lastModified);
+        assertEquals(2, statCalls[0]);
+    }
+
+    @Test
+    public void dynamicTextTextureDoesNotMatchAfterCatalogGenerationChanges() {
+        byte[] text = "score".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        WorkshopTextureProvider.TextTexture texture = new WorkshopTextureProvider.TextTexture(
+                1, "font-identity", 20, 10, 20, 10, 2, 3, 1L);
+        WorkshopTextureProvider.DynamicTextTexture cached =
+                new WorkshopTextureProvider.DynamicTextTexture(17, text, texture, 5L);
+        ByteBuffer utf8 = ByteBuffer.wrap(text);
+
+        assertTrue(cached.matches(17, utf8, 0, text.length, 5L));
+        assertFalse(cached.matches(17, utf8, 0, text.length, 6L));
     }
 }

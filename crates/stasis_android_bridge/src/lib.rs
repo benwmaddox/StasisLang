@@ -46,6 +46,20 @@ use stasis_compiler::frontend::workshop::{
 use stasis_dynload::StasisAudioHostApi;
 
 const MAX_EXTERNAL_URL_BYTES: usize = 2048;
+static EMBEDDED_RESOURCE_CATALOG_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+// A new handle does not invalidate existing cache entries, and replaceable runs
+// bypass Java's immutable metadata cache. Advance this epoch when a catalog swap
+// or final font release can invalidate already-published font/text handles.
+fn bump_embedded_resource_catalog_generation() {
+    EMBEDDED_RESOURCE_CATALOG_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn embedded_resource_catalog_generation() -> u64 {
+    let _catalog = embedded_resource_catalog().lock().ok();
+    EMBEDDED_RESOURCE_CATALOG_GENERATION.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 type AndroidExternalUrlHost = extern "C" fn(*const u8, i32, *mut c_void) -> i32;
 
@@ -1031,9 +1045,12 @@ fn embedded_resource_catalog() -> &'static Mutex<Option<EmbeddedResourceCatalog>
 
 fn install_embedded_resource_host(project_root: &Path) -> Result<(), String> {
     let catalog = prepare_embedded_resource_catalog(project_root, false)?;
-    *embedded_resource_catalog()
+    let mut slot = embedded_resource_catalog()
         .lock()
-        .map_err(|_| "embedded resource catalog mutex poisoned")? = Some(catalog);
+        .map_err(|_| "embedded resource catalog mutex poisoned")?;
+    *slot = Some(catalog);
+    bump_embedded_resource_catalog_generation();
+    drop(slot);
     stasis_dynload::set_embedded_graphics_host(Some(stasis_dynload::EmbeddedGraphicsHost {
         load_sprite: embedded_load_sprite,
         release_sprite: embedded_release_sprite,
@@ -1465,6 +1482,7 @@ fn embedded_release_font(handle: i32) {
     catalog.fonts[index].path = PathBuf::new();
     catalog.fonts[index].size = 0;
     catalog.text_runs.retain(|run| run.font != handle);
+    bump_embedded_resource_catalog_generation();
 }
 
 fn embedded_font_status(handle: i32) -> i32 {
@@ -1689,6 +1707,7 @@ fn resolve_embedded_text_run(
         "font_size": font.size,
         "text": run.text,
         "measured_width": run.measured_width,
+        "replaceable": run.replaceable,
     }))
 }
 
@@ -2215,14 +2234,17 @@ impl DevelopmentSwapHost for AndroidResourcePublication {
             .lock()
             .map_err(|_| "embedded resource catalog mutex poisoned".to_string())?;
         staged.previous = Some(slot.replace(catalog));
+        bump_embedded_resource_catalog_generation();
         Ok(())
     }
 
     fn restore(&mut self, staged: Self::Staged) -> Result<(), String> {
         if let Some(previous) = staged.previous {
-            *embedded_resource_catalog()
+            let mut slot = embedded_resource_catalog()
                 .lock()
-                .map_err(|_| "embedded resource catalog mutex poisoned".to_string())? = previous;
+                .map_err(|_| "embedded resource catalog mutex poisoned".to_string())?;
+            *slot = previous;
+            bump_embedded_resource_catalog_generation();
         }
         Ok(())
     }
@@ -3580,6 +3602,12 @@ pub extern "C" fn stasis_android_bridge_resolve_cached_text(
     CString::new(value.to_string())
         .unwrap_or_else(|_| CString::new("{\"status\":\"error\"}").unwrap())
         .into_raw()
+}
+
+/// Cheap per-frame invalidation epoch for Java-side immutable resource metadata caches.
+#[no_mangle]
+pub extern "C" fn stasis_android_bridge_resource_catalog_generation() -> u64 {
+    embedded_resource_catalog_generation()
 }
 
 #[no_mangle]
@@ -7933,12 +7961,19 @@ function on_code_swap(): void {}\n";
         assert_eq!(embedded_font_status(1), ASSET_STATE_LOADED);
         assert_eq!(embedded_font_status(0), ASSET_STATE_NONE);
         assert_eq!(embedded_font_status(-1), ASSET_STATE_NONE);
+        let before_shared_release = embedded_resource_catalog_generation();
         embedded_release_font(1);
+        assert_eq!(
+            embedded_resource_catalog_generation(),
+            before_shared_release
+        );
         assert_eq!(embedded_font_status(1), ASSET_STATE_LOADED);
         assert!(embedded_measure_text_cached(stale_run) > 0.0);
         embedded_release_font(1);
+        assert!(embedded_resource_catalog_generation() > before_shared_release);
         assert_eq!(embedded_font_status(1), ASSET_STATE_NONE);
         assert_eq!(embedded_measure_text_cached(stale_run), 0.0);
+        assert!(resolve_embedded_text_run(&root, stale_run).is_err());
         assert!(embedded_measure_text_cached(retained_run) > 0.0);
         {
             let mut slot = embedded_resource_catalog().lock().unwrap();
@@ -8091,6 +8126,13 @@ function on_code_swap(): void {}\n";
         assert_eq!(after.text, before.text);
         assert_eq!(after.measured_width, before.measured_width);
         assert_eq!(after.measured_height, before.measured_height);
+        let fixed_metadata =
+            resolve_embedded_text_run(&root, fixed).expect("immutable text metadata");
+        assert_eq!(fixed_metadata["replaceable"], false);
+        let dynamic_metadata =
+            resolve_embedded_text_run(&root, dynamic).expect("replaceable text metadata");
+        assert_eq!(dynamic_metadata["replaceable"], true);
+        assert_eq!(dynamic_metadata["text"], "Punktzahl 8");
         let refreshed = prepare_embedded_resource_catalog(&root, true).unwrap();
         let refreshed_run = refreshed
             .text_runs

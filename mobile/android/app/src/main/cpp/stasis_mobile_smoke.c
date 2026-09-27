@@ -50,6 +50,7 @@ typedef char *(*stasis_android_bridge_drain_sprite_releases_fn)(void);
 typedef char *(*stasis_android_bridge_poll_sprite_release_cancellations_fn)(void);
 typedef char *(*stasis_android_bridge_resolve_cached_text_fn)(const char *project_root, int handle);
 typedef char *(*stasis_android_bridge_resolve_font_fn)(const char *project_root, int handle);
+typedef uint64_t (*stasis_android_bridge_resource_catalog_generation_fn)(void);
 typedef char *(*stasis_android_bridge_source_items_fn)(const char *project_root, const char *entry_file);
 typedef char *(*stasis_android_bridge_find_references_fn)(const char *project_root, const char *entry_file, const char *symbol, uintptr_t limit);
 typedef char *(*stasis_android_bridge_semantic_edit_fn)(const char *project_root, const char *entry_file, const char *request_json, int dry_run, int validate, int run_tests);
@@ -101,6 +102,7 @@ typedef struct RustBridgeApi {
     stasis_android_bridge_poll_sprite_release_cancellations_fn poll_sprite_release_cancellations;
     stasis_android_bridge_resolve_cached_text_fn resolve_cached_text;
     stasis_android_bridge_resolve_font_fn resolve_font;
+    stasis_android_bridge_resource_catalog_generation_fn resource_catalog_generation;
     stasis_android_bridge_source_items_fn source_items;
     stasis_android_bridge_find_references_fn find_references;
     stasis_android_bridge_semantic_edit_fn semantic_edit;
@@ -401,6 +403,9 @@ static RustBridgeApi *load_rust_bridge_api(void) {
             (stasis_android_bridge_resolve_cached_text_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_cached_text");
     rust_bridge_api.resolve_font =
             (stasis_android_bridge_resolve_font_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_resolve_font");
+    rust_bridge_api.resource_catalog_generation =
+            (stasis_android_bridge_resource_catalog_generation_fn)dlsym(
+                    rust_bridge_api.handle, "stasis_android_bridge_resource_catalog_generation");
     rust_bridge_api.source_items =
             (stasis_android_bridge_source_items_fn)dlsym(rust_bridge_api.handle, "stasis_android_bridge_source_items");
     rust_bridge_api.find_references =
@@ -832,6 +837,16 @@ Java_com_stasislang_workshop_MainActivity_nativeResolveFont(
     jstring result = (*env)->NewStringUTF(env, message);
     bridge->free_string(message);
     return result;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_stasislang_workshop_MainActivity_nativeResourceCatalogGeneration(
+        JNIEnv *env, jclass activity_class) {
+    (void)env;
+    (void)activity_class;
+    RustBridgeApi *bridge = load_rust_bridge_api();
+    if (bridge == NULL || bridge->resource_catalog_generation == NULL) return 0;
+    return (jlong)bridge->resource_catalog_generation();
 }
 
 JNIEXPORT jstring JNICALL
