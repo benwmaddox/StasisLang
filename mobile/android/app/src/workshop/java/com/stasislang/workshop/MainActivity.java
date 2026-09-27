@@ -251,6 +251,7 @@ public final class MainActivity extends Activity {
     static native String nativeResolveSpriteAsset(String projectRoot, int handle);
     static native String nativeResolveCachedText(String projectRoot, int handle);
     static native String nativeResolveFont(String projectRoot, int handle);
+    static native long nativeResourceCatalogGeneration();
     static native int[] nativeDecodeSvgSprite(String path, int width, int height);
 
     void reportPreviewResourceError(String message) {

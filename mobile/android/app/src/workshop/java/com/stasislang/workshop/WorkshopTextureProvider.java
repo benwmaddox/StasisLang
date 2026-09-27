@@ -35,6 +35,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private final HashMap<String, SpriteTexture> spriteTexturesByHash = new HashMap<>();
     private final SparseArray<TextTexture> textTextures = new SparseArray<>();
     private final SparseArray<FontInfo> fonts = new SparseArray<>();
+    private final MetadataCache<CachedTextMetadata> cachedTextMetadata = new MetadataCache<>();
+    private final MetadataCache<FontMetadata> fontMetadata = new MetadataCache<>();
     private final ArrayList<DynamicTextTexture> dynamicTextTextures = new ArrayList<>();
     private final ArrayList<AtlasPage> atlasPages = new ArrayList<>();
     private final ArrayList<AtlasPage> dedicatedAtlasPages = new ArrayList<>();
@@ -52,6 +54,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private long textUseClock;
     private int surfaceGeneration;
     private int rendererGeneration;
+    private long resourceCatalogGeneration = Long.MIN_VALUE;
     private String lastFailure;
     private String transitionReason = "none";
     private boolean reportRestoreTiming;
@@ -93,6 +96,10 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private int cachedTextIdentityCalls;
     private int fontResolveCalls;
     private int fontIdentityCalls;
+    private int resourceCatalogGenerationCalls;
+    private long resourceCatalogGenerationNanos;
+    private int cachedTextMetadataCacheHits;
+    private int fontMetadataCacheHits;
 
     WorkshopTextureProvider(MainActivity activity) {
         this.activity = activity;
@@ -167,6 +174,18 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     @Override
     public void onFrameStart() {
         ensureCurrentProject();
+        long generationStarted = profileResourceLookups ? System.nanoTime() : 0L;
+        long nextResourceCatalogGeneration = MainActivity.nativeResourceCatalogGeneration();
+        if (profileResourceLookups) {
+            resourceCatalogGenerationCalls += 1;
+            resourceCatalogGenerationNanos += System.nanoTime() - generationStarted;
+        }
+        if (nextResourceCatalogGeneration != resourceCatalogGeneration) {
+            cachedTextMetadata.clear();
+            fontMetadata.clear();
+            fonts.clear();
+            resourceCatalogGeneration = nextResourceCatalogGeneration;
+        }
         long now = System.nanoTime();
         if (now < nextManifestCheckNanos) return;
         nextManifestCheckNanos = now + MANIFEST_CHECK_INTERVAL_NANOS;
@@ -377,6 +396,10 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         cachedTextIdentityCalls = 0;
         fontResolveCalls = 0;
         fontIdentityCalls = 0;
+        resourceCatalogGenerationCalls = 0;
+        resourceCatalogGenerationNanos = 0L;
+        cachedTextMetadataCacheHits = 0;
+        fontMetadataCacheHits = 0;
     }
 
     @Override
@@ -389,20 +412,43 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                 + " font_resolve_calls=" + fontResolveCalls
                 + " font_resolve_us_total=" + fontResolveNanos / 1_000L
                 + " font_identity_calls=" + fontIdentityCalls
-                + " font_identity_us_total=" + fontIdentityNanos / 1_000L;
+                + " font_identity_us_total=" + fontIdentityNanos / 1_000L
+                + " cached_text_metadata_hits=" + cachedTextMetadataCacheHits
+                + " font_metadata_hits=" + fontMetadataCacheHits
+                + " catalog_generation_calls=" + resourceCatalogGenerationCalls
+                + " catalog_generation_us_total=" + resourceCatalogGenerationNanos / 1_000L;
     }
 
     @Override
     public long cachedTextTextureFor(int runHandle) {
         ensureCurrentProject();
         TextTexture cached = textTextures.get(runHandle);
-        JSONObject resolved;
-        long resolveStarted = profileResourceLookups ? System.nanoTime() : 0L;
+        MetadataLookup<CachedTextMetadata> metadataLookup;
         try {
-            resolved = new JSONObject(MainActivity.nativeResolveCachedText(
-                    activity.projectRootPath(), runHandle));
-            if (!"ok".equals(resolved.optString("status"))) {
-                throw new IOException(resolved.optString("error", "cached text resolution failed"));
+            metadataLookup = resolveCachedTextMetadata(cachedTextMetadata, runHandle,
+                    resourceCatalogGeneration, () -> {
+                        long resolveStarted = profileResourceLookups ? System.nanoTime() : 0L;
+                        try {
+                            JSONObject resolved = new JSONObject(MainActivity.nativeResolveCachedText(
+                                    activity.projectRootPath(), runHandle));
+                            if (!"ok".equals(resolved.optString("status"))) {
+                                throw new IOException(resolved.optString(
+                                        "error", "cached text resolution failed"));
+                            }
+                            return new CachedTextMetadata(
+                                    resolved.getString("font_path"),
+                                    resolved.getString("text"),
+                                    resolved.getInt("font_size"),
+                                    resolved.optBoolean("replaceable", true));
+                        } finally {
+                            if (profileResourceLookups) {
+                                cachedTextResolveCalls += 1;
+                                cachedTextResolveNanos += System.nanoTime() - resolveStarted;
+                            }
+                        }
+                    });
+            if (profileResourceLookups && metadataLookup.cacheHit) {
+                cachedTextMetadataCacheHits += 1;
             }
         } catch (Exception error) {
             if (cached != null) {
@@ -411,19 +457,17 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             }
             recordFailure("cached_text", runHandle, "<resolved-cached-text>", 0, 0, error);
             return 0L;
-        } finally {
-            if (profileResourceLookups) {
-                cachedTextResolveCalls += 1;
-                cachedTextResolveNanos += System.nanoTime() - resolveStarted;
-            }
         }
-        File fontFile = new File(resolved.optString("font_path", ""));
-        String text = resolved.optString("text", "");
+        CachedTextMetadata resolved = metadataLookup.value;
+        File fontFile = new File(resolved.fontPath);
+        String text = resolved.text;
         String fontIdentity;
+        String exactIdentity;
         long identityStarted = profileResourceLookups ? System.nanoTime() : 0L;
         try {
             fontIdentity = fontFile.getCanonicalPath() + ":" + fontFile.length() + ":"
-                    + fontFile.lastModified() + ":" + resolved.getInt("font_size");
+                    + fontFile.lastModified() + ":" + resolved.fontSize;
+            exactIdentity = textIdentity(fontIdentity, text, textRasterScale);
         } catch (Exception error) {
             recordFailure("cached_text", runHandle, "<resolved-cached-text>", 0, 0, error);
             return 0L;
@@ -433,7 +477,6 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                 cachedTextIdentityNanos += System.nanoTime() - identityStarted;
             }
         }
-        String exactIdentity = textIdentity(fontIdentity, text, textRasterScale);
         if (cached != null && cached.matches(surfaceGeneration, rendererGeneration)
                 && cached.exactIdentity.equals(exactIdentity)) {
             touchText(cached);
@@ -448,7 +491,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         try {
             long rasterStarted = System.nanoTime();
             FontInfo resolvedFont = new FontInfo(Typeface.createFromFile(fontFile),
-                    resolved.getInt("font_size"), fontFile.length(), fontIdentity);
+                    resolved.fontSize, fontFile.length(), fontIdentity);
             cached = rasterText(resolvedFont, text, textRasterScale, exactIdentity);
             textTextures.put(runHandle, cached);
             if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
@@ -533,22 +576,35 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     }
 
     private FontInfo fontInfo(int handle) throws Exception {
-        long resolveStarted = profileResourceLookups ? System.nanoTime() : 0L;
-        JSONObject resolved = new JSONObject(MainActivity.nativeResolveFont(projectRootPath, handle));
-        if (profileResourceLookups) {
-            fontResolveCalls += 1;
-            fontResolveNanos += System.nanoTime() - resolveStarted;
-        }
-        if (!"ok".equals(resolved.optString("status"))) {
-            invalidateFontCaches(handle);
-            throw new IOException(resolved.optString("error", "font resolution failed"));
-        }
-        File fontFile = new File(resolved.getString("font_path"));
+        MetadataLookup<FontMetadata> metadataLookup = resolveImmutableMetadata(
+                fontMetadata, handle, resourceCatalogGeneration, () -> {
+                    long resolveStarted = profileResourceLookups ? System.nanoTime() : 0L;
+                    try {
+                        JSONObject resolved = new JSONObject(
+                                MainActivity.nativeResolveFont(projectRootPath, handle));
+                        if (!"ok".equals(resolved.optString("status"))) {
+                            invalidateFontCaches(handle);
+                            throw new IOException(resolved.optString(
+                                    "error", "font resolution failed"));
+                        }
+                        return new FontMetadata(
+                                resolved.getString("font_path"),
+                                resolved.optString("content_sha256", ""),
+                                resolved.getInt("font_size"));
+                    } finally {
+                        if (profileResourceLookups) {
+                            fontResolveCalls += 1;
+                            fontResolveNanos += System.nanoTime() - resolveStarted;
+                        }
+                    }
+                });
+        if (profileResourceLookups && metadataLookup.cacheHit) fontMetadataCacheHits += 1;
+        FontMetadata resolved = metadataLookup.value;
+        File fontFile = new File(resolved.fontPath);
         long identityStarted = profileResourceLookups ? System.nanoTime() : 0L;
         String identity = fontFile.getCanonicalPath() + ":"
                 + fontFile.length() + ":" + fontFile.lastModified() + ":"
-                + resolved.optString("content_sha256", "") + ":"
-                + resolved.getInt("font_size");
+                + resolved.contentSha256 + ":" + resolved.fontSize;
         if (profileResourceLookups) {
             fontIdentityCalls += 1;
             fontIdentityNanos += System.nanoTime() - identityStarted;
@@ -557,12 +613,11 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         if (cached != null && cached.identity.equals(identity)) return cached;
         if (cached != null) invalidateFontCaches(handle);
         cached = new FontInfo(Typeface.createFromFile(fontFile),
-                resolved.getInt("font_size"), fontFile.length(), identity);
+                resolved.fontSize, fontFile.length(), identity);
         fonts.put(handle, cached);
         if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
             acceptanceIdentities.add("font:" + handle + ":" + canonicalProjectRoot()
-                    + ":" + resolved.optString("content_sha256", "") + ":"
-                    + resolved.getInt("font_size"));
+                    + ":" + resolved.contentSha256 + ":" + resolved.fontSize);
             updateAcceptanceMaximums();
         }
         return cached;
@@ -855,6 +910,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         clearSpriteTextures(deleteGpuHandles);
         clearTextTextures(deleteGpuHandles);
         fonts.clear();
+        cachedTextMetadata.clear();
+        fontMetadata.clear();
+        resourceCatalogGeneration = Long.MIN_VALUE;
     }
 
     private void clearSpriteTextures(boolean deleteGpuHandles) {
@@ -1329,6 +1387,104 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             this.sourceBytes = sourceBytes;
             this.identity = identity;
         }
+    }
+
+    interface MetadataResolver<T> {
+        T resolve() throws Exception;
+    }
+
+    static final class MetadataCache<T> {
+        private static final class Entry<T> {
+            final long generation;
+            final T value;
+
+            Entry(long generation, T value) {
+                this.generation = generation;
+                this.value = value;
+            }
+        }
+
+        private final HashMap<Integer, Entry<T>> entries = new HashMap<>();
+
+        T get(int handle, long generation) {
+            if (generation <= 0L) return null;
+            Entry<T> entry = entries.get(handle);
+            if (entry == null) return null;
+            if (entry.generation != generation) {
+                entries.remove(handle);
+                return null;
+            }
+            return entry.value;
+        }
+
+        void put(int handle, long generation, T value) {
+            if (generation > 0L) entries.put(handle, new Entry<>(generation, value));
+        }
+
+        void remove(int handle) {
+            entries.remove(handle);
+        }
+
+        void clear() {
+            entries.clear();
+        }
+    }
+
+    static final class MetadataLookup<T> {
+        final T value;
+        final boolean cacheHit;
+
+        MetadataLookup(T value, boolean cacheHit) {
+            this.value = value;
+            this.cacheHit = cacheHit;
+        }
+    }
+
+    static final class CachedTextMetadata {
+        final String fontPath;
+        final String text;
+        final int fontSize;
+        final boolean replaceable;
+
+        CachedTextMetadata(String fontPath, String text, int fontSize, boolean replaceable) {
+            this.fontPath = fontPath;
+            this.text = text;
+            this.fontSize = fontSize;
+            this.replaceable = replaceable;
+        }
+    }
+
+    static final class FontMetadata {
+        final String fontPath;
+        final String contentSha256;
+        final int fontSize;
+
+        FontMetadata(String fontPath, String contentSha256, int fontSize) {
+            this.fontPath = fontPath;
+            this.contentSha256 = contentSha256;
+            this.fontSize = fontSize;
+        }
+    }
+
+    static <T> MetadataLookup<T> resolveImmutableMetadata(
+            MetadataCache<T> cache, int handle, long generation,
+            MetadataResolver<T> resolver) throws Exception {
+        T cached = cache.get(handle, generation);
+        if (cached != null) return new MetadataLookup<>(cached, true);
+        T resolved = resolver.resolve();
+        cache.put(handle, generation, resolved);
+        return new MetadataLookup<>(resolved, false);
+    }
+
+    static MetadataLookup<CachedTextMetadata> resolveCachedTextMetadata(
+            MetadataCache<CachedTextMetadata> cache, int handle, long generation,
+            MetadataResolver<CachedTextMetadata> resolver) throws Exception {
+        CachedTextMetadata cached = cache.get(handle, generation);
+        if (cached != null) return new MetadataLookup<>(cached, true);
+        CachedTextMetadata resolved = resolver.resolve();
+        if (resolved.replaceable) cache.remove(handle);
+        else cache.put(handle, generation, resolved);
+        return new MetadataLookup<>(resolved, false);
     }
 
     private static final class DynamicTextTexture {
