@@ -41,7 +41,7 @@ sizes where the format exposes them, duplicate content hashes, retained large
 files and rationales, and the archive SHA-256. The nightly workflow runs it
 after each Linux, Windows, and macOS archive is created.
 
-The workflow currently enforces a 120 MiB compressed archive ceiling. The audit
+Nightly `nightly-20260927-358` produced a 127,411,505-byte Windows ZIP, above the previous 120 MiB ceiling. The required offline toolchain and archive format remain unchanged. The workflow now enforces a 128 MiB compressed archive ceiling, the smallest whole-power-of-two MiB budget above that measured ZIP. The audit
 prints the measured current size and SHA-256 into the build log/summary, so a
 future reduction can be recorded as an exact before/after comparison without
 inventing a digest for the historical approximate baseline.
