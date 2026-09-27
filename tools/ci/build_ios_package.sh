@@ -381,6 +381,8 @@ PY
     local crash_report=""
     local crash_artifact=""
     local crash_sha256=""
+    local crash_exception=""
+    local crash_signal=""
     rm -f -- "${result_receipt}"
     touch "${marker}"
     launch_output="$(
@@ -417,8 +419,16 @@ PY
     crash_artifact="${build_root}/bounds-${label}-crash.${crash_report##*.}"
     cp "${crash_report}" "${crash_artifact}"
     crash_sha256="$(shasum -a 256 "${crash_artifact}" | awk '{print $1}')"
-    if ! grep -Eq 'EXC_BREAKPOINT|SIGTRAP|Trace/BPT trap' "${crash_report}"; then
-      echo "bounds probe ${label} did not terminate through the expected trap" >&2
+    if grep -Eq 'EXC_BREAKPOINT' "${crash_report}" && \
+        grep -Eq 'SIGTRAP|Trace/BPT trap' "${crash_report}"; then
+      crash_exception="EXC_BREAKPOINT"
+      crash_signal="SIGTRAP"
+    elif grep -Eq 'EXC_BAD_INSTRUCTION' "${crash_report}" && \
+        grep -Eq 'SIGILL|Illegal instruction' "${crash_report}"; then
+      crash_exception="EXC_BAD_INSTRUCTION"
+      crash_signal="SIGILL"
+    else
+      echo "bounds probe ${label} did not terminate through a recognized fatal trap" >&2
       exit 1
     fi
     if [[ -e "${result_receipt}" ]]; then
@@ -426,7 +436,8 @@ PY
       exit 1
     fi
     python3 - "${build_root}/bounds-${label}.json" "${label}" "${index}" \
-      "${launch_pid}" "${crash_artifact}" "${crash_sha256}" <<'PY'
+      "${launch_pid}" "${crash_exception}" "${crash_signal}" \
+      "${crash_artifact}" "${crash_sha256}" <<'PY'
 import json
 import sys
 
@@ -438,10 +449,10 @@ with open(sys.argv[1], "w", encoding="utf-8") as output:
         "process": "StasisMobile",
         "pid": int(sys.argv[4]),
         "fatal": True,
-        "signal": "SIGTRAP",
-        "exception": "EXC_BREAKPOINT",
-        "crash_report": sys.argv[5],
-        "crash_report_sha256": sys.argv[6],
+        "signal": sys.argv[6],
+        "exception": sys.argv[5],
+        "crash_report": sys.argv[7],
+        "crash_report_sha256": sys.argv[8],
     }, output, indent=2)
     output.write("\n")
 PY

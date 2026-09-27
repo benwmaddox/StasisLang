@@ -338,10 +338,16 @@ def validate_bounds(path: Path, label: str, expected_index: int) -> dict:
         raise EvidenceError(f"{path}: expected a positive launch pid, got {pid!r}")
     if value.get("fatal") is not True:
         raise EvidenceError(f"{path}: bounds evidence is not fatal")
-    if value.get("signal") != "SIGTRAP":
-        raise EvidenceError(f"{path}: expected signal SIGTRAP")
-    if value.get("exception") != "EXC_BREAKPOINT":
-        raise EvidenceError(f"{path}: expected exception EXC_BREAKPOINT")
+    signal = value.get("signal")
+    exception = value.get("exception")
+    accepted_traps = {
+        ("EXC_BREAKPOINT", "SIGTRAP"),
+        ("EXC_BAD_INSTRUCTION", "SIGILL"),
+    }
+    if (exception, signal) not in accepted_traps:
+        raise EvidenceError(
+            f"{path}: unrecognized fatal trap pair exception={exception!r} signal={signal!r}"
+        )
     crash_report_value = value.get("crash_report")
     if not isinstance(crash_report_value, str) or not crash_report_value:
         raise EvidenceError(f"{path}: missing crash_report identity")
@@ -355,8 +361,14 @@ def validate_bounds(path: Path, label: str, expected_index: int) -> dict:
     if not crash_data or len(crash_data) > MAX_LOG_BYTES:
         raise EvidenceError(f"{path}: crash report is empty or exceeds the bounded limit")
     crash_text = crash_data.decode("utf-8", errors="replace")
-    if re.search(r"EXC_BREAKPOINT|SIGTRAP|Trace/BPT trap", crash_text) is None:
-        raise EvidenceError(f"{path}: crash report does not contain trap evidence")
+    if exception not in crash_text:
+        raise EvidenceError(
+            f"{path}: crash report does not contain exception {exception}"
+        )
+    if signal not in crash_text and not (
+        signal == "SIGTRAP" and "Trace/BPT trap" in crash_text
+    ) and not (signal == "SIGILL" and "Illegal instruction" in crash_text):
+        raise EvidenceError(f"{path}: crash report does not contain signal {signal}")
     if re.search(
         r'"procName"\s*:\s*"StasisMobile"|Process:\s+StasisMobile\s+\[\d+\]',
         crash_text,

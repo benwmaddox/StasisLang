@@ -181,6 +181,29 @@ class IosGenericsVerifierTest(unittest.TestCase):
         with self.assertRaisesRegex(EvidenceError, "bounds evidence is not fatal"):
             self.evidence()
 
+    def test_arm64_bad_instruction_bounds_trap_is_accepted(self) -> None:
+        for path, report, pid in (
+            (self.bounds_low, self.crash_low, 4101),
+            (self.bounds_high, self.crash_high, 4102),
+        ):
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["exception"] = "EXC_BAD_INSTRUCTION"
+            value["signal"] = "SIGILL"
+            write_json(path, value)
+            report.write_text(
+                f'{{"procName":"StasisMobile","pid":{pid}}}\n'
+                '"exception":{"type":"EXC_BAD_INSTRUCTION","signal":"SIGILL"}\n',
+                encoding="utf-8",
+            )
+        self.evidence()
+
+    def test_mismatched_bounds_trap_pair_is_rejected(self) -> None:
+        value = json.loads(self.bounds_high.read_text(encoding="utf-8"))
+        value["exception"] = "EXC_BAD_INSTRUCTION"
+        write_json(self.bounds_high, value)
+        with self.assertRaisesRegex(EvidenceError, "unrecognized fatal trap pair"):
+            self.evidence()
+
     def test_transparent_teal_is_rejected(self) -> None:
         write_png(self.frame, TRANSPARENT_TEAL)
         with self.assertRaisesRegex(EvidenceError, "digest-success teal rectangle"):
