@@ -20,9 +20,9 @@ use stasis::{
     ProjectCompilationConfiguration, SigningOptions, StasisTestRunSession,
 };
 use stasis_assets::{
-    load_project_asset_manifest, prepare_asset_bundle, write_asset_package_identity, AssetFormat,
-    AssetLimits, AudioEncoding, FontEncoding, SpriteEncoding, ASSET_PACKAGE_IDENTITY_PATH,
-    DEFAULT_ASSET_MANIFEST_PATH,
+    load_project_asset_manifest, prepare_asset_bundle, resolve_project_asset_paths,
+    write_asset_package_identity, AssetFormat, AssetLimits, AudioEncoding, FontEncoding,
+    SpriteEncoding, ASSET_PACKAGE_IDENTITY_PATH, DEFAULT_ASSET_MANIFEST_PATH,
 };
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::{JitExternProfile, JitProcess};
@@ -6834,9 +6834,21 @@ fn retain_opted_in_web_loading_font(
     {
         return Ok(());
     }
-    let Ok(source) = load_project_asset_manifest(&workspace.root, AssetLimits::default()) else {
+    if !workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
+        let mut paths = retained
+            .assets
+            .iter()
+            .map(|asset| asset.entry.path.clone())
+            .collect::<BTreeSet<_>>();
+        paths.insert(loading_font.to_string());
+        *retained = resolve_project_asset_paths(&workspace.root, &paths, AssetLimits::default())
+            .map_err(|error| {
+                format!("failed to infer opted-in Web loading font metadata: {error}")
+            })?;
         return Ok(());
-    };
+    }
+    let source = load_project_asset_manifest(&workspace.root, AssetLimits::default())
+        .map_err(|error| format!("failed to load Web loading font metadata: {error}"))?;
     let Some(font) = source
         .assets
         .iter()
@@ -11282,6 +11294,57 @@ mod tests {
             html.contains(r#"font-family: "StasisLoadingFont", Georgia, "Times New Roman", serif"#)
         );
         assert!(!html.contains("__STASIS_"));
+    }
+
+    #[test]
+    fn opted_in_loading_font_is_added_to_an_inferred_asset_manifest() {
+        let root = temp_dir("inferred_loading_font");
+        fs::create_dir_all(root.join("assets/fonts")).expect("font directory");
+        fs::write(root.join("assets/fonts/ui.ttf"), b"font bytes").expect("font fixture");
+        fs::write(root.join("assets/fonts/LICENSE.txt"), b"font license").expect("license fixture");
+        let root = canonical_workspace_root(&root).expect("canonical workspace root");
+        let mut manifest = ProjectManifest::new("inferred-font".to_string());
+        manifest.web = Some(WebProjectManifest {
+            entry: "src/main.stasis".to_string(),
+            replay: false,
+            loading_font: Some("assets/fonts/ui.ttf".to_string()),
+            viewport: None,
+            atlas_budget_bytes: None,
+        });
+        manifest.release = Some(ReleaseProjectManifest {
+            font_subsetting: Some(crate::release_assets::ReleaseFontSubsettingManifest {
+                fonts: vec![crate::release_assets::ReleaseFontSubsetEntry {
+                    path: "assets/fonts/ui.ttf".to_string(),
+                    license_path: "assets/fonts/LICENSE.txt".to_string(),
+                    modification_permitted: true,
+                    reserved_names: Vec::new(),
+                    replacement_family: None,
+                }],
+            }),
+        });
+        let workspace = Workspace {
+            root: root.clone(),
+            manifest,
+            resolved_settings: None,
+        };
+        let mut retained =
+            resolve_project_asset_paths(&root, &BTreeSet::new(), AssetLimits::default())
+                .expect("empty inferred manifest");
+
+        retain_opted_in_web_loading_font(&workspace, &mut retained, "assets/fonts/ui.ttf")
+            .expect("retain loading font");
+
+        assert_eq!(retained.assets.len(), 1);
+        assert_eq!(retained.assets[0].entry.path, "assets/fonts/ui.ttf");
+        let staging = root.join("stage");
+        prepare_asset_bundle(&retained, &staging, root.join("cache"))
+            .expect("prepare inferred font bundle");
+        let prepared: serde_json::Value = serde_json::from_slice(
+            &fs::read(staging.join(DEFAULT_ASSET_MANIFEST_PATH)).expect("prepared manifest"),
+        )
+        .expect("decode prepared manifest");
+        assert_eq!(prepared["assets"][0]["path"], "assets/fonts/ui.ttf");
+        remove_temp(&root);
     }
 
     #[test]
