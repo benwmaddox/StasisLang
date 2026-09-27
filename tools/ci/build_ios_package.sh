@@ -150,7 +150,6 @@ python tools/cargo_cache.py run -- cargo run -p stasis -- \
   --workspace "${workspace}" \
   package-mobile \
   --target ios-arm64 \
-  --entry src/main.stasis \
   --out "${package_output}" \
   --development-build
 package_created=1
@@ -252,7 +251,6 @@ if [[ "${simulator_acceptance}" = "generics" ]]; then
     --workspace "${workspace}" \
     package-mobile \
     --target ios-simulator-arm64 \
-    --entry src/main.stasis \
     --out "${simulator_output}" \
     --development-build
   simulator_package_created=1
