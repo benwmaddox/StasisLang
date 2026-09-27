@@ -37,6 +37,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private final SparseArray<FontInfo> fonts = new SparseArray<>();
     private final MetadataCache<CachedTextMetadata> cachedTextMetadata = new MetadataCache<>();
     private final MetadataCache<FontMetadata> fontMetadata = new MetadataCache<>();
+    private final FontFileIdentityCache fileIdentityCache = new FontFileIdentityCache();
     private final ArrayList<DynamicTextTexture> dynamicTextTextures = new ArrayList<>();
     private final ArrayList<AtlasPage> atlasPages = new ArrayList<>();
     private final ArrayList<AtlasPage> dedicatedAtlasPages = new ArrayList<>();
@@ -100,6 +101,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private long resourceCatalogGenerationNanos;
     private int cachedTextMetadataCacheHits;
     private int fontMetadataCacheHits;
+    private int fileIdentityRequests;
+    private int fileIdentityStatCalls;
+    private long fileIdentityLookupNanos;
 
     WorkshopTextureProvider(MainActivity activity) {
         this.activity = activity;
@@ -174,6 +178,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     @Override
     public void onFrameStart() {
         ensureCurrentProject();
+        fileIdentityCache.beginFrame();
         long generationStarted = profileResourceLookups ? System.nanoTime() : 0L;
         long nextResourceCatalogGeneration = MainActivity.nativeResourceCatalogGeneration();
         if (profileResourceLookups) {
@@ -400,6 +405,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         resourceCatalogGenerationNanos = 0L;
         cachedTextMetadataCacheHits = 0;
         fontMetadataCacheHits = 0;
+        fileIdentityRequests = 0;
+        fileIdentityStatCalls = 0;
+        fileIdentityLookupNanos = 0L;
     }
 
     @Override
@@ -416,7 +424,10 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
                 + " cached_text_metadata_hits=" + cachedTextMetadataCacheHits
                 + " font_metadata_hits=" + fontMetadataCacheHits
                 + " catalog_generation_calls=" + resourceCatalogGenerationCalls
-                + " catalog_generation_us_total=" + resourceCatalogGenerationNanos / 1_000L;
+                + " catalog_generation_us_total=" + resourceCatalogGenerationNanos / 1_000L
+                + " file_identity_requests=" + fileIdentityRequests
+                + " file_identity_stat_calls=" + fileIdentityStatCalls
+                + " file_identity_us_total=" + fileIdentityLookupNanos / 1_000L;
     }
 
     @Override
@@ -465,8 +476,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         String exactIdentity;
         long identityStarted = profileResourceLookups ? System.nanoTime() : 0L;
         try {
-            fontIdentity = fontFile.getCanonicalPath() + ":" + fontFile.length() + ":"
-                    + fontFile.lastModified() + ":" + resolved.fontSize;
+            FileIdentity fileIdentity = fileIdentityFor(fontFile);
+            fontIdentity = fileIdentity.canonicalPath + ":" + fileIdentity.length + ":"
+                    + fileIdentity.lastModified + ":" + resolved.fontSize;
             exactIdentity = textIdentity(fontIdentity, text, textRasterScale);
         } catch (Exception error) {
             recordFailure("cached_text", runHandle, "<resolved-cached-text>", 0, 0, error);
@@ -602,8 +614,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         FontMetadata resolved = metadataLookup.value;
         File fontFile = new File(resolved.fontPath);
         long identityStarted = profileResourceLookups ? System.nanoTime() : 0L;
-        String identity = fontFile.getCanonicalPath() + ":"
-                + fontFile.length() + ":" + fontFile.lastModified() + ":"
+        FileIdentity fileIdentity = fileIdentityFor(fontFile);
+        String identity = fileIdentity.canonicalPath + ":"
+                + fileIdentity.length + ":" + fileIdentity.lastModified + ":"
                 + resolved.contentSha256 + ":" + resolved.fontSize;
         if (profileResourceLookups) {
             fontIdentityCalls += 1;
@@ -621,6 +634,22 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             updateAcceptanceMaximums();
         }
         return cached;
+    }
+
+    private FileIdentity fileIdentityFor(File file) throws Exception {
+        long lookupStarted = profileResourceLookups ? System.nanoTime() : 0L;
+        if (profileResourceLookups) fileIdentityRequests += 1;
+        try {
+            return fileIdentityCache.getOrResolve(file.getPath(), () -> {
+                if (profileResourceLookups) fileIdentityStatCalls += 1;
+                return new FileIdentity(file.getCanonicalPath(),
+                        file.length(), file.lastModified());
+            });
+        } finally {
+            if (profileResourceLookups) {
+                fileIdentityLookupNanos += System.nanoTime() - lookupStarted;
+            }
+        }
     }
 
     private void invalidateFontCaches(int handle) {
@@ -909,6 +938,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private void clearTextures(boolean deleteGpuHandles) {
         clearSpriteTextures(deleteGpuHandles);
         clearTextTextures(deleteGpuHandles);
+        fileIdentityCache.beginFrame();
         fonts.clear();
         cachedTextMetadata.clear();
         fontMetadata.clear();
@@ -1427,6 +1457,35 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
 
         void clear() {
             entries.clear();
+        }
+    }
+
+    static final class FileIdentity {
+        final String canonicalPath;
+        final long length;
+        final long lastModified;
+
+        FileIdentity(String canonicalPath, long length, long lastModified) {
+            this.canonicalPath = canonicalPath;
+            this.length = length;
+            this.lastModified = lastModified;
+        }
+    }
+
+    static final class FontFileIdentityCache {
+        private final HashMap<String, FileIdentity> identities = new HashMap<>();
+
+        FileIdentity getOrResolve(String path, MetadataResolver<FileIdentity> resolver)
+                throws Exception {
+            FileIdentity cached = identities.get(path);
+            if (cached != null) return cached;
+            FileIdentity resolved = resolver.resolve();
+            identities.put(path, resolved);
+            return resolved;
+        }
+
+        void beginFrame() {
+            identities.clear();
         }
     }
 
