@@ -178,10 +178,11 @@ public final class WorkshopTextureProviderTest {
         assertEquals("score 2", dynamicTwo.value.text);
         assertEquals(null, dynamicOne.value.immutableTextSha256);
         assertEquals(null, dynamicTwo.value.immutableTextSha256);
+        String sameFontIdentity = "/fonts/fixed.ttf:4096:123:18";
         assertFalse(WorkshopTextureProvider.textIdentity(
-                "font-a", dynamicOne.value.text, 2.0f).equals(
+                sameFontIdentity, dynamicOne.value.text, 2.0f).equals(
                 WorkshopTextureProvider.textIdentity(
-                        "font-a", dynamicTwo.value.text, 2.0f)));
+                        sameFontIdentity, dynamicTwo.value.text, 2.0f)));
         assertEquals(2, replaceableCalls[0]);
     }
 
@@ -209,18 +210,20 @@ public final class WorkshopTextureProviderTest {
     }
 
     @Test
-    public void directAndCachedTextShareFileIdentityWithinFrameAndRefreshNextFrame()
+    public void fileIdentityRefreshesAtManifestBoundaryAndOnScopeChanges()
             throws Exception {
         WorkshopTextureProvider.FontFileIdentityCache cache =
                 new WorkshopTextureProvider.FontFileIdentityCache();
         int[] statCalls = {0};
 
+        cache.beginFrame("/projects/alpha", 5L, true);
         WorkshopTextureProvider.FileIdentity directTextFont = cache.getOrResolve(
                 "/fonts/shared.ttf", () -> {
                     statCalls[0] += 1;
                     return new WorkshopTextureProvider.FileIdentity(
                             "/fonts/shared.ttf", 4096L, 123L);
                 });
+        cache.beginFrame("/projects/alpha", 5L, false);
         WorkshopTextureProvider.FileIdentity cachedTextFont = cache.getOrResolve(
                 "/fonts/shared.ttf", () -> {
                     statCalls[0] += 1;
@@ -230,18 +233,41 @@ public final class WorkshopTextureProviderTest {
 
         assertTrue(directTextFont == cachedTextFont);
         assertEquals(1, statCalls[0]);
-        cache.beginFrame();
-        WorkshopTextureProvider.FileIdentity nextFrame = cache.getOrResolve(
+        cache.beginFrame("/projects/alpha", 5L, true);
+        WorkshopTextureProvider.FileIdentity afterManifestRefresh = cache.getOrResolve(
                 "/fonts/shared.ttf", () -> {
                     statCalls[0] += 1;
                     return new WorkshopTextureProvider.FileIdentity(
                             "/fonts/shared.ttf", 8192L, 789L);
                 });
 
-        assertFalse(directTextFont == nextFrame);
-        assertEquals(8192L, nextFrame.length);
-        assertEquals(789L, nextFrame.lastModified);
+        assertFalse(directTextFont == afterManifestRefresh);
+        assertEquals("/fonts/shared.ttf", afterManifestRefresh.canonicalPath);
+        assertEquals(8192L, afterManifestRefresh.length);
+        assertEquals(789L, afterManifestRefresh.lastModified);
         assertEquals(2, statCalls[0]);
+
+        cache.beginFrame("/projects/alpha", 6L, false);
+        WorkshopTextureProvider.FileIdentity afterCatalogPublish = cache.getOrResolve(
+                "/fonts/shared.ttf", () -> {
+                    statCalls[0] += 1;
+                    return new WorkshopTextureProvider.FileIdentity(
+                            "/fonts/shared.ttf", 9000L, 901L);
+                });
+        assertEquals(9000L, afterCatalogPublish.length);
+        assertEquals(901L, afterCatalogPublish.lastModified);
+        assertEquals(3, statCalls[0]);
+
+        cache.beginFrame("/projects/beta", 6L, false);
+        WorkshopTextureProvider.FileIdentity afterProjectSwap = cache.getOrResolve(
+                "/fonts/shared.ttf", () -> {
+                    statCalls[0] += 1;
+                    return new WorkshopTextureProvider.FileIdentity(
+                            "/fonts/shared.ttf", 10000L, 1001L);
+                });
+        assertEquals(10000L, afterProjectSwap.length);
+        assertEquals(1001L, afterProjectSwap.lastModified);
+        assertEquals(4, statCalls[0]);
     }
 
     @Test

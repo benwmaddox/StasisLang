@@ -178,7 +178,14 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     @Override
     public void onFrameStart() {
         ensureCurrentProject();
-        fileIdentityCache.beginFrame();
+        long now = System.nanoTime();
+        boolean manifestRefreshDue = now >= nextManifestCheckNanos;
+        // Font files can change without a catalog publication, so re-stat them at the
+        // existing manifest poll cadence while still invalidating catalog/project swaps
+        // immediately below.
+        if (manifestRefreshDue) {
+            nextManifestCheckNanos = now + MANIFEST_CHECK_INTERVAL_NANOS;
+        }
         long generationStarted = profileResourceLookups ? System.nanoTime() : 0L;
         long nextResourceCatalogGeneration = MainActivity.nativeResourceCatalogGeneration();
         if (profileResourceLookups) {
@@ -192,9 +199,9 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             fonts.clear();
             resourceCatalogGeneration = nextResourceCatalogGeneration;
         }
-        long now = System.nanoTime();
-        if (now < nextManifestCheckNanos) return;
-        nextManifestCheckNanos = now + MANIFEST_CHECK_INTERVAL_NANOS;
+        fileIdentityCache.beginFrame(
+                projectRootPath, nextResourceCatalogGeneration, manifestRefreshDue);
+        if (!manifestRefreshDue) return;
         long currentStamp = manifest.isFile()
                 ? manifest.lastModified() ^ (manifest.length() << 7) : 0L;
         if (currentStamp != manifestStamp) manifestStamp = currentStamp;
@@ -956,7 +963,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private void clearTextures(boolean deleteGpuHandles) {
         clearSpriteTextures(deleteGpuHandles);
         clearTextTextures(deleteGpuHandles);
-        fileIdentityCache.beginFrame();
+        fileIdentityCache.invalidate();
         fonts.clear();
         cachedTextMetadata.clear();
         fontMetadata.clear();
@@ -1489,6 +1496,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
 
     static final class FontFileIdentityCache {
         private final HashMap<String, FileIdentity> identities = new HashMap<>();
+        private String projectRoot;
+        private long catalogGeneration = Long.MIN_VALUE;
 
         FileIdentity getOrResolve(String path, MetadataResolver<FileIdentity> resolver)
                 throws Exception {
@@ -1499,8 +1508,22 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             return resolved;
         }
 
-        void beginFrame() {
+        void beginFrame(String nextProjectRoot, long nextCatalogGeneration,
+                boolean manifestRefreshDue) {
+            boolean projectChanged = projectRoot == null
+                    ? nextProjectRoot != null : !projectRoot.equals(nextProjectRoot);
+            if (manifestRefreshDue || projectChanged
+                    || catalogGeneration != nextCatalogGeneration) {
+                identities.clear();
+            }
+            projectRoot = nextProjectRoot;
+            catalogGeneration = nextCatalogGeneration;
+        }
+
+        void invalidate() {
             identities.clear();
+            projectRoot = null;
+            catalogGeneration = Long.MIN_VALUE;
         }
     }
 
