@@ -401,7 +401,8 @@ pub fn optimize_native_atlas_v1(exports: NativeAtlasExportsV1) -> bool {
     export_native_atlas_snapshot_v1(&snapshot);
 
     const ELIGIBLE: u32 = 1;
-    const PROTECTED_PAGE_FLAGS: u32 = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3);
+    const SEALED_PAGE_FLAG: u32 = 1 << 5;
+    const PROTECTED_PAGE_FLAGS: u32 = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | SEALED_PAGE_FLAG;
     const PLAN_ELIGIBLE_PAGE_FLAG: u32 = 1 << 4;
     const SDL_COMPAT: u32 = 1;
     let mut pages_by_id = BTreeMap::new();
