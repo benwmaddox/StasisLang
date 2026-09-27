@@ -255,10 +255,17 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         private final long[] totalNanos;
         private final long[] resourceNanos;
         private final long[] drawNanos;
+        private final long[] unphasedNanos;
+        private final long[] monitorWaitNanos;
+        private final long[] preResourceNanos;
+        private final long[] resourceToDrawGapNanos;
+        private final long[] postDrawLockedNanos;
+        private final long[] afterLockNanos;
         private int seenFrames;
         private int sampleCount;
         private int minimumDrawCalls = Integer.MAX_VALUE;
         private int maximumDrawCalls;
+        private long maximumTimingConservationErrorNanos;
         private volatile boolean reported;
 
         FramePerformanceSamples(int warmupFrames, int sampleFrames) {
@@ -269,16 +276,44 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             totalNanos = new long[sampleFrames];
             resourceNanos = new long[sampleFrames];
             drawNanos = new long[sampleFrames];
+            unphasedNanos = new long[sampleFrames];
+            monitorWaitNanos = new long[sampleFrames];
+            preResourceNanos = new long[sampleFrames];
+            resourceToDrawGapNanos = new long[sampleFrames];
+            postDrawLockedNanos = new long[sampleFrames];
+            afterLockNanos = new long[sampleFrames];
         }
 
         String add(long total, long resources, long draw, int drawCalls,
-                int lines, int rectangles, int sprites, int text, int order) {
+                int lines, int rectangles, int sprites, int text, int order,
+                long monitorWait, long preResource, long resourceToDrawGap,
+                long postDrawLocked, long afterLock) {
             if (reported) return null;
             seenFrames += 1;
             if (seenFrames <= warmupFrames) return null;
-            totalNanos[sampleCount] = Math.max(0L, total);
-            resourceNanos[sampleCount] = Math.max(0L, resources);
-            drawNanos[sampleCount] = Math.max(0L, draw);
+            long sampledTotal = Math.max(0L, total);
+            long sampledResources = Math.max(0L, resources);
+            long sampledDraw = Math.max(0L, draw);
+            long sampledMonitorWait = Math.max(0L, monitorWait);
+            long sampledPreResource = Math.max(0L, preResource);
+            long sampledResourceToDrawGap = Math.max(0L, resourceToDrawGap);
+            long sampledPostDrawLocked = Math.max(0L, postDrawLocked);
+            long sampledAfterLock = Math.max(0L, afterLock);
+            totalNanos[sampleCount] = sampledTotal;
+            resourceNanos[sampleCount] = sampledResources;
+            drawNanos[sampleCount] = sampledDraw;
+            unphasedNanos[sampleCount] = Math.max(
+                    0L, sampledTotal - sampledResources - sampledDraw);
+            monitorWaitNanos[sampleCount] = sampledMonitorWait;
+            preResourceNanos[sampleCount] = sampledPreResource;
+            resourceToDrawGapNanos[sampleCount] = sampledResourceToDrawGap;
+            postDrawLockedNanos[sampleCount] = sampledPostDrawLocked;
+            afterLockNanos[sampleCount] = sampledAfterLock;
+            long measuredUnphased = sampledMonitorWait + sampledPreResource
+                    + sampledResourceToDrawGap + sampledPostDrawLocked + sampledAfterLock;
+            maximumTimingConservationErrorNanos = Math.max(
+                    maximumTimingConservationErrorNanos,
+                    Math.abs(unphasedNanos[sampleCount] - measuredUnphased));
             minimumDrawCalls = Math.min(minimumDrawCalls, drawCalls);
             maximumDrawCalls = Math.max(maximumDrawCalls, drawCalls);
             sampleCount += 1;
@@ -296,6 +331,24 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     + " draw_calls_max=" + maximumDrawCalls
                     + " lines=" + lines + " rects=" + rectangles
                     + " sprites=" + sprites + " text=" + text + " order=" + order;
+        }
+
+        String phaseReport() {
+            if (!reported) return "";
+            return "RenderPhaseProfile: schema=1 samples=" + sampleCount
+                    + " unphased_p50_us=" + percentileMicros(unphasedNanos, 50)
+                    + " unphased_p95_us=" + percentileMicros(unphasedNanos, 95)
+                    + " monitor_wait_p50_us=" + percentileMicros(monitorWaitNanos, 50)
+                    + " monitor_wait_p95_us=" + percentileMicros(monitorWaitNanos, 95)
+                    + " pre_resource_p50_us=" + percentileMicros(preResourceNanos, 50)
+                    + " pre_resource_p95_us=" + percentileMicros(preResourceNanos, 95)
+                    + " resource_to_draw_gap_p50_us=" + percentileMicros(resourceToDrawGapNanos, 50)
+                    + " resource_to_draw_gap_p95_us=" + percentileMicros(resourceToDrawGapNanos, 95)
+                    + " post_draw_locked_p50_us=" + percentileMicros(postDrawLockedNanos, 50)
+                    + " post_draw_locked_p95_us=" + percentileMicros(postDrawLockedNanos, 95)
+                    + " after_lock_p50_us=" + percentileMicros(afterLockNanos, 50)
+                    + " after_lock_p95_us=" + percentileMicros(afterLockNanos, 95)
+                    + " conservation_error_ns=" + maximumTimingConservationErrorNanos;
         }
 
         boolean isComplete() {
@@ -600,6 +653,13 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         LogicalFrameSnapshot capturedFrame;
         long resourceNanos = 0L;
         long drawNanos = 0L;
+        long monitorWaitNanos = 0L;
+        long preResourceNanos = 0L;
+        long resourceToDrawGapNanos = 0L;
+        long postDrawLockedNanos = 0L;
+        long afterLockNanos = 0L;
+        long drawFinishedAt = 0L;
+        FramePerformanceSamples frameSamples = null;
         int drawCalls = 0;
         int lineCount = 0;
         int rectCount = 0;
@@ -608,6 +668,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         int orderCount = 0;
         boolean presented = false;
         synchronized (this) {
+            frameSamples = performanceSamples;
+            long lockAcquiredAt = frameSamples == null ? 0L : System.nanoTime();
+            if (frameSamples != null) monitorWaitNanos = lockAcquiredAt - started;
             // Rejection must not clear the prior frame, prepare resources, or consume
             // its presentation token/capture. The next valid frame can recover normally.
             if (!isValidFrame(frameI32, frameF32)) {
@@ -621,7 +684,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 return;
             }
             restorePlaceholderPending = false;
-            long resourceStarted = performanceSamples == null ? 0L : System.nanoTime();
+            long resourceStarted = frameSamples == null ? 0L : System.nanoTime();
+            if (frameSamples != null) preResourceNanos = resourceStarted - lockAcquiredAt;
             boolean restoring = resourceLifecycle.beginRestore();
             textures.beginRestoreAttempt();
             if (restoring) {
@@ -668,16 +732,21 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 spriteCount = clampCount(frameI32.get(I_SPRITE_COUNT), MAX_SPRITES);
                 textCount = clampCount(frameI32.get(I_TEXT_COUNT), MAX_TEXT);
                 orderCount = clampCount(frameI32.get(I_ORDER_COUNT), MAX_ORDER);
-                resourceNanos = performanceSamples == null
-                        ? 0L : System.nanoTime() - resourceStarted;
-                long drawStarted = performanceSamples == null ? 0L : System.nanoTime();
+                long resourceEndedAt = frameSamples == null ? 0L : System.nanoTime();
+                resourceNanos = frameSamples == null
+                        ? 0L : resourceEndedAt - resourceStarted;
+                long drawStarted = frameSamples == null ? 0L : System.nanoTime();
+                if (frameSamples != null) {
+                    resourceToDrawGapNanos = drawStarted - resourceEndedAt;
+                }
                 frameDrawCalls = 0;
                 frameTextureBinds = 0;
                 frameMixedRuns = 0;
                 frameSubmittedQuads = 0;
                 drawFrame();
-                drawNanos = performanceSamples == null
-                        ? 0L : System.nanoTime() - drawStarted;
+                drawFinishedAt = frameSamples == null ? 0L : System.nanoTime();
+                drawNanos = frameSamples == null
+                        ? 0L : drawFinishedAt - drawStarted;
                 drawCalls = frameDrawCalls;
                 presented = true;
                 int frameToken = frameI32.get(I_FRAME_TOKEN);
@@ -740,16 +809,25 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             pendingCapture = null;
             capturedFrame = capture == null ? null : captureLogicalFrame();
         }
+        long lockReleasedAt = frameSamples == null ? 0L : System.nanoTime();
+        if (frameSamples != null && presented) {
+            postDrawLockedNanos = lockReleasedAt - drawFinishedAt;
+        }
         captureIfRequested(capture, capturedFrame);
-        long totalNanos = System.nanoTime() - started;
-        if (performanceSamples != null && presented) {
-            String report = performanceSamples.add(totalNanos, resourceNanos, drawNanos,
-                    drawCalls, lineCount, rectCount, spriteCount, textCount, orderCount);
+        long finishedAt = System.nanoTime();
+        long totalNanos = finishedAt - started;
+        if (frameSamples != null && presented) {
+            afterLockNanos = finishedAt - lockReleasedAt;
+            String report = frameSamples.add(totalNanos, resourceNanos, drawNanos,
+                    drawCalls, lineCount, rectCount, spriteCount, textCount, orderCount,
+                    monitorWaitNanos, preResourceNanos, resourceToDrawGapNanos,
+                    postDrawLockedNanos, afterLockNanos);
             if (report != null) {
                 Log.i(LOG_TAG, report + " mixed_runs=" + frameMixedRuns
                         + " texture_binds=" + frameTextureBinds
                         + " submitted_quads=" + frameSubmittedQuads + " "
                         + textures.atlasMetrics());
+                Log.i(LOG_TAG, frameSamples.phaseReport());
                 String resourceLookupMetrics = textures.finishPerformanceSampling();
                 if (!resourceLookupMetrics.isEmpty()) {
                     Log.i(LOG_TAG, resourceLookupMetrics);

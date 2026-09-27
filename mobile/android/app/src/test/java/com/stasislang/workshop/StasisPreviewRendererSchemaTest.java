@@ -683,13 +683,19 @@ public final class StasisPreviewRendererSchemaTest {
         StasisPreviewRenderer.FramePerformanceSamples samples =
                 new StasisPreviewRenderer.FramePerformanceSamples(2, 4);
         assertFalse(samples.isComplete());
-        assertNull(samples.add(99_000, 90_000, 9_000, 9, 1, 2, 3, 4, 5));
-        assertNull(samples.add(98_000, 80_000, 8_000, 8, 1, 2, 3, 4, 5));
-        assertNull(samples.add(10_000, 4_000, 5_000, 3, 1, 2, 3, 4, 5));
-        assertNull(samples.add(20_000, 8_000, 10_000, 4, 1, 2, 3, 4, 5));
-        assertNull(samples.add(30_000, 12_000, 15_000, 5, 1, 2, 3, 4, 5));
+        assertNull(samples.add(99_000, 90_000, 9_000, 9, 1, 2, 3, 4, 5,
+                0, 0, 0, 0, 0));
+        assertNull(samples.add(98_000, 80_000, 8_000, 8, 1, 2, 3, 4, 5,
+                0, 0, 0, 0, 0));
+        assertNull(samples.add(10_000, 4_000, 5_000, 3, 1, 2, 3, 4, 5,
+                1_000, 0, 0, 0, 0));
+        assertNull(samples.add(20_000, 8_000, 10_000, 4, 1, 2, 3, 4, 5,
+                1_000, 1_000, 0, 0, 0));
+        assertNull(samples.add(30_000, 12_000, 15_000, 5, 1, 2, 3, 4, 5,
+                1_000, 1_000, 0, 1_000, 0));
 
-        String report = samples.add(40_000, 16_000, 20_000, 6, 1, 2, 3, 4, 5);
+        String report = samples.add(40_000, 16_000, 20_000, 6, 1, 2, 3, 4, 5,
+                1_000, 1_000, 1_000, 1_000, 0);
 
         assertTrue(report.contains("warmup=2 samples=4"));
         assertTrue(report.contains("total_p50_us=20 total_p95_us=40"));
@@ -697,8 +703,17 @@ public final class StasisPreviewRendererSchemaTest {
         assertTrue(report.contains("draw_p50_us=10 draw_p95_us=20"));
         assertTrue(report.contains("draw_calls_min=3 draw_calls_max=6"));
         assertTrue(report.endsWith("lines=1 rects=2 sprites=3 text=4 order=5"));
+        String phaseReport = samples.phaseReport();
+        assertTrue(phaseReport.contains("unphased_p50_us=2 unphased_p95_us=4"));
+        assertTrue(phaseReport.contains("monitor_wait_p50_us=1 monitor_wait_p95_us=1"));
+        assertTrue(phaseReport.contains("pre_resource_p50_us=1 pre_resource_p95_us=1"));
+        assertTrue(phaseReport.contains("resource_to_draw_gap_p50_us=0 resource_to_draw_gap_p95_us=1"));
+        assertTrue(phaseReport.contains("post_draw_locked_p50_us=0 post_draw_locked_p95_us=1"));
+        assertTrue(phaseReport.contains("after_lock_p50_us=0 after_lock_p95_us=0"));
+        assertTrue(phaseReport.endsWith("conservation_error_ns=0"));
         assertTrue(samples.isComplete());
-        assertNull(samples.add(1, 1, 1, 1, 0, 0, 0, 0, 0));
+        assertNull(samples.add(1, 1, 1, 1, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0));
     }
 
     @Test
