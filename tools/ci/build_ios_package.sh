@@ -7,7 +7,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-workspace="${1:-${repo_root}/samples/mobile_storage_link}"
+workspace="${1:-${repo_root}/samples/generics_collections}"
 workspace="$(cd "${workspace}" && pwd)"
 package_output="${2:-dist/ios-ci}"
 build_root="${STASIS_IOS_BUILD_ROOT:-${repo_root}/target/ios-package-link}"
@@ -150,7 +150,6 @@ python tools/cargo_cache.py run -- cargo run -p stasis -- \
   --workspace "${workspace}" \
   package-mobile \
   --target ios-arm64 \
-  --entry src/main.stasis \
   --out "${package_output}" \
   --development-build
 package_created=1
@@ -252,7 +251,6 @@ if [[ "${simulator_acceptance}" = "generics" ]]; then
     --workspace "${workspace}" \
     package-mobile \
     --target ios-simulator-arm64 \
-    --entry src/main.stasis \
     --out "${simulator_output}" \
     --development-build
   simulator_package_created=1
