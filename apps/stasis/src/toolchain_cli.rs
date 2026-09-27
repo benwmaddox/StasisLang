@@ -6860,14 +6860,36 @@ fn retain_opted_in_web_loading_font(
     }
     let source = load_project_asset_manifest(&workspace.root, AssetLimits::default())
         .map_err(|error| format!("failed to load Web loading font metadata: {error}"))?;
-    let Some(font) = source
+    let font = source
         .assets
         .iter()
         .find(|asset| asset.entry.path == loading_font)
-    else {
-        return Ok(());
-    };
-    retained.assets.push(font.clone());
+        .cloned()
+        .map(Ok)
+        .unwrap_or_else(|| {
+            let paths = BTreeSet::from([loading_font.to_string()]);
+            resolve_project_asset_paths(&workspace.root, &paths, AssetLimits::default())
+                .map_err(|error| {
+                    format!("failed to infer opted-in Web loading font metadata: {error}")
+                })
+                .and_then(|mut inferred| {
+                    inferred.assets.pop().ok_or_else(|| {
+                        format!(
+                            "failed to infer opted-in Web loading font metadata for {loading_font}"
+                        )
+                    })
+                })
+        })?;
+    if retained
+        .assets
+        .iter()
+        .any(|asset| asset.entry.id == font.entry.id || asset.handle == font.handle)
+    {
+        return Err(format!(
+            "inferred Web loading font metadata collides with an authored asset: {loading_font}"
+        ));
+    }
+    retained.assets.push(font);
     retained
         .assets
         .sort_by(|left, right| left.entry.path.cmp(&right.entry.path));
@@ -11355,6 +11377,83 @@ mod tests {
         )
         .expect("decode prepared manifest");
         assert_eq!(prepared["assets"][0]["path"], "assets/fonts/ui.ttf");
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn opted_in_loading_font_is_inferred_when_authored_manifest_omits_it() {
+        let root = temp_dir("authored_manifest_missing_loading_font");
+        fs::create_dir_all(root.join("assets/fonts")).expect("font directory");
+        fs::write(root.join("assets/fonts/ui.ttf"), b"loading font bytes")
+            .expect("loading font fixture");
+        fs::write(root.join("assets/fonts/other.ttf"), b"authored font bytes")
+            .expect("authored font fixture");
+        fs::write(root.join("assets/fonts/LICENSE.txt"), b"font license").expect("license fixture");
+        let authored_sha = stasis_assets::sha256_bytes(b"authored font bytes");
+        let authored = json!({
+            "schema": "stasis-assets",
+            "version": 2,
+            "assets": [{
+                "id": "authored-font",
+                "path": "assets/fonts/other.ttf",
+                "content_sha256": authored_sha,
+                "format": {"kind": "font", "encoding": "ttf"},
+                "dependencies": []
+            }]
+        });
+        fs::write(
+            root.join(DEFAULT_ASSET_MANIFEST_PATH),
+            serde_json::to_vec_pretty(&authored).expect("encode authored manifest"),
+        )
+        .expect("authored manifest fixture");
+        let root = canonical_workspace_root(&root).expect("canonical workspace root");
+        let mut manifest = ProjectManifest::new("authored-font".to_string());
+        manifest.web = Some(WebProjectManifest {
+            entry: "src/main.stasis".to_string(),
+            replay: false,
+            loading_font: Some("assets/fonts/ui.ttf".to_string()),
+            viewport: None,
+            atlas_budget_bytes: None,
+        });
+        manifest.release = Some(ReleaseProjectManifest {
+            font_subsetting: Some(crate::release_assets::ReleaseFontSubsettingManifest {
+                fonts: vec![crate::release_assets::ReleaseFontSubsetEntry {
+                    path: "assets/fonts/ui.ttf".to_string(),
+                    license_path: "assets/fonts/LICENSE.txt".to_string(),
+                    modification_permitted: true,
+                    reserved_names: Vec::new(),
+                    replacement_family: None,
+                }],
+            }),
+        });
+        let workspace = Workspace {
+            root: root.clone(),
+            manifest,
+            resolved_settings: None,
+        };
+        let mut retained =
+            load_project_asset_manifest(&root, AssetLimits::default()).expect("authored manifest");
+
+        retain_opted_in_web_loading_font(&workspace, &mut retained, "assets/fonts/ui.ttf")
+            .expect("infer omitted loading font");
+
+        assert_eq!(retained.assets.len(), 2);
+        assert!(retained
+            .assets
+            .iter()
+            .any(|asset| asset.entry.id == "authored-font"));
+        assert!(retained
+            .assets
+            .iter()
+            .any(|asset| asset.entry.path == "assets/fonts/ui.ttf"));
+        let staging = root.join("stage");
+        prepare_asset_bundle(&retained, &staging, root.join("cache"))
+            .expect("prepare combined bundle");
+        let prepared: serde_json::Value = serde_json::from_slice(
+            &fs::read(staging.join(DEFAULT_ASSET_MANIFEST_PATH)).expect("prepared manifest"),
+        )
+        .expect("decode prepared manifest");
+        assert_eq!(prepared["assets"].as_array().expect("asset array").len(), 2);
         remove_temp(&root);
     }
 

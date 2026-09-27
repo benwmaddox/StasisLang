@@ -203,13 +203,17 @@ pub(crate) fn validate_font_subsetting_manifest(
                 ));
             }
             let license_path = canonical_root.join(&font.license_path);
-            if let Ok(resolved_license) = license_path.canonicalize() {
-                if !resolved_license.starts_with(&assets_root) || !resolved_license.is_file() {
-                    return Err(format!(
-                        "font subsetting license_path must resolve to a file under assets/: {}",
-                        font.license_path
-                    ));
-                }
+            let resolved_license = license_path.canonicalize().map_err(|error| {
+                format!(
+                    "failed to resolve font subsetting license_path {}: {error}",
+                    font.license_path
+                )
+            })?;
+            if !resolved_license.starts_with(&assets_root) || !resolved_license.is_file() {
+                return Err(format!(
+                    "font subsetting license_path must resolve to a file under assets/: {}",
+                    font.license_path
+                ));
             }
         }
     }
@@ -1331,6 +1335,16 @@ mod tests {
     fn font_subsetting_config_validates_paths_legal_assertions_and_reserved_names() {
         let fixture = font_fixture();
         assert!(validate_font_subsetting_manifest(Some(&fixture.root), &fixture.config).is_ok());
+
+        std::fs::remove_file(fixture.root.join(BASIC_LICENSE_PATH))
+            .expect("remove license fixture");
+        let missing_license =
+            validate_font_subsetting_manifest(Some(&fixture.root), &fixture.config)
+                .expect_err("missing license notice must fail validation");
+        assert!(
+            missing_license.contains(BASIC_LICENSE_PATH),
+            "{missing_license}"
+        );
 
         let mut unsafe_path = fixture.config.clone();
         unsafe_path.fonts[0].path = "assets/../outside.ttf".to_string();
