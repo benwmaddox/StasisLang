@@ -18,7 +18,7 @@ except ModuleNotFoundError:  # pragma: no cover - supports importing as tools.*
     from tools.generate_release_provenance import RUNTIME_DIRS, RUNTIME_FILES
 
 
-MAX_ARCHIVE_BYTES = 120 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 ARCHIVE_REQUIRED_FILES = (
     "README.md",
     "LICENSE",

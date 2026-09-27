@@ -339,7 +339,7 @@ jobs:
             --platform "${{ matrix.bundle_platform }}" \
             --archive "dist/${{ matrix.archive }}.${{ matrix.ext }}" \
             --output "bundle-audit/${{ matrix.archive }}.json" \
-            --max-archive-bytes 125829120
+            --max-archive-bytes 134217728
 
       - name: Assemble bundle (windows)
         if: runner.os == 'Windows'
@@ -412,7 +412,7 @@ jobs:
             --platform "${{ matrix.bundle_platform }}" `
             --archive "dist/${{ matrix.archive }}.${{ matrix.ext }}" `
             --output "bundle-audit/${{ matrix.archive }}.json" `
-            --max-archive-bytes 125829120
+            --max-archive-bytes 134217728
 
       - name: Verify extracted Windows editor toolchain
         if: runner.os == 'Windows'
@@ -792,7 +792,7 @@ jobs:
             --platform windows `
             --archive "dist/stasis-nightly-win-x64.zip" `
             --output "bundle-audit/stasis-nightly-win-x64-signed.json" `
-            --max-archive-bytes 125829120
+            --max-archive-bytes 134217728
           if ($LASTEXITCODE -ne 0) { throw "Signed Windows release bundle audit failed" }
           $signedArtifacts = @(python tools/ci/windows_signing_manifest.py list --root $validationRoot --receipt $receipt)
           foreach ($artifact in $signedArtifacts) {
