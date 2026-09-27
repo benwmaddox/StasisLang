@@ -351,10 +351,12 @@ PY
   bundle_id="$(/usr/libexec/PlistBuddy -c 'Print:CFBundleIdentifier' "${simulator_app}/Info.plist")"
   data_container="$(xcrun simctl get_app_container "${simulator_udid}" "${bundle_id}" data)"
   result_receipt="${data_container}/Documents/stasis-ios-generics-result.json"
-  SIMCTL_CHILD_STASIS_ENABLE_TEST_INPUT=1 \
-  SIMCTL_CHILD_STASIS_SEAM_TEST_ID=IOS-GENERICS \
-    xcrun simctl launch --terminate-running-process "${simulator_udid}" "${bundle_id}" \
-    | tee "${build_root}/simulator-launch.txt"
+  launch_output="$(
+    SIMCTL_CHILD_STASIS_ENABLE_TEST_INPUT=1 \
+    SIMCTL_CHILD_STASIS_SEAM_TEST_ID=IOS-GENERICS \
+      xcrun simctl launch --terminate-running-process "${simulator_udid}" "${bundle_id}"
+  )"
+  printf '%s\n' "${launch_output}" | tee "${build_root}/simulator-launch.txt"
   wait_for_receipt() {
     local path="$1"
     for _ in $(seq 1 160); do
@@ -368,8 +370,22 @@ PY
   cp "${result_receipt}" "${build_root}/simulator-result.json"
   sleep 1
   xcrun simctl io "${simulator_udid}" screenshot "${build_root}/simulator-frame.png"
-  xcrun simctl spawn "${simulator_udid}" log show --style compact --last 5m \
-    --predicate 'process == "StasisMobile"' > "${build_root}/simulator.log"
+  for _ in $(seq 1 40); do
+    xcrun simctl spawn "${simulator_udid}" log show --style compact --last 5m \
+      --predicate 'process == "StasisMobile"' > "${build_root}/simulator.log"
+    if grep -Fq 'Stasis iOS generics acceptance digest=507 frame=1' \
+        "${build_root}/simulator.log" && \
+        grep -Eq 'Stasis provenance: .* renderer=gfx_cmd schema=7' \
+        "${build_root}/simulator.log"; then
+      break
+    fi
+    sleep 0.25
+  done
+  if ! grep -Fq 'Stasis iOS generics acceptance digest=507 frame=1' \
+      "${build_root}/simulator.log"; then
+    echo "simulator unified log did not publish the iOS generics acceptance marker" >&2
+    exit 1
+  fi
   xcrun simctl terminate "${simulator_udid}" "${bundle_id}"
 
   run_bounds_probe() {

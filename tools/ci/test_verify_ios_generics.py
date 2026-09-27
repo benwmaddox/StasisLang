@@ -269,6 +269,16 @@ class IosGenericsWorkflowContractTest(unittest.TestCase):
             self.script,
         )
 
+    def test_green_launch_waits_for_unified_log_acceptance_marker(self) -> None:
+        self.assertIn("for _ in $(seq 1 40); do", self.script)
+        self.assertIn(
+            "Stasis iOS generics acceptance digest=507 frame=1", self.script
+        )
+        self.assertIn(
+            "simulator unified log did not publish the iOS generics acceptance marker",
+            self.script,
+        )
+
     def test_symbol_gate_uses_manifest_lifecycle_and_workload_symbols(self) -> None:
         self.assertIn("verify_ios_generics_symbols()", self.script)
         self.assertIn('for name in ("main", "tick", "render"):', self.script)
