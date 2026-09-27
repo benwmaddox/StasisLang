@@ -159,10 +159,27 @@ public final class WorkshopTextureProviderTest {
         assertFalse(fixed.cacheHit);
         assertTrue(fixedHit.cacheHit);
         assertEquals(1, immutableCalls[0]);
+        assertEquals(fixed.value.immutableTextSha256,
+                fixedHit.value.immutableTextSha256);
+        assertFalse(fixed.value.immutableTextSha256.isEmpty());
+        String fixedIdentity = WorkshopTextureProvider.textIdentityFromDigest(
+                "font-a", fixed.value.immutableTextSha256, 2.0f);
+        assertEquals(WorkshopTextureProvider.textIdentity("font-a", "Fixed", 2.0f),
+                fixedIdentity);
+        assertFalse(fixedIdentity.equals(WorkshopTextureProvider.textIdentityFromDigest(
+                "font-b", fixed.value.immutableTextSha256, 2.0f)));
+        assertFalse(fixedIdentity.equals(WorkshopTextureProvider.textIdentityFromDigest(
+                "font-a", fixed.value.immutableTextSha256, 2.0005f)));
         assertFalse(dynamicOne.cacheHit);
         assertFalse(dynamicTwo.cacheHit);
         assertEquals("score 1", dynamicOne.value.text);
         assertEquals("score 2", dynamicTwo.value.text);
+        assertEquals(null, dynamicOne.value.immutableTextSha256);
+        assertEquals(null, dynamicTwo.value.immutableTextSha256);
+        assertFalse(WorkshopTextureProvider.textIdentity(
+                "font-a", dynamicOne.value.text, 2.0f).equals(
+                WorkshopTextureProvider.textIdentity(
+                        "font-a", dynamicTwo.value.text, 2.0f)));
         assertEquals(2, replaceableCalls[0]);
     }
 

@@ -479,7 +479,10 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             FileIdentity fileIdentity = fileIdentityFor(fontFile);
             fontIdentity = fileIdentity.canonicalPath + ":" + fileIdentity.length + ":"
                     + fileIdentity.lastModified + ":" + resolved.fontSize;
-            exactIdentity = textIdentity(fontIdentity, text, textRasterScale);
+            String textSha256 = resolved.replaceable
+                    ? sha256(text) : resolved.immutableTextSha256;
+            exactIdentity = textIdentityFromDigest(
+                    fontIdentity, textSha256, textRasterScale);
         } catch (Exception error) {
             recordFailure("cached_text", runHandle, "<resolved-cached-text>", 0, 0, error);
             return 0L;
@@ -718,7 +721,12 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     }
 
     static String textIdentity(String fontIdentity, String text, float rasterScale) {
-        return fontIdentity + ":" + Float.toHexString(rasterScale) + ":" + sha256(text);
+        return textIdentityFromDigest(fontIdentity, sha256(text), rasterScale);
+    }
+
+    static String textIdentityFromDigest(
+            String fontIdentity, String textSha256, float rasterScale) {
+        return fontIdentity + ":" + Float.toHexString(rasterScale) + ":" + textSha256;
     }
 
     private long textCacheBytes() {
@@ -1504,12 +1512,14 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         final String text;
         final int fontSize;
         final boolean replaceable;
+        final String immutableTextSha256;
 
         CachedTextMetadata(String fontPath, String text, int fontSize, boolean replaceable) {
             this.fontPath = fontPath;
             this.text = text;
             this.fontSize = fontSize;
             this.replaceable = replaceable;
+            this.immutableTextSha256 = replaceable ? null : sha256(text);
         }
     }
 
