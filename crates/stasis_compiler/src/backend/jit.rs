@@ -9119,6 +9119,352 @@ test `boolean fail`(): bool { return false; }
 
     #[cfg(windows)]
     #[test]
+    fn jit_reuses_soa_foreach_field_values_and_writes_through() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "foreach_cache.stasis",
+            r#"
+struct Ball { x: i32; y: i32; vx: i32; vy: i32; }
+global balls: Ball[4];
+function tick(): void {
+    foreach (let ball in balls) {
+        ball.x += ball.vx;
+        ball.y += ball.vy;
+        if (ball.x <= 0 || ball.x >= 628) {
+            ball.vx = 0 - ball.vx;
+        }
+        if (ball.y <= 0 || ball.y >= 348) {
+            ball.vy = 0 - ball.vy;
+        }
+    }
+    return;
+}
+function main(): i32 {
+    balls[0].x = 0; balls[0].y = 0; balls[0].vx = 3; balls[0].vy = 2;
+    balls[1].x = 100; balls[1].y = 100; balls[1].vx = 1; balls[1].vy = 1;
+    balls[2].x = 400; balls[2].y = 100; balls[2].vx = 0 - 2; balls[2].vy = 2;
+    balls[3].x = 626; balls[3].y = 347; balls[3].vx = 3; balls[3].vy = 2;
+    tick();
+    if (balls[0].x != 3) { return 1; }
+    if (balls[0].y != 2) { return 2; }
+    if (balls[0].vx != 3) { return 3; }
+    if (balls[0].vy != 2) { return 4; }
+    if (balls[3].x != 629) { return 5; }
+    if (balls[3].y != 349) { return 6; }
+    if (balls[3].vx != 0 - 3) { return 7; }
+    if (balls[3].vy != 0 - 2) { return 8; }
+    tick();
+    if (balls[0].x != 6) { return 9; }
+    if (balls[0].y != 4) { return 10; }
+    if (balls[0].vx != 3) { return 11; }
+    if (balls[0].vy != 2) { return 12; }
+    if (balls[3].x != 626) { return 13; }
+    if (balls[3].y != 347) { return 14; }
+    if (balls[3].vx != 0 - 3) { return 15; }
+    if (balls[3].vy != 0 - 2) { return 16; }
+    return 0;
+}
+"#,
+        );
+        process.compile().expect("compile foreach cache fixture");
+
+        let clif = process.clif_for_function_name("tick").expect("tick CLIF");
+        let i32_loads = clif
+            .lines()
+            .filter(|line| line.trim_start().contains("load.i32"))
+            .count();
+        assert_eq!(
+            i32_loads, 4,
+            "expected one load for each read field per iteration:\n{clif}"
+        );
+        assert!(
+            !clif.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("call ") || line.contains(" = call ")
+            }),
+            "eligible SoA foreach retained runtime calls:\n{clif}"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            0
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_disables_soa_foreach_field_cache_for_indexed_aliases() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "foreach_cache_alias.stasis",
+            r#"
+struct Ball { x: i32; }
+global balls: Ball[4];
+function main(): i32 {
+    let total: i32 = 0;
+    foreach (let ball, index in balls) {
+        total += ball.x;
+        balls[index].x = index + 1;
+        total += ball.x;
+    }
+    return total;
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("compile indexed alias invalidation fixture");
+        let clif = process.clif_for_function_name("main").expect("main CLIF");
+        let loads = clif
+            .lines()
+            .filter(|line| line.trim_start().contains("load.i32"))
+            .count();
+        assert_eq!(
+            loads, 2,
+            "indexed alias must leave both reads intact:\n{clif}"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            10
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_initializes_soa_foreach_cache_only_at_dominating_access() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "foreach_cache_branch.stasis",
+            r#"
+struct Ball { x: i32; }
+global balls: Ball[4];
+function measure(enabled: bool): i32 {
+    let total: i32 = 0;
+    foreach (let ball in balls) {
+        if (enabled) { total += ball.x; }
+    }
+    return total;
+}
+function main(): i32 {
+    balls[0].x = 3;
+    if (measure(false) != 0) { return 1; }
+    if (measure(true) != 3) { return 2; }
+    return 0;
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("compile conditional cache fixture");
+
+        let clif = process
+            .clif_for_function_name("measure")
+            .expect("measure CLIF");
+        let loads = clif
+            .lines()
+            .filter(|line| line.trim_start().contains("load.i32"))
+            .count();
+        assert_eq!(loads, 1, "expected one conditional field load:\n{clif}");
+        let branch = clif
+            .match_indices("brif")
+            .nth(1)
+            .map(|(position, _)| position)
+            .expect("inner if branch in CLIF");
+        let first_load = clif.find("load.i32").expect("conditional field load");
+        assert!(
+            first_load > branch,
+            "field load must remain inside the conditional path, not be hoisted:\n{clif}"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            0
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_soa_foreach_write_before_read_skips_old_field_load() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "foreach_cache_set_first.stasis",
+            r#"
+struct Ball { x: i32; }
+global balls: Ball[4];
+function tick(): i32 {
+    let total: i32 = 0;
+    foreach (let ball in balls) {
+        ball.x = 5;
+        total += ball.x;
+        total += ball.x;
+    }
+    return total;
+}
+function main(): i32 {
+    if (tick() != 40) { return 1; }
+    if (balls[0].x != 5) { return 2; }
+    if (balls[3].x != 5) { return 3; }
+    return 0;
+}
+"#,
+        );
+        process.compile().expect("compile set-first cache fixture");
+
+        let clif = process.clif_for_function_name("tick").expect("tick CLIF");
+        assert!(
+            !clif
+                .lines()
+                .any(|line| line.trim_start().contains("load.i32")),
+            "set-before-read must not load the old field value:\n{clif}"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            0
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_normalizes_cached_soa_foreach_unsigned_lanes() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "foreach_cache_unsigned.stasis",
+            r#"
+struct Lanes { byte: u8; word: u16; }
+global lanes: Lanes[1];
+function tick(): i32 {
+    let total: i32 = 0;
+    foreach (let lane in lanes) {
+        lane.byte += 2;
+        lane.word += 2;
+        total += lane.byte;
+        total += lane.byte;
+        total += lane.word;
+        total += lane.word;
+    }
+    return total;
+}
+function main(): i32 {
+    lanes[0].byte = 255;
+    lanes[0].word = 65535;
+    if (tick() != 4) { return 1; }
+    if (lanes[0].byte != 1) { return 2; }
+    if (lanes[0].word != 1) { return 3; }
+    return 0;
+}
+"#,
+        );
+        process.compile().expect("compile unsigned cache fixture");
+
+        let clif = process.clif_for_function_name("tick").expect("tick CLIF");
+        assert_eq!(
+            clif.lines()
+                .filter(|line| line.trim_start().contains("load.i8"))
+                .count(),
+            1,
+            "expected one cached byte load:\n{clif}"
+        );
+        assert_eq!(
+            clif.lines()
+                .filter(|line| line.trim_start().contains("load.i16"))
+                .count(),
+            1,
+            "expected one cached word load:\n{clif}"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            0
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_disables_soa_foreach_field_cache_across_calls() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "foreach_cache_call.stasis",
+            r#"
+struct Ball { x: i32; }
+global balls: Ball[4];
+function mutate(): void { balls[0].x = 7; }
+function measure(): i32 {
+    foreach (let ball, index in balls) {
+        mutate();
+        if (index == 0) { return ball.x + ball.x; }
+    }
+    return 0;
+}
+function main(): i32 { return measure(); }
+"#,
+        );
+        process
+            .compile()
+            .expect("compile call invalidation fixture");
+
+        let clif = process
+            .clif_for_function_name("measure")
+            .expect("measure CLIF");
+        let i32_loads = clif
+            .lines()
+            .filter(|line| line.trim_start().contains("load.i32"))
+            .count();
+        assert_eq!(
+            i32_loads, 2,
+            "call must leave both field reads intact:\n{clif}"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            14
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_keeps_unproven_index_trap_inside_soa_foreach() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "foreach_cache_index.stasis",
+            r#"
+struct Ball { x: i32; }
+global balls: Ball[4];
+global values: i32[4];
+function read(index: i32): i32 {
+    let total: i32 = 0;
+    foreach (let ball, item_index in balls) {
+        total += values[index];
+        total += ball.x;
+    }
+    return total;
+}
+function main(): i32 { return read(0); }
+"#,
+        );
+        process.compile().expect("compile checked foreach fixture");
+        let clif = process.clif_for_function_name("read").expect("read CLIF");
+        assert!(
+            clif.contains("trapz"),
+            "unproven indexed access inside foreach lost its fatal check:\n{clif}"
+        );
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            0
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_executes_tick_from_stasis_fixture_with_input_snapshot() {
         let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")

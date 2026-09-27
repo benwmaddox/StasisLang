@@ -24,7 +24,9 @@ use cranelift_codegen::ir::{
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Linkage, Module};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::rc::Rc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -49,6 +51,8 @@ pub(crate) struct ForeachBinding {
     pub(crate) element_type: Option<TypeId>,
     pub(crate) struct_type_id: Option<TypeId>,
     pub(crate) field_types: BTreeMap<String, TypeId>,
+    pub(crate) cached_field_vars: BTreeMap<String, Variable>,
+    pub(crate) initialized_cached_fields: Rc<RefCell<BTreeSet<String>>>,
     pub(crate) u8_array_base_ptrs: BTreeMap<String, Value>,
     pub(crate) u16_array_base_ptrs: BTreeMap<String, Value>,
     pub(crate) i32_array_base_ptrs: BTreeMap<String, Value>,
@@ -4227,6 +4231,44 @@ pub(crate) fn emit_simple_statements(
                         },
                     );
                 }
+                let cache_fields = if debug_refs.is_none()
+                    && runtime_call_refs.profile.is_none()
+                    && collection_info.element_type.is_none()
+                {
+                    collect_safe_foreach_field_reads(
+                        body_statements,
+                        item_name,
+                        index_name.as_deref(),
+                        collection_path,
+                        &collection_info.field_types,
+                        &loop_values,
+                        global_path_types,
+                        type_table,
+                        named_struct_field_types,
+                    )
+                } else {
+                    None
+                };
+                let mut cached_field_vars = BTreeMap::new();
+                if let Some(cache_fields) = cache_fields {
+                    for field in cache_fields {
+                        let field_type = collection_info
+                            .field_types
+                            .get(&field)
+                            .copied()
+                            .ok_or_else(|| {
+                                format!("missing foreach field type for cache field '{field}'")
+                            })?;
+                        let next = *next_variable;
+                        let variable = Variable::from_u32(next);
+                        *next_variable = next
+                            .checked_add(1)
+                            .ok_or_else(|| "too many local variables".to_string())?;
+                        builder
+                            .declare_var(variable, clif_type_for_type_id(field_type, type_table)?);
+                        cached_field_vars.insert(field, variable);
+                    }
+                }
                 let mut loop_foreach_bindings = foreach_bindings.clone();
                 loop_foreach_bindings.insert(
                     item_name.clone(),
@@ -4237,6 +4279,8 @@ pub(crate) fn emit_simple_statements(
                         element_type: collection_info.element_type,
                         struct_type_id: collection_struct_type_id,
                         field_types: collection_info.field_types.clone(),
+                        cached_field_vars,
+                        initialized_cached_fields: Rc::new(RefCell::new(BTreeSet::new())),
                         u8_array_base_ptrs,
                         u16_array_base_ptrs,
                         i32_array_base_ptrs,
@@ -12117,6 +12161,294 @@ pub(crate) fn resolve_foreach_binding_for_path<'a>(
     Some((binding, suffix))
 }
 
+fn is_cacheable_foreach_field_type(type_id: TypeId, type_table: &TypeTable) -> bool {
+    type_id == TYPE_ID_BOOL
+        || type_id == TYPE_ID_F32
+        || type_id == TYPE_ID_F64
+        || is_i32_abi_compatible_type(type_id, type_table)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ForeachFieldAccess {
+    Read,
+    Set,
+}
+
+#[derive(Default)]
+struct ForeachFieldAccesses {
+    first: Option<(ForeachFieldAccess, bool)>,
+    reads: usize,
+}
+
+struct ForeachCacheScanner<'a> {
+    item_name: &'a str,
+    index_name: Option<&'a str>,
+    collection_path: &'a str,
+    fields: &'a BTreeMap<String, TypeId>,
+    global_paths: &'a GlobalPathTypeMap,
+    type_table: &'a TypeTable,
+    named_struct_fields: &'a NamedStructFieldTypeMap,
+    accesses: BTreeMap<String, ForeachFieldAccesses>,
+}
+
+impl ForeachCacheScanner<'_> {
+    fn record(&mut self, field: &str, access: ForeachFieldAccess, dominates: bool) {
+        let use_info = self.accesses.entry(field.to_string()).or_default();
+        use_info.first.get_or_insert((access, dominates));
+        if access == ForeachFieldAccess::Read {
+            use_info.reads += 1;
+        }
+    }
+
+    fn expression(
+        &mut self,
+        expression: &SimpleExpr,
+        dominates: bool,
+        locals: &BTreeMap<String, Option<TypeId>>,
+    ) -> bool {
+        match expression {
+            SimpleExpr::Identifier(name) => {
+                if name == self.item_name {
+                    return false;
+                }
+                if let Some(field) = name.strip_prefix(&format!("{}.", self.item_name)) {
+                    if self.fields.get(field).is_some_and(|type_id| {
+                        is_cacheable_foreach_field_type(*type_id, self.type_table)
+                    }) {
+                        self.record(field, ForeachFieldAccess::Read, dominates);
+                        return true;
+                    }
+                    return false;
+                }
+                if name.contains('.') || self.global_paths.contains_key(name) {
+                    return false;
+                }
+                locals.get(name).is_some_and(|type_id| {
+                    type_id.is_none_or(|type_id| {
+                        !self.named_struct_fields.contains_key(&type_id)
+                            && !is_collection_handle_type(type_id, self.type_table)
+                    })
+                })
+            }
+            SimpleExpr::Condition(condition) => self.condition(condition, dominates, locals),
+            SimpleExpr::Binary { lhs, rhs, .. } => {
+                self.expression(lhs, dominates, locals) && self.expression(rhs, dominates, locals)
+            }
+            SimpleExpr::DefaultValue(type_id) => {
+                !self.named_struct_fields.contains_key(type_id)
+                    && !is_collection_handle_type(*type_id, self.type_table)
+            }
+            SimpleExpr::IndexedPath { .. } | SimpleExpr::Call { .. } => false,
+            SimpleExpr::Int(_)
+            | SimpleExpr::Float(_)
+            | SimpleExpr::Bool(_)
+            | SimpleExpr::StringLiteral(_) => true,
+        }
+    }
+
+    fn condition(
+        &mut self,
+        condition: &SimpleCondition,
+        dominates: bool,
+        locals: &BTreeMap<String, Option<TypeId>>,
+    ) -> bool {
+        match condition {
+            SimpleCondition::Comparison { lhs, rhs, .. } => {
+                self.expression(lhs, dominates, locals) && self.expression(rhs, dominates, locals)
+            }
+            SimpleCondition::Expr(expression) => self.expression(expression, dominates, locals),
+            SimpleCondition::Not(inner) => self.condition(inner, dominates, locals),
+            SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+                self.condition(lhs, dominates, locals) && self.condition(rhs, false, locals)
+            }
+        }
+    }
+
+    fn local_target_is_safe(&self, name: &str, locals: &BTreeMap<String, Option<TypeId>>) -> bool {
+        name != self.item_name
+            && Some(name) != self.index_name
+            && name != self.collection_path
+            && !self.global_paths.contains_key(name)
+            && locals.get(name).is_some_and(|type_id| {
+                type_id.is_none_or(|type_id| {
+                    !self.named_struct_fields.contains_key(&type_id)
+                        && !is_collection_handle_type(type_id, self.type_table)
+                })
+            })
+    }
+
+    fn item_field_target(&self, name: &str) -> Option<String> {
+        let field = name.strip_prefix(&format!("{}.", self.item_name))?;
+        self.fields
+            .get(field)
+            .copied()
+            .filter(|type_id| is_cacheable_foreach_field_type(*type_id, self.type_table))
+            .map(|_| field.to_string())
+    }
+
+    fn target(
+        &mut self,
+        target: &AssignTarget,
+        op: AssignOp,
+        dominates: bool,
+        locals: &BTreeMap<String, Option<TypeId>>,
+    ) -> bool {
+        let path = match target {
+            AssignTarget::Local(name) | AssignTarget::GlobalPath(name) => name,
+            AssignTarget::IndexedPath { .. } => return false,
+        };
+        if let Some(field) = self.item_field_target(path) {
+            self.record(
+                &field,
+                if op == AssignOp::Set {
+                    ForeachFieldAccess::Set
+                } else {
+                    ForeachFieldAccess::Read
+                },
+                dominates,
+            );
+            return true;
+        }
+        matches!(target, AssignTarget::Local(_)) && self.local_target_is_safe(path, locals)
+    }
+
+    fn statement(
+        &mut self,
+        statement: &SimpleStmt,
+        dominates: bool,
+        locals: &mut BTreeMap<String, Option<TypeId>>,
+    ) -> bool {
+        match statement {
+            SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => true,
+            SimpleStmt::Let {
+                name,
+                type_id,
+                expression,
+            } => {
+                if name == self.item_name
+                    || Some(name.as_str()) == self.index_name
+                    || name == self.collection_path
+                    || self.global_paths.contains_key(name)
+                    || type_id.is_some_and(|type_id| {
+                        self.named_struct_fields.contains_key(&type_id)
+                            || is_collection_handle_type(type_id, self.type_table)
+                    })
+                    || !self.expression(expression, dominates, locals)
+                {
+                    return false;
+                }
+                locals.insert(name.clone(), *type_id);
+                true
+            }
+            SimpleStmt::Assign {
+                target,
+                op,
+                expression,
+            } => {
+                self.expression(expression, dominates, locals)
+                    && self.target(target, *op, dominates, locals)
+            }
+            SimpleStmt::Convert { target, source, .. } => {
+                self.expression(source, dominates, locals)
+                    && matches!(target, AssignTarget::Local(name) if self.local_target_is_safe(name, locals))
+            }
+            SimpleStmt::If {
+                condition,
+                then_statements,
+                else_statements,
+            } => {
+                if !self.condition(condition, dominates, locals) {
+                    return false;
+                }
+                let mut then_locals = locals.clone();
+                if !self.statements(then_statements, false, &mut then_locals) {
+                    return false;
+                }
+                let mut else_locals = locals.clone();
+                else_statements
+                    .as_ref()
+                    .is_none_or(|statements| self.statements(statements, false, &mut else_locals))
+            }
+            SimpleStmt::For {
+                init,
+                condition,
+                step,
+                body_statements,
+            } => {
+                let mut loop_locals = locals.clone();
+                self.statement(init, false, &mut loop_locals)
+                    && self.condition(condition, false, &loop_locals)
+                    && self.statement(step, false, &mut loop_locals)
+                    && self.statements(body_statements, false, &mut loop_locals)
+            }
+            SimpleStmt::Foreach { .. } => false,
+            SimpleStmt::Expr(expression) | SimpleStmt::Return(expression) => {
+                self.expression(expression, dominates, locals)
+            }
+        }
+    }
+
+    fn statements(
+        &mut self,
+        statements: &[SimpleStmt],
+        dominates: bool,
+        locals: &mut BTreeMap<String, Option<TypeId>>,
+    ) -> bool {
+        statements
+            .iter()
+            .all(|statement| self.statement(statement, dominates, locals))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_safe_foreach_field_reads(
+    statements: &[SimpleStmt],
+    item_name: &str,
+    index_name: Option<&str>,
+    collection_path: &str,
+    field_types: &BTreeMap<String, TypeId>,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    global_path_types: &GlobalPathTypeMap,
+    type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+) -> Option<BTreeSet<String>> {
+    let mut scanner = ForeachCacheScanner {
+        item_name,
+        index_name,
+        collection_path,
+        fields: field_types,
+        global_paths: global_path_types,
+        type_table,
+        named_struct_fields: named_struct_field_types,
+        accesses: BTreeMap::new(),
+    };
+    let mut locals: BTreeMap<_, _> = values_by_name
+        .iter()
+        .filter(|(_, binding)| {
+            binding.struct_view.is_none()
+                && binding.owned_fixed.is_none()
+                && !named_struct_field_types.contains_key(&binding.type_id)
+                && !is_collection_handle_type(binding.type_id, type_table)
+        })
+        .map(|(name, binding)| (name.clone(), Some(binding.type_id)))
+        .collect();
+    if !scanner.statements(statements, true, &mut locals) {
+        return None;
+    }
+    Some(
+        scanner
+            .accesses
+            .into_iter()
+            .filter_map(|(field, uses)| {
+                let (first_access, dominates) = uses.first?;
+                let worthwhile =
+                    uses.reads >= 2 || (first_access == ForeachFieldAccess::Set && uses.reads >= 1);
+                (dominates && worthwhile).then_some(field)
+            })
+            .collect(),
+    )
+}
+
 pub(crate) fn build_local_foreach_collection_info(
     collection_path: &str,
     collection_type: TypeId,
@@ -12162,6 +12494,42 @@ pub(crate) fn build_local_foreach_collection_info(
 }
 
 pub(crate) fn emit_foreach_binding_load(
+    builder: &mut FunctionBuilder<'_>,
+    runtime_call_refs: &RuntimeCallRefs,
+    type_table: &TypeTable,
+    binding: &ForeachBinding,
+    suffix: &str,
+) -> Result<ValueBinding, String> {
+    let resolved = resolve_foreach_binding_value_type(binding, suffix)?;
+    if let Some(variable) = binding.cached_field_vars.get(suffix).copied() {
+        if binding.initialized_cached_fields.borrow().contains(suffix) {
+            return Ok(ValueBinding {
+                value: builder.use_var(variable),
+                type_id: resolved,
+            });
+        }
+        let loaded = emit_foreach_binding_load_uncached(
+            builder,
+            runtime_call_refs,
+            type_table,
+            binding,
+            suffix,
+        )?;
+        let value = normalize_unsigned_value(builder, loaded.value, resolved, type_table);
+        builder.def_var(variable, value);
+        binding
+            .initialized_cached_fields
+            .borrow_mut()
+            .insert(suffix.to_string());
+        return Ok(ValueBinding {
+            value: builder.use_var(variable),
+            type_id: resolved,
+        });
+    }
+    emit_foreach_binding_load_uncached(builder, runtime_call_refs, type_table, binding, suffix)
+}
+
+fn emit_foreach_binding_load_uncached(
     builder: &mut FunctionBuilder<'_>,
     runtime_call_refs: &RuntimeCallRefs,
     type_table: &TypeTable,
@@ -12274,6 +12642,24 @@ pub(crate) fn emit_foreach_binding_load(
     ))
 }
 
+fn update_foreach_cached_field(
+    builder: &mut FunctionBuilder<'_>,
+    type_table: &TypeTable,
+    binding: &ForeachBinding,
+    suffix: &str,
+    type_id: TypeId,
+    value: Value,
+) {
+    if let Some(variable) = binding.cached_field_vars.get(suffix).copied() {
+        let value = normalize_unsigned_value(builder, value, type_id, type_table);
+        builder.def_var(variable, value);
+        binding
+            .initialized_cached_fields
+            .borrow_mut()
+            .insert(suffix.to_string());
+    }
+}
+
 pub(crate) fn emit_foreach_binding_assignment(
     builder: &mut FunctionBuilder<'_>,
     runtime_call_refs: &RuntimeCallRefs,
@@ -12328,6 +12714,7 @@ pub(crate) fn emit_foreach_binding_assignment(
                 &[collection_hash, field_hash_value, index_value, value],
             );
         }
+        update_foreach_cached_field(builder, type_table, binding, suffix, path_type, value);
         return Ok(());
     }
     if path_type == TYPE_ID_BOOL {
@@ -12348,6 +12735,7 @@ pub(crate) fn emit_foreach_binding_assignment(
                 &[collection_hash, field_hash_value, index_value, rhs.value],
             );
         }
+        update_foreach_cached_field(builder, type_table, binding, suffix, path_type, rhs.value);
         return Ok(());
     }
     if path_type == TYPE_ID_F32 {
@@ -12415,6 +12803,7 @@ pub(crate) fn emit_foreach_binding_assignment(
                 &[collection_hash, field_hash_value, index_value, value],
             );
         }
+        update_foreach_cached_field(builder, type_table, binding, suffix, path_type, value);
         return Ok(());
     }
     if path_type == TYPE_ID_F64 {
@@ -12482,6 +12871,7 @@ pub(crate) fn emit_foreach_binding_assignment(
                 &[collection_hash, field_hash_value, index_value, value],
             );
         }
+        update_foreach_cached_field(builder, type_table, binding, suffix, path_type, value);
         return Ok(());
     }
     Err(format!(
