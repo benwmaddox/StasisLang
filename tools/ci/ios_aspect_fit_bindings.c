@@ -25,6 +25,21 @@ static int drawable_h;
 static int left_safe_x;
 static int safe_w;
 static int safe_h;
+static Uint64 left_capture_wait_started;
+
+static int left_capture_acknowledged(void) {
+    const char *home = SDL_getenv("HOME");
+    if (!home || home[0] == '\0') return 0;
+    char path[1024];
+    int written = snprintf(
+        path, sizeof(path),
+        "%s/Documents/stasis-ios-aspect-fit-left-captured", home);
+    if (written < 0 || (size_t)written >= sizeof(path)) return 0;
+    FILE *file = fopen(path, "rb");
+    if (!file) return 0;
+    fclose(file);
+    return 1;
+}
 
 void stasis_set_window_size(int width, int height);
 void stasis_get_display_metrics(
@@ -159,6 +174,14 @@ int32_t stasis_mobile_main_entry(void) {
 }
 
 int32_t stasis_mobile_tick_entry(void) {
+    if (frame == 599 && !left_capture_acknowledged()) {
+        if (!left_capture_wait_started) left_capture_wait_started = SDL_GetTicks();
+        if (SDL_GetTicks() - left_capture_wait_started > 120000) {
+            SDL_Log("Stasis iOS aspect-fit left screenshot was not acknowledged");
+            return 79;
+        }
+        return 0;
+    }
     frame++;
     if (frame == 30 && !write_receipt("actual")) return 71;
     if (frame == 60) {
