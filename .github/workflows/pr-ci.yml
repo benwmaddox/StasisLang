@@ -180,8 +180,11 @@ jobs:
       - name: Build browser compiler core
         run: python tools/cargo_cache.py run -- cargo build -p stasis_browser_compiler --target wasm32-unknown-unknown --release
 
+      - name: Stage browser compiler Worker bundle
+        run: node tools/stage_browser_compiler.mjs build/codex-cargo-target/wasm32-unknown-unknown/release/stasis_browser_compiler.wasm target/browser-compiler-bundle
+
       - name: Prove offline Worker compilation in Chromium
-        run: node tools/run_browser_compiler_smoke.mjs build/codex-cargo-target/wasm32-unknown-unknown/release/stasis_browser_compiler.wasm
+        run: node tools/run_browser_compiler_smoke.mjs target/browser-compiler-bundle
 
   pr-ci-cargo-workspace:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}

@@ -55,10 +55,13 @@ Install the Rust target once, then build through the repository Cargo cache and 
 ```powershell
 rustup target add wasm32-unknown-unknown
 python tools/cargo_cache.py run -- cargo build -p stasis_browser_compiler --target wasm32-unknown-unknown --release
-node tools/run_browser_compiler_smoke.mjs build/codex-cargo-target/wasm32-unknown-unknown/release/stasis_browser_compiler.wasm
+node tools/stage_browser_compiler.mjs build/codex-cargo-target/wasm32-unknown-unknown/release/stasis_browser_compiler.wasm target/browser-compiler-bundle
+node tools/run_browser_compiler_smoke.mjs target/browser-compiler-bundle
 ```
 
-The smoke waits until the Worker has loaded the compiler, records the application server request
-count, runs two compilations, verifies byte-for-byte determinism, instantiates `game.wasm`, and calls
-`main`. It fails if any application-server request occurs after the ready boundary and writes a JSON
-receipt under `target/browser-compiler-smoke/`.
+The staging command copies the Cargo artifact to the exact `compiler_core.wasm` sibling URL requested
+by `compiler_worker.js`, alongside the Worker and smoke assets. The smoke serves only that staged
+layout, waits until the Worker has loaded the compiler, records the application server request count,
+runs two compilations, verifies byte-for-byte determinism, instantiates `game.wasm`, and calls `main`.
+It fails if any application-server request occurs after the ready boundary and writes a JSON receipt
+under `target/browser-compiler-smoke/`.

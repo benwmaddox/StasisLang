@@ -6,12 +6,9 @@ import { createServer } from "node:http";
 import path from "node:path";
 
 const repository = path.resolve(import.meta.dirname, "..");
-const compilerWasm = path.resolve(process.argv[2] || path.join(
-  repository,
-  "build/codex-cargo-target/wasm32-unknown-unknown/release/stasis_browser_compiler.wasm",
-));
+const bundle = path.resolve(process.argv[2] || path.join(repository, "target/browser-compiler-bundle"));
+const compilerWasm = path.join(bundle, "compiler_core.wasm");
 const evidence = path.resolve(process.argv[3] || path.join(repository, "target/browser-compiler-smoke"));
-const webRoot = path.join(repository, "crates/stasis_browser_compiler/web");
 const browserPath = process.env.STASIS_BROWSER_EXECUTABLE
   || (process.platform === "win32"
     ? "C:/Program Files/Google/Chrome/Application/chrome.exe"
@@ -39,10 +36,10 @@ await mkdir(evidence, { recursive: true });
 const profile = await mkdtemp(path.join(evidence, "chrome-"));
 const requests = [];
 const routes = new Map([
-  ["/", { path: path.join(webRoot, "smoke.html"), type: "text/html; charset=utf-8" }],
-  ["/smoke.js", { path: path.join(webRoot, "smoke.js"), type: "text/javascript; charset=utf-8" }],
-  ["/compiler_worker.js", { path: path.join(webRoot, "compiler_worker.js"), type: "text/javascript; charset=utf-8" }],
-  ["/compiler_core.wasm", { path: compilerWasm, type: "application/wasm" }],
+  ["/", { path: path.join(bundle, "smoke.html"), type: "text/html; charset=utf-8" }],
+  ["/smoke.js", { path: path.join(bundle, "smoke.js"), type: "text/javascript; charset=utf-8" }],
+  ["/compiler_worker.js", { path: path.join(bundle, "compiler_worker.js"), type: "text/javascript; charset=utf-8" }],
+  ["/compiler_core.wasm", { path: path.join(bundle, "compiler_core.wasm"), type: "application/wasm" }],
 ]);
 const server = createServer(async (request, response) => {
   const requestPath = new URL(request.url, "http://localhost").pathname;
