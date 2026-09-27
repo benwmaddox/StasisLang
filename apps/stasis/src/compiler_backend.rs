@@ -4608,49 +4608,52 @@ fn visual_studio_discovery_error(attempted: &[String]) -> String {
 }
 
 #[cfg(windows)]
-fn resolve_visual_studio_installation(
+fn query_vswhere_installations(
+    vswhere: &Path,
     environment: &[(OsString, OsString)],
+) -> Result<(Vec<WindowsVisualStudioInstallation>, Vec<String>), String> {
+    if !vswhere.is_file() {
+        return Err("not found".to_string());
+    }
+    let output = std::process::Command::new(vswhere)
+        .args([
+            "-products",
+            "*",
+            "-requires",
+            WINDOWS_MSVC_COMPONENTS[0],
+            WINDOWS_MSVC_COMPONENTS[1],
+            "-format",
+            "json",
+            "-utf8",
+        ])
+        .env_clear()
+        .envs(environment.iter().map(|(key, value)| (key, value)))
+        .output()
+        .map_err(|error| format!("failed to launch: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "exited {} ({})",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_vswhere_installations(&output.stdout)
+}
+
+#[cfg(windows)]
+fn resolve_visual_studio_from_vswhere_candidates<Query, Validate>(
+    vswhere_candidates: &[PathBuf],
     supported_generators: &BTreeSet<String>,
-) -> Result<(WindowsVisualStudioInstallation, PathBuf), String> {
-    let vswhere_candidates = executable_candidates(
-        "vswhere.exe",
-        environment,
-        [
-            PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
-            PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
-        ],
-    );
-    let mut attempted = Vec::new();
-    for vswhere in &vswhere_candidates {
-        if !vswhere.is_file() {
-            attempted.push(format!("{}: not found", vswhere.display()));
-            continue;
-        }
-        let output = std::process::Command::new(vswhere)
-            .args([
-                "-products",
-                "*",
-                "-requires",
-                WINDOWS_MSVC_COMPONENTS[0],
-                WINDOWS_MSVC_COMPONENTS[1],
-                "-format",
-                "json",
-                "-utf8",
-            ])
-            .env_clear()
-            .envs(environment.iter().map(|(key, value)| (key, value)))
-            .output()
-            .map_err(|error| format!("failed to launch {}: {error}", vswhere.display()))?;
-        if !output.status.success() {
-            attempted.push(format!(
-                "{}: exited {} ({})",
-                vswhere.display(),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-            continue;
-        }
-        match parse_vswhere_installations(&output.stdout) {
+    attempted: &mut Vec<String>,
+    mut query: Query,
+    mut validate: Validate,
+) -> Option<(WindowsVisualStudioInstallation, PathBuf)>
+where
+    Query: FnMut(&Path) -> Result<(Vec<WindowsVisualStudioInstallation>, Vec<String>), String>,
+    Validate: FnMut(&WindowsVisualStudioInstallation) -> Result<PathBuf, String>,
+{
+    for vswhere in vswhere_candidates {
+        match query(vswhere) {
             Ok((installations, skipped)) if installations.is_empty() && skipped.is_empty() => {
                 attempted.push(format!(
                     "{}: no installation has both {} and {}",
@@ -4667,8 +4670,8 @@ fn resolve_visual_studio_installation(
                 );
                 attempted.extend(skipped);
                 for installation in installations {
-                    match validate_visual_studio_installation(&installation) {
-                        Ok(vcvars64) => return Ok((installation, vcvars64)),
+                    match validate(&installation) {
+                        Ok(vcvars64) => return Some((installation, vcvars64)),
                         Err(reason) => attempted.push(format!(
                             "{} ({}): {reason}",
                             installation.root.display(),
@@ -4679,6 +4682,32 @@ fn resolve_visual_studio_installation(
             }
             Err(reason) => attempted.push(format!("{}: {reason}", vswhere.display())),
         }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn resolve_visual_studio_installation(
+    environment: &[(OsString, OsString)],
+    supported_generators: &BTreeSet<String>,
+) -> Result<(WindowsVisualStudioInstallation, PathBuf), String> {
+    let vswhere_candidates = executable_candidates(
+        "vswhere.exe",
+        environment,
+        [
+            PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
+            PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
+        ],
+    );
+    let mut attempted = Vec::new();
+    if let Some(resolved) = resolve_visual_studio_from_vswhere_candidates(
+        &vswhere_candidates,
+        supported_generators,
+        &mut attempted,
+        |vswhere| query_vswhere_installations(vswhere, environment),
+        validate_visual_studio_installation,
+    ) {
+        return Ok(resolved);
     }
 
     let (fallback_installations, skipped) = newest_supported_visual_studio_installations(
@@ -5658,6 +5687,48 @@ mod tests {
         assert!(skipped[0].contains(r"D:\Legacy VS\2019"));
         assert!(skipped[0].contains("16.11.42.0"));
         assert!(skipped[0].contains("is not supported"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_vswhere_launch_failure_continues_to_later_candidate() {
+        let stale = PathBuf::from(r"C:\stale\vswhere.exe");
+        let standard =
+            PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe");
+        let candidates = vec![stale.clone(), standard.clone()];
+        let expected = WindowsVisualStudioInstallation {
+            root: PathBuf::from(r"D:\Custom Tools\VS2022"),
+            version: "17.14.36811.4".to_string(),
+            generator: "Visual Studio 17 2022".to_string(),
+        };
+        let supported = BTreeSet::from(["Visual Studio 17 2022".to_string()]);
+        let mut attempted = Vec::new();
+        let mut queried = Vec::new();
+        let resolved = resolve_visual_studio_from_vswhere_candidates(
+            &candidates,
+            &supported,
+            &mut attempted,
+            |vswhere| {
+                queried.push(vswhere.to_path_buf());
+                if vswhere == stale {
+                    Err("failed to launch: Access is denied".to_string())
+                } else {
+                    Ok((vec![expected.clone()], Vec::new()))
+                }
+            },
+            |installation| Ok(installation.root.join(r"VC\Auxiliary\Build\vcvars64.bat")),
+        )
+        .expect("later vswhere candidate should resolve Build Tools");
+
+        assert_eq!(queried, vec![stale.clone(), standard]);
+        assert_eq!(resolved.0, expected);
+        assert_eq!(
+            attempted,
+            vec![format!(
+                "{}: failed to launch: Access is denied",
+                stale.display()
+            )]
+        );
     }
 
     #[cfg(windows)]
