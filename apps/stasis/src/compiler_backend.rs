@@ -4354,18 +4354,25 @@ fn newest_supported_visual_studio_installations(
 #[cfg(windows)]
 fn parse_vswhere_installations(
     stdout: &[u8],
-) -> Result<Vec<WindowsVisualStudioInstallation>, String> {
+) -> Result<(Vec<WindowsVisualStudioInstallation>, Vec<String>), String> {
     let rows: Vec<VsWhereInstallation> = serde_json::from_slice(stdout)
         .map_err(|error| format!("could not parse vswhere.exe JSON output: {error}"))?;
-    rows.into_iter()
-        .map(|row| {
-            Ok(WindowsVisualStudioInstallation {
+    let mut installations = Vec::new();
+    let mut skipped = Vec::new();
+    for row in rows {
+        match visual_studio_generator(&row.installation_version) {
+            Ok(generator) => installations.push(WindowsVisualStudioInstallation {
                 root: PathBuf::from(row.installation_path),
-                version: row.installation_version.clone(),
-                generator: visual_studio_generator(&row.installation_version)?.to_string(),
-            })
-        })
-        .collect()
+                version: row.installation_version,
+                generator: generator.to_string(),
+            }),
+            Err(reason) => skipped.push(format!(
+                "{} ({}): {reason}",
+                row.installation_path, row.installation_version
+            )),
+        }
+    }
+    Ok((installations, skipped))
 }
 
 #[cfg(windows)]
@@ -4644,13 +4651,16 @@ fn resolve_visual_studio_installation(
             continue;
         }
         match parse_vswhere_installations(&output.stdout) {
-            Ok(installations) if installations.is_empty() => attempted.push(format!(
-                "{}: no installation has both {} and {}",
-                vswhere.display(),
-                WINDOWS_MSVC_COMPONENTS[0],
-                WINDOWS_MSVC_COMPONENTS[1]
-            )),
-            Ok(installations) => {
+            Ok((installations, skipped)) if installations.is_empty() && skipped.is_empty() => {
+                attempted.push(format!(
+                    "{}: no installation has both {} and {}",
+                    vswhere.display(),
+                    WINDOWS_MSVC_COMPONENTS[0],
+                    WINDOWS_MSVC_COMPONENTS[1]
+                ))
+            }
+            Ok((installations, skipped)) => {
+                attempted.extend(skipped);
                 let (installations, skipped) = newest_supported_visual_studio_installations(
                     installations,
                     supported_generators,
@@ -5610,10 +5620,11 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_vswhere_build_tools_instance_selects_installed_generator() {
-        let installations = parse_vswhere_installations(
+        let (installations, skipped) = parse_vswhere_installations(
             br#"[{"installationPath":"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools","installationVersion":"17.14.36811.4"}]"#,
         )
         .expect("parse Build Tools instance");
+        assert!(skipped.is_empty());
         assert_eq!(installations.len(), 1);
         assert_eq!(
             installations[0].root,
@@ -5625,6 +5636,28 @@ mod tests {
             "Visual Studio 18 2026"
         );
         assert!(visual_studio_generator("16.11").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_vswhere_keeps_supported_custom_instance_beside_unsupported_row() {
+        let (installations, skipped) = parse_vswhere_installations(
+            br#"[
+                {"installationPath":"D:\\Legacy VS\\2019","installationVersion":"16.11.42.0"},
+                {"installationPath":"D:\\Custom Tools\\VS2022","installationVersion":"17.14.36811.4"}
+            ]"#,
+        )
+        .expect("parse mixed vswhere response");
+        assert_eq!(installations.len(), 1);
+        assert_eq!(
+            installations[0].root,
+            PathBuf::from(r"D:\Custom Tools\VS2022")
+        );
+        assert_eq!(installations[0].generator, "Visual Studio 17 2022");
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains(r"D:\Legacy VS\2019"));
+        assert!(skipped[0].contains("16.11.42.0"));
+        assert!(skipped[0].contains("is not supported"));
     }
 
     #[cfg(windows)]
