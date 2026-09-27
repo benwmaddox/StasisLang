@@ -197,6 +197,23 @@ class VerifyIosAspectFitTests(unittest.TestCase):
         self.assertIn("frame == 630 && !write_receipt(\"landscape-right\")", fixture)
         self.assertIn("const int right_stage = frame >= 600;", fixture)
 
+    def test_left_stage_is_held_until_its_screenshot_is_captured(self) -> None:
+        script = (ROOT / "tools" / "ci" / "build_ios_package.sh").read_text(
+            encoding="utf-8"
+        )
+        fixture = (ROOT / "tools" / "ci" / "ios_aspect_fit_bindings.c").read_text(
+            encoding="utf-8"
+        )
+        screenshot = 'screenshot "${build_root}/simulator-landscape-left.png"'
+        ack = 'touch "${data_container}/Documents/stasis-ios-aspect-fit-left-captured"'
+        self.assertLess(script.index(screenshot), script.index(ack))
+        self.assertLess(script.index(ack), script.index('wait_for_receipt "${right_receipt}"'))
+        self.assertIn('frame == 599 && !left_capture_acknowledged()', fixture)
+        self.assertLess(
+            fixture.index('frame == 599 && !left_capture_acknowledged()'),
+            fixture.index('if (frame == 600)'),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
