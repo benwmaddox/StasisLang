@@ -2394,6 +2394,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "stasis_browser_compiler"
+version = "0.1.0"
+dependencies = [
+ "stasis_compiler",
+]
+
+[[package]]
 name = "stasis_compiler"
 version = "0.1.0"
 dependencies = [

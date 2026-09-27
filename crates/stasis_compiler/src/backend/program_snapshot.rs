@@ -11,6 +11,7 @@ use crate::backend::compile_analysis::{
     build_compile_analysis_cache, compute_files_fingerprint,
     resolve_preferred_extern_call_signatures, CompileAnalysisCache,
 };
+use crate::backend::hash::hash_string_literal;
 use crate::backend::hot_render::{
     analyze_hot_render_images, HotRenderImageMetadata, HotRenderTransitionAnalysis,
     HotRenderTransitionMetadata,
@@ -791,7 +792,7 @@ fn collect_program_literals(files: &[SourceFile]) -> Result<BTreeMap<i32, String
                 continue;
             }
             let value = parse_string_literal_text(&file.content[token.start..token.end])?;
-            let id = crate::backend::emit::hash_string_literal(&value);
+            let id = hash_string_literal(&value);
             if let Some(previous) = literals.insert(id, value.clone()) {
                 if previous != value {
                     return Err(format!(

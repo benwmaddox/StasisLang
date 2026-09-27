@@ -5,6 +5,7 @@ members = [
   "crates/stasis_assets",
   "crates/stasis_network",
   "crates/stasis_compiler",
+  "crates/stasis_browser_compiler",
   "crates/stasis_dynload",
   "crates/stasis_android_bridge",
   "crates/stasis_jit",

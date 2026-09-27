@@ -9,7 +9,7 @@ use crate::backend::compile_analysis::{
     compute_files_fingerprint, is_i32_numeric_type, resolve_extern_call_signatures_with,
     ConstantValue,
 };
-use crate::backend::emit::hash_global_path;
+use crate::backend::hash::{hash_global_path, hash_string_literal};
 use crate::backend::program_snapshot::{ProgramSnapshot, ProjectConfiguration};
 use crate::backend::reachability::matches_root;
 use crate::backend::state_layout::{
@@ -5890,7 +5890,7 @@ fn encode_expr_as(
         }
         SimpleExpr::StringLiteral(value) => {
             out.push(0x41);
-            sleb(crate::backend::emit::hash_string_literal(value), out);
+            sleb(hash_string_literal(value), out);
             Ok(expected.unwrap_or(TYPE_ID_I32))
         }
         SimpleExpr::Identifier(name) => {
@@ -6169,7 +6169,7 @@ fn encode_constant(
         }
         ConstantValue::String { value, type_id } => {
             out.push(0x41);
-            sleb(crate::backend::emit::hash_string_literal(value), out);
+            sleb(hash_string_literal(value), out);
             Ok(expected.unwrap_or(*type_id))
         }
     }
@@ -6270,7 +6270,7 @@ fn collect_string_literals(
     constants: &BTreeMap<String, ConstantValue>,
 ) -> Result<BTreeMap<i32, String>, String> {
     fn insert(out: &mut BTreeMap<i32, String>, value: &str) -> Result<(), String> {
-        let handle = crate::backend::emit::hash_string_literal(value);
+        let handle = hash_string_literal(value);
         if let Some(previous) = out.get(&handle) {
             if previous != value {
                 return Err(format!(
@@ -6772,13 +6772,11 @@ function render(): i32 { return 0; }
 
         let strings = process.string_literals();
         assert_eq!(
-            strings.get(&crate::backend::emit::hash_string_literal(
-                "/assets/used.svg"
-            )),
+            strings.get(&hash_string_literal("/assets/used.svg")),
             Some(&"/assets/used.svg".to_string())
         );
         assert_eq!(
-            strings.get(&crate::backend::emit::hash_string_literal("direct literal")),
+            strings.get(&hash_string_literal("direct literal")),
             Some(&"direct literal".to_string())
         );
         assert!(!strings.values().any(|value| value == "/assets/unused.svg"));

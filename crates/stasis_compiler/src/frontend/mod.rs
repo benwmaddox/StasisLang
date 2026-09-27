@@ -6,4 +6,5 @@ pub mod lexer;
 pub mod module_graph;
 pub mod parser;
 pub mod types;
+#[cfg(feature = "native")]
 pub mod workshop;

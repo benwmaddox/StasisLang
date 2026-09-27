@@ -5,6 +5,7 @@ use crate::backend::compile_analysis::{
     ConstantValue, ConstantValueMap, ExternImportKey, ForeachCollectionInfo, GlobalPathTypeMap,
     NamedStructFieldTypeMap,
 };
+pub(crate) use crate::backend::hash::{hash_global_path, hash_string_literal};
 use crate::compiler::{FunctionId, FunctionMeta};
 use crate::data_flow::{FunctionDataFlowSummary, ParameterStorageKind};
 use crate::frontend::types::{
@@ -14663,19 +14664,6 @@ fn emit_global_scalar_store(
     };
     builder.ins().call(helper, &[path_hash, value]);
     Ok(())
-}
-
-pub(crate) fn hash_global_path(path: &str) -> i32 {
-    let mut hash: u32 = 2166136261;
-    for byte in path.bytes() {
-        hash ^= u32::from(byte);
-        hash = hash.wrapping_mul(16777619);
-    }
-    hash as i32
-}
-
-pub(crate) fn hash_string_literal(value: &str) -> i32 {
-    hash_global_path(value)
 }
 
 pub(crate) fn emit_simple_condition(

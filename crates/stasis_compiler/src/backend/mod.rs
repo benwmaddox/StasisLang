@@ -1,17 +1,25 @@
+#[cfg(feature = "native")]
 pub mod aot;
 pub mod assets;
 pub(crate) mod compile_analysis;
+#[cfg(feature = "native")]
 pub mod development_swap;
+#[cfg(feature = "native")]
 pub(crate) mod emit;
+pub(crate) mod hash;
 pub mod hot_render;
 pub mod input_usage;
+#[cfg(feature = "native")]
 pub mod jit;
+#[cfg(feature = "native")]
 pub mod patch_plan;
 pub mod program_snapshot;
 pub(crate) mod reachability;
 mod runtime_exports;
 pub mod state_layout;
+#[cfg(feature = "native")]
 pub mod state_migration;
+#[cfg(feature = "native")]
 mod state_query;
 pub mod text_coverage;
 pub mod wasm;
