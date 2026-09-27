@@ -7,7 +7,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-workspace="${1:-${repo_root}/samples/mobile_storage_link}"
+workspace="${1:-${repo_root}/samples/generics_collections}"
 workspace="$(cd "${workspace}" && pwd)"
 package_output="${2:-dist/ios-ci}"
 build_root="${STASIS_IOS_BUILD_ROOT:-${repo_root}/target/ios-package-link}"

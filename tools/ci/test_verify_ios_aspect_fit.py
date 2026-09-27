@@ -179,6 +179,7 @@ class VerifyIosAspectFitTests(unittest.TestCase):
         self.assertIn("Intentionally empty simulator replacement object", script)
         self.assertNotIn("stasis_ios_simulator_placeholder(void)", script)
         self.assertIn("physical_device_qualified=false", script)
+        self.assertIn('workspace="${1:-${repo_root}/samples/generics_collections}"', script)
         self.assertNotIn("--entry src/main.stasis", script)
         fixture = (ROOT / "tools" / "ci" / "ios_aspect_fit_bindings.c").read_text(
             encoding="utf-8"
