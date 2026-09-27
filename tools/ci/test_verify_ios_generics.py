@@ -85,10 +85,12 @@ class IosGenericsVerifierTest(unittest.TestCase):
             encoding="utf-8",
         )
         self.crash_low.write_text(
-            "Exception Type: EXC_BREAKPOINT (SIGTRAP)\n", encoding="utf-8"
+            "Process: StasisMobile [4101]\nException Type: EXC_BREAKPOINT (SIGTRAP)\n",
+            encoding="utf-8",
         )
         self.crash_high.write_text(
-            "Exception Type: EXC_BREAKPOINT (SIGTRAP)\n", encoding="utf-8"
+            "Process: StasisMobile [4102]\nException Type: EXC_BREAKPOINT (SIGTRAP)\n",
+            encoding="utf-8",
         )
         write_json(
             self.bounds_low,
@@ -96,6 +98,8 @@ class IosGenericsVerifierTest(unittest.TestCase):
                 "schema": "stasis.ios.generics.bounds.v1",
                 "label": "low",
                 "index": -1,
+                "process": "StasisMobile",
+                "pid": 4101,
                 "fatal": True,
                 "signal": "SIGTRAP",
                 "exception": "EXC_BREAKPOINT",
@@ -108,6 +112,8 @@ class IosGenericsVerifierTest(unittest.TestCase):
                 "schema": "stasis.ios.generics.bounds.v1",
                 "label": "high",
                 "index": 2,
+                "process": "StasisMobile",
+                "pid": 4102,
                 "fatal": True,
                 "signal": "SIGTRAP",
                 "exception": "EXC_BREAKPOINT",
@@ -187,6 +193,65 @@ class IosGenericsVerifierTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(EvidenceError, "digest/frame marker"):
             self.evidence()
+
+    def test_bounds_report_must_match_its_launch_pid(self) -> None:
+        value = json.loads(self.bounds_high.read_text(encoding="utf-8"))
+        value["pid"] = 4999
+        write_json(self.bounds_high, value)
+        with self.assertRaisesRegex(EvidenceError, "does not match launch pid 4999"):
+            self.evidence()
+
+    def test_bounds_launches_must_have_distinct_pids(self) -> None:
+        value = json.loads(self.bounds_high.read_text(encoding="utf-8"))
+        value["pid"] = 4101
+        self.crash_high.write_text(
+            "Process: StasisMobile [4101]\nException Type: EXC_BREAKPOINT (SIGTRAP)\n",
+            encoding="utf-8",
+        )
+        write_json(self.bounds_high, value)
+        with self.assertRaisesRegex(EvidenceError, "reused one launch pid"):
+            self.evidence()
+
+    def test_bounds_launches_must_have_distinct_crash_reports(self) -> None:
+        reused = (
+            '{"procName":"StasisMobile","pid":4101}\n'
+            '{"procName":"StasisMobile","pid":4102}\n'
+            "Exception Type: EXC_BREAKPOINT (SIGTRAP)\n"
+        )
+        self.crash_low.write_text(reused, encoding="utf-8")
+        self.crash_high.write_text(reused, encoding="utf-8")
+        with self.assertRaisesRegex(EvidenceError, "reused one crash report"):
+            self.evidence()
+
+
+class IosGenericsWorkflowContractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.repo = Path(__file__).resolve().parents[2]
+        cls.script = (cls.repo / "tools/ci/build_ios_package.sh").read_text(
+            encoding="utf-8"
+        )
+        cls.workflow = (cls.repo / ".github/workflows/pr-ci.yml").read_text(
+            encoding="utf-8"
+        )
+
+    def test_bounds_reports_are_selected_by_launch_pid(self) -> None:
+        self.assertIn('launch_pid="$(printf', self.script)
+        self.assertIn('${launch_pid}([^0-9]|$)|Process:', self.script)
+        self.assertIn('"pid": int(sys.argv[4])', self.script)
+
+    def test_simulator_build_preserves_required_preprocessor_definitions(self) -> None:
+        self.assertIn(
+            "GCC_PREPROCESSOR_DEFINITIONS=$(inherited) TVG_STATIC=1 NOMINMAX=1 STASIS_ENABLE_SEAM_TESTS=1",
+            self.script,
+        )
+
+    def test_hosted_simulator_lane_runs_on_pull_requests(self) -> None:
+        self.assertIn("ios-generics-simulator:", self.workflow)
+        self.assertIn(
+            "if: ${{ github.event_name == 'pull_request' || inputs.run_slow_seams }}",
+            self.workflow,
+        )
 
 
 if __name__ == "__main__":

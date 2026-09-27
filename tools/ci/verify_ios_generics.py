@@ -331,6 +331,11 @@ def validate_bounds(path: Path, label: str, expected_index: int) -> dict:
     if value.get("label") != label:
         raise EvidenceError(f"{path}: expected label {label!r}, got {value.get('label')!r}")
     _require_exact_int(value, "index", expected_index, path)
+    if value.get("process") != "StasisMobile":
+        raise EvidenceError(f"{path}: expected process StasisMobile")
+    pid = value.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise EvidenceError(f"{path}: expected a positive launch pid, got {pid!r}")
     if value.get("fatal") is not True:
         raise EvidenceError(f"{path}: bounds evidence is not fatal")
     if value.get("signal") != "SIGTRAP":
@@ -352,6 +357,18 @@ def validate_bounds(path: Path, label: str, expected_index: int) -> dict:
     crash_text = crash_data.decode("utf-8", errors="replace")
     if re.search(r"EXC_BREAKPOINT|SIGTRAP|Trace/BPT trap", crash_text) is None:
         raise EvidenceError(f"{path}: crash report does not contain trap evidence")
+    if re.search(
+        r'"procName"\s*:\s*"StasisMobile"|Process:\s+StasisMobile\s+\[\d+\]',
+        crash_text,
+    ) is None:
+        raise EvidenceError(f"{path}: crash report does not identify StasisMobile")
+    if re.search(
+        rf'"pid"\s*:\s*{pid}(?:\D|$)|Process:\s+StasisMobile\s+\[{pid}\]',
+        crash_text,
+    ) is None:
+        raise EvidenceError(
+            f"{path}: crash report does not match launch pid {pid}"
+        )
     normalized = dict(value)
     normalized["crash_report_evidence"] = {
         "path": str(crash_report),
@@ -374,6 +391,12 @@ def build_evidence(
     logs, log_markers = validate_logs(log_paths, receipt["frame"])
     bounds_low = validate_bounds(bounds_low_path, "low", -1)
     bounds_high = validate_bounds(bounds_high_path, "high", 2)
+    if bounds_low["pid"] == bounds_high["pid"]:
+        raise EvidenceError("low/high bounds evidence reused one launch pid")
+    low_crash = bounds_low["crash_report_evidence"]
+    high_crash = bounds_high["crash_report_evidence"]
+    if low_crash["sha256"] == high_crash["sha256"]:
+        raise EvidenceError("low/high bounds evidence reused one crash report")
     frame = validate_frame(frame_path)
     return {
         "schema": EVIDENCE_SCHEMA,

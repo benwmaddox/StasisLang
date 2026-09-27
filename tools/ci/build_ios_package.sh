@@ -227,7 +227,7 @@ PY
     -arch arm64 \
     -derivedDataPath "${simulator_derived_data}" \
     STASIS_SDL_FRAMEWORKS="${framework_root}" \
-    'GCC_PREPROCESSOR_DEFINITIONS=$(inherited) STASIS_ENABLE_SEAM_TESTS=1' \
+    'GCC_PREPROCESSOR_DEFINITIONS=$(inherited) TVG_STATIC=1 NOMINMAX=1 STASIS_ENABLE_SEAM_TESTS=1' \
     CODE_SIGNING_ALLOWED=NO \
     CODE_SIGNING_REQUIRED=NO \
     build | tee "${build_root}/simulator-xcodebuild.log"
@@ -326,20 +326,37 @@ PY
     local label="$1"
     local index="$2"
     local marker="${build_root}/bounds-${label}.marker"
+    local launch_output=""
+    local launch_pid=""
     local crash_report=""
     local crash_artifact=""
     local crash_sha256=""
     rm -f -- "${result_receipt}"
     touch "${marker}"
-    SIMCTL_CHILD_STASIS_ENABLE_TEST_INPUT=1 \
-    SIMCTL_CHILD_STASIS_SEAM_TEST_ID=IOS-GENERICS \
-    SIMCTL_CHILD_STASIS_IOS_GENERICS_BOUNDS_INDEX="${index}" \
-      xcrun simctl launch --terminate-running-process "${simulator_udid}" "${bundle_id}" \
-      | tee "${build_root}/bounds-${label}-launch.txt"
+    launch_output="$(
+      SIMCTL_CHILD_STASIS_ENABLE_TEST_INPUT=1 \
+      SIMCTL_CHILD_STASIS_SEAM_TEST_ID=IOS-GENERICS \
+      SIMCTL_CHILD_STASIS_IOS_GENERICS_BOUNDS_INDEX="${index}" \
+        xcrun simctl launch --terminate-running-process "${simulator_udid}" "${bundle_id}"
+    )"
+    printf '%s\n' "${launch_output}" | tee "${build_root}/bounds-${label}-launch.txt"
+    launch_pid="$(printf '%s\n' "${launch_output}" \
+      | sed -n 's/.*: \([0-9][0-9]*\)$/\1/p' | tail -n 1)"
+    if [[ -z "${launch_pid}" ]]; then
+      echo "bounds probe ${label} launch did not report a process id" >&2
+      exit 1
+    fi
     for _ in $(seq 1 120); do
-      crash_report="$(find "${HOME}/Library/Logs/DiagnosticReports" -type f \
+      while IFS= read -r candidate; do
+        if grep -Fq 'StasisMobile' "${candidate}" && \
+            grep -Eq "\"pid\"[[:space:]]*:[[:space:]]*${launch_pid}([^0-9]|$)|Process:[[:space:]]+StasisMobile[[:space:]]+\\[${launch_pid}\\]" \
+              "${candidate}"; then
+          crash_report="${candidate}"
+          break
+        fi
+      done < <(find "${HOME}/Library/Logs/DiagnosticReports" -type f \
         \( -name 'StasisMobile*.ips' -o -name 'StasisMobile*.crash' \) \
-        -newer "${marker}" -print 2>/dev/null | head -n 1)"
+        -newer "${marker}" -print 2>/dev/null)
       if [[ -n "${crash_report}" ]]; then break; fi
       sleep 0.25
     done
@@ -359,7 +376,7 @@ PY
       exit 1
     fi
     python3 - "${build_root}/bounds-${label}.json" "${label}" "${index}" \
-      "${crash_artifact}" "${crash_sha256}" <<'PY'
+      "${launch_pid}" "${crash_artifact}" "${crash_sha256}" <<'PY'
 import json
 import sys
 
@@ -368,11 +385,13 @@ with open(sys.argv[1], "w", encoding="utf-8") as output:
         "schema": "stasis.ios.generics.bounds.v1",
         "label": sys.argv[2],
         "index": int(sys.argv[3]),
+        "process": "StasisMobile",
+        "pid": int(sys.argv[4]),
         "fatal": True,
         "signal": "SIGTRAP",
         "exception": "EXC_BREAKPOINT",
-        "crash_report": sys.argv[4],
-        "crash_report_sha256": sys.argv[5],
+        "crash_report": sys.argv[5],
+        "crash_report_sha256": sys.argv[6],
     }, output, indent=2)
     output.write("\n")
 PY
