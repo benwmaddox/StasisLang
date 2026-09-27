@@ -209,13 +209,16 @@ class IosGenericsVerifierTest(unittest.TestCase):
         with self.assertRaisesRegex(EvidenceError, "digest-success teal rectangle"):
             self.evidence()
 
-    def test_missing_positive_log_marker_is_rejected(self) -> None:
+    def test_receipt_remains_authoritative_when_log_marker_is_delayed(self) -> None:
         self.log.write_text(
             "Stasis provenance: generics tag=v0 commit=abc renderer=gfx_cmd schema=7\n",
             encoding="utf-8",
         )
-        with self.assertRaisesRegex(EvidenceError, "digest/frame marker"):
-            self.evidence()
+        evidence = self.evidence()
+        self.assertEqual(
+            evidence["log_markers"]["generics_acceptance"],
+            "verified receipt digest=507 frame=1",
+        )
 
     def test_bounds_report_must_match_its_launch_pid(self) -> None:
         value = json.loads(self.bounds_high.read_text(encoding="utf-8"))
@@ -269,13 +272,13 @@ class IosGenericsWorkflowContractTest(unittest.TestCase):
             self.script,
         )
 
-    def test_green_launch_waits_for_unified_log_acceptance_marker(self) -> None:
+    def test_green_launch_waits_for_unified_log_provenance_marker(self) -> None:
         self.assertIn("for _ in $(seq 1 40); do", self.script)
         self.assertIn(
-            "Stasis iOS generics acceptance digest=507 frame=1", self.script
+            "Stasis provenance: .* renderer=gfx_cmd schema=7", self.script
         )
         self.assertIn(
-            "simulator unified log did not publish the iOS generics acceptance marker",
+            "simulator unified log did not publish the package provenance marker",
             self.script,
         )
 

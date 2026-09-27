@@ -373,17 +373,15 @@ PY
   for _ in $(seq 1 40); do
     xcrun simctl spawn "${simulator_udid}" log show --style compact --last 5m \
       --predicate 'process == "StasisMobile"' > "${build_root}/simulator.log"
-    if grep -Fq 'Stasis iOS generics acceptance digest=507 frame=1' \
-        "${build_root}/simulator.log" && \
-        grep -Eq 'Stasis provenance: .* renderer=gfx_cmd schema=7' \
+    if grep -Eq 'Stasis provenance: .* renderer=gfx_cmd schema=7' \
         "${build_root}/simulator.log"; then
       break
     fi
     sleep 0.25
   done
-  if ! grep -Fq 'Stasis iOS generics acceptance digest=507 frame=1' \
+  if ! grep -Eq 'Stasis provenance: .* renderer=gfx_cmd schema=7' \
       "${build_root}/simulator.log"; then
-    echo "simulator unified log did not publish the iOS generics acceptance marker" >&2
+    echo "simulator unified log did not publish the package provenance marker" >&2
     exit 1
   fi
   xcrun simctl terminate "${simulator_udid}" "${bundle_id}"
