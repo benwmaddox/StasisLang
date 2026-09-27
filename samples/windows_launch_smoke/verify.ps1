@@ -127,9 +127,9 @@ $captures.run_watch = Join-Path $ArtifactRoot 'run-watch.png'
 Invoke-Capture -Description 'run --watch' -Screenshot $captures.run_watch -ExitAfterScreenshot `
     -FilePath $Toolchain -Arguments @('--workspace', $PSScriptRoot, 'run', '--watch')
 
-$captures.tui = Join-Path $ArtifactRoot 'tui.png'
-Invoke-Capture -Description 'tui' -Screenshot $captures.tui -FilePath $Toolchain `
-    -Arguments @('--workspace', $PSScriptRoot, 'tui', '--live-script', 'live.commands', '--live-json')
+$captures.live = Join-Path $ArtifactRoot 'live.png'
+Invoke-Capture -Description 'live' -Screenshot $captures.live -FilePath $Toolchain `
+    -Arguments @('--workspace', $PSScriptRoot, 'live', '--live-script', 'live.commands', '--live-json')
 
 $releaseRoot = Join-Path $projectOutputRoot 'release'
 New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
