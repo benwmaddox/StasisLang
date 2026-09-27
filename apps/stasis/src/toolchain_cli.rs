@@ -6262,6 +6262,7 @@ fn package_web_workspace(
                     bytes,
                 });
             }
+            append_staged_font_license_files(&staging_root, &mut bundle_files)?;
             let bundle = stasis_network::StaticBundle::new(bundle_files)
                 .map_err(|error| format!("failed to create network guest bundle: {error}"))?;
             let encoded = bundle
@@ -7191,6 +7192,56 @@ fn network_guest_asset_mime_for_path(
         Some("woff2") => "font/woff2",
         _ => "application/octet-stream",
     }
+}
+
+fn append_staged_font_license_files(
+    staging_root: &Path,
+    bundle_files: &mut Vec<stasis_network::BundleFile>,
+) -> Result<(), String> {
+    let license_root = staging_root.join("font_licenses");
+    if !license_root.is_dir() {
+        return Ok(());
+    }
+    let mut notices = fs::read_dir(&license_root)
+        .map_err(|error| {
+            format!(
+                "failed to inspect staged font licenses {}: {error}",
+                license_root.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to inspect staged font licenses: {error}"))?;
+    notices.sort_by_key(|entry| entry.file_name());
+    for notice in notices {
+        let file_type = notice
+            .file_type()
+            .map_err(|error| format!("failed to inspect staged font license: {error}"))?;
+        if !file_type.is_file()
+            || notice
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                != Some("txt")
+        {
+            continue;
+        }
+        let name = notice
+            .file_name()
+            .into_string()
+            .map_err(|_| "staged font license filename is not valid Unicode".to_string())?;
+        let bytes = fs::read(notice.path()).map_err(|error| {
+            format!(
+                "failed to read staged font license {}: {error}",
+                notice.path().display()
+            )
+        })?;
+        bundle_files.push(stasis_network::BundleFile {
+            path: format!("font_licenses/{name}"),
+            mime: "text/plain; charset=utf-8".to_string(),
+            bytes,
+        });
+    }
+    Ok(())
 }
 
 fn package_mobile_command(
@@ -11327,6 +11378,26 @@ mod tests {
             html.contains(r#"font-family: "StasisLoadingFont", Georgia, "Times New Roman", serif"#)
         );
         assert!(!html.contains("__STASIS_"));
+    }
+
+    #[test]
+    fn network_guest_bundle_includes_staged_font_license_notices() {
+        let root = temp_dir("network_guest_font_license");
+        let license_root = root.join("font_licenses");
+        fs::create_dir_all(&license_root).expect("license directory");
+        let notice_name = format!("{}.txt", "a".repeat(64));
+        fs::write(license_root.join(&notice_name), b"font license\n").expect("license notice");
+        let mut files = Vec::new();
+
+        append_staged_font_license_files(&root, &mut files).expect("append license notice");
+        let bundle = stasis_network::StaticBundle::new(files).expect("network guest bundle");
+        let notice = bundle
+            .get(&format!("font_licenses/{notice_name}"))
+            .expect("bundled license notice");
+
+        assert_eq!(notice.mime, "text/plain; charset=utf-8");
+        assert_eq!(notice.bytes, b"font license\n");
+        remove_temp(&root);
     }
 
     #[test]

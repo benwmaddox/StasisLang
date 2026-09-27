@@ -215,6 +215,18 @@ pub(crate) fn validate_font_subsetting_manifest(
                     font.license_path
                 ));
             }
+            let license_bytes = std::fs::read(&resolved_license).map_err(|error| {
+                format!(
+                    "failed to read font subsetting license_path {}: {error}",
+                    font.license_path
+                )
+            })?;
+            std::str::from_utf8(&license_bytes).map_err(|error| {
+                format!(
+                    "font subsetting license_path must contain UTF-8 text: {}: {error}",
+                    font.license_path
+                )
+            })?;
         }
     }
     Ok(())
@@ -1345,6 +1357,12 @@ mod tests {
             missing_license.contains(BASIC_LICENSE_PATH),
             "{missing_license}"
         );
+        std::fs::write(fixture.root.join(BASIC_LICENSE_PATH), [0xff])
+            .expect("write invalid license fixture");
+        let invalid_license =
+            validate_font_subsetting_manifest(Some(&fixture.root), &fixture.config)
+                .expect_err("non-UTF-8 license notice must fail validation");
+        assert!(invalid_license.contains("UTF-8"), "{invalid_license}");
 
         let mut unsafe_path = fixture.config.clone();
         unsafe_path.fonts[0].path = "assets/../outside.ttf".to_string();
