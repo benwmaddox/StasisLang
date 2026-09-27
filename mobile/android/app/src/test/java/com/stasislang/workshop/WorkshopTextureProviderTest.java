@@ -4,6 +4,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.assertEquals;
 
+import java.nio.ByteBuffer;
+
 import org.junit.Test;
 
 public final class WorkshopTextureProviderTest {
@@ -240,5 +242,18 @@ public final class WorkshopTextureProviderTest {
         assertEquals(8192L, nextFrame.length);
         assertEquals(789L, nextFrame.lastModified);
         assertEquals(2, statCalls[0]);
+    }
+
+    @Test
+    public void dynamicTextTextureDoesNotMatchAfterCatalogGenerationChanges() {
+        byte[] text = "score".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        WorkshopTextureProvider.TextTexture texture = new WorkshopTextureProvider.TextTexture(
+                1, "font-identity", 20, 10, 20, 10, 2, 3, 1L);
+        WorkshopTextureProvider.DynamicTextTexture cached =
+                new WorkshopTextureProvider.DynamicTextTexture(17, text, texture, 5L);
+        ByteBuffer utf8 = ByteBuffer.wrap(text);
+
+        assertTrue(cached.matches(17, utf8, 0, text.length, 5L));
+        assertFalse(cached.matches(17, utf8, 0, text.length, 6L));
     }
 }

@@ -188,6 +188,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         if (nextResourceCatalogGeneration != resourceCatalogGeneration) {
             cachedTextMetadata.clear();
             fontMetadata.clear();
+            clearDynamicTextTextures(true);
             fonts.clear();
             resourceCatalogGeneration = nextResourceCatalogGeneration;
         }
@@ -542,7 +543,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         for (int index = 0; index < dynamicTextTextures.size(); index += 1) {
             DynamicTextTexture cached = dynamicTextTextures.get(index);
             if (cached.texture.matches(surfaceGeneration, rendererGeneration)
-                    && cached.matches(font, utf8, offset, length)) {
+                    && cached.matches(font, utf8, offset, length,
+                    resourceCatalogGeneration)) {
                 touchText(cached.texture);
                 return StasisPreviewRenderer.packTexture(
                         cached.texture.texture, cached.texture.width, cached.texture.height);
@@ -558,7 +560,8 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             TextTexture texture = rasterText(
                     resolvedFont, text, textRasterScale, exactIdentity);
             long rasterBytes = texture.byteLength();
-            dynamicTextTextures.add(new DynamicTextTexture(font, bytes, texture));
+            dynamicTextTextures.add(new DynamicTextTexture(
+                    font, bytes, texture, resourceCatalogGeneration));
             if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
                 acceptanceSourceBytes += resolvedFont.sourceBytes;
                 acceptanceDecodeBytes += rasterBytes;
@@ -663,6 +666,13 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             dynamicTextTextures.remove(index);
             deleteTexture(cached.texture.texture);
         }
+    }
+
+    private void clearDynamicTextTextures(boolean deleteGpuHandles) {
+        for (DynamicTextTexture cached : dynamicTextTextures) {
+            if (deleteGpuHandles) deleteTexture(cached.texture.texture);
+        }
+        dynamicTextTextures.clear();
     }
 
     private TextTexture rasterText(FontInfo font, String text, float rasterScale,
@@ -975,10 +985,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
             if (deleteGpuHandles) deleteTexture(textTextures.valueAt(index).texture);
         }
         textTextures.clear();
-        for (DynamicTextTexture texture : dynamicTextTextures) {
-            if (deleteGpuHandles) deleteTexture(texture.texture.texture);
-        }
-        dynamicTextTextures.clear();
+        clearDynamicTextTextures(deleteGpuHandles);
         textUseClock = 0L;
     }
 
@@ -1350,7 +1357,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         }
     }
 
-    private static final class TextTexture {
+    static final class TextTexture {
         final int texture;
         final String exactIdentity;
         final int width;
@@ -1556,19 +1563,24 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
         return new MetadataLookup<>(resolved, false);
     }
 
-    private static final class DynamicTextTexture {
+    static final class DynamicTextTexture {
         final int font;
         final byte[] text;
         final TextTexture texture;
+        final long resourceCatalogGeneration;
 
-        DynamicTextTexture(int font, byte[] text, TextTexture texture) {
+        DynamicTextTexture(
+                int font, byte[] text, TextTexture texture, long resourceCatalogGeneration) {
             this.font = font;
             this.text = text;
             this.texture = texture;
+            this.resourceCatalogGeneration = resourceCatalogGeneration;
         }
 
-        boolean matches(int candidateFont, ByteBuffer utf8, int offset, int length) {
-            if (font != candidateFont || text.length != length) return false;
+        boolean matches(int candidateFont, ByteBuffer utf8, int offset, int length,
+                long candidateResourceCatalogGeneration) {
+            if (resourceCatalogGeneration != candidateResourceCatalogGeneration
+                    || font != candidateFont || text.length != length) return false;
             for (int index = 0; index < length; index += 1) {
                 if (text[index] != utf8.get(offset + index)) return false;
             }
