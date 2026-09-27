@@ -3244,6 +3244,17 @@ fn format_files(
 }
 
 fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
+    if let Some(font_subsetting) = workspace
+        .manifest
+        .release
+        .as_ref()
+        .and_then(|release| release.font_subsetting.as_ref())
+    {
+        crate::release_assets::validate_font_subsetting_manifest(
+            Some(&workspace.root),
+            font_subsetting,
+        )?;
+    }
     let jit = compile_workspace_jit(workspace)?;
     validate_compiled_workspace_assets(workspace, &jit)?;
     Ok(CommandResult::success(
@@ -11344,6 +11355,36 @@ mod tests {
         )
         .expect("decode prepared manifest");
         assert_eq!(prepared["assets"][0]["path"], "assets/fonts/ui.ttf");
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn check_rejects_an_opted_in_missing_release_font() {
+        let root = temp_dir("check_missing_release_font");
+        fs::create_dir_all(root.join("assets/fonts")).expect("font directory");
+        fs::write(root.join("assets/fonts/LICENSE.txt"), b"font license").expect("license fixture");
+        let root = canonical_workspace_root(&root).expect("canonical workspace root");
+        let mut manifest = ProjectManifest::new("missing-font".to_string());
+        manifest.release = Some(ReleaseProjectManifest {
+            font_subsetting: Some(crate::release_assets::ReleaseFontSubsettingManifest {
+                fonts: vec![crate::release_assets::ReleaseFontSubsetEntry {
+                    path: "assets/fonts/missing.ttf".to_string(),
+                    license_path: "assets/fonts/LICENSE.txt".to_string(),
+                    modification_permitted: true,
+                    reserved_names: Vec::new(),
+                    replacement_family: None,
+                }],
+            }),
+        });
+        let workspace = Workspace {
+            root: root.clone(),
+            manifest,
+            resolved_settings: None,
+        };
+
+        let error = check_workspace(&workspace).expect_err("missing release font must fail check");
+
+        assert!(error.contains("assets/fonts/missing.ttf"), "{error}");
         remove_temp(&root);
     }
 
