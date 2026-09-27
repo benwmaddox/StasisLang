@@ -53,6 +53,7 @@ pub enum AotTarget {
     AndroidArm64 { min_sdk: u32 },
     AndroidX86_64 { min_sdk: u32 },
     IosArm64,
+    IosSimulatorArm64,
 }
 
 impl AotTarget {
@@ -68,12 +69,17 @@ impl AotTarget {
         Self::IosArm64
     }
 
+    pub fn ios_simulator_arm64_default() -> Self {
+        Self::IosSimulatorArm64
+    }
+
     pub fn object_triple(&self) -> Option<&'static str> {
         match self {
             Self::Native => None,
             Self::AndroidArm64 { .. } => Some("aarch64-linux-android"),
             Self::AndroidX86_64 { .. } => Some("x86_64-linux-android"),
             Self::IosArm64 => Some("aarch64-apple-ios"),
+            Self::IosSimulatorArm64 => Some("aarch64-apple-ios-sim"),
         }
     }
 
@@ -83,6 +89,7 @@ impl AotTarget {
             Self::AndroidArm64 { min_sdk } => Some(format!("aarch64-linux-android{min_sdk}")),
             Self::AndroidX86_64 { min_sdk } => Some(format!("x86_64-linux-android{min_sdk}")),
             Self::IosArm64 => Some("aarch64-apple-ios".to_string()),
+            Self::IosSimulatorArm64 => Some("arm64-apple-ios15.0-simulator".to_string()),
         }
     }
 
@@ -928,6 +935,7 @@ printf '%s\n' "$ALL_ARGS" > "$OUT.args"
         assert!(AotTarget::android_arm64_default().requires_position_independent_code());
         assert!(AotTarget::android_x86_64_default().requires_position_independent_code());
         assert!(AotTarget::ios_arm64_default().requires_position_independent_code());
+        assert!(AotTarget::ios_simulator_arm64_default().requires_position_independent_code());
     }
 
     #[test]
@@ -946,6 +954,16 @@ printf '%s\n' "$ALL_ARGS" > "$OUT.args"
         let target = AotTarget::ios_arm64_default();
         assert_eq!(target.object_triple(), Some("aarch64-apple-ios"));
         assert_eq!(target.clang_target().as_deref(), Some("aarch64-apple-ios"));
+    }
+
+    #[test]
+    fn ios_simulator_aot_target_reports_apple_arm64_simulator_triples() {
+        let target = AotTarget::ios_simulator_arm64_default();
+        assert_eq!(target.object_triple(), Some("aarch64-apple-ios-sim"));
+        assert_eq!(
+            target.clang_target().as_deref(),
+            Some("arm64-apple-ios15.0-simulator")
+        );
     }
 
     #[test]

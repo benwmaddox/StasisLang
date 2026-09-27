@@ -17,6 +17,7 @@ CANONICAL_LF_VENDOR_HASH_VERSION = 2
 CANONICAL_PROJECT_TARGETS = {
     "web", "windows-x86_64", "windows-arm64", "linux-x86_64", "linux-arm64",
     "macos-x86_64", "macos-arm64", "android-arm64", "android-x86_64", "ios-arm64",
+    "ios-simulator-arm64",
 }
 ASSET_PACKAGE_IDENTITY_NAME = "stasis_asset_package.json"
 ASSET_MANIFEST_RELATIVE_PATH = pathlib.PurePosixPath("assets/manifest.json")
@@ -307,7 +308,9 @@ def verify_mobile_shells(
     if receipt_schema not in (None, "stasis.mobile_package.v1", "stasis.mobile_package.v2"):
         parser.error(f"unsupported mobile package schema: {receipt_schema!r}")
     target = receipt.get("target")
-    if target not in ("android-arm64", "ios-arm64"):
+    if target not in (
+        "android-arm64", "android-x86_64", "ios-arm64", "ios-simulator-arm64"
+    ):
         parser.error(f"unsupported mobile package target: {target!r}")
     receipt_configuration = receipt.get("project_configuration")
     if receipt_schema == "stasis.mobile_package.v2" and receipt_configuration is None:
@@ -369,7 +372,7 @@ def verify_mobile_shells(
         ),
         "@STASIS_LOCAL_NETWORK_USAGE@": (
             f"    <key>NSLocalNetworkUsageDescription</key><string>{receipt.get('app_name') or receipt['name']} uses your local network so nearby friends can join games hosted on this device.</string>\n"
-            if network_enabled and target == "ios-arm64"
+            if network_enabled and target in ("ios-arm64", "ios-simulator-arm64")
             else ""
         ),
     }
@@ -395,7 +398,7 @@ def verify_mobile_shells(
                 parser.error(f"packaged mobile shell does not match release transform: {destination}")
 
     expected_paths.add(("common", "stasis_package_provenance.h"))
-    if target == "ios-arm64":
+    if target in ("ios-arm64", "ios-simulator-arm64"):
         expected_paths.add(("ios", "StasisMobile.xcconfig"))
     if launcher_resources:
         android_resource_root = package_root / "android/app/src/main/res"
@@ -408,7 +411,7 @@ def verify_mobile_shells(
             if path.is_file()
         )
     if network_enabled or network_client_enabled:
-        if target == "ios-arm64":
+        if target in ("ios-arm64", "ios-simulator-arm64"):
             expected_paths.update(
                 {
                     ("ios", "network/libstasis_network.a"),

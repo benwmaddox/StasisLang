@@ -3963,8 +3963,11 @@ STASIS_EXPORT int32_t host_req_window_h_px = 0;\n",
         ),
     ];
     let use_msvc_aliases = matches!(target, stasis_jit::AotTarget::Native) && cfg!(windows);
-    let use_darwin_aliases = matches!(target, stasis_jit::AotTarget::IosArm64)
-        || (matches!(target, stasis_jit::AotTarget::Native) && cfg!(target_os = "macos"));
+    let use_darwin_aliases = matches!(
+        target,
+        stasis_jit::AotTarget::IosArm64 | stasis_jit::AotTarget::IosSimulatorArm64
+    ) || (matches!(target, stasis_jit::AotTarget::Native)
+        && cfg!(target_os = "macos"));
     if use_msvc_aliases {
         for (qualified, legacy) in &bridge_storage_aliases {
             source.push_str(&format!(
@@ -7361,21 +7364,54 @@ mod tests {
     }
 
     #[test]
-    fn packaged_runtime_bridge_aliases_ios_use_macho_assembly() {
-        let source = build_engine_bundle_runtime_bridge_source(
-            &stasis_jit::AotTarget::ios_arm64_default(),
-            &[],
-            &[],
-            &[],
-            None,
-            &[],
-        )
-        .expect("build iOS runtime bridge");
-        let qualified = aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_i32", "");
-        assert!(source.contains(&format!(
-            "__asm__(\".globl _{qualified}\\n_{qualified} = _gfx_cmd_i32\");"
-        )));
-        assert!(!source.contains("__attribute__((alias"));
+    fn packaged_runtime_bridge_aliases_apple_mobile_targets_use_macho_assembly() {
+        for target in [
+            stasis_jit::AotTarget::ios_arm64_default(),
+            stasis_jit::AotTarget::ios_simulator_arm64_default(),
+        ] {
+            let source =
+                build_engine_bundle_runtime_bridge_source(&target, &[], &[], &[], None, &[])
+                    .expect("build Apple mobile runtime bridge");
+            let qualified = aot_storage_symbol(AotStorageSymbolKind::Array, "gfx_cmd_i32", "");
+            assert!(source.contains(&format!(
+                "__asm__(\".globl _{qualified}\\n_{qualified} = _gfx_cmd_i32\");"
+            )));
+            assert!(!source.contains("__attribute__((alias"));
+
+            #[cfg(target_os = "macos")]
+            {
+                let stamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos();
+                let temp_root = std::env::temp_dir().join(format!(
+                    "stasis-apple-mobile-runtime-bridge-{}-{stamp}",
+                    std::process::id()
+                ));
+                fs::create_dir_all(&temp_root).expect("create bridge compile root");
+                let source_path = temp_root.join("engine_bundle_runtime_bridge.c");
+                let object_path = temp_root.join("engine_bundle_runtime_bridge.o");
+                fs::write(&source_path, &source).expect("write bridge source");
+                let compiler = default_runtime_bridge_compiler(&target);
+                let output = Command::new(&compiler)
+                    .args(["-c", "-O2", "-x", "c", "-fPIC"])
+                    .arg(format!(
+                        "--target={}",
+                        target.clang_target().expect("Apple mobile clang target")
+                    ))
+                    .arg("-o")
+                    .arg(&object_path)
+                    .arg(&source_path)
+                    .output()
+                    .expect("run Apple clang for generated bridge");
+                fs::remove_dir_all(&temp_root).ok();
+                assert!(
+                    output.status.success(),
+                    "generated Apple mobile bridge must compile for {target:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
     }
 
     #[test]

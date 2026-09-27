@@ -34,6 +34,7 @@ ARCHIVE_REQUIRED_FILES = (
     "mobile/network/android-arm64/libstasis_network.a",
     "mobile/network/android-x86_64/libstasis_network.a",
     "mobile/network/ios-arm64/libstasis_network.a",
+    "mobile/network/ios-simulator-arm64/libstasis_network.a",
 )
 REQUIRED_DIRECTORIES = ("docs/knowledge", "mobile/shells") + tuple(
     f"runtime/{directory}" for directory in RUNTIME_DIRS

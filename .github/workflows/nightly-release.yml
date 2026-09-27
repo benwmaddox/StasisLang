@@ -91,7 +91,7 @@ jobs:
       - name: Setup Rust targets
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          targets: ${{ matrix.kind == 'android' && 'aarch64-linux-android,x86_64-linux-android' || 'aarch64-apple-ios' }}
+          targets: ${{ matrix.kind == 'android' && 'aarch64-linux-android,x86_64-linux-android' || 'aarch64-apple-ios,aarch64-apple-ios-sim' }}
 
       - name: Install pinned Android NDK
         if: matrix.kind == 'android'
@@ -129,15 +129,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          clang="$(xcrun --sdk iphoneos --find clang)"
-          test -x "${clang}"
-          mkdir -p network-artifact/include network-artifact/ios-arm64
+          device_clang="$(xcrun --sdk iphoneos --find clang)"
+          simulator_clang="$(xcrun --sdk iphonesimulator --find clang)"
+          test -x "${device_clang}"
+          test -x "${simulator_clang}"
+          mkdir -p network-artifact/include network-artifact/ios-arm64 network-artifact/ios-simulator-arm64
           cp crates/stasis_network/include/stasis_network.h network-artifact/include/
-          CARGO_TARGET_AARCH64_APPLE_IOS_LINKER="${clang}" \
-            CC_aarch64_apple_ios="${clang}" \
-            CXX_aarch64_apple_ios="${clang}" \
+          CARGO_TARGET_AARCH64_APPLE_IOS_LINKER="${device_clang}" \
+            CC_aarch64_apple_ios="${device_clang}" \
+            CXX_aarch64_apple_ios="${device_clang}" \
             cargo build -p stasis_network --target aarch64-apple-ios --release
+          CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER="${simulator_clang}" \
+            CC_aarch64_apple_ios_sim="${simulator_clang}" \
+            CXX_aarch64_apple_ios_sim="${simulator_clang}" \
+            cargo build -p stasis_network --target aarch64-apple-ios-sim --release
+          xcrun lipo -verify_arch arm64 target/aarch64-apple-ios/release/libstasis_network.a
+          xcrun lipo -verify_arch arm64 target/aarch64-apple-ios-sim/release/libstasis_network.a
+          if cmp -s \
+            target/aarch64-apple-ios/release/libstasis_network.a \
+            target/aarch64-apple-ios-sim/release/libstasis_network.a; then
+            echo "device and simulator network archives are unexpectedly identical" >&2
+            exit 1
+          fi
           cp target/aarch64-apple-ios/release/libstasis_network.a network-artifact/ios-arm64/
+          cp target/aarch64-apple-ios-sim/release/libstasis_network.a network-artifact/ios-simulator-arm64/
 
       - name: Upload immutable mobile network support
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -298,6 +313,7 @@ jobs:
           test -f mobile/network/android-arm64/libstasis_network.a
           test -f mobile/network/android-x86_64/libstasis_network.a
           test -f mobile/network/ios-arm64/libstasis_network.a
+          test -f mobile/network/ios-simulator-arm64/libstasis_network.a
           cp -R mobile/network "${out}/mobile/"
           network_target=linux-x86_64
           if [[ "${RUNNER_OS}" == "macOS" ]]; then network_target=macos-arm64; fi
@@ -362,7 +378,8 @@ jobs:
             "mobile/network/include/stasis_network.h",
             "mobile/network/android-arm64/libstasis_network.a",
             "mobile/network/android-x86_64/libstasis_network.a",
-            "mobile/network/ios-arm64/libstasis_network.a"
+            "mobile/network/ios-arm64/libstasis_network.a",
+            "mobile/network/ios-simulator-arm64/libstasis_network.a"
           ) | ForEach-Object {
             if (-not (Test-Path $_)) { throw "mobile network support missing: $_" }
           }

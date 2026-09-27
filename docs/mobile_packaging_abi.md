@@ -106,7 +106,8 @@ Required shape:
 Rules:
 
 - `schema` must be exactly `stasis.mobile_abi.v1`.
-- `target` must be `android-arm64` or `ios-arm64` for v1.
+- `target` must be `android-arm64`, `android-x86_64`, `ios-arm64`, or
+  development-only `ios-simulator-arm64` for v1.
 - `objects` and `staticLibraries` are ordered linker inputs. At least one must
   be non-empty.
 - `entries.main`, `entries.tick`, and `entries.render` are required.

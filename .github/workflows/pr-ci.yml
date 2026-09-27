@@ -923,3 +923,50 @@ jobs:
             target/ios-package-link/simulator.log
             target/ios-package-link/simulator-*.json
             target/ios-package-link/simulator-*.png
+
+  ios-generics-simulator:
+    if: ${{ github.event_name == 'pull_request' || inputs.run_slow_seams }}
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout Stasis
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Test iOS generics device package and simulator execution
+        env:
+          STASIS_IOS_BUILD_ROOT: ${{ github.workspace }}/target/ios-generics
+          STASIS_IOS_SIMULATOR_ACCEPTANCE: generics
+        run: bash tools/ci/build_ios_package.sh samples/generics_collections dist/ios-ci
+
+      - name: Upload iOS generics evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: true
+          name: ios-generics-evidence
+          if-no-files-found: warn
+          path: |
+            target/ios-generics/evidence.txt
+            target/ios-generics/xcode-version.txt
+            target/ios-generics/xcodebuild.log
+            target/ios-generics/linked-libraries.txt
+            target/ios-generics/device-symbols.txt
+            target/ios-generics/device-hashes.txt
+            target/ios-generics/device-platform.txt
+            target/ios-generics/simulator-evidence.json
+            target/ios-generics/simulator-evidence.txt
+            target/ios-generics/simulator-xcodebuild.log
+            target/ios-generics/simulator-launch.txt
+            target/ios-generics/simulator.log
+            target/ios-generics/simulator-linked-libraries.txt
+            target/ios-generics/simulator-symbols.txt
+            target/ios-generics/simulator-hashes.txt
+            target/ios-generics/simulator-platform.txt
+            target/ios-generics/simulator-result.json
+            target/ios-generics/simulator-frame.png
+            target/ios-generics/bounds-*.json
+            target/ios-generics/bounds-*-launch.txt
+            target/ios-generics/bounds-*-crash.*

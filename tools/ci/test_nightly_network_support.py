@@ -1,6 +1,7 @@
 import pathlib
 import unittest
 
+from tools.audit_release_bundle import required_files
 from tools.desktop_network_target import network_target
 
 
@@ -145,9 +146,27 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
         self.assertIn("aarch64-linux-android", self.workflow)
         self.assertIn("x86_64-linux-android", self.workflow)
         self.assertIn("aarch64-apple-ios", self.workflow)
+        self.assertIn("aarch64-apple-ios-sim", self.workflow)
         self.assertIn('"platforms;android-26"', self.workflow)
         self.assertIn('api_target="${target}26"', self.workflow)
         self.assertIn("xcrun --sdk iphoneos --find clang", self.workflow)
+        self.assertIn("xcrun --sdk iphonesimulator --find clang", self.workflow)
+        self.assertIn(
+            "cargo build -p stasis_network --target aarch64-apple-ios-sim --release",
+            self.workflow,
+        )
+        self.assertIn(
+            "target/aarch64-apple-ios-sim/release/libstasis_network.a network-artifact/ios-simulator-arm64/",
+            self.workflow,
+        )
+        self.assertIn(
+            "xcrun lipo -verify_arch arm64 target/aarch64-apple-ios-sim/release/libstasis_network.a",
+            self.workflow,
+        )
+        self.assertIn(
+            "device and simulator network archives are unexpectedly identical",
+            self.workflow,
+        )
         self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", self.workflow)
         self.assertIn("name: mobile-network-support-${{ matrix.kind }}", self.workflow)
 
@@ -156,9 +175,15 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             "mobile/network/android-arm64/libstasis_network.a",
             "mobile/network/android-x86_64/libstasis_network.a",
             "mobile/network/ios-arm64/libstasis_network.a",
+            "mobile/network/ios-simulator-arm64/libstasis_network.a",
             "mobile/network/include/stasis_network.h",
         ):
             self.assertIn(path, self.workflow)
+        for platform in ("windows", "linux", "macos"):
+            self.assertIn(
+                "mobile/network/ios-simulator-arm64/libstasis_network.a",
+                required_files(platform),
+            )
         self.assertIn('cp -R mobile/network "${out}/mobile/"', self.workflow)
         self.assertIn('Copy-Item mobile/network "$out/mobile/"', self.workflow)
         self.assertGreaterEqual(
