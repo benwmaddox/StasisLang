@@ -1,7 +1,7 @@
 use crate::backend::compile_analysis::{
     build_compile_analysis_cache, compile_analysis_requires_reemit, compute_files_fingerprint,
     is_i32_abi_compatible_type, resolve_preferred_extern_call_signatures, select_emit_function_ids,
-    CallSignatureMap, CollectionInfoMap, ConstantValueMap, GlobalPathTypeMap,
+    CallSignatureMap, CollectionInfoMap, ConstantValue, ConstantValueMap, GlobalPathTypeMap,
     NamedStructFieldTypeMap, TypedCollectionInfoMap,
 };
 use crate::backend::emit::*;
@@ -1447,7 +1447,9 @@ fn compile_function_to_object_bytes(
         None,
         false,
         profile_instrumentation,
-        |statement| record_string_literals_in_stmt(statement, referenced_string_literals),
+        |statement| {
+            record_string_literals_in_stmt(statement, constant_values, referenced_string_literals)
+        },
         |_meta, _func| {
             #[cfg(test)]
             maybe_invoke_clif_dump_hook(_meta, _func);
@@ -1546,56 +1548,70 @@ fn collect_fixed_collection_max_lengths(
 
 fn record_string_literals_in_assign_target(
     target: &AssignTarget,
+    constant_values: &ConstantValueMap,
     out: &mut BTreeMap<i32, String>,
 ) -> Result<(), String> {
     match target {
         AssignTarget::Local(_) | AssignTarget::GlobalPath(_) => Ok(()),
-        AssignTarget::IndexedPath { index, .. } => record_string_literals_in_expr(index, out),
+        AssignTarget::IndexedPath { index, .. } => {
+            record_string_literals_in_expr(index, constant_values, out)
+        }
     }
 }
 
 fn record_string_literals_in_condition(
     condition: &SimpleCondition,
+    constant_values: &ConstantValueMap,
     out: &mut BTreeMap<i32, String>,
 ) -> Result<(), String> {
     match condition {
         SimpleCondition::Comparison { lhs, rhs, .. } => {
-            record_string_literals_in_expr(lhs, out)?;
-            record_string_literals_in_expr(rhs, out)?;
+            record_string_literals_in_expr(lhs, constant_values, out)?;
+            record_string_literals_in_expr(rhs, constant_values, out)?;
             Ok(())
         }
-        SimpleCondition::Expr(expr) => record_string_literals_in_expr(expr, out),
+        SimpleCondition::Expr(expr) => record_string_literals_in_expr(expr, constant_values, out),
         SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
-            record_string_literals_in_condition(lhs, out)?;
-            record_string_literals_in_condition(rhs, out)?;
+            record_string_literals_in_condition(lhs, constant_values, out)?;
+            record_string_literals_in_condition(rhs, constant_values, out)?;
             Ok(())
         }
-        SimpleCondition::Not(inner) => record_string_literals_in_condition(inner, out),
+        SimpleCondition::Not(inner) => {
+            record_string_literals_in_condition(inner, constant_values, out)
+        }
     }
 }
 
 fn record_string_literals_in_expr(
     expression: &SimpleExpr,
+    constant_values: &ConstantValueMap,
     out: &mut BTreeMap<i32, String>,
 ) -> Result<(), String> {
     match expression {
         SimpleExpr::DefaultValue(_)
         | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
-        | SimpleExpr::Bool(_)
-        | SimpleExpr::Identifier(_) => Ok(()),
+        | SimpleExpr::Bool(_) => Ok(()),
+        SimpleExpr::Identifier(name) => match constant_values.get(name) {
+            Some(ConstantValue::String { value, .. }) => record_string_literal(out, value),
+            _ => Ok(()),
+        },
         SimpleExpr::StringLiteral(value) => record_string_literal(out, value),
-        SimpleExpr::Condition(condition) => record_string_literals_in_condition(condition, out),
-        SimpleExpr::IndexedPath { index, .. } => record_string_literals_in_expr(index, out),
+        SimpleExpr::Condition(condition) => {
+            record_string_literals_in_condition(condition, constant_values, out)
+        }
+        SimpleExpr::IndexedPath { index, .. } => {
+            record_string_literals_in_expr(index, constant_values, out)
+        }
         SimpleExpr::Call { args, .. } => {
             for arg in args {
-                record_string_literals_in_expr(arg, out)?;
+                record_string_literals_in_expr(arg, constant_values, out)?;
             }
             Ok(())
         }
         SimpleExpr::Binary { lhs, rhs, .. } => {
-            record_string_literals_in_expr(lhs, out)?;
-            record_string_literals_in_expr(rhs, out)?;
+            record_string_literals_in_expr(lhs, constant_values, out)?;
+            record_string_literals_in_expr(rhs, constant_values, out)?;
             Ok(())
         }
     }
@@ -1603,21 +1619,24 @@ fn record_string_literals_in_expr(
 
 fn record_string_literals_in_stmt(
     statement: &SimpleStmt,
+    constant_values: &ConstantValueMap,
     out: &mut BTreeMap<i32, String>,
 ) -> Result<(), String> {
     match statement {
         SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => Ok(()),
-        SimpleStmt::Let { expression, .. } => record_string_literals_in_expr(expression, out),
+        SimpleStmt::Let { expression, .. } => {
+            record_string_literals_in_expr(expression, constant_values, out)
+        }
         SimpleStmt::Assign {
             target, expression, ..
         } => {
-            record_string_literals_in_assign_target(target, out)?;
-            record_string_literals_in_expr(expression, out)?;
+            record_string_literals_in_assign_target(target, constant_values, out)?;
+            record_string_literals_in_expr(expression, constant_values, out)?;
             Ok(())
         }
         SimpleStmt::Convert { target, source, .. } => {
-            record_string_literals_in_assign_target(target, out)?;
-            record_string_literals_in_expr(source, out)?;
+            record_string_literals_in_assign_target(target, constant_values, out)?;
+            record_string_literals_in_expr(source, constant_values, out)?;
             Ok(())
         }
         SimpleStmt::If {
@@ -1625,13 +1644,13 @@ fn record_string_literals_in_stmt(
             then_statements,
             else_statements,
         } => {
-            record_string_literals_in_condition(condition, out)?;
+            record_string_literals_in_condition(condition, constant_values, out)?;
             for stmt in then_statements {
-                record_string_literals_in_stmt(stmt, out)?;
+                record_string_literals_in_stmt(stmt, constant_values, out)?;
             }
             if let Some(else_statements) = else_statements {
                 for stmt in else_statements {
-                    record_string_literals_in_stmt(stmt, out)?;
+                    record_string_literals_in_stmt(stmt, constant_values, out)?;
                 }
             }
             Ok(())
@@ -1642,11 +1661,11 @@ fn record_string_literals_in_stmt(
             step,
             body_statements,
         } => {
-            record_string_literals_in_stmt(init, out)?;
-            record_string_literals_in_condition(condition, out)?;
-            record_string_literals_in_stmt(step, out)?;
+            record_string_literals_in_stmt(init, constant_values, out)?;
+            record_string_literals_in_condition(condition, constant_values, out)?;
+            record_string_literals_in_stmt(step, constant_values, out)?;
             for stmt in body_statements {
-                record_string_literals_in_stmt(stmt, out)?;
+                record_string_literals_in_stmt(stmt, constant_values, out)?;
             }
             Ok(())
         }
@@ -1654,12 +1673,12 @@ fn record_string_literals_in_stmt(
             body_statements, ..
         } => {
             for stmt in body_statements {
-                record_string_literals_in_stmt(stmt, out)?;
+                record_string_literals_in_stmt(stmt, constant_values, out)?;
             }
             Ok(())
         }
         SimpleStmt::Expr(expression) | SimpleStmt::Return(expression) => {
-            record_string_literals_in_expr(expression, out)
+            record_string_literals_in_expr(expression, constant_values, out)
         }
     }
 }
@@ -5365,6 +5384,27 @@ function zero_capacity(): i32 {
             .string_literals()
             .values()
             .any(|value| value == "second"));
+    }
+
+    #[test]
+    fn release_aot_keeps_reachable_const_string_paths() {
+        let mut process = AotProcess::new();
+        process.set_reachability_policy(ReachabilityPolicy::Release);
+        process.upsert_file(
+            "asset_paths.stasis",
+            "const FONT_PATH: string = \"/assets/font.ttf\";\n\
+             const RELOAD_PATH: string = \"/assets/reload-only.ttf\";\n\
+             function main(): i32 { print_string(FONT_PATH); print_string(\"inline\"); return 0; }\n\
+             function on_code_swap(): void { print_string(RELOAD_PATH); }\n",
+        );
+
+        process
+            .compile()
+            .expect("compile release AOT asset path fixture");
+        let literals = process.string_literals().values().collect::<BTreeSet<_>>();
+        assert!(literals.contains(&"/assets/font.ttf".to_string()));
+        assert!(literals.contains(&"inline".to_string()));
+        assert!(!literals.contains(&"/assets/reload-only.ttf".to_string()));
     }
 
     #[test]

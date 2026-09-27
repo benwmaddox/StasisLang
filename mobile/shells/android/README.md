@@ -54,17 +54,18 @@ Future candidates are recorded in `docs/android_release_shell_backlog.md`.
 
 ## Packaged replay documents
 
-The generated Android shell offers `Play` and `Import replay` from its
-launcher dialog before `MainActivity` loads the native library. Import opens
-`ACTION_OPEN_DOCUMENT` for JSON or octet-stream documents. Java copies the
-selected URI into app-private storage with a 256 MiB bound, flushes it, and
-publishes it with a same-directory rename before native startup consumes the
-path through the bounded `--replay` loader. The same startup bridge accepts a
-cold `ACTION_VIEW` URI or the `stasis.replay_uri` intent extra. A warm
-`ACTION_VIEW` is also bounded and staged, then Android displays a restart
-message and keeps the selection queued for the next launch instead of dropping
-it. Failed copies leave the previous published replay intact; failed rollback
-keeps the prior document in private recovery storage.
+The app icon starts `MainActivity` directly. `ReplayLaunchActivity` remains
+available for explicit component launches. It offers `Play` and `Import
+replay`; import opens `ACTION_OPEN_DOCUMENT` for JSON or octet-stream
+documents. Java copies the selected URI into app-private storage with a
+256 MiB bound, flushes it, and publishes it with a same-directory rename
+before native startup consumes the path through the bounded `--replay`
+loader. `MainActivity` also handles a cold `ACTION_VIEW` URI or the
+`stasis.replay_uri` intent extra. A warm `ACTION_VIEW` is bounded and staged,
+then Android displays a restart message and keeps the selection queued for the
+next launch instead of dropping it. Failed copies leave the previous published
+replay intact; failed rollback keeps the prior document in private recovery
+storage.
 
 The Java status overlay polls the packaged host's replay receipt and displays
 verified completion or divergence; replay load failures remain on the runtime
