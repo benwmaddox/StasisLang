@@ -3636,20 +3636,36 @@ pub(crate) fn append_replay_state_snapshot_bridge_source(
                 continue;
             }
             let symbol = replay_snapshot_storage_symbol(entry);
-            for index in 0..entry.element_count {
-                let element_offset = entry
-                    .offset
-                    .checked_add(index * u64::from(entry.element_bytes))
-                    .ok_or_else(|| "replay state snapshot element offset overflow".to_string())?;
-                let element_offset = i32::try_from(element_offset).map_err(|_| {
-                    "replay state snapshot element offset exceeds the native ABI limit".to_string()
-                })?;
-                let expression = if entry.kind == "scalar" {
-                    symbol.clone()
+            let element_offset = i32::try_from(entry.offset).map_err(|_| {
+                "replay state snapshot element offset exceeds the native ABI limit".to_string()
+            })?;
+            let collection = entry.kind == "collection";
+            if collection {
+                source.push_str(&format!(
+                    "    for (uint32_t index = 0; index < {}u; ++index) {{\n",
+                    entry.element_count
+                ));
+            }
+            let offset = if collection {
+                format!("({element_offset}u + index * {}u)", entry.element_bytes)
+            } else {
+                element_offset.to_string()
+            };
+            let byte_offset = |lane: u32| {
+                if collection {
+                    format!("({offset} + {lane}u)")
                 } else {
-                    format!("{symbol}[{index}]")
-                };
-                match entry.storage_type.as_str() {
+                    (entry.offset + u64::from(lane)).to_string()
+                }
+            };
+            let element_offset = &offset;
+            let index = "index";
+            let expression = if entry.kind == "scalar" {
+                symbol.clone()
+            } else {
+                format!("{symbol}[{index}]")
+            };
+            match entry.storage_type.as_str() {
                     "bool" => source.push_str(&format!(
                         "    out[{element_offset}] = (uint8_t)(((int32_t)({expression}) != 0) ? 1 : 0);\n"
                     )),
@@ -3658,29 +3674,29 @@ pub(crate) fn append_replay_state_snapshot_bridge_source(
                     )),
                     "u16" => source.push_str(&format!(
                         "    bits32 = (uint32_t)({expression});\n    out[{element_offset}] = (uint8_t)(bits32 & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 8) & 0xffu);\n",
-                        element_offset + 1
+                        byte_offset(1)
                     )),
                     "i32" | "u32" => source.push_str(&format!(
                         "    bits32 = (uint32_t)({expression});\n    out[{element_offset}] = (uint8_t)(bits32 & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 8) & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 16) & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 24) & 0xffu);\n",
-                        element_offset + 1,
-                        element_offset + 2,
-                        element_offset + 3
+                        byte_offset(1),
+                        byte_offset(2),
+                        byte_offset(3)
                     )),
                     "f32" => source.push_str(&format!(
                         "    stasis_copy_bytes(&bits32, &({expression}), 4u);\n    out[{element_offset}] = (uint8_t)(bits32 & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 8) & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 16) & 0xffu);\n    out[{}] = (uint8_t)((bits32 >> 24) & 0xffu);\n",
-                        element_offset + 1,
-                        element_offset + 2,
-                        element_offset + 3
+                        byte_offset(1),
+                        byte_offset(2),
+                        byte_offset(3)
                     )),
                     "f64" => source.push_str(&format!(
                         "    stasis_copy_bytes(&bits64, &({expression}), 8u);\n    out[{element_offset}] = (uint8_t)(bits64 & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 8) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 16) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 24) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 32) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 40) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 48) & 0xffull);\n    out[{}] = (uint8_t)((bits64 >> 56) & 0xffull);\n",
-                        element_offset + 1,
-                        element_offset + 2,
-                        element_offset + 3,
-                        element_offset + 4,
-                        element_offset + 5,
-                        element_offset + 6,
-                        element_offset + 7
+                        byte_offset(1),
+                        byte_offset(2),
+                        byte_offset(3),
+                        byte_offset(4),
+                        byte_offset(5),
+                        byte_offset(6),
+                        byte_offset(7)
                     )),
                     other => {
                         return Err(format!(
@@ -3689,6 +3705,8 @@ pub(crate) fn append_replay_state_snapshot_bridge_source(
                         ));
                     }
                 }
+            if collection {
+                source.push_str("    }\n");
             }
         }
         source.push_str("    return required;\n}\n");
@@ -3706,7 +3724,7 @@ pub(crate) fn append_replay_state_snapshot_bridge_source(
     }
     source.push_str("    if (input == (const uint8_t *)0) return -required;\n");
 
-    // Exact-size and null checks above precede a complete, unrolled decode that overwrites
+    // Exact-size and null checks above precede a complete decode that overwrites
     // every represented value, so no separate preclear is needed.
     source.push_str("    uint32_t bits32 = 0;\n    uint64_t bits64 = 0;\n");
     for entry in &snapshot.entries {
@@ -3714,20 +3732,36 @@ pub(crate) fn append_replay_state_snapshot_bridge_source(
             continue;
         }
         let symbol = replay_snapshot_storage_symbol(entry);
-        for index in 0..entry.element_count {
-            let element_offset = entry
-                .offset
-                .checked_add(index * u64::from(entry.element_bytes))
-                .ok_or_else(|| "replay state snapshot element offset overflow".to_string())?;
-            let element_offset = i32::try_from(element_offset).map_err(|_| {
-                "replay state snapshot element offset exceeds the native ABI limit".to_string()
-            })?;
-            let expression = if entry.kind == "scalar" {
-                symbol.clone()
+        let element_offset = i32::try_from(entry.offset).map_err(|_| {
+            "replay state snapshot element offset exceeds the native ABI limit".to_string()
+        })?;
+        let collection = entry.kind == "collection";
+        if collection {
+            source.push_str(&format!(
+                "    for (uint32_t index = 0; index < {}u; ++index) {{\n",
+                entry.element_count
+            ));
+        }
+        let offset = if collection {
+            format!("({element_offset}u + index * {}u)", entry.element_bytes)
+        } else {
+            element_offset.to_string()
+        };
+        let byte_offset = |lane: u32| {
+            if collection {
+                format!("({offset} + {lane}u)")
             } else {
-                format!("{symbol}[{index}]")
-            };
-            match entry.storage_type.as_str() {
+                (entry.offset + u64::from(lane)).to_string()
+            }
+        };
+        let element_offset = &offset;
+        let index = "index";
+        let expression = if entry.kind == "scalar" {
+            symbol.clone()
+        } else {
+            format!("{symbol}[{index}]")
+        };
+        match entry.storage_type.as_str() {
                 "bool" => source.push_str(&format!(
                     "    {expression} = (input[{element_offset}] != 0) ? 1 : 0;\n"
                 )),
@@ -3736,23 +3770,23 @@ pub(crate) fn append_replay_state_snapshot_bridge_source(
                 )),
                 "u16" => source.push_str(&format!(
                     "    bits32 = ((uint32_t)input[{element_offset}]) | ((uint32_t)input[{}] << 8);\n    {expression} = (uint16_t)bits32;\n",
-                    element_offset + 1
+                    byte_offset(1)
                 )),
                 "i32" | "u32" | "f32" => source.push_str(&format!(
                     "    bits32 = ((uint32_t)input[{element_offset}]) | ((uint32_t)input[{}] << 8) | ((uint32_t)input[{}] << 16) | ((uint32_t)input[{}] << 24);\n",
-                    element_offset + 1,
-                    element_offset + 2,
-                    element_offset + 3
+                    byte_offset(1),
+                    byte_offset(2),
+                    byte_offset(3)
                 )),
                 "f64" => source.push_str(&format!(
                     "    bits64 = ((uint64_t)input[{element_offset}]) | ((uint64_t)input[{}] << 8) | ((uint64_t)input[{}] << 16) | ((uint64_t)input[{}] << 24) | ((uint64_t)input[{}] << 32) | ((uint64_t)input[{}] << 40) | ((uint64_t)input[{}] << 48) | ((uint64_t)input[{}] << 56);\n",
-                    element_offset + 1,
-                    element_offset + 2,
-                    element_offset + 3,
-                    element_offset + 4,
-                    element_offset + 5,
-                    element_offset + 6,
-                    element_offset + 7
+                    byte_offset(1),
+                    byte_offset(2),
+                    byte_offset(3),
+                    byte_offset(4),
+                    byte_offset(5),
+                    byte_offset(6),
+                    byte_offset(7)
                 )),
                 other => {
                     return Err(format!(
@@ -3761,22 +3795,24 @@ pub(crate) fn append_replay_state_snapshot_bridge_source(
                     ));
                 }
             }
-            match entry.storage_type.as_str() {
-                "i32" | "f32" => source.push_str(&format!(
-                    "    stasis_copy_bytes(&({expression}), &bits32, 4u);\n"
-                )),
-                "u32" => source.push_str(&format!("    {expression} = bits32;\n")),
-                "f64" => source.push_str(&format!(
-                    "    stasis_copy_bytes(&({expression}), &bits64, 8u);\n"
-                )),
-                "bool" | "u8" | "u16" => {}
-                other => {
-                    return Err(format!(
-                        "replay state snapshot entry '{}.{}' has unsupported type '{other}'",
-                        entry.path, entry.field
-                    ));
-                }
+        match entry.storage_type.as_str() {
+            "i32" | "f32" => source.push_str(&format!(
+                "    stasis_copy_bytes(&({expression}), &bits32, 4u);\n"
+            )),
+            "u32" => source.push_str(&format!("    {expression} = bits32;\n")),
+            "f64" => source.push_str(&format!(
+                "    stasis_copy_bytes(&({expression}), &bits64, 8u);\n"
+            )),
+            "bool" | "u8" | "u16" => {}
+            other => {
+                return Err(format!(
+                    "replay state snapshot entry '{}.{}' has unsupported type '{other}'",
+                    entry.path, entry.field
+                ));
             }
+        }
+        if collection {
+            source.push_str("    }\n");
         }
     }
     source.push_str("    return required;\n}\n");
@@ -7062,8 +7098,10 @@ mod tests {
 
         assert!(source.contains("STASIS_EXPORT extern int32_t stasis_state_scalar__scalar;"));
         assert!(source.contains("STASIS_EXPORT extern int32_t stasis_state_array__primitive[];"));
-        assert!(source.contains("stasis_state_array__primitive[0]"));
-        assert!(source.contains("stasis_state_array__primitive[1]"));
+        assert!(source.contains("for (uint32_t index = 0; index < 2u; ++index)"));
+        assert!(source.contains("stasis_state_array__primitive[index]"));
+        assert!(source.contains("out[(17u + index * 4u)] = (uint8_t)(bits32 & 0xffu);"));
+        assert!(source.contains("input[((17u + index * 4u) + 3u)] << 24"));
         assert!(source.contains("STASIS_EXPORT extern float stasis_state_array__named__lane[];"));
         assert!(source.contains("STASIS_EXPORT extern int32_t stasis_state_scalar__flag;"));
         assert!(source.contains("STASIS_EXPORT extern double stasis_state_scalar__wide;"));
@@ -7074,8 +7112,9 @@ mod tests {
         assert!(source
             .contains("out[0] = (uint8_t)(((int32_t)(stasis_state_scalar__flag) != 0) ? 1 : 0);"));
         assert!(source.contains("out[12] = (uint8_t)((bits64 >> 56) & 0xffull);"));
-        assert!(source
-            .contains("stasis_copy_bytes(&bits32, &(stasis_state_array__named__lane[0]), 4u);"));
+        assert!(source.contains(
+            "stasis_copy_bytes(&bits32, &(stasis_state_array__named__lane[index]), 4u);"
+        ));
         assert!(source.contains("stasis_copy_bytes(&bits64, &(stasis_state_scalar__wide), 8u);"));
         assert!(!source.contains("memcpy("));
         assert!(!source.contains("#include <string.h>"));
@@ -7083,8 +7122,9 @@ mod tests {
             "STASIS_EXPORT int32_t stasis_replay_state_snapshot_restore(const uint8_t *input, int32_t bytes)"
         ));
         assert!(source.contains("if (bytes != required) return required == 0 ? -1 : -required;"));
-        assert!(source
-            .contains("stasis_copy_bytes(&(stasis_state_array__named__lane[0]), &bits32, 4u);"));
+        assert!(source.contains(
+            "stasis_copy_bytes(&(stasis_state_array__named__lane[index]), &bits32, 4u);"
+        ));
         assert!(source.contains("stasis_copy_bytes(&(stasis_state_scalar__wide), &bits64, 8u);"));
         let guard = source
             .find("if (out == (uint8_t *)0 || capacity < required) return -required;")
@@ -7094,6 +7134,21 @@ mod tests {
             guard < first_write,
             "short/null checks must precede all writes"
         );
+        let mut large_snapshot = snapshot.clone();
+        large_snapshot.entries[4].element_count = 40_000;
+        large_snapshot.required_bytes = 160_017;
+        let large_source = build_engine_bundle_runtime_bridge_source_with_snapshot(
+            &stasis_jit::AotTarget::Native,
+            &[],
+            &[],
+            &[],
+            None,
+            &[],
+            Some(&large_snapshot),
+        )
+        .expect("build large replay snapshot bridge");
+        assert!(large_source.contains("index < 40000u"));
+        assert!(large_source.len() < source.len() + 1_000);
         #[cfg(windows)]
         {
             let stamp = SystemTime::now()
