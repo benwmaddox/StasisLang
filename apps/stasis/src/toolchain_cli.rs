@@ -14,14 +14,15 @@ use stasis::{
     run_live_in_process_with_data_and_project_configuration,
     run_play_in_process_with_replay_and_project_configuration,
     run_play_in_process_with_window_title_and_project_configuration,
-    run_self_host_aot_cli_with_project_configuration, sign_artifacts, signing_status,
-    verify_artifacts, DesktopNetworkMode, LiveRunConfig, PlayReplayConfig,
+    run_self_host_aot_cli_with_project_configuration,
+    run_self_host_aot_cli_with_project_configuration_and_release_asset_transforms, sign_artifacts,
+    signing_status, verify_artifacts, DesktopNetworkMode, LiveRunConfig, PlayReplayConfig,
     ProjectCompilationConfiguration, SigningOptions, StasisTestRunSession,
 };
 use stasis_assets::{
-    load_project_asset_manifest, prepare_asset_bundle, write_asset_package_identity, AssetFormat,
-    AssetLimits, AudioEncoding, FontEncoding, SpriteEncoding, ASSET_PACKAGE_IDENTITY_PATH,
-    DEFAULT_ASSET_MANIFEST_PATH,
+    load_project_asset_manifest, prepare_asset_bundle, resolve_project_asset_paths,
+    write_asset_package_identity, AssetFormat, AssetLimits, AudioEncoding, FontEncoding,
+    SpriteEncoding, ASSET_PACKAGE_IDENTITY_PATH, DEFAULT_ASSET_MANIFEST_PATH,
 };
 use stasis_compiler::backend::aot::AotProcess;
 use stasis_compiler::backend::jit::{JitExternProfile, JitProcess};
@@ -895,6 +896,15 @@ struct ProjectManifest {
     web: Option<WebProjectManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     settings: Option<ProjectSettingsManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release: Option<ReleaseProjectManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct ReleaseProjectManifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    font_subsetting: Option<crate::release_assets::ReleaseFontSubsettingManifest>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1007,6 +1017,7 @@ impl From<LegacyProjectManifest> for ProjectManifest {
                 atlas_budget_bytes: web.atlas_budget_bytes,
             }),
             settings: None,
+            release: None,
         }
     }
 }
@@ -1102,6 +1113,7 @@ impl ProjectManifest {
             capabilities: None,
             web: None,
             settings: None,
+            release: None,
         }
     }
 
@@ -1115,8 +1127,18 @@ impl ProjectManifest {
         if self.manifest_version == 1 && self.settings.is_some() {
             return Err("project settings require manifest_version 2".to_string());
         }
+        if self.manifest_version == 1 && self.release.is_some() {
+            return Err("release configuration requires manifest_version 2".to_string());
+        }
         if let Some(settings) = self.settings.as_ref() {
             project_settings::validate_manifest(settings)?;
+        }
+        if let Some(font_subsetting) = self
+            .release
+            .as_ref()
+            .and_then(|release| release.font_subsetting.as_ref())
+        {
+            crate::release_assets::validate_font_subsetting_manifest(None, font_subsetting)?;
         }
         validate_project_name(&self.name)?;
         for (field, value) in [
@@ -2211,6 +2233,9 @@ fn parse_project_manifest(bytes: &[u8]) -> Result<ProjectManifest, String> {
             if value.get("settings").is_some() {
                 return Err("project settings require manifest_version 2".to_string());
             }
+            if value.get("release").is_some() {
+                return Err("release configuration requires manifest_version 2".to_string());
+            }
             serde_json::from_value::<LegacyProjectManifest>(value)
                 .map(ProjectManifest::from)
                 .map_err(|error| format!("invalid {MANIFEST_NAME}: {error}"))?
@@ -2240,6 +2265,15 @@ pub(super) fn load_project_configuration(
         target,
         manifest.manifest_version >= 2,
     )
+}
+
+pub(super) fn load_release_font_subsetting(
+    project_dir: &Path,
+) -> Result<Option<crate::release_assets::ReleaseFontSubsettingManifest>, String> {
+    let bytes = fs::read(project_dir.join(MANIFEST_NAME))
+        .map_err(|error| format!("failed to read {MANIFEST_NAME}: {error}"))?;
+    let manifest = parse_project_manifest(&bytes)?;
+    Ok(manifest.release.and_then(|release| release.font_subsetting))
 }
 
 pub(super) fn resolve_manifestless_project_configuration(
@@ -3210,6 +3244,17 @@ fn format_files(
 }
 
 fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
+    if let Some(font_subsetting) = workspace
+        .manifest
+        .release
+        .as_ref()
+        .and_then(|release| release.font_subsetting.as_ref())
+    {
+        crate::release_assets::validate_font_subsetting_manifest(
+            Some(&workspace.root),
+            font_subsetting,
+        )?;
+    }
     let jit = compile_workspace_jit(workspace)?;
     validate_compiled_workspace_assets(workspace, &jit)?;
     Ok(CommandResult::success(
@@ -4715,7 +4760,14 @@ fn build_workspace(
     mode: BuildMode,
     output: Option<&Path>,
 ) -> Result<CommandResult, String> {
-    build_workspace_with_desktop_network(workspace, mode, output, None, None)
+    build_workspace_with_desktop_network(
+        workspace,
+        mode,
+        output,
+        None,
+        None,
+        matches!(mode, BuildMode::Release),
+    )
 }
 
 struct DesktopNetworkBuild<'a> {
@@ -4730,6 +4782,7 @@ fn build_workspace_with_desktop_network(
     output: Option<&Path>,
     desktop_network: Option<DesktopNetworkBuild<'_>>,
     aot_artifact_root: Option<&Path>,
+    apply_release_asset_transforms: bool,
 ) -> Result<CommandResult, String> {
     match mode {
         BuildMode::Dev => {
@@ -4793,7 +4846,12 @@ fn build_workspace_with_desktop_network(
                     .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
             }
             let entry = Path::new(&workspace.manifest.entry);
-            let summary = run_self_host_aot_cli_with_project_configuration(
+            let run_aot = if apply_release_asset_transforms {
+                run_self_host_aot_cli_with_project_configuration_and_release_asset_transforms
+            } else {
+                run_self_host_aot_cli_with_project_configuration
+            };
+            let summary = run_aot(
                 &workspace.root,
                 &output,
                 None,
@@ -4829,15 +4887,21 @@ fn build_workspace_with_desktop_network(
                     )
                 })
                 .transpose()?;
-            stage_workspace_assets(
-                workspace,
-                release_asset_output_directory(
-                    &output,
-                    &summary.linked_image_path,
-                    desktop_network.is_some(),
-                )?,
-                retained.as_ref(),
+            let asset_output = release_asset_output_directory(
+                &output,
+                &summary.linked_image_path,
+                desktop_network.is_some(),
             )?;
+            stage_workspace_assets(workspace, asset_output, retained.as_ref())?;
+            if apply_release_asset_transforms {
+                apply_workspace_release_font_subsetting(
+                    workspace,
+                    asset_output,
+                    build_snapshot,
+                    None,
+                    None,
+                )?;
+            }
             Ok(CommandResult::success(
                 format!(
                     "built release executable: {}",
@@ -5260,6 +5324,7 @@ fn package_workspace(
                     },
                 }),
             Some(aot_artifact_root.path()),
+            !development_build,
         )?;
         let network_target = package_assembly_root.join(".network-rust-target");
         if network_target.exists() {
@@ -5968,6 +6033,13 @@ fn package_web_workspace(
             .program_snapshot()
             .ok_or_else(|| "web compile produced no ProgramSnapshot".to_string())?;
         validate_snapshot_project_configuration(workspace, snapshot, "Web compile")?;
+        let loading_font = workspace
+            .manifest
+            .web
+            .as_ref()
+            .and_then(|web| web.loading_font.as_deref())
+            .map(normalize_web_loading_font_path)
+            .transpose()?;
         let resolved = if development_build {
             validate_program_snapshot_assets(workspace, snapshot)?
         } else {
@@ -5976,21 +6048,30 @@ fn package_web_workspace(
                 snapshot,
             )?)
         };
-        let retained = resolved
+        let mut retained = resolved
             .as_ref()
             .map(|manifest| {
                 crate::release_assets::retain_snapshot_assets(&workspace.root, snapshot, manifest)
             })
             .transpose()?;
+        if !development_build {
+            if let (Some(manifest), Some(loading_font)) =
+                (retained.as_mut(), loading_font.as_deref())
+            {
+                retain_opted_in_web_loading_font(workspace, manifest, loading_font)?;
+            }
+        }
         stage_workspace_assets(workspace, &staging_root, retained.as_ref())?;
         stage_web_loading_font(workspace, &staging_root)?;
-        let loading_font = workspace
-            .manifest
-            .web
-            .as_ref()
-            .and_then(|web| web.loading_font.as_deref())
-            .map(normalize_web_loading_font_path)
-            .transpose()?;
+        if !development_build {
+            apply_workspace_release_font_subsetting(
+                workspace,
+                &staging_root,
+                snapshot,
+                Some(workspace.manifest.name.as_str()),
+                loading_font.as_deref(),
+            )?;
+        }
         let asset_paths =
             staged_web_asset_paths(&staging_root, retained.as_ref(), loading_font.as_deref())?;
         let asset_urls = staged_web_asset_urls(&staging_root, &asset_paths)?;
@@ -6181,6 +6262,7 @@ fn package_web_workspace(
                     bytes,
                 });
             }
+            append_staged_font_license_files(&staging_root, &mut bundle_files)?;
             let bundle = stasis_network::StaticBundle::new(bundle_files)
                 .map_err(|error| format!("failed to create network guest bundle: {error}"))?;
             let encoded = bundle
@@ -6718,6 +6800,103 @@ fn stage_workspace_assets(
     Ok(())
 }
 
+fn apply_workspace_release_font_subsetting(
+    workspace: &Workspace,
+    destination_root: &Path,
+    snapshot: &ProgramSnapshot,
+    shell_title: Option<&str>,
+    shell_font_path: Option<&str>,
+) -> Result<(), String> {
+    let config = workspace
+        .manifest
+        .release
+        .as_ref()
+        .and_then(|release| release.font_subsetting.as_ref());
+    if config.is_none() {
+        return Ok(());
+    }
+    crate::release_assets::apply_release_font_subsetting(
+        &workspace.root,
+        destination_root,
+        &workspace.root.join(".stasis_cache/font-subsets"),
+        snapshot.text_coverage(),
+        config,
+        shell_title,
+        shell_font_path,
+    )?;
+    Ok(())
+}
+
+fn retain_opted_in_web_loading_font(
+    workspace: &Workspace,
+    retained: &mut stasis_assets::ResolvedAssetManifest,
+    loading_font: &str,
+) -> Result<(), String> {
+    let opted_in = workspace
+        .manifest
+        .release
+        .as_ref()
+        .and_then(|release| release.font_subsetting.as_ref())
+        .is_some_and(|config| config.fonts.iter().any(|font| font.path == loading_font));
+    if !opted_in
+        || retained
+            .assets
+            .iter()
+            .any(|asset| asset.entry.path == loading_font)
+    {
+        return Ok(());
+    }
+    if !workspace.root.join(DEFAULT_ASSET_MANIFEST_PATH).is_file() {
+        let mut paths = retained
+            .assets
+            .iter()
+            .map(|asset| asset.entry.path.clone())
+            .collect::<BTreeSet<_>>();
+        paths.insert(loading_font.to_string());
+        *retained = resolve_project_asset_paths(&workspace.root, &paths, AssetLimits::default())
+            .map_err(|error| {
+                format!("failed to infer opted-in Web loading font metadata: {error}")
+            })?;
+        return Ok(());
+    }
+    let source = load_project_asset_manifest(&workspace.root, AssetLimits::default())
+        .map_err(|error| format!("failed to load Web loading font metadata: {error}"))?;
+    let font = source
+        .assets
+        .iter()
+        .find(|asset| asset.entry.path == loading_font)
+        .cloned()
+        .map(Ok)
+        .unwrap_or_else(|| {
+            let paths = BTreeSet::from([loading_font.to_string()]);
+            resolve_project_asset_paths(&workspace.root, &paths, AssetLimits::default())
+                .map_err(|error| {
+                    format!("failed to infer opted-in Web loading font metadata: {error}")
+                })
+                .and_then(|mut inferred| {
+                    inferred.assets.pop().ok_or_else(|| {
+                        format!(
+                            "failed to infer opted-in Web loading font metadata for {loading_font}"
+                        )
+                    })
+                })
+        })?;
+    if retained
+        .assets
+        .iter()
+        .any(|asset| asset.entry.id == font.entry.id || asset.handle == font.handle)
+    {
+        return Err(format!(
+            "inferred Web loading font metadata collides with an authored asset: {loading_font}"
+        ));
+    }
+    retained.assets.push(font);
+    retained
+        .assets
+        .sort_by(|left, right| left.entry.path.cmp(&right.entry.path));
+    Ok(())
+}
+
 fn web_content_hash_url(path: &str, bytes: &[u8]) -> String {
     format!("{path}?hash={:x}", Sha256::digest(bytes))
 }
@@ -7015,6 +7194,56 @@ fn network_guest_asset_mime_for_path(
     }
 }
 
+fn append_staged_font_license_files(
+    staging_root: &Path,
+    bundle_files: &mut Vec<stasis_network::BundleFile>,
+) -> Result<(), String> {
+    let license_root = staging_root.join("font_licenses");
+    if !license_root.is_dir() {
+        return Ok(());
+    }
+    let mut notices = fs::read_dir(&license_root)
+        .map_err(|error| {
+            format!(
+                "failed to inspect staged font licenses {}: {error}",
+                license_root.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to inspect staged font licenses: {error}"))?;
+    notices.sort_by_key(|entry| entry.file_name());
+    for notice in notices {
+        let file_type = notice
+            .file_type()
+            .map_err(|error| format!("failed to inspect staged font license: {error}"))?;
+        if !file_type.is_file()
+            || notice
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                != Some("txt")
+        {
+            continue;
+        }
+        let name = notice
+            .file_name()
+            .into_string()
+            .map_err(|_| "staged font license filename is not valid Unicode".to_string())?;
+        let bytes = fs::read(notice.path()).map_err(|error| {
+            format!(
+                "failed to read staged font license {}: {error}",
+                notice.path().display()
+            )
+        })?;
+        bundle_files.push(stasis_network::BundleFile {
+            path: format!("font_licenses/{name}"),
+            mime: "text/plain; charset=utf-8".to_string(),
+            bytes,
+        });
+    }
+    Ok(())
+}
+
 fn package_mobile_command(
     workspace: &Workspace,
     target: MobilePackageTarget,
@@ -7161,6 +7390,9 @@ fn package_mobile_workspace(
             .arg(entry)
             .arg("--out-dir")
             .arg(&aot_root);
+        if development_build {
+            child_command.arg("--development-build");
+        }
         if !profile_functions.is_empty() {
             child_command
                 .arg("--profile-functions")
@@ -10430,6 +10662,56 @@ mod tests {
             parse_project_manifest(with_settings).unwrap_err(),
             "project settings require manifest_version 2"
         );
+
+        let with_release = br#"{
+            "manifest_version": 1,
+            "name": "legacy",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build",
+            "release": {"font_subsetting": {"fonts": []}}
+        }"#;
+        assert_eq!(
+            parse_project_manifest(with_release).unwrap_err(),
+            "release configuration requires manifest_version 2"
+        );
+    }
+
+    #[test]
+    fn manifest_v2_parses_strict_release_font_subsetting_metadata() {
+        let valid = br#"{
+            "manifest_version": 2,
+            "name": "strict",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build",
+            "release": {"font_subsetting": {"fonts": [{
+                "path": "assets/fonts/ui.ttf",
+                "license_path": "assets/fonts/OFL.txt",
+                "modification_permitted": true,
+                "reserved_names": [],
+                "replacement_family": "Strict UI"
+            }]}}
+        }"#;
+        let parsed = parse_project_manifest(valid).expect("parse release font metadata");
+        let font = &parsed.release.unwrap().font_subsetting.unwrap().fonts[0];
+        assert_eq!(font.path, "assets/fonts/ui.ttf");
+        assert_eq!(font.reserved_names, Vec::<String>::new());
+
+        let missing_reserved_names = br#"{
+            "manifest_version": 2,
+            "name": "strict",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build",
+            "release": {"font_subsetting": {"fonts": [{
+                "path": "assets/fonts/ui.ttf",
+                "license_path": "assets/fonts/OFL.txt",
+                "modification_permitted": true
+            }]}}
+        }"#;
+        let error = parse_project_manifest(missing_reserved_names).unwrap_err();
+        assert!(error.contains("missing field `reserved_names`"), "{error}");
     }
 
     #[test]
@@ -11096,6 +11378,184 @@ mod tests {
             html.contains(r#"font-family: "StasisLoadingFont", Georgia, "Times New Roman", serif"#)
         );
         assert!(!html.contains("__STASIS_"));
+    }
+
+    #[test]
+    fn network_guest_bundle_includes_staged_font_license_notices() {
+        let root = temp_dir("network_guest_font_license");
+        let license_root = root.join("font_licenses");
+        fs::create_dir_all(&license_root).expect("license directory");
+        let notice_name = format!("{}.txt", "a".repeat(64));
+        fs::write(license_root.join(&notice_name), b"font license\n").expect("license notice");
+        let mut files = Vec::new();
+
+        append_staged_font_license_files(&root, &mut files).expect("append license notice");
+        let bundle = stasis_network::StaticBundle::new(files).expect("network guest bundle");
+        let notice = bundle
+            .get(&format!("font_licenses/{notice_name}"))
+            .expect("bundled license notice");
+
+        assert_eq!(notice.mime, "text/plain; charset=utf-8");
+        assert_eq!(notice.bytes, b"font license\n");
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn opted_in_loading_font_is_added_to_an_inferred_asset_manifest() {
+        let root = temp_dir("inferred_loading_font");
+        fs::create_dir_all(root.join("assets/fonts")).expect("font directory");
+        fs::write(root.join("assets/fonts/ui.ttf"), b"font bytes").expect("font fixture");
+        fs::write(root.join("assets/fonts/LICENSE.txt"), b"font license").expect("license fixture");
+        let root = canonical_workspace_root(&root).expect("canonical workspace root");
+        let mut manifest = ProjectManifest::new("inferred-font".to_string());
+        manifest.web = Some(WebProjectManifest {
+            entry: "src/main.stasis".to_string(),
+            replay: false,
+            loading_font: Some("assets/fonts/ui.ttf".to_string()),
+            viewport: None,
+            atlas_budget_bytes: None,
+        });
+        manifest.release = Some(ReleaseProjectManifest {
+            font_subsetting: Some(crate::release_assets::ReleaseFontSubsettingManifest {
+                fonts: vec![crate::release_assets::ReleaseFontSubsetEntry {
+                    path: "assets/fonts/ui.ttf".to_string(),
+                    license_path: "assets/fonts/LICENSE.txt".to_string(),
+                    modification_permitted: true,
+                    reserved_names: Vec::new(),
+                    replacement_family: None,
+                }],
+            }),
+        });
+        let workspace = Workspace {
+            root: root.clone(),
+            manifest,
+            resolved_settings: None,
+        };
+        let mut retained =
+            resolve_project_asset_paths(&root, &BTreeSet::new(), AssetLimits::default())
+                .expect("empty inferred manifest");
+
+        retain_opted_in_web_loading_font(&workspace, &mut retained, "assets/fonts/ui.ttf")
+            .expect("retain loading font");
+
+        assert_eq!(retained.assets.len(), 1);
+        assert_eq!(retained.assets[0].entry.path, "assets/fonts/ui.ttf");
+        let staging = root.join("stage");
+        prepare_asset_bundle(&retained, &staging, root.join("cache"))
+            .expect("prepare inferred font bundle");
+        let prepared: serde_json::Value = serde_json::from_slice(
+            &fs::read(staging.join(DEFAULT_ASSET_MANIFEST_PATH)).expect("prepared manifest"),
+        )
+        .expect("decode prepared manifest");
+        assert_eq!(prepared["assets"][0]["path"], "assets/fonts/ui.ttf");
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn opted_in_loading_font_is_inferred_when_authored_manifest_omits_it() {
+        let root = temp_dir("authored_manifest_missing_loading_font");
+        fs::create_dir_all(root.join("assets/fonts")).expect("font directory");
+        fs::write(root.join("assets/fonts/ui.ttf"), b"loading font bytes")
+            .expect("loading font fixture");
+        fs::write(root.join("assets/fonts/other.ttf"), b"authored font bytes")
+            .expect("authored font fixture");
+        fs::write(root.join("assets/fonts/LICENSE.txt"), b"font license").expect("license fixture");
+        let authored_sha = stasis_assets::sha256_bytes(b"authored font bytes");
+        let authored = json!({
+            "schema": "stasis-assets",
+            "version": 2,
+            "assets": [{
+                "id": "authored-font",
+                "path": "assets/fonts/other.ttf",
+                "content_sha256": authored_sha,
+                "format": {"kind": "font", "encoding": "ttf"},
+                "dependencies": []
+            }]
+        });
+        fs::write(
+            root.join(DEFAULT_ASSET_MANIFEST_PATH),
+            serde_json::to_vec_pretty(&authored).expect("encode authored manifest"),
+        )
+        .expect("authored manifest fixture");
+        let root = canonical_workspace_root(&root).expect("canonical workspace root");
+        let mut manifest = ProjectManifest::new("authored-font".to_string());
+        manifest.web = Some(WebProjectManifest {
+            entry: "src/main.stasis".to_string(),
+            replay: false,
+            loading_font: Some("assets/fonts/ui.ttf".to_string()),
+            viewport: None,
+            atlas_budget_bytes: None,
+        });
+        manifest.release = Some(ReleaseProjectManifest {
+            font_subsetting: Some(crate::release_assets::ReleaseFontSubsettingManifest {
+                fonts: vec![crate::release_assets::ReleaseFontSubsetEntry {
+                    path: "assets/fonts/ui.ttf".to_string(),
+                    license_path: "assets/fonts/LICENSE.txt".to_string(),
+                    modification_permitted: true,
+                    reserved_names: Vec::new(),
+                    replacement_family: None,
+                }],
+            }),
+        });
+        let workspace = Workspace {
+            root: root.clone(),
+            manifest,
+            resolved_settings: None,
+        };
+        let mut retained =
+            load_project_asset_manifest(&root, AssetLimits::default()).expect("authored manifest");
+
+        retain_opted_in_web_loading_font(&workspace, &mut retained, "assets/fonts/ui.ttf")
+            .expect("infer omitted loading font");
+
+        assert_eq!(retained.assets.len(), 2);
+        assert!(retained
+            .assets
+            .iter()
+            .any(|asset| asset.entry.id == "authored-font"));
+        assert!(retained
+            .assets
+            .iter()
+            .any(|asset| asset.entry.path == "assets/fonts/ui.ttf"));
+        let staging = root.join("stage");
+        prepare_asset_bundle(&retained, &staging, root.join("cache"))
+            .expect("prepare combined bundle");
+        let prepared: serde_json::Value = serde_json::from_slice(
+            &fs::read(staging.join(DEFAULT_ASSET_MANIFEST_PATH)).expect("prepared manifest"),
+        )
+        .expect("decode prepared manifest");
+        assert_eq!(prepared["assets"].as_array().expect("asset array").len(), 2);
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn check_rejects_an_opted_in_missing_release_font() {
+        let root = temp_dir("check_missing_release_font");
+        fs::create_dir_all(root.join("assets/fonts")).expect("font directory");
+        fs::write(root.join("assets/fonts/LICENSE.txt"), b"font license").expect("license fixture");
+        let root = canonical_workspace_root(&root).expect("canonical workspace root");
+        let mut manifest = ProjectManifest::new("missing-font".to_string());
+        manifest.release = Some(ReleaseProjectManifest {
+            font_subsetting: Some(crate::release_assets::ReleaseFontSubsettingManifest {
+                fonts: vec![crate::release_assets::ReleaseFontSubsetEntry {
+                    path: "assets/fonts/missing.ttf".to_string(),
+                    license_path: "assets/fonts/LICENSE.txt".to_string(),
+                    modification_permitted: true,
+                    reserved_names: Vec::new(),
+                    replacement_family: None,
+                }],
+            }),
+        });
+        let workspace = Workspace {
+            root: root.clone(),
+            manifest,
+            resolved_settings: None,
+        };
+
+        let error = check_workspace(&workspace).expect_err("missing release font must fail check");
+
+        assert!(error.contains("assets/fonts/missing.ttf"), "{error}");
+        remove_temp(&root);
     }
 
     #[test]
