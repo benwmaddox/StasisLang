@@ -33,6 +33,11 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.workshop_activity = read(
             "mobile/android/app/src/workshop/java/com/stasislang/workshop/MainActivity.java"
         )
+        cls.surface_readiness = read(
+            "mobile/android/app/src/main/java/com/stasislang/workshop/"
+            "WorkshopRenderSurfaceReadiness.java"
+        )
+        cls.capture_manifest = json.loads(read("samples/render_parity/capture_manifest.json"))
         cls.preview_renderer = read(
             "mobile/android/app/src/main/java/com/stasislang/workshop/"
             "StasisPreviewRenderer.java"
@@ -717,6 +722,61 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertNotIn("--viewport-y-search-radius=0", self.workshop_script)
         self.assertNotIn("--viewport-y-search-radius=1080", self.workshop_script)
         self.assertNotIn("min_coverage", self.workshop_script)
+
+    def test_observed_workshop_surface_maps_to_exact_crop_on_test_avd(self):
+        app_window = (0, 136, 1080, 2337)
+        surface = (
+            app_window[0],
+            app_window[1],
+            app_window[2] - app_window[0],
+            app_window[3] - app_window[1],
+        )
+        logical_width, logical_height = 640, 360
+        width, height = surface[2], surface[3]
+        if width * logical_height > height * logical_width:
+            viewport_width = int(height * logical_width / logical_height + 0.5)
+            viewport_left = surface[0] + (width - viewport_width) // 2
+            viewport = (viewport_left, surface[1], viewport_width, height)
+        else:
+            viewport_height = int(width * logical_height / logical_width + 0.5)
+            # Renderer y is bottom-origin and integer-divided; flip that fitted rect to screen top-origin.
+            viewport_top = surface[1] + (height - viewport_height + 1) // 2
+            viewport = (surface[0], viewport_top, width, viewport_height)
+        # Preserve the failed run's floor-based diagnostic as a historical fixture.
+        reported_height = width * logical_height // logical_width
+        reported_top = surface[1] + (height - reported_height) // 2
+        reported_pre_fix_viewport = (surface[0], reported_top, width, reported_height)
+        self.assertEqual((0, 933, 1080, 607), reported_pre_fix_viewport)
+        self.assertEqual((0, 933, 1080, 608), viewport)
+        self.assertNotEqual(reported_pre_fix_viewport, viewport)
+        self.assertIn("-Headless -AvdName test", self.workflow)
+        self.assertIn(
+            "$viewportHeight = [int][math]::Floor(($width * $logicalHeight / $logicalWidth) + 0.5)",
+            self.workshop_script,
+        )
+        self.assertIn(
+            "$viewportTop = $Surface[1] + [int][math]::Ceiling(($height - $viewportHeight) / 2.0)",
+            self.workshop_script,
+        )
+
+        android_regions = self.capture_manifest["capture_profiles"]["android_emulator"]["regions"]
+        atlas = next(region for region in android_regions if region["name"] == "atlas_canvas_sprite")
+        self.assertEqual(0.40, atlas["min_coverage"])
+
+    def test_workshop_waits_for_usable_surface_before_render_acceptance(self):
+        activity = self.workshop_activity
+        gate = activity.index("WorkshopRenderSurfaceReadiness.hasTimedOut")
+        abi_acceptance = activity.index("WorkshopJniFrameAbiAcceptance.run")
+        self.assertLess(gate, abi_acceptance)
+        self.assertIn(
+            "RENDER_ACCEPTANCE_SURFACE_READY_TIMEOUT_MS = 30_000L", activity
+        )
+        self.assertIn("renderAcceptanceSurfaceWaitStartedAtMillis", activity)
+        self.assertIn("gamePreview.isAcceptanceSurfaceReady()", activity)
+        self.assertIn("preview surface is not ready:", activity)
+        self.assertIn("renderer.drawableWidth(), renderer.drawableHeight()", activity)
+        self.assertIn("surface readiness timed out", activity.lower())
+        self.assertIn("return width > 1 && height > 1;", self.surface_readiness)
 
     def test_workshop_collects_and_verifies_it029_identity_captures(self):
         for phase in (
