@@ -968,6 +968,51 @@ extern function measure_text(font: i32, text: string): f32;
         )
     }
 
+    fn compile_unlinked_release_text_coverage(source: &str) -> ProgramSnapshot {
+        let mut compiler = crate::compiler::Compiler::new();
+        let seam_path = "tests/stasis/text_coverage_graphics_seam.stasis";
+        compiler.upsert_file(seam_path, TEXT_COVERAGE_EXTERN_PRELUDE);
+        compiler.upsert_file("main.stasis", format!("import \"{seam_path}\";\n{source}"));
+        compiler
+            .index_pass()
+            .expect("index unlinked coverage fixture");
+        compiler
+            .types_mut()
+            .ensure_utf8_view_id()
+            .expect("register utf8 view");
+        compiler
+            .types_mut()
+            .ensure_ascii_view_id()
+            .expect("register ascii view");
+        let mut types = compiler.types().clone();
+        let revision = compute_files_fingerprint(compiler.files());
+        let analysis = build_compile_analysis_cache(
+            compiler.files(),
+            compiler.functions(),
+            &mut types,
+            revision,
+            resolve_preferred_extern_call_signatures,
+        )
+        .expect("analyze unlinked coverage fixture");
+        let function_hirs = compiler
+            .analysis_hirs(&[])
+            .expect("lower unlinked coverage fixture");
+        ProgramSnapshot::build(
+            ReachabilityPolicy::Release,
+            revision,
+            compiler.files(),
+            compiler.module_graph(),
+            compiler.functions(),
+            &types,
+            compiler.data_flow_summaries_shared(),
+            &[],
+            &function_hirs,
+            analysis,
+            None,
+        )
+        .expect("build unlinked release snapshot")
+    }
+
     #[test]
     fn text_coverage_proves_literal_constant_and_finite_helper_union_with_backend_parity() {
         let (jit, aot) = compile_text_coverage_pair(
@@ -1081,6 +1126,62 @@ function main(): i32 {
         assert_eq!(unicode_scalars, &[69, 72, 76, 80]);
         assert_eq!(fonts[0].path, "assets/helper.ttf");
         assert_eq!(sinks.len(), 1);
+    }
+
+    #[test]
+    fn text_coverage_unions_shared_font_text_across_sizes_and_paths() {
+        let (_, aot) = compile_text_coverage_pair(
+            r#"
+function label_width(font: i32): f32 { return measure_text(font, "SMALL"); }
+function main(): i32 {
+    let small: i32 = load_font("assets/shared.ttf", 12);
+    let large: i32 = load_font("assets/shared.ttf", 48);
+    let first: f32 = label_width(small);
+    let second: f32 = measure_text(large, "LARGE 42");
+    return 0;
+}
+"#,
+        );
+        let TextCoverageProof::Finite {
+            unicode_scalars,
+            fonts,
+            sinks,
+        } = aot.text_coverage()
+        else {
+            panic!("shared finite font uses should remain finite");
+        };
+        assert_eq!(unicode_scalars, &[32, 50, 52, 65, 69, 71, 76, 77, 82, 83]);
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].path, "assets/shared.ttf");
+        assert_eq!(sinks.len(), 2);
+    }
+
+    #[test]
+    fn text_coverage_rejects_custom_external_text_and_dynamic_font_loading() {
+        let snapshot = compile_unlinked_release_text_coverage(
+            r#"
+function @extern("custom_localized_label") localized_label(): string;
+function @extern("custom_dynamic_font_path") dynamic_font_path(): string;
+function @extern("custom_text_operation") custom_text_operation(value: utf8[]): i32;
+global outbound_text: utf8[16];
+function main(): i32 {
+    if (custom_text_operation(outbound_text) == 1) { return 1; }
+    let font: i32 = load_font(dynamic_font_path(), 18);
+    let width: f32 = measure_text(font, localized_label());
+    return 0;
+}
+"#,
+        );
+        let TextCoverageProof::Unknown { reasons, .. } = snapshot.text_coverage() else {
+            panic!("custom external text and a dynamic font path must remain unknown");
+        };
+        let codes = reasons
+            .iter()
+            .map(|reason| reason.code.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(codes.contains("custom_text_extern"), "{codes:?}");
+        assert!(codes.contains("unknown_font"));
+        assert!(codes.contains("unknown_text_value"));
     }
 
     #[test]

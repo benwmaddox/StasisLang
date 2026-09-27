@@ -11,6 +11,9 @@ mod live_workspace;
 mod mobile_aot_bindings;
 mod play_error_toasts;
 mod record_replay;
+// The CLI binary owns release packaging; the library includes this module for
+// its shared asset-validation tests but does not call the packaging entrypoints.
+#[allow(dead_code)]
 mod release_assets;
 mod runtime_exec;
 mod stasis_test_runner;
@@ -29,6 +32,8 @@ pub use compiler_backend::run_self_host_aot_cli_with_desktop_network_and_artifac
 pub use compiler_backend::run_self_host_aot_cli_with_options;
 pub use compiler_backend::run_self_host_aot_cli_with_options_and_artifact_root;
 pub use compiler_backend::run_self_host_aot_cli_with_project_configuration;
+#[doc(hidden)]
+pub use compiler_backend::run_self_host_aot_cli_with_project_configuration_and_release_asset_transforms;
 pub use compiler_backend::sign_output_artifact_if_configured;
 pub use compiler_backend::{DesktopNetworkMode, ProjectCompilationConfiguration};
 pub use events::RunnerEvent;

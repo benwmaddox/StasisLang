@@ -120,6 +120,7 @@ struct MobileAotBundleArgs {
     profile_functions: Vec<String>,
     profile_warmup_frames: u32,
     profile_sample_frames: u32,
+    development_build: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1692,6 +1693,7 @@ fn parse_mobile_aot_bundle_args(args: &[String]) -> Result<MobileAotBundleArgs, 
     let mut profile_functions = Vec::new();
     let mut profile_warmup_frames = 120_u32;
     let mut profile_sample_frames = 300_u32;
+    let mut development_build = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -1754,6 +1756,10 @@ fn parse_mobile_aot_bundle_args(args: &[String]) -> Result<MobileAotBundleArgs, 
                     .map_err(|error| format!("invalid --profile-sample-frames: {error}"))?;
                 i += 2;
             }
+            "--development-build" => {
+                development_build = true;
+                i += 1;
+            }
             other if other.starts_with("--") => {
                 return Err(format!("unknown mobile AOT bundle flag '{other}'"));
             }
@@ -1781,6 +1787,7 @@ fn parse_mobile_aot_bundle_args(args: &[String]) -> Result<MobileAotBundleArgs, 
         profile_functions,
         profile_warmup_frames,
         profile_sample_frames,
+        development_build,
     })
 }
 
@@ -1807,6 +1814,7 @@ fn try_run_mobile_aot_bundle_subcommand() -> Option<i32> {
         &parsed.profile_functions,
         parsed.profile_warmup_frames,
         parsed.profile_sample_frames,
+        parsed.development_build,
     ) {
         Ok(summary) => {
             println!("mobile_aot_target={}", summary.target.as_str());
@@ -1920,6 +1928,7 @@ fn write_android_aot_engine_bundle(
         &[],
         0,
         0,
+        false,
     )?;
     let cmake_file = summary
         .cmake_file
@@ -1942,6 +1951,7 @@ fn write_mobile_aot_engine_bundle(
     profile_functions: &[String],
     profile_warmup_frames: u32,
     profile_sample_frames: u32,
+    development_build: bool,
 ) -> Result<MobileAotBundleSummary, String> {
     let canonical_target = match target {
         MobileAotTarget::AndroidArm64 => {
@@ -2016,7 +2026,19 @@ fn write_mobile_aot_engine_bundle(
         profile_sample_frames,
         replay_state_snapshot.as_ref(),
     )?;
-    let asset_dir = write_mobile_asset_bundle(target, output_dir, &resolved)?;
+    let font_subsetting = if !development_build && project_dir.join("stasis.json").is_file() {
+        toolchain_cli::load_release_font_subsetting(project_dir)?
+    } else {
+        None
+    };
+    let asset_dir = write_mobile_asset_bundle(
+        target,
+        project_dir,
+        output_dir,
+        &resolved,
+        Some(&snapshot),
+        font_subsetting.as_ref(),
+    )?;
     let asset_manifest_path = asset_dir
         .join("stasis_game")
         .join(DEFAULT_ASSET_MANIFEST_PATH);
@@ -2084,8 +2106,11 @@ fn write_mobile_aot_engine_bundle(
 
 fn write_mobile_asset_bundle(
     target: MobileAotTarget,
+    project_dir: &Path,
     output_dir: &Path,
     resolved: &stasis_assets::ResolvedAssetManifest,
+    snapshot: Option<&stasis_compiler::backend::program_snapshot::ProgramSnapshot>,
+    font_subsetting: Option<&release_assets::ReleaseFontSubsettingManifest>,
 ) -> Result<PathBuf, String> {
     let asset_root = output_dir.join(target.asset_root_dir());
     if asset_root.exists() {
@@ -2103,6 +2128,20 @@ fn write_mobile_asset_bundle(
         output_dir.join("asset-preparation-cache"),
     )
     .map_err(|error| format!("failed to prepare mobile AOT assets: {error}"))?;
+    if let Some(font_subsetting) = font_subsetting {
+        let snapshot = snapshot.ok_or_else(|| {
+            "release font subsetting requires the authoritative mobile ProgramSnapshot".to_string()
+        })?;
+        release_assets::apply_release_font_subsetting(
+            project_dir,
+            &game_root,
+            &output_dir.join("asset-preparation-cache/font-subsets"),
+            snapshot.text_coverage(),
+            Some(font_subsetting),
+            None,
+            None,
+        )?;
+    }
     Ok(asset_root)
 }
 
@@ -3231,6 +3270,7 @@ mod tests {
             "src/main.stasis".to_string(),
             "--out-dir".to_string(),
             "target/mobile-aot-simulator".to_string(),
+            "--development-build".to_string(),
         ];
         let parsed = parse_mobile_aot_bundle_args(&args).expect("parse should succeed");
         assert_eq!(parsed.target, MobileAotTarget::IosSimulatorArm64);
@@ -3240,6 +3280,7 @@ mod tests {
             AotTarget::ios_simulator_arm64_default()
         );
         assert_eq!(parsed.target.asset_root_dir(), "ios_assets");
+        assert!(parsed.development_build);
     }
 
     #[test]
@@ -3284,6 +3325,7 @@ mod tests {
         assert_eq!(parsed.profile_functions, ["render", "draw_board"]);
         assert_eq!(parsed.profile_warmup_frames, 30);
         assert_eq!(parsed.profile_sample_frames, 90);
+        assert!(!parsed.development_build);
     }
 
     #[test]
@@ -3569,9 +3611,15 @@ function main(): i32 { request_font("../assets/fonts/ui.ttf", 16); return 0; }
         )];
 
         let resolved = retained_mobile_assets(&project_dir, &sources);
-        let asset_root =
-            write_mobile_asset_bundle(MobileAotTarget::AndroidArm64, &output_dir, &resolved)
-                .expect("package font asset");
+        let asset_root = write_mobile_asset_bundle(
+            MobileAotTarget::AndroidArm64,
+            &project_dir,
+            &output_dir,
+            &resolved,
+            None,
+            None,
+        )
+        .expect("package font asset");
 
         assert!(asset_root.join("stasis_game/assets/fonts/ui.ttf").is_file());
         assert!(!asset_root
@@ -3624,8 +3672,9 @@ function main(): void { request_sprite("../assets/svg/used.svg", 32, 32); }
         for target in [MobileAotTarget::AndroidArm64, MobileAotTarget::IosArm64] {
             let output_dir = root.join(target.as_str());
             let resolved = retained_mobile_assets(&project_dir, &sources);
-            let asset_root = write_mobile_asset_bundle(target, &output_dir, &resolved)
-                .expect("package filtered assets");
+            let asset_root =
+                write_mobile_asset_bundle(target, &project_dir, &output_dir, &resolved, None, None)
+                    .expect("package filtered assets");
             let game_root = asset_root.join("stasis_game");
             assert!(game_root.join("assets/svg/used.svg").is_file());
             assert!(!game_root.join("assets/svg/unused.svg").exists());
@@ -3675,6 +3724,7 @@ function render(): i32 { return 0; }
             &[],
             0,
             0,
+            false,
         )
         .expect("package inferred mobile assets");
 
@@ -3760,6 +3810,7 @@ function frame_width(): i32 { return 360; }
             &[],
             0,
             0,
+            false,
         ) {
             Ok(_) => panic!("cyclic imports must be rejected by the compiler graph"),
             Err(error) => error,
@@ -3802,6 +3853,7 @@ function frame_width(): i32 { return 360; }
                 &[],
                 0,
                 0,
+                false,
             )
             .expect("release mobile bundle");
             let manifest: serde_json::Value = serde_json::from_slice(
@@ -3875,6 +3927,7 @@ function frame_width(): i32 { return 360; }
             &[],
             0,
             0,
+            false,
         )
         .expect("missing on_code_swap should be accepted for mobile");
         let header = fs::read_to_string(&summary.symbols_header).expect("read symbols header");
@@ -3930,6 +3983,7 @@ function frame_width(): i32 { return 360; }
             &[],
             0,
             0,
+            false,
         )
         .expect("write iOS mobile AOT bundle");
 

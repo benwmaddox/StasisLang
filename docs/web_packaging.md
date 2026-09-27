@@ -161,6 +161,13 @@ validate the path before producing output. Web packages retain the configured fo
 game does not load it through Stasis code, preload it in the HTML shell, and use it for the loading
 title. Projects without this field keep the Georgia fallback and the same loading DOM contract.
 
+When the loading font is also opted into manifest-v2 `release.font_subsetting`, release packaging
+adds every Unicode scalar from both the authored loading title and its CSS-rendered uppercase form
+to the compiler's finite coverage before invoking the pinned subsetter. The transform runs after loading-font staging, so the static-shell copy cannot
+overwrite the final bytes. Development Web packages keep the complete source font. See
+[`text-coverage-proof.md`](text-coverage-proof.md) for the conservative proof and legal metadata
+contract.
+
 ## Runtime contract
 
 The browser owns `requestAnimationFrame`, input collection, Canvas 2D command execution, WebAudio,

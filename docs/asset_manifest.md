@@ -103,8 +103,11 @@ image from those whole cells, keeping frame boundaries exact and dimensions
 divisible by the declared grid.
 
 Fonts use `{"kind":"font","encoding":"ttf"}` or
-`{"kind":"font","encoding":"otf"}`. They are hash-validated and copied unchanged; sprite
-preparation metadata is not valid for fonts.
+`{"kind":"font","encoding":"otf"}`. They are hash-validated and copied unchanged by
+default; sprite preparation metadata is not valid for fonts. Manifest-v2 projects may opt
+individual TTF files into release-only subsetting through `release.font_subsetting`; see
+[`text-coverage-proof.md`](text-coverage-proof.md). Development packages, OTF files, and every
+font whose reachable text coverage is not proven finite retain the source bytes.
 
 Audio uses `{"kind":"audio","encoding":"wav","sample_rate":24000,"channels":1,"duration_frames":24000}`.
 The shared runtime playback slice accepts bounded little-endian PCM16 WAV and MP3 files through

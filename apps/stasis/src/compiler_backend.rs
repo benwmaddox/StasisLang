@@ -552,6 +552,7 @@ pub struct SelfHostedAotCliOptions {
     desktop_network: Option<DesktopNetworkLink>,
     artifact_root: Option<PathBuf>,
     project_configuration: Option<ProjectCompilationConfiguration>,
+    apply_release_asset_transforms: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -591,6 +592,7 @@ impl SelfHostedAotCliOptions {
             desktop_network: None,
             artifact_root: None,
             project_configuration: None,
+            apply_release_asset_transforms: false,
         }
     }
 
@@ -618,6 +620,11 @@ impl SelfHostedAotCliOptions {
         project_configuration: ProjectCompilationConfiguration,
     ) -> Self {
         self.project_configuration = Some(project_configuration);
+        self
+    }
+
+    fn with_release_asset_transforms(mut self) -> Self {
+        self.apply_release_asset_transforms = true;
         self
     }
 }
@@ -5005,6 +5012,7 @@ fn package_engine_bundle_monolithic_desktop(
     output_exe: &Path,
     project_dir: &Path,
     desktop_network: Option<&DesktopNetworkLink>,
+    apply_release_asset_transforms: bool,
 ) -> Result<SelfHostedAotCliSummary, String> {
     let repo_root = self_host_repo_root()?;
     let aot_root = backend.aot_artifact_root.join("desktop_monolith");
@@ -5050,6 +5058,21 @@ fn package_engine_bundle_monolithic_desktop(
                 project_dir.join(".stasis_cache/assets"),
             )
             .map_err(|error| format!("failed to prepare desktop replay asset manifest: {error}"))?;
+            if apply_release_asset_transforms {
+                if let Some(config) =
+                    crate::release_assets::load_release_font_subsetting_manifest(project_dir)?
+                {
+                    crate::release_assets::apply_release_font_subsetting(
+                        project_dir,
+                        &replay_asset_manifest_root,
+                        &project_dir.join(".stasis_cache/font-subsets"),
+                        snapshot.text_coverage(),
+                        Some(&config),
+                        None,
+                        None,
+                    )?;
+                }
+            }
             let manifest_path = replay_asset_manifest_root.join(DEFAULT_ASSET_MANIFEST_PATH);
             let bytes = std::fs::read(&manifest_path).map_err(|error| {
                 format!(
@@ -5376,6 +5399,7 @@ fn package_engine_bundle_release(
     project_dir: &Path,
     entry_file_override: Option<&Path>,
     desktop_network: Option<&DesktopNetworkLink>,
+    apply_release_asset_transforms: bool,
 ) -> Result<SelfHostedAotCliSummary, String> {
     let manifest = backend.read_engine_bundle_manifest(&bundle.manifest_path)?;
     let entry_symbol = resolve_engine_bundle_symbol(&manifest, "main")?;
@@ -5434,6 +5458,7 @@ fn package_engine_bundle_release(
             packaged_output_exe,
             project_dir,
             desktop_network,
+            apply_release_asset_transforms,
         );
     }
     let host_manifest: serde_json::Value = serde_json::from_slice(
@@ -9957,6 +9982,7 @@ fn run_self_host_aot_cli_with_backend_and_options(
             project_dir,
             options.entry_file.as_deref(),
             options.desktop_network.as_ref(),
+            options.apply_release_asset_transforms,
         )?
     } else {
         let main_entries: Vec<_> = function_entries
@@ -10074,6 +10100,33 @@ pub fn run_self_host_aot_cli_with_project_configuration(
         entry_file.map(PathBuf::from),
     )
     .with_project_configuration(project_configuration);
+    if let Some(artifact_root) = artifact_root {
+        options = options.with_artifact_root(artifact_root.to_path_buf());
+    }
+    if let Some((library, include_dir, mode)) = desktop_network {
+        options =
+            options.with_desktop_network(library.to_path_buf(), include_dir.to_path_buf(), mode);
+    }
+    run_self_host_aot_cli_with_cli_options(project_dir, output_exe, options)
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn run_self_host_aot_cli_with_project_configuration_and_release_asset_transforms(
+    project_dir: &Path,
+    output_exe: &Path,
+    summary_file_path: Option<&Path>,
+    entry_file: Option<&Path>,
+    artifact_root: Option<&Path>,
+    desktop_network: Option<(&Path, &Path, DesktopNetworkMode)>,
+    project_configuration: ProjectCompilationConfiguration,
+) -> Result<SelfHostedAotCliSummary, String> {
+    let mut options = SelfHostedAotCliOptions::new(
+        summary_file_path.map(PathBuf::from),
+        entry_file.map(PathBuf::from),
+    )
+    .with_project_configuration(project_configuration)
+    .with_release_asset_transforms();
     if let Some(artifact_root) = artifact_root {
         options = options.with_artifact_root(artifact_root.to_path_buf());
     }

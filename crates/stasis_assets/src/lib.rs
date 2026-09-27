@@ -913,6 +913,18 @@ pub fn prepare_asset_bundle(
     manifest
         .assets
         .retain(|entry| by_id.contains_key(entry.id.as_str()));
+    let mut manifest_ids = manifest
+        .assets
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect::<BTreeSet<_>>();
+    manifest.assets.extend(
+        resolved
+            .assets
+            .iter()
+            .filter(|asset| manifest_ids.insert(asset.entry.id.clone()))
+            .map(|asset| asset.entry.clone()),
+    );
     manifest
         .dynamic_assets
         .retain(|path| resolved.dynamic_assets.contains(path));
