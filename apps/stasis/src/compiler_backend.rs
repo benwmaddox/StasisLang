@@ -19,6 +19,8 @@ use stasis_runner::swap::contracts::{
 };
 use stasis_runner::swap::pipeline::CompilerBackend;
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(windows)]
+use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -4274,121 +4276,650 @@ fn create_monolith_cmake_build_dir(
 }
 
 #[cfg(windows)]
-fn resolve_vcvars64() -> Result<PathBuf, String> {
-    let mut installation_roots = Vec::new();
-    let mut vswhere_paths = vec![
-        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
-        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
-    ];
-    if let Ok(output) = std::process::Command::new("vswhere.exe")
-        .args([
-            "-latest",
-            "-products",
-            "*",
-            "-requires",
-            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-            "-property",
-            "installationPath",
-        ])
-        .output()
-    {
-        if output.status.success() {
-            installation_roots.extend(
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(PathBuf::from),
-            );
+const WINDOWS_MSVC_COMPONENTS: [&str; 2] = [
+    "Microsoft.Component.MSBuild",
+    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+];
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VsWhereInstallation {
+    installation_path: String,
+    installation_version: String,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsVisualStudioInstallation {
+    root: PathBuf,
+    version: String,
+    generator: String,
+}
+
+#[cfg(windows)]
+struct MonolithCmakeRunner {
+    cmake: PathBuf,
+    installation: WindowsVisualStudioInstallation,
+    environment: Vec<(OsString, OsString)>,
+}
+
+#[cfg(not(windows))]
+struct MonolithCmakeRunner;
+
+#[cfg(windows)]
+fn visual_studio_generator(version: &str) -> Result<&'static str, String> {
+    match version.split('.').next() {
+        Some("18") => Ok("Visual Studio 18 2026"),
+        Some("17") => Ok("Visual Studio 17 2022"),
+        _ => Err(format!(
+            "Visual Studio installation version {version:?} is not supported; expected Visual Studio 2022 (17.x) or 2026 (18.x)"
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn visual_studio_version_parts(version: &str) -> Vec<u32> {
+    version
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0))
+        .collect()
+}
+
+#[cfg(windows)]
+fn newest_supported_visual_studio_installations(
+    mut installations: Vec<WindowsVisualStudioInstallation>,
+    supported_generators: &BTreeSet<String>,
+) -> (Vec<WindowsVisualStudioInstallation>, Vec<String>) {
+    installations.sort_by(|left, right| {
+        visual_studio_version_parts(&right.version).cmp(&visual_studio_version_parts(&left.version))
+    });
+    let mut skipped = Vec::new();
+    installations.retain(|installation| {
+        if supported_generators.contains(&installation.generator) {
+            true
+        } else {
+            skipped.push(format!(
+                "{} ({}): installed CMake does not support {}",
+                installation.root.display(),
+                installation.version,
+                installation.generator
+            ));
+            false
+        }
+    });
+    (installations, skipped)
+}
+
+#[cfg(windows)]
+fn parse_vswhere_installations(
+    stdout: &[u8],
+) -> Result<(Vec<WindowsVisualStudioInstallation>, Vec<String>), String> {
+    let rows: Vec<VsWhereInstallation> = serde_json::from_slice(stdout)
+        .map_err(|error| format!("could not parse vswhere.exe JSON output: {error}"))?;
+    let mut installations = Vec::new();
+    let mut skipped = Vec::new();
+    for row in rows {
+        match visual_studio_generator(&row.installation_version) {
+            Ok(generator) => installations.push(WindowsVisualStudioInstallation {
+                root: PathBuf::from(row.installation_path),
+                version: row.installation_version,
+                generator: generator.to_string(),
+            }),
+            Err(reason) => skipped.push(format!(
+                "{} ({}): {reason}",
+                row.installation_path, row.installation_version
+            )),
         }
     }
-    for path in vswhere_paths.drain(..) {
-        if !path.is_file() {
+    Ok((installations, skipped))
+}
+
+#[cfg(windows)]
+fn normalize_windows_environment<I>(variables: I) -> Vec<(OsString, OsString)>
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
+    let mut environment = BTreeMap::<String, (OsString, OsString)>::new();
+    let mut path_values = Vec::<(bool, OsString)>::new();
+    for (key, value) in variables {
+        let key_text = key.to_string_lossy();
+        if key_text.is_empty() || key_text.starts_with('=') {
             continue;
         }
-        if let Ok(output) = std::process::Command::new(&path)
-            .args([
-                "-latest",
-                "-products",
-                "*",
-                "-requires",
-                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-                "-property",
-                "installationPath",
-            ])
-            .output()
-        {
-            if output.status.success() {
-                installation_roots.extend(
-                    String::from_utf8_lossy(&output.stdout)
-                        .lines()
-                        .map(str::trim)
-                        .filter(|line| !line.is_empty())
-                        .map(PathBuf::from),
+        if key_text.eq_ignore_ascii_case("path") {
+            path_values.push((key_text == "Path", value));
+            continue;
+        }
+        environment
+            .entry(key_text.to_ascii_lowercase())
+            .or_insert((key, value));
+    }
+
+    path_values.sort_by_key(|(canonical, _)| !canonical);
+    let mut seen_paths = BTreeSet::new();
+    let mut paths = Vec::new();
+    for (_, value) in path_values {
+        for raw_path in value.to_string_lossy().split(';') {
+            let path = raw_path.trim().trim_matches('"');
+            if path.is_empty() {
+                continue;
+            }
+            let identity = path.trim_end_matches(['\\', '/']).to_ascii_lowercase();
+            if seen_paths.insert(identity) {
+                paths.push(path.to_string());
+            }
+        }
+    }
+    if !paths.is_empty() {
+        environment.insert(
+            "path".to_string(),
+            (OsString::from("Path"), OsString::from(paths.join(";"))),
+        );
+    }
+    environment.into_values().collect()
+}
+
+#[cfg(windows)]
+fn environment_value<'a>(environment: &'a [(OsString, OsString)], name: &str) -> Option<&'a OsStr> {
+    environment
+        .iter()
+        .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_os_str())
+}
+
+#[cfg(windows)]
+fn push_unique_windows_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    let identity = path.to_string_lossy().to_ascii_lowercase();
+    if !paths
+        .iter()
+        .any(|existing| existing.to_string_lossy().to_ascii_lowercase() == identity)
+    {
+        paths.push(path);
+    }
+}
+
+#[cfg(windows)]
+fn executable_candidates(
+    executable_name: &str,
+    environment: &[(OsString, OsString)],
+    conventional_paths: impl IntoIterator<Item = PathBuf>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = environment_value(environment, "Path") {
+        for directory in path.to_string_lossy().split(';') {
+            let directory = directory.trim().trim_matches('"');
+            if !directory.is_empty() {
+                push_unique_windows_path(
+                    &mut candidates,
+                    PathBuf::from(directory).join(executable_name),
                 );
             }
         }
     }
-    for root in [
-        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools",
-        r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools",
-        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Community",
-        r"C:\Program Files\Microsoft Visual Studio\2022\Community",
-        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Professional",
-        r"C:\Program Files\Microsoft Visual Studio\2022\Professional",
-        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\Enterprise",
-        r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise",
-    ] {
-        installation_roots.push(PathBuf::from(root));
+    for path in conventional_paths {
+        push_unique_windows_path(&mut candidates, path);
     }
-    for root in installation_roots {
-        let candidate = root.join(r"VC\Auxiliary\Build\vcvars64.bat");
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err("Visual Studio vcvars64.bat was not found. Install the C++ desktop workload (including MSVC x64/x86 build tools) or add vswhere.exe to PATH".to_string())
+    candidates
 }
 
 #[cfg(windows)]
-fn run_monolith_cmake(arguments: &[String]) -> Result<std::process::Output, String> {
-    let vcvars = resolve_vcvars64()?;
-    let quoted_arguments = arguments
-        .iter()
-        .map(|argument| format!("\"{}\"", argument.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" ");
+fn decode_windows_command_output(bytes: &[u8]) -> String {
+    if bytes.len() >= 2
+        && bytes.len() % 2 == 0
+        && (bytes.starts_with(&[0xff, 0xfe]) || bytes[1] == 0)
+    {
+        let words = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        String::from_utf16_lossy(&words)
+            .trim_start_matches('\u{feff}')
+            .to_string()
+    } else {
+        String::from_utf8_lossy(bytes).to_string()
+    }
+}
+
+#[cfg(windows)]
+fn parse_windows_environment(text: &str) -> Vec<(OsString, OsString)> {
+    normalize_windows_environment(text.lines().filter_map(|line| {
+        let line = line.trim_end_matches('\r');
+        let (key, value) = line.split_once('=')?;
+        if key.is_empty() || key.starts_with('=') {
+            return None;
+        }
+        Some((OsString::from(key), OsString::from(value)))
+    }))
+}
+
+#[cfg(windows)]
+fn capture_vcvars64_environment(
+    vcvars64: &Path,
+    base_environment: &[(OsString, OsString)],
+) -> Result<Vec<(OsString, OsString)>, String> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| format!("system clock failed while staging CMake: {error}"))?
+        .map_err(|error| format!("system clock failed while staging vcvars64: {error}"))?
         .as_nanos();
     let script_path = std::env::temp_dir().join(format!(
-        "stasis_monolith_cmake_{}_{}.cmd",
+        "stasis_capture_vcvars64_{}_{}.cmd",
         std::process::id(),
         stamp
     ));
-    let script = format!(
-        "@echo off\r\ncall \"{}\" >nul\r\nif errorlevel 1 exit /b %errorlevel%\r\ncmake {quoted_arguments}\r\n",
-        vcvars.display()
-    );
-    std::fs::write(&script_path, script)
-        .map_err(|error| format!("failed to stage {}: {error}", script_path.display()))?;
-    let output = std::process::Command::new("cmd.exe")
-        .arg("/d")
-        .arg("/c")
+    std::fs::write(
+        &script_path,
+        "@echo off\r\ncall \"%~1\" >nul\r\nif errorlevel 1 exit /b %errorlevel%\r\nset\r\n",
+    )
+    .map_err(|error| format!("failed to stage {}: {error}", script_path.display()))?;
+    let mut command = std::process::Command::new("cmd.exe");
+    command
+        .args(["/d", "/u", "/c"])
         .arg(&script_path)
-        .output()
-        .map_err(|error| format!("failed to launch CMake in the MSVC environment: {error}"));
+        .arg(vcvars64)
+        .env_clear()
+        .envs(base_environment.iter().map(|(key, value)| (key, value)));
+    let output = command.output().map_err(|error| {
+        format!(
+            "failed to launch Visual Studio environment script {}: {error}",
+            vcvars64.display()
+        )
+    });
     let _ = std::fs::remove_file(&script_path);
-    output
+    let output = output?;
+    if !output.status.success() {
+        return Err(format!(
+            "Visual Studio environment script {} failed with {}\nstdout:\n{}\nstderr:\n{}",
+            vcvars64.display(),
+            output.status,
+            decode_windows_command_output(&output.stdout),
+            decode_windows_command_output(&output.stderr)
+        ));
+    }
+    let environment = parse_windows_environment(&decode_windows_command_output(&output.stdout));
+    if environment.is_empty() {
+        return Err(format!(
+            "Visual Studio environment script {} returned no environment variables",
+            vcvars64.display()
+        ));
+    }
+    Ok(environment)
+}
+
+#[cfg(windows)]
+fn validate_visual_studio_installation(
+    installation: &WindowsVisualStudioInstallation,
+) -> Result<PathBuf, String> {
+    let vcvars64 = installation.root.join(r"VC\Auxiliary\Build\vcvars64.bat");
+    let msbuild = installation.root.join(r"MSBuild\Current\Bin\MSBuild.exe");
+    let mut missing = Vec::new();
+    if !vcvars64.is_file() {
+        missing.push(format!(
+            "{} ({})",
+            vcvars64.display(),
+            WINDOWS_MSVC_COMPONENTS[1]
+        ));
+    }
+    if !msbuild.is_file() {
+        missing.push(format!(
+            "{} ({})",
+            msbuild.display(),
+            WINDOWS_MSVC_COMPONENTS[0]
+        ));
+    }
+    if missing.is_empty() {
+        Ok(vcvars64)
+    } else {
+        Err(format!("missing {}", missing.join(" and ")))
+    }
+}
+
+#[cfg(windows)]
+fn fixed_visual_studio_installations() -> Vec<WindowsVisualStudioInstallation> {
+    let mut installations = Vec::new();
+    for (year, version, generator) in [
+        ("2026", "18.0", "Visual Studio 18 2026"),
+        ("2022", "17.0", "Visual Studio 17 2022"),
+    ] {
+        for edition in ["BuildTools", "Community", "Professional", "Enterprise"] {
+            for program_files in [r"C:\Program Files (x86)", r"C:\Program Files"] {
+                installations.push(WindowsVisualStudioInstallation {
+                    root: PathBuf::from(program_files)
+                        .join("Microsoft Visual Studio")
+                        .join(year)
+                        .join(edition),
+                    version: version.to_string(),
+                    generator: generator.to_string(),
+                });
+            }
+        }
+    }
+    installations
+}
+
+#[cfg(windows)]
+fn visual_studio_discovery_error(attempted: &[String]) -> String {
+    format!(
+        "Windows desktop packaging requires Visual Studio 2022 or 2026 Build Tools with components {} and {}. Attempted discovery:\n- {}",
+        WINDOWS_MSVC_COMPONENTS[0],
+        WINDOWS_MSVC_COMPONENTS[1],
+        attempted.join("\n- ")
+    )
+}
+
+#[cfg(windows)]
+fn query_vswhere_installations(
+    vswhere: &Path,
+    environment: &[(OsString, OsString)],
+) -> Result<(Vec<WindowsVisualStudioInstallation>, Vec<String>), String> {
+    if !vswhere.is_file() {
+        return Err("not found".to_string());
+    }
+    let output = std::process::Command::new(vswhere)
+        .args([
+            "-products",
+            "*",
+            "-requires",
+            WINDOWS_MSVC_COMPONENTS[0],
+            WINDOWS_MSVC_COMPONENTS[1],
+            "-format",
+            "json",
+            "-utf8",
+        ])
+        .env_clear()
+        .envs(environment.iter().map(|(key, value)| (key, value)))
+        .output()
+        .map_err(|error| format!("failed to launch: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "exited {} ({})",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_vswhere_installations(&output.stdout)
+}
+
+#[cfg(windows)]
+fn resolve_visual_studio_from_vswhere_candidates<Query, Validate>(
+    vswhere_candidates: &[PathBuf],
+    supported_generators: &BTreeSet<String>,
+    attempted: &mut Vec<String>,
+    mut query: Query,
+    mut validate: Validate,
+) -> Option<(WindowsVisualStudioInstallation, PathBuf)>
+where
+    Query: FnMut(&Path) -> Result<(Vec<WindowsVisualStudioInstallation>, Vec<String>), String>,
+    Validate: FnMut(&WindowsVisualStudioInstallation) -> Result<PathBuf, String>,
+{
+    for vswhere in vswhere_candidates {
+        match query(vswhere) {
+            Ok((installations, skipped)) if installations.is_empty() && skipped.is_empty() => {
+                attempted.push(format!(
+                    "{}: no installation has both {} and {}",
+                    vswhere.display(),
+                    WINDOWS_MSVC_COMPONENTS[0],
+                    WINDOWS_MSVC_COMPONENTS[1]
+                ))
+            }
+            Ok((installations, skipped)) => {
+                attempted.extend(skipped);
+                let (installations, skipped) = newest_supported_visual_studio_installations(
+                    installations,
+                    supported_generators,
+                );
+                attempted.extend(skipped);
+                for installation in installations {
+                    match validate(&installation) {
+                        Ok(vcvars64) => return Some((installation, vcvars64)),
+                        Err(reason) => attempted.push(format!(
+                            "{} ({}): {reason}",
+                            installation.root.display(),
+                            installation.version
+                        )),
+                    }
+                }
+            }
+            Err(reason) => attempted.push(format!("{}: {reason}", vswhere.display())),
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn resolve_visual_studio_installation(
+    environment: &[(OsString, OsString)],
+    supported_generators: &BTreeSet<String>,
+) -> Result<(WindowsVisualStudioInstallation, PathBuf), String> {
+    let vswhere_candidates = executable_candidates(
+        "vswhere.exe",
+        environment,
+        [
+            PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
+            PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
+        ],
+    );
+    let mut attempted = Vec::new();
+    if let Some(resolved) = resolve_visual_studio_from_vswhere_candidates(
+        &vswhere_candidates,
+        supported_generators,
+        &mut attempted,
+        |vswhere| query_vswhere_installations(vswhere, environment),
+        validate_visual_studio_installation,
+    ) {
+        return Ok(resolved);
+    }
+
+    let (fallback_installations, skipped) = newest_supported_visual_studio_installations(
+        fixed_visual_studio_installations(),
+        supported_generators,
+    );
+    attempted.extend(skipped);
+    for installation in fallback_installations {
+        match validate_visual_studio_installation(&installation) {
+            Ok(vcvars64) => return Ok((installation, vcvars64)),
+            Err(reason) => attempted.push(format!(
+                "{} (fallback): {reason}",
+                installation.root.display()
+            )),
+        }
+    }
+    Err(visual_studio_discovery_error(&attempted))
+}
+
+#[cfg(windows)]
+fn resolve_windows_cmake(environment: &[(OsString, OsString)]) -> Result<PathBuf, String> {
+    let candidates = executable_candidates(
+        "cmake.exe",
+        environment,
+        [PathBuf::from(r"C:\Program Files\CMake\bin\cmake.exe")],
+    );
+    candidates
+        .iter()
+        .find(|candidate| candidate.is_file())
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "Windows desktop packaging requires CMake. Attempted discovery:\n- {}",
+                candidates
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n- ")
+            )
+        })
+}
+
+#[cfg(windows)]
+fn cmake_supported_generators(
+    cmake: &Path,
+    environment: &[(OsString, OsString)],
+) -> Result<BTreeSet<String>, String> {
+    let output = std::process::Command::new(cmake)
+        .args(["-E", "capabilities"])
+        .env_clear()
+        .envs(environment.iter().map(|(key, value)| (key, value)))
+        .output()
+        .map_err(|error| {
+            format!(
+                "failed to query {} generator capabilities: {error}",
+                cmake.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to query {} generator capabilities: {}",
+            cmake.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let capabilities: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("could not parse {} capabilities: {error}", cmake.display()))?;
+    let supported = capabilities["generators"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row["name"].as_str().map(str::to_string))
+        .collect::<BTreeSet<_>>();
+    if supported.is_empty() {
+        return Err(format!(
+            "{} reported no CMake generators in its capabilities",
+            cmake.display()
+        ));
+    }
+    Ok(supported)
+}
+
+#[cfg(windows)]
+fn validate_vcvars_environment(environment: &[(OsString, OsString)]) -> Result<(), String> {
+    let mut missing = Vec::new();
+    for executable in ["cl.exe", "link.exe"] {
+        let candidates = executable_candidates(executable, environment, std::iter::empty());
+        if !candidates.iter().any(|candidate| candidate.is_file()) {
+            missing.push(format!("{executable} from {}", WINDOWS_MSVC_COMPONENTS[1]));
+        }
+    }
+    match environment_value(environment, "WindowsSdkDir") {
+        Some(root) if Path::new(root).is_dir() => {}
+        _ => missing.push("Windows SDK (WindowsSdkDir)".to_string()),
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "vcvars64.bat did not expose required Windows desktop tools: {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+#[cfg(windows)]
+impl MonolithCmakeRunner {
+    fn discover() -> Result<Self, String> {
+        let base_environment = normalize_windows_environment(std::env::vars_os());
+        let cmake = resolve_windows_cmake(&base_environment)?;
+        let supported_generators = cmake_supported_generators(&cmake, &base_environment)?;
+        let (installation, vcvars64) =
+            resolve_visual_studio_installation(&base_environment, &supported_generators)?;
+        let environment = capture_vcvars64_environment(&vcvars64, &base_environment)?;
+        validate_vcvars_environment(&environment)?;
+        Ok(Self {
+            cmake,
+            installation,
+            environment,
+        })
+    }
+
+    fn configure_arguments(&self, mut arguments: Vec<String>) -> Vec<String> {
+        arguments.extend([
+            "-G".to_string(),
+            self.installation.generator.clone(),
+            "-A".to_string(),
+            "x64".to_string(),
+            format!(
+                "-DCMAKE_GENERATOR_INSTANCE={}",
+                cmake_path(&self.installation.root)
+            ),
+        ]);
+        arguments
+    }
+
+    fn run(&self, arguments: &[String]) -> Result<std::process::Output, String> {
+        std::process::Command::new(&self.cmake)
+            .args(arguments)
+            .env_clear()
+            .envs(self.environment.iter().map(|(key, value)| (key, value)))
+            .output()
+            .map_err(|error| {
+                format!(
+                    "failed to launch {} with {} at {}: {error}",
+                    self.cmake.display(),
+                    self.installation.generator,
+                    self.installation.root.display()
+                )
+            })
+    }
 }
 
 #[cfg(not(windows))]
-fn run_monolith_cmake(arguments: &[String]) -> Result<std::process::Output, String> {
-    std::process::Command::new("cmake")
-        .args(arguments)
-        .output()
-        .map_err(|error| format!("failed to launch CMake: {error}"))
+impl MonolithCmakeRunner {
+    fn discover() -> Result<Self, String> {
+        Ok(Self)
+    }
+
+    fn configure_arguments(&self, arguments: Vec<String>) -> Vec<String> {
+        arguments
+    }
+
+    fn run(&self, arguments: &[String]) -> Result<std::process::Output, String> {
+        std::process::Command::new("cmake")
+            .args(arguments)
+            .output()
+            .map_err(|error| format!("failed to launch CMake: {error}"))
+    }
+}
+
+fn monolith_cmake_log(build_dir: &Path) -> Option<String> {
+    const MAX_LOG_BYTES: usize = 64 * 1024;
+    for relative in [
+        "CMakeFiles/CMakeConfigureLog.yaml",
+        "CMakeFiles/CMakeError.log",
+    ] {
+        let path = build_dir.join(relative);
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let retained = &bytes[..bytes.len().min(MAX_LOG_BYTES)];
+        let suffix = if bytes.len() > MAX_LOG_BYTES {
+            format!(
+                "\n[truncated {} bytes; full temporary log was {}]",
+                bytes.len() - MAX_LOG_BYTES,
+                path.display()
+            )
+        } else {
+            String::new()
+        };
+        return Some(format!(
+            "captured {} before temporary build cleanup:\n{}{}",
+            path.display(),
+            String::from_utf8_lossy(retained),
+            suffix
+        ));
+    }
+    None
+}
+
+fn monolith_cmake_failure(stage: &str, output: &std::process::Output, build_dir: &Path) -> String {
+    let mut message = format!(
+        "desktop monolith {stage} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if let Some(log) = monolith_cmake_log(build_dir) {
+        message.push('\n');
+        message.push_str(&log);
+    }
+    message
 }
 
 fn monolith_configure_arguments(
@@ -4594,8 +5125,9 @@ fn package_engine_bundle_monolithic_desktop(
         .file_stem()
         .and_then(|value| value.to_str())
         .ok_or_else(|| format!("invalid monolith output name {}", output_exe.display()))?;
+    let cmake = MonolithCmakeRunner::discover()?;
     let build_dir = create_monolith_cmake_build_dir(&aot_root, output_exe)?;
-    let configure_arguments = monolith_configure_arguments(
+    let configure_arguments = cmake.configure_arguments(monolith_configure_arguments(
         &repo_root.join("runtime"),
         &build_dir.path,
         &aot_root,
@@ -4603,16 +5135,16 @@ fn package_engine_bundle_monolithic_desktop(
         output_dir,
         output_name,
         desktop_network,
-    );
-    let configure = run_monolith_cmake(&configure_arguments)?;
+    ));
+    let configure = cmake.run(&configure_arguments)?;
     if !configure.status.success() {
-        return Err(format!(
-            "desktop monolith configure failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&configure.stdout),
-            String::from_utf8_lossy(&configure.stderr)
+        return Err(monolith_cmake_failure(
+            "configure",
+            &configure,
+            &build_dir.path,
         ));
     }
-    let build = run_monolith_cmake(&[
+    let build = cmake.run(&[
         "--build".to_string(),
         cmake_path(&build_dir.path),
         "--config".to_string(),
@@ -4621,11 +5153,7 @@ fn package_engine_bundle_monolithic_desktop(
         "stasis_monolith".to_string(),
     ])?;
     if !build.status.success() {
-        return Err(format!(
-            "desktop monolith build failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&build.stdout),
-            String::from_utf8_lossy(&build.stderr)
-        ));
+        return Err(monolith_cmake_failure("build", &build, &build_dir.path));
     }
     if !output_exe.is_file() {
         return Err(format!(
@@ -5117,6 +5645,233 @@ fn package_engine_bundle_release(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_vswhere_build_tools_instance_selects_installed_generator() {
+        let (installations, skipped) = parse_vswhere_installations(
+            br#"[{"installationPath":"C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools","installationVersion":"17.14.36811.4"}]"#,
+        )
+        .expect("parse Build Tools instance");
+        assert!(skipped.is_empty());
+        assert_eq!(installations.len(), 1);
+        assert_eq!(
+            installations[0].root,
+            PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools")
+        );
+        assert_eq!(installations[0].generator, "Visual Studio 17 2022");
+        assert_eq!(
+            visual_studio_generator("18.2.1").expect("VS 2026 generator"),
+            "Visual Studio 18 2026"
+        );
+        assert!(visual_studio_generator("16.11").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_vswhere_keeps_supported_custom_instance_beside_unsupported_row() {
+        let (installations, skipped) = parse_vswhere_installations(
+            br#"[
+                {"installationPath":"D:\\Legacy VS\\2019","installationVersion":"16.11.42.0"},
+                {"installationPath":"D:\\Custom Tools\\VS2022","installationVersion":"17.14.36811.4"}
+            ]"#,
+        )
+        .expect("parse mixed vswhere response");
+        assert_eq!(installations.len(), 1);
+        assert_eq!(
+            installations[0].root,
+            PathBuf::from(r"D:\Custom Tools\VS2022")
+        );
+        assert_eq!(installations[0].generator, "Visual Studio 17 2022");
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains(r"D:\Legacy VS\2019"));
+        assert!(skipped[0].contains("16.11.42.0"));
+        assert!(skipped[0].contains("is not supported"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_vswhere_launch_failure_continues_to_later_candidate() {
+        let stale = PathBuf::from(r"C:\stale\vswhere.exe");
+        let standard =
+            PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe");
+        let candidates = vec![stale.clone(), standard.clone()];
+        let expected = WindowsVisualStudioInstallation {
+            root: PathBuf::from(r"D:\Custom Tools\VS2022"),
+            version: "17.14.36811.4".to_string(),
+            generator: "Visual Studio 17 2022".to_string(),
+        };
+        let supported = BTreeSet::from(["Visual Studio 17 2022".to_string()]);
+        let mut attempted = Vec::new();
+        let mut queried = Vec::new();
+        let resolved = resolve_visual_studio_from_vswhere_candidates(
+            &candidates,
+            &supported,
+            &mut attempted,
+            |vswhere| {
+                queried.push(vswhere.to_path_buf());
+                if vswhere == stale {
+                    Err("failed to launch: Access is denied".to_string())
+                } else {
+                    Ok((vec![expected.clone()], Vec::new()))
+                }
+            },
+            |installation| Ok(installation.root.join(r"VC\Auxiliary\Build\vcvars64.bat")),
+        )
+        .expect("later vswhere candidate should resolve Build Tools");
+
+        assert_eq!(queried, vec![stale.clone(), standard]);
+        assert_eq!(resolved.0, expected);
+        assert_eq!(
+            attempted,
+            vec![format!(
+                "{}: failed to launch: Access is denied",
+                stale.display()
+            )]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_discovery_skips_newer_instance_when_cmake_only_supports_vs2022() {
+        let installations = vec![
+            WindowsVisualStudioInstallation {
+                root: PathBuf::from(r"C:\VS\2022\BuildTools"),
+                version: "17.14.36811.4".to_string(),
+                generator: "Visual Studio 17 2022".to_string(),
+            },
+            WindowsVisualStudioInstallation {
+                root: PathBuf::from(r"C:\VS\2026\BuildTools"),
+                version: "18.1.10.0".to_string(),
+                generator: "Visual Studio 18 2026".to_string(),
+            },
+        ];
+        let supported = BTreeSet::from(["Visual Studio 17 2022".to_string()]);
+        let (usable, skipped) =
+            newest_supported_visual_studio_installations(installations, &supported);
+        assert_eq!(usable.len(), 1);
+        assert_eq!(usable[0].root, PathBuf::from(r"C:\VS\2022\BuildTools"));
+        assert_eq!(usable[0].version, "17.14.36811.4");
+        assert_eq!(skipped.len(), 1);
+        assert!(skipped[0].contains(r"C:\VS\2026\BuildTools"));
+        assert!(skipped[0].contains("does not support Visual Studio 18 2026"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_missing_toolchain_diagnostic_names_components_and_attempts() {
+        let diagnostic = visual_studio_discovery_error(&[
+            r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe: no matching installation"
+                .to_string(),
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools: missing vcvars64.bat"
+                .to_string(),
+        ]);
+        assert!(diagnostic.contains("Microsoft.Component.MSBuild"));
+        assert!(diagnostic.contains("Microsoft.VisualStudio.Component.VC.Tools.x86.x64"));
+        assert!(diagnostic.contains("vswhere.exe: no matching installation"));
+        assert!(diagnostic.contains("BuildTools: missing vcvars64.bat"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_environment_normalization_collapses_duplicate_path_keys() {
+        let normalized = normalize_windows_environment([
+            (OsString::from("PATH"), OsString::from(r"C:\tools;C:\SDK")),
+            (
+                OsString::from("Path"),
+                OsString::from(r"C:\Program Files\CMake\bin;C:\TOOLS"),
+            ),
+            (OsString::from("TEMP"), OsString::from(r"C:\Temp")),
+            (OsString::from("temp"), OsString::from(r"C:\ignored")),
+        ]);
+        let path_rows = normalized
+            .iter()
+            .filter(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("path"))
+            .collect::<Vec<_>>();
+        assert_eq!(path_rows.len(), 1);
+        assert_eq!(path_rows[0].0, OsStr::new("Path"));
+        assert_eq!(
+            path_rows[0].1,
+            OsStr::new(r"C:\Program Files\CMake\bin;C:\TOOLS;C:\SDK")
+        );
+        assert_eq!(
+            normalized
+                .iter()
+                .filter(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("temp"))
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_vcvars_environment_parser_preserves_spaced_and_equals_values() {
+        let parsed = parse_windows_environment(
+            "INCLUDE=C:\\Program Files (x86)\\Windows Kits\\Include\r\nPath=C:\\VS Tools;C:\\Program Files\\CMake\\bin\r\nTOKEN=a=b=c\r\n=C:=C:\\work\r\n",
+        );
+        assert_eq!(
+            environment_value(&parsed, "include"),
+            Some(OsStr::new(r"C:\Program Files (x86)\Windows Kits\Include"))
+        );
+        assert_eq!(
+            environment_value(&parsed, "TOKEN"),
+            Some(OsStr::new("a=b=c"))
+        );
+        assert!(parsed
+            .iter()
+            .all(|(key, _)| !key.to_string_lossy().starts_with('=')));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_configure_arguments_keep_paths_native_and_pin_the_instance() {
+        let runner = MonolithCmakeRunner {
+            cmake: PathBuf::from(r"C:\Program Files\CMake\bin\cmake.exe"),
+            installation: WindowsVisualStudioInstallation {
+                root: PathBuf::from(
+                    r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools",
+                ),
+                version: "17.14.0".to_string(),
+                generator: "Visual Studio 17 2022".to_string(),
+            },
+            environment: Vec::new(),
+        };
+        let arguments = runner.configure_arguments(vec![
+            "-S".to_string(),
+            "C:/source with spaces & symbols".to_string(),
+        ]);
+        assert_eq!(arguments[0], "-S");
+        assert_eq!(arguments[1], "C:/source with spaces & symbols");
+        assert_eq!(
+            &arguments[2..6],
+            ["-G", "Visual Studio 17 2022", "-A", "x64"]
+        );
+        assert_eq!(
+            arguments[6],
+            "-DCMAKE_GENERATOR_INSTANCE=C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools"
+        );
+    }
+
+    #[test]
+    fn monolith_configure_log_is_captured_before_temp_cleanup() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis-monolith-log-test-{}-{}",
+            std::process::id(),
+            MONOLITH_CMAKE_INSTANCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let cmake_files = root.join("CMakeFiles");
+        std::fs::create_dir_all(&cmake_files).expect("create CMakeFiles");
+        std::fs::write(
+            cmake_files.join("CMakeConfigureLog.yaml"),
+            "compiler: unknown\nmissing: cl.exe\n",
+        )
+        .expect("write configure log");
+        let captured = monolith_cmake_log(&root).expect("capture configure log");
+        assert!(captured.contains("CMakeConfigureLog.yaml"));
+        assert!(captured.contains("compiler: unknown"));
+        assert!(captured.contains("missing: cl.exe"));
+        std::fs::remove_dir_all(root).expect("remove test directory");
+    }
 
     #[test]
     fn self_host_aot_artifact_root_override_is_package_scoped() {

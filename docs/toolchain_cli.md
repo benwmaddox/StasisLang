@@ -383,6 +383,27 @@ restore release assets.
 `verify` remains reserved for a future non-presenting batch verifier. `replay` performs verification
 while presenting every reconstructed tick.
 
+### Windows desktop compiler prerequisites
+
+Windows release builds and desktop packages support a Visual Studio IDE installation or the smaller
+Visual Studio Build Tools installation. Install CMake plus Visual Studio 2022 or 2026 with MSBuild,
+the MSVC x64/x86 tools, and a Windows SDK. Stasis queries the installed instance with `vswhere.exe`,
+selects its matching CMake generator, and configures x64 explicitly; the command works from ordinary
+PowerShell as well as an x64 Developer Command Prompt. It does not install or modify Visual Studio
+workloads.
+
+After updating Stasis, downstream projects can rebuild without editing generated output:
+
+```text
+stasis build --mode release
+stasis package --target desktop --signing optional
+```
+
+If discovery fails, the error names the missing component and the paths Stasis attempted. A failed
+CMake configure also includes the bounded `CMakeConfigureLog.yaml` contents before its temporary
+build directory is removed. `--signing optional` changes only package signing policy; it does not
+relax compiler, SDK, or generator checks.
+
 Validation commands (`check`, `test`, and `record`) and formatting checks and writes leave
 `stasis.json` and `vendor/stasis` unchanged, even when the selected toolchain differs from the
 project's vendor pin. Generated commit hooks
