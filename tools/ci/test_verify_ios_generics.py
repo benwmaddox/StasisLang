@@ -246,6 +246,15 @@ class IosGenericsWorkflowContractTest(unittest.TestCase):
             self.script,
         )
 
+    def test_symbol_gate_uses_manifest_lifecycle_and_workload_symbols(self) -> None:
+        self.assertIn("verify_ios_generics_symbols()", self.script)
+        self.assertIn('for name in ("main", "tick", "render"):', self.script)
+        self.assertIn(
+            '"stasis_state_scalar__generics_collections_digest_value"',
+            self.script,
+        )
+        self.assertIn("len(linked_aot_functions) < 16", self.script)
+
     def test_hosted_simulator_lane_runs_on_pull_requests(self) -> None:
         self.assertIn("ios-generics-simulator:", self.workflow)
         self.assertIn(

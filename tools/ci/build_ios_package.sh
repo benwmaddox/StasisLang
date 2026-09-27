@@ -82,6 +82,56 @@ install_xcframework() {
   active_mount=""
 }
 
+verify_ios_generics_symbols() {
+  local engine_manifest="$1"
+  local symbols="$2"
+  python3 - "${engine_manifest}" "${symbols}" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    manifest = json.load(source)
+with open(sys.argv[2], encoding="utf-8") as source:
+    symbols = source.read()
+
+functions = manifest.get("functions")
+if not isinstance(functions, list):
+    raise SystemExit("engine manifest is missing its full function table")
+by_name = {
+    function.get("name"): function.get("symbol")
+    for function in functions
+    if isinstance(function, dict)
+}
+for name in ("main", "tick", "render"):
+    symbol = by_name.get(name)
+    if not isinstance(symbol, str) or not symbol:
+        raise SystemExit(f"engine manifest is missing lifecycle symbol {name}")
+    if re.search(rf"^[0-9a-f]+ T _{re.escape(symbol)}$", symbols, re.MULTILINE) is None:
+        raise SystemExit(f"linked app is missing lifecycle AOT symbol {name}={symbol}")
+
+required = (
+    "stasis_replay_state_snapshot_restore",
+    "stasis_replay_state_snapshot_size",
+    "stasis_replay_state_snapshot_write",
+    "stasis_state_scalar__generics_collections_digest_value",
+    "stasis_state_scalar__web_bounds_probe_index",
+    "stasis_state_array__gfx_cmd_i32",
+    "stasis_state_array__gfx_cmd_f32",
+    "stasis_state_array__gfx_cmd_u8",
+)
+for symbol in required:
+    if re.search(rf"^[0-9a-f]+ [A-Z] _{re.escape(symbol)}$", symbols, re.MULTILINE) is None:
+        raise SystemExit(f"linked app is missing required workload symbol {symbol}")
+
+linked_aot_functions = re.findall(r"^[0-9a-f]+ T _aot_fn_[0-9]+$", symbols, re.MULTILINE)
+if len(linked_aot_functions) < 16:
+    raise SystemExit(
+        f"linked app contains only {len(linked_aot_functions)} AOT functions; expected the full workload"
+    )
+PY
+}
+
 install_xcframework \
   SDL3 \
   3.4.10 \
@@ -148,9 +198,9 @@ otool -L "${executable}" | tee "${build_root}/linked-libraries.txt"
 grep -Fq '@rpath/SDL3.framework/SDL3' "${build_root}/linked-libraries.txt"
 grep -Fq '@rpath/SDL3_image.framework/SDL3_image' "${build_root}/linked-libraries.txt"
 nm -gU "${executable}" | tee "${build_root}/device-symbols.txt"
-for symbol in stasis_aot_bind_runtime_globals stasis_mobile_main_entry stasis_mobile_tick_entry stasis_mobile_render_entry; do
-  grep -Eq "[[:space:]]_${symbol}$" "${build_root}/device-symbols.txt"
-done
+verify_ios_generics_symbols \
+  "${package_root}/aot/engine_bundle_manifest.json" \
+  "${build_root}/device-symbols.txt"
 stasis_source=""
 while IFS= read -r candidate; do
   stasis_source="${candidate}"
@@ -242,9 +292,9 @@ PY
   grep -Fq '@rpath/SDL3.framework/SDL3' "${build_root}/simulator-linked-libraries.txt"
   grep -Fq '@rpath/SDL3_image.framework/SDL3_image' "${build_root}/simulator-linked-libraries.txt"
   nm -gU "${simulator_executable}" | tee "${build_root}/simulator-symbols.txt"
-  for symbol in stasis_aot_bind_runtime_globals stasis_mobile_main_entry stasis_mobile_tick_entry stasis_mobile_render_entry; do
-    grep -Eq "[[:space:]]_${symbol}$" "${build_root}/simulator-symbols.txt"
-  done
+  verify_ios_generics_symbols \
+    "${simulator_package}/aot/engine_bundle_manifest.json" \
+    "${build_root}/simulator-symbols.txt"
   cmp "${simulator_package}/stasis_provenance.json" \
     "${simulator_app}/stasis_game/stasis_provenance.json"
   shasum -a 256 \
