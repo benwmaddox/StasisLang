@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -955,8 +956,56 @@ def main() -> int:
     assert "setContentView(status)" not in activity
 
     release_activity = read("mobile/shells/android/app/src/main/java/com/stasislang/game/MainActivity.java")
+    release_manifest_text = read("mobile/shells/android/app/src/main/AndroidManifest.xml")
+    for template_token in (
+        "@STASIS_NETWORK_PERMISSION@",
+        "@STASIS_NETWORK_CLIENT_PERMISSION@",
+        "@STASIS_ANDROID_ICON_ATTRIBUTES@",
+        "@STASIS_NETWORK_CLIENT_ALIAS@",
+    ):
+        release_manifest_text = release_manifest_text.replace(template_token, "")
+    release_manifest = ElementTree.fromstring(
+        release_manifest_text
+    )
     release_cache = read("mobile/shells/android/app/src/main/java/com/stasislang/shell/StasisAssetCache.java")
     release_bridge = read("mobile/shells/android/app/src/main/cpp/stasis_android_assets.c")
+    android_name = "{http://schemas.android.com/apk/res/android}name"
+    android_exported = "{http://schemas.android.com/apk/res/android}exported"
+    release_activities = {
+        activity.get(android_name): activity
+        for activity in release_manifest.findall("./application/activity")
+    }
+    launcher_activities = []
+    for release_activity_node in release_activities.values():
+        for intent_filter in release_activity_node.findall("./intent-filter"):
+            actions = {
+                action.get(android_name)
+                for action in intent_filter.findall("./action")
+            }
+            categories = {
+                category.get(android_name)
+                for category in intent_filter.findall("./category")
+            }
+            if (
+                "android.intent.action.MAIN" in actions
+                and "android.intent.category.LAUNCHER" in categories
+            ):
+                launcher_activities.append(release_activity_node)
+    assert len(launcher_activities) == 1
+    assert launcher_activities[0].get(android_name) == ".MainActivity"
+    assert release_activities[".ReplayLaunchActivity"].get(android_exported) == "true"
+    main_activity = release_activities[".MainActivity"]
+    android_mime_type = "{http://schemas.android.com/apk/res/android}mimeType"
+    view_mime_types = {
+        data.get(android_mime_type)
+        for intent_filter in main_activity.findall("./intent-filter")
+        if any(
+            action.get(android_name) == "android.intent.action.VIEW"
+            for action in intent_filter.findall("./action")
+        )
+        for data in intent_filter.findall("./data")
+    }
+    assert view_mime_types == {"application/json", "application/octet-stream"}
     assert "System.loadLibrary(\"SDL3\")" not in release_activity
     assert "System.loadLibrary(\"SDL3_image\")" not in release_activity
     assert "System.loadLibrary(\"main\")" in release_activity
