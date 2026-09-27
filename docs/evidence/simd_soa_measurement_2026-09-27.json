@@ -1,0 +1,660 @@
+{
+  "arm64_runtime": {
+    "available": false,
+    "devices": [
+      {
+        "abi": "x86_64",
+        "model": "sdk_gphone64_x86_64",
+        "serial": "emulator-5554"
+      }
+    ],
+    "timing_claim": "none; static evidence only"
+  },
+  "cases": [
+    {
+      "active_count": 4,
+      "aot_clif": {
+        "branches": 1,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 4,
+        "stores": 2
+      },
+      "arm64": {
+        "branch_instructions": 2,
+        "instruction_count": 25,
+        "load_instructions": 9,
+        "packed_lane_instruction_count": 0,
+        "packed_lane_mnemonics": [],
+        "store_instructions": 3,
+        "vector_encoding_instruction_count": 0,
+        "vector_encoding_mnemonics": []
+      },
+      "capacity": 4,
+      "case": "position_4",
+      "compile_distribution": {
+        "mad_us": 3280,
+        "max_us": 43770,
+        "median_us": 34076,
+        "min_us": 30796,
+        "raw_us": [
+          34076,
+          30796,
+          32342,
+          43770,
+          38262
+        ]
+      },
+      "jit_clif": {
+        "branches": 1,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 11,
+        "stores": 2
+      },
+      "semantic_ticks": 5,
+      "shape": "position",
+      "tick_object": "position_4/objects/tick_fn4078260562_0.o",
+      "tick_text_bytes": 100
+    },
+    {
+      "active_count": 64,
+      "aot_clif": {
+        "branches": 1,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 4,
+        "stores": 2
+      },
+      "arm64": {
+        "branch_instructions": 2,
+        "instruction_count": 25,
+        "load_instructions": 9,
+        "packed_lane_instruction_count": 0,
+        "packed_lane_mnemonics": [],
+        "store_instructions": 3,
+        "vector_encoding_instruction_count": 0,
+        "vector_encoding_mnemonics": []
+      },
+      "capacity": 64,
+      "case": "position_64",
+      "compile_distribution": {
+        "mad_us": 1638,
+        "max_us": 37900,
+        "median_us": 36262,
+        "min_us": 33093,
+        "raw_us": [
+          33992,
+          33093,
+          37900,
+          36262,
+          36665
+        ]
+      },
+      "jit_clif": {
+        "branches": 1,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 11,
+        "stores": 2
+      },
+      "semantic_ticks": 5,
+      "shape": "position",
+      "tick_object": "position_64/objects/tick_fn4078260562_0.o",
+      "tick_text_bytes": 100
+    },
+    {
+      "active_count": 900,
+      "aot_clif": {
+        "branches": 1,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 4,
+        "stores": 2
+      },
+      "arm64": {
+        "branch_instructions": 2,
+        "instruction_count": 25,
+        "load_instructions": 9,
+        "packed_lane_instruction_count": 0,
+        "packed_lane_mnemonics": [],
+        "store_instructions": 3,
+        "vector_encoding_instruction_count": 0,
+        "vector_encoding_mnemonics": []
+      },
+      "capacity": 900,
+      "case": "position_900",
+      "compile_distribution": {
+        "mad_us": 1916,
+        "max_us": 39848,
+        "median_us": 37932,
+        "min_us": 25080,
+        "raw_us": [
+          39717,
+          39848,
+          37932,
+          35015,
+          25080
+        ]
+      },
+      "jit_clif": {
+        "branches": 1,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 11,
+        "stores": 2
+      },
+      "semantic_ticks": 5,
+      "shape": "position",
+      "tick_object": "position_900/objects/tick_fn4078260562_0.o",
+      "tick_text_bytes": 100
+    },
+    {
+      "active_count": 4,
+      "aot_clif": {
+        "branches": 5,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 4,
+        "stores": 4
+      },
+      "arm64": {
+        "branch_instructions": 6,
+        "instruction_count": 53,
+        "load_instructions": 9,
+        "packed_lane_instruction_count": 0,
+        "packed_lane_mnemonics": [],
+        "store_instructions": 5,
+        "vector_encoding_instruction_count": 4,
+        "vector_encoding_mnemonics": [
+          "movi"
+        ]
+      },
+      "capacity": 4,
+      "case": "wall_sparse_4",
+      "compile_distribution": {
+        "mad_us": 353,
+        "max_us": 44363,
+        "median_us": 44010,
+        "min_us": 36920,
+        "raw_us": [
+          44363,
+          36920,
+          44340,
+          44010,
+          40866
+        ]
+      },
+      "jit_clif": {
+        "branches": 5,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 11,
+        "stores": 4
+      },
+      "semantic_ticks": 5,
+      "shape": "wall_sparse",
+      "tick_object": "wall_sparse_4/objects/tick_fn4078260562_0.o",
+      "tick_text_bytes": 212
+    },
+    {
+      "active_count": 64,
+      "aot_clif": {
+        "branches": 5,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 4,
+        "stores": 4
+      },
+      "arm64": {
+        "branch_instructions": 6,
+        "instruction_count": 53,
+        "load_instructions": 9,
+        "packed_lane_instruction_count": 0,
+        "packed_lane_mnemonics": [],
+        "store_instructions": 5,
+        "vector_encoding_instruction_count": 4,
+        "vector_encoding_mnemonics": [
+          "movi"
+        ]
+      },
+      "capacity": 64,
+      "case": "wall_sparse_64",
+      "compile_distribution": {
+        "mad_us": 3303,
+        "max_us": 54617,
+        "median_us": 44832,
+        "min_us": 33540,
+        "raw_us": [
+          33540,
+          46135,
+          41529,
+          54617,
+          44832
+        ]
+      },
+      "jit_clif": {
+        "branches": 5,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 11,
+        "stores": 4
+      },
+      "semantic_ticks": 5,
+      "shape": "wall_sparse",
+      "tick_object": "wall_sparse_64/objects/tick_fn4078260562_0.o",
+      "tick_text_bytes": 212
+    },
+    {
+      "active_count": 900,
+      "aot_clif": {
+        "branches": 5,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 4,
+        "stores": 4
+      },
+      "arm64": {
+        "branch_instructions": 6,
+        "instruction_count": 53,
+        "load_instructions": 9,
+        "packed_lane_instruction_count": 0,
+        "packed_lane_mnemonics": [],
+        "store_instructions": 5,
+        "vector_encoding_instruction_count": 4,
+        "vector_encoding_mnemonics": [
+          "movi"
+        ]
+      },
+      "capacity": 900,
+      "case": "wall_sparse_900",
+      "compile_distribution": {
+        "mad_us": 4335,
+        "max_us": 48857,
+        "median_us": 38896,
+        "min_us": 34561,
+        "raw_us": [
+          38896,
+          35171,
+          43409,
+          48857,
+          34561
+        ]
+      },
+      "jit_clif": {
+        "branches": 5,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 11,
+        "stores": 4
+      },
+      "semantic_ticks": 5,
+      "shape": "wall_sparse",
+      "tick_object": "wall_sparse_900/objects/tick_fn4078260562_0.o",
+      "tick_text_bytes": 212
+    },
+    {
+      "active_count": 4,
+      "aot_clif": {
+        "branches": 5,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 4,
+        "stores": 4
+      },
+      "arm64": {
+        "branch_instructions": 6,
+        "instruction_count": 53,
+        "load_instructions": 9,
+        "packed_lane_instruction_count": 0,
+        "packed_lane_mnemonics": [],
+        "store_instructions": 5,
+        "vector_encoding_instruction_count": 4,
+        "vector_encoding_mnemonics": [
+          "movi"
+        ]
+      },
+      "capacity": 4,
+      "case": "wall_dense_4",
+      "compile_distribution": {
+        "mad_us": 4078,
+        "max_us": 51360,
+        "median_us": 47282,
+        "min_us": 39702,
+        "raw_us": [
+          48646,
+          51360,
+          39702,
+          39995,
+          47282
+        ]
+      },
+      "jit_clif": {
+        "branches": 5,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 11,
+        "stores": 4
+      },
+      "semantic_ticks": 5,
+      "shape": "wall_dense",
+      "tick_object": "wall_dense_4/objects/tick_fn4078260562_0.o",
+      "tick_text_bytes": 212
+    },
+    {
+      "active_count": 64,
+      "aot_clif": {
+        "branches": 5,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 4,
+        "stores": 4
+      },
+      "arm64": {
+        "branch_instructions": 6,
+        "instruction_count": 53,
+        "load_instructions": 9,
+        "packed_lane_instruction_count": 0,
+        "packed_lane_mnemonics": [],
+        "store_instructions": 5,
+        "vector_encoding_instruction_count": 4,
+        "vector_encoding_mnemonics": [
+          "movi"
+        ]
+      },
+      "capacity": 64,
+      "case": "wall_dense_64",
+      "compile_distribution": {
+        "mad_us": 4979,
+        "max_us": 51194,
+        "median_us": 46174,
+        "min_us": 37856,
+        "raw_us": [
+          41195,
+          46174,
+          37856,
+          51194,
+          47569
+        ]
+      },
+      "jit_clif": {
+        "branches": 5,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 11,
+        "stores": 4
+      },
+      "semantic_ticks": 5,
+      "shape": "wall_dense",
+      "tick_object": "wall_dense_64/objects/tick_fn4078260562_0.o",
+      "tick_text_bytes": 212
+    },
+    {
+      "active_count": 900,
+      "aot_clif": {
+        "branches": 5,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 4,
+        "stores": 4
+      },
+      "arm64": {
+        "branch_instructions": 6,
+        "instruction_count": 53,
+        "load_instructions": 9,
+        "packed_lane_instruction_count": 0,
+        "packed_lane_mnemonics": [],
+        "store_instructions": 5,
+        "vector_encoding_instruction_count": 4,
+        "vector_encoding_mnemonics": [
+          "movi"
+        ]
+      },
+      "capacity": 900,
+      "case": "wall_dense_900",
+      "compile_distribution": {
+        "mad_us": 7255,
+        "max_us": 56385,
+        "median_us": 49130,
+        "min_us": 38142,
+        "raw_us": [
+          38142,
+          49130,
+          56385,
+          53216,
+          40915
+        ]
+      },
+      "jit_clif": {
+        "branches": 5,
+        "f32_adds": 2,
+        "f32_multiplies": 0,
+        "loads": 11,
+        "stores": 4
+      },
+      "semantic_ticks": 5,
+      "shape": "wall_dense",
+      "tick_object": "wall_dense_900/objects/tick_fn4078260562_0.o",
+      "tick_text_bytes": 212
+    },
+    {
+      "active_count": 2,
+      "aot_clif": {
+        "branches": 7,
+        "f32_adds": 2,
+        "f32_multiplies": 2,
+        "loads": 20,
+        "stores": 10
+      },
+      "arm64": {
+        "branch_instructions": 9,
+        "instruction_count": 111,
+        "load_instructions": 34,
+        "packed_lane_instruction_count": 0,
+        "packed_lane_mnemonics": [],
+        "store_instructions": 15,
+        "vector_encoding_instruction_count": 3,
+        "vector_encoding_mnemonics": [
+          "movi"
+        ]
+      },
+      "capacity": 4,
+      "case": "brickout_active_4",
+      "compile_distribution": {
+        "mad_us": 890,
+        "max_us": 77981,
+        "median_us": 68923,
+        "min_us": 66089,
+        "raw_us": [
+          68923,
+          68372,
+          66089,
+          69813,
+          77981
+        ]
+      },
+      "jit_clif": {
+        "branches": 7,
+        "f32_adds": 2,
+        "f32_multiplies": 2,
+        "loads": 27,
+        "stores": 10
+      },
+      "semantic_ticks": 5,
+      "shape": "brickout_active",
+      "tick_object": "brickout_active_4/objects/tick_fn4078260562_1.o",
+      "tick_text_bytes": 444
+    },
+    {
+      "active_count": 32,
+      "aot_clif": {
+        "branches": 7,
+        "f32_adds": 2,
+        "f32_multiplies": 2,
+        "loads": 20,
+        "stores": 10
+      },
+      "arm64": {
+        "branch_instructions": 9,
+        "instruction_count": 111,
+        "load_instructions": 34,
+        "packed_lane_instruction_count": 0,
+        "packed_lane_mnemonics": [],
+        "store_instructions": 15,
+        "vector_encoding_instruction_count": 3,
+        "vector_encoding_mnemonics": [
+          "movi"
+        ]
+      },
+      "capacity": 64,
+      "case": "brickout_active_64",
+      "compile_distribution": {
+        "mad_us": 2130,
+        "max_us": 77758,
+        "median_us": 75628,
+        "min_us": 65273,
+        "raw_us": [
+          65273,
+          75628,
+          72315,
+          77758,
+          75809
+        ]
+      },
+      "jit_clif": {
+        "branches": 7,
+        "f32_adds": 2,
+        "f32_multiplies": 2,
+        "loads": 27,
+        "stores": 10
+      },
+      "semantic_ticks": 5,
+      "shape": "brickout_active",
+      "tick_object": "brickout_active_64/objects/tick_fn4078260562_1.o",
+      "tick_text_bytes": 444
+    },
+    {
+      "active_count": 90,
+      "aot_clif": {
+        "branches": 7,
+        "f32_adds": 2,
+        "f32_multiplies": 2,
+        "loads": 20,
+        "stores": 10
+      },
+      "arm64": {
+        "branch_instructions": 9,
+        "instruction_count": 111,
+        "load_instructions": 34,
+        "packed_lane_instruction_count": 0,
+        "packed_lane_mnemonics": [],
+        "store_instructions": 15,
+        "vector_encoding_instruction_count": 3,
+        "vector_encoding_mnemonics": [
+          "movi"
+        ]
+      },
+      "capacity": 900,
+      "case": "brickout_active_900",
+      "compile_distribution": {
+        "mad_us": 3109,
+        "max_us": 73133,
+        "median_us": 69630,
+        "min_us": 56320,
+        "raw_us": [
+          72739,
+          68651,
+          56320,
+          73133,
+          69630
+        ]
+      },
+      "jit_clif": {
+        "branches": 7,
+        "f32_adds": 2,
+        "f32_multiplies": 2,
+        "loads": 27,
+        "stores": 10
+      },
+      "semantic_ticks": 5,
+      "shape": "brickout_active",
+      "tick_object": "brickout_active_900/objects/tick_fn4078260562_1.o",
+      "tick_text_bytes": 444
+    }
+  ],
+  "compile_timing": {
+    "measure": "whole AotProcess compile; frontend plus Cranelift codegen",
+    "profile": "speed_and_size",
+    "repetitions": 5,
+    "warmups": 1
+  },
+  "explicit_simd_prototype": {
+    "contract": "scratch-only static position update; count is dynamic and scalar remainder preserves 1-3 tail lanes",
+    "neon": {
+      "branch_instructions": 5,
+      "instruction_count": 40,
+      "load_instructions": 8,
+      "packed_lane_instruction_count": 8,
+      "packed_lane_mnemonics": [
+        "fadd",
+        "ldr",
+        "str"
+      ],
+      "store_instructions": 4,
+      "text_bytes": 160,
+      "vector_encoding_instruction_count": 8,
+      "vector_encoding_mnemonics": [
+        "fadd",
+        "ldr",
+        "str"
+      ]
+    },
+    "runtime_state_parity": "unresolved without ARM64 execution",
+    "scalar": {
+      "branch_instructions": 2,
+      "instruction_count": 12,
+      "load_instructions": 4,
+      "packed_lane_instruction_count": 0,
+      "packed_lane_mnemonics": [],
+      "store_instructions": 2,
+      "text_bytes": 48,
+      "vector_encoding_instruction_count": 0,
+      "vector_encoding_mnemonics": []
+    }
+  },
+  "host": {
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)",
+    "cpu": "Intel(R) Core(TM) Ultra 9 185H",
+    "git_dirty": true,
+    "git_revision": "ab96b3e02d294fa6f2b48b08703a64b4d0387b05",
+    "machine": "AMD64",
+    "manufacturer": "AZW",
+    "memory_bytes": 68179521536,
+    "model": "GTi14",
+    "ndk": "C:\\Android\\Sdk\\ndk\\27.0.12077973",
+    "ndk_clang": "Android (12027248, based on r522817) clang version 18.0.1 (https://android.googlesource.com/toolchain/llvm-project d8003a456d14a3deb8054cdaa529ffbf02d9b262)",
+    "os": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.10",
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)"
+  },
+  "reproduce": {
+    "command": "python tools/measure_simd_soa.py --output <new-dir> --warmups 1 --repetitions 5",
+    "test_command": [
+      "C:\\Users\\Ben\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "tools/cargo_cache.py",
+      "run",
+      "--",
+      "cargo",
+      "test",
+      "-p",
+      "stasis_compiler",
+      "--lib",
+      "simd_soa_characterization_emits_scalar_arm64_evidence",
+      "--",
+      "--nocapture",
+      "--test-threads=1"
+    ]
+  },
+  "schema": "stasis.simd_soa_characterization.v1",
+  "target": "aarch64-linux-android"
+}
