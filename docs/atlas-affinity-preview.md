@@ -2,6 +2,8 @@
 
 The exporter renders atlases from the exact native page inventory and baseline placements returned by stasis_gfx_sprite_atlas_query_v1. It sends that inventory and directed pair weights to stasis_dynload::atlas_placement::plan_atlas_affinity, then paints only the returned placements. Python does not choose sprite pages or reproduce the planner.
 
+Finalized native pages follow the [native atlas page lifecycle](native_atlas_page_lifecycle.md). They carry the additive `SEALED` and `PROTECTED` flags and are excluded from affinity planning without changing the V1 inventory layout.
+
 ## Reproduce a named-game preview
 
 Run from the StasisLang checkout after a JIT or AOT run has written a native snapshot through STASIS_ATLAS_SNAPSHOT_OUT and the compiler has produced its engine-bundle manifest v4.

@@ -43,7 +43,8 @@ enum {
     STASIS_SPRITE_ATLAS_PAGE_FLAG_COLD = 1u << 1,
     STASIS_SPRITE_ATLAS_PAGE_FLAG_FALLBACK = 1u << 2,
     STASIS_SPRITE_ATLAS_PAGE_FLAG_PROTECTED = 1u << 3,
-    STASIS_SPRITE_ATLAS_PAGE_FLAG_PLAN_ELIGIBLE = 1u << 4
+    STASIS_SPRITE_ATLAS_PAGE_FLAG_PLAN_ELIGIBLE = 1u << 4,
+    STASIS_SPRITE_ATLAS_PAGE_FLAG_SEALED = 1u << 5
 };
 
 enum {
@@ -151,6 +152,9 @@ STASIS_SPRITE_ATLAS_API int stasis_gfx_sprite_atlas_stage_plan_v1(
     uint32_t placement_count);
 
 STASIS_SPRITE_ATLAS_API int stasis_gfx_sprite_atlas_commit_plan_v1(uint64_t snapshot_token);
+STASIS_SPRITE_ATLAS_API int stasis_gfx_sprite_atlas_seal_page_v1(
+    uint64_t snapshot_token,
+    uint32_t page_index);
 STASIS_SPRITE_ATLAS_API int stasis_gfx_sprite_atlas_last_frame_stats_v1(
     StasisSpriteAtlasFrameStatsV1* out_stats);
 

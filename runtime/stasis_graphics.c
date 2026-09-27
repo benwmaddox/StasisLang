@@ -500,6 +500,7 @@ typedef struct {
     uint64_t group_id;
     int dedicated;
     int planner_layout;
+    int sealed;
     int live_allocations;
     int free_rect_count;
     StasisSdlAtlasFreeRect free_rects[STASIS_SDL_ATLAS_MAX_FREE_RECTS];
@@ -507,6 +508,9 @@ typedef struct {
 static StasisSdlAtlasPage g_sprite_atlas_pages[STASIS_SDL_ATLAS_MAX_PAGES];
 static int g_sprite_atlas_page_count = 0;
 static uint64_t g_sprite_atlas_asset_generation = 1;
+#if defined(STASIS_ATLAS_TEST_HOOKS)
+static int g_sprite_atlas_test_fail_allocation = 0;
+#endif
 #if defined(STASIS_DESKTOP_ATLAS_PLANNING)
 #define STASIS_SDL_ATLAS_PAIR_TABLE_CAPACITY (STASIS_SPRITE_ATLAS_QUERY_MAX_PAIRS * 2u)
 typedef struct {
@@ -5818,6 +5822,11 @@ static void stasis_sprite_atlas_release_allocation(
     if (page_index < 0 || page_index >= g_sprite_atlas_page_count || w <= 0 || h <= 0) return;
     StasisSdlAtlasPage* page = &g_sprite_atlas_pages[page_index];
     if (!page->texture) return;
+    if (page->sealed) {
+        if (page->live_allocations > 0) page->live_allocations--;
+        stasis_sprite_atlas_bump_asset_generation();
+        return;
+    }
     if (page->planner_layout && !page->dedicated) {
         if (page->live_allocations > 0) page->live_allocations--;
         if (page->live_allocations == 0) {
@@ -5852,6 +5861,7 @@ static void stasis_sprite_atlas_release_allocation(
 static int stasis_sprite_atlas_reserve_on_page(
     StasisSdlAtlasPage* page, int w, int h, int* out_x, int* out_y
 ) {
+    if (!page || page->sealed) return 0;
     const int alloc_w = w + STASIS_SDL_ATLAS_PADDING * 2;
     const int alloc_h = h + STASIS_SDL_ATLAS_PADDING * 2;
     int best = -1;
@@ -5918,13 +5928,17 @@ static int stasis_sprite_atlas_allocate(
     const StasisSpriteAtlasPolicyV3* policy, int logical_w, int logical_h,
     int w, int h, int* out_x, int* out_y
 ) {
+#if defined(STASIS_ATLAS_TEST_HOOKS)
+    if (g_sprite_atlas_test_fail_allocation) return -1;
+#endif
     const int eligible = policy && policy->eligible;
     const uint64_t group_id = eligible ? policy->group_id : 0;
     if (eligible && w + 2 <= STASIS_SDL_ATLAS_PAGE_SIZE &&
         h + 8 <= STASIS_SDL_ATLAS_PAGE_SIZE) {
         for (int i = 0; i < g_sprite_atlas_page_count; i++) {
             StasisSdlAtlasPage* page = &g_sprite_atlas_pages[i];
-            if (!page->texture || page->dedicated || page->planner_layout || page->group_id != group_id) continue;
+            if (!page->texture || page->dedicated || page->planner_layout || page->sealed ||
+                page->group_id != group_id) continue;
             if (stasis_sprite_atlas_reserve_on_page(page, w, h, out_x, out_y)) return i;
         }
         int page_w = STASIS_SDL_ATLAS_PAGE_SIZE;
@@ -5945,7 +5959,7 @@ static int stasis_sprite_atlas_allocate(
     if (!eligible && stasis_sprite_atlas_fits_cold_page(w, h)) {
         for (int i = 0; i < g_sprite_atlas_page_count; i++) {
             StasisSdlAtlasPage* page = &g_sprite_atlas_pages[i];
-            if (!stasis_sprite_atlas_is_cold_page(page) || page->planner_layout) continue;
+            if (!stasis_sprite_atlas_is_cold_page(page) || page->planner_layout || page->sealed) continue;
             if (stasis_sprite_atlas_reserve_on_page(page, w, h, out_x, out_y)) return i;
         }
         const int page_index = stasis_sprite_atlas_create_page(
@@ -6029,6 +6043,10 @@ static int stasis_sprite_atlas_page_flags(int page_index, uint32_t* flags_out) {
     int plan_eligible = page->group_id != 0 && !page->dedicated;
     if (page->dedicated) flags |= STASIS_SPRITE_ATLAS_PAGE_FLAG_DEDICATED;
     if (stasis_sprite_atlas_is_cold_page(page)) flags |= STASIS_SPRITE_ATLAS_PAGE_FLAG_COLD;
+    if (page->sealed) {
+        flags |= STASIS_SPRITE_ATLAS_PAGE_FLAG_SEALED;
+        plan_eligible = 0;
+    }
     if (g_sprite_fallback.used && g_sprite_fallback.page_index == page_index &&
         g_sprite_fallback.sdl_tex == page->texture &&
         g_sprite_fallback.renderer_generation == g_resource_lifecycle.renderer_generation) {
@@ -6073,6 +6091,7 @@ static uint64_t stasis_sprite_atlas_snapshot_token(void) {
         stasis_sprite_atlas_token_mix(&hash, (uint32_t)page->height);
         stasis_sprite_atlas_token_mix(&hash, page->group_id);
         stasis_sprite_atlas_token_mix(&hash, (uint32_t)page->dedicated);
+        stasis_sprite_atlas_token_mix(&hash, (uint32_t)page->sealed);
         stasis_sprite_atlas_token_mix(&hash, (uintptr_t)page->texture);
     }
     for (int slot = 0; slot < g_sprite_capacity; slot++) {
@@ -6293,6 +6312,20 @@ STASIS_EXPORT int stasis_gfx_sprite_atlas_last_frame_stats_v1(
     return 1;
 }
 
+STASIS_EXPORT int stasis_gfx_sprite_atlas_seal_page_v1(
+    uint64_t snapshot_token, uint32_t page_index) {
+    if (!snapshot_token || snapshot_token != stasis_sprite_atlas_snapshot_token() ||
+        page_index >= (uint32_t)g_sprite_atlas_page_count ||
+        g_sprite_atlas_staged_token != 0 || g_sprite_atlas_staged_plan_pages != NULL) {
+        return 0;
+    }
+    StasisSdlAtlasPage* page = &g_sprite_atlas_pages[page_index];
+    if (!page->texture || page->sealed) return 0;
+    page->sealed = 1;
+    stasis_sprite_atlas_bump_asset_generation();
+    return 1;
+}
+
 static int stasis_sprite_atlas_mark_occupied(
     uint8_t* bits, uint32_t page_width, uint32_t page_height,
     uint32_t x, uint32_t y, uint32_t width, uint32_t height
@@ -6340,6 +6373,9 @@ static int g_sprite_atlas_test_stage_failpoint = STASIS_ATLAS_TEST_FAIL_NONE;
 STASIS_EXPORT void stasis_gfx_test_set_atlas_stage_failpoint(int failpoint) {
     g_sprite_atlas_test_stage_failpoint = failpoint;
 }
+STASIS_EXPORT void stasis_gfx_test_set_atlas_allocation_failure(int enabled) {
+    g_sprite_atlas_test_fail_allocation = enabled != 0;
+}
 #endif
 STASIS_EXPORT int stasis_gfx_sprite_atlas_stage_plan_v1(
     uint64_t snapshot_token, const StasisSpriteAtlasPlanPageV1* pages, uint32_t page_count,
@@ -6382,12 +6418,14 @@ STASIS_EXPORT int stasis_gfx_sprite_atlas_stage_plan_v1(
             (f & (STASIS_SPRITE_ATLAS_PAGE_FLAG_DEDICATED |
                   STASIS_SPRITE_ATLAS_PAGE_FLAG_COLD |
                   STASIS_SPRITE_ATLAS_PAGE_FLAG_FALLBACK |
-                  STASIS_SPRITE_ATLAS_PAGE_FLAG_PROTECTED)) ||
+                  STASIS_SPRITE_ATLAS_PAGE_FLAG_PROTECTED |
+                  STASIS_SPRITE_ATLAS_PAGE_FLAG_SEALED)) ||
             !(p->flags & STASIS_SPRITE_ATLAS_PAGE_FLAG_PLAN_ELIGIBLE) ||
             (p->flags & (STASIS_SPRITE_ATLAS_PAGE_FLAG_DEDICATED |
                          STASIS_SPRITE_ATLAS_PAGE_FLAG_COLD |
                          STASIS_SPRITE_ATLAS_PAGE_FLAG_FALLBACK |
-                         STASIS_SPRITE_ATLAS_PAGE_FLAG_PROTECTED)) ||
+                         STASIS_SPRITE_ATLAS_PAGE_FLAG_PROTECTED |
+                         STASIS_SPRITE_ATLAS_PAGE_FLAG_SEALED)) ||
             p->width != (uint32_t)source->width || p->height != (uint32_t)source->height ||
             p->usable_x != 1u || p->usable_y != 6u || p->padding != 1u ||
             p->reserved_header_height != 6u ||

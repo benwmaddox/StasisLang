@@ -6625,10 +6625,12 @@ function render(): void {{ {draws} return; }}
             "stasis_sprite_atlas_page_size_v3",
             "#define STASIS_SDL_ATLAS_COLD_PAGE_SIZE 512",
             "if (eligible && w + 2 <= STASIS_SDL_ATLAS_PAGE_SIZE",
-            "if (!page->texture || page->dedicated || page->planner_layout || page->group_id != group_id) continue;",
+            "if (!page->texture || page->dedicated || page->planner_layout || page->sealed ||",
+            "page->group_id != group_id) continue;",
+            "if (!page || page->sealed) return 0;",
             "stasis_sprite_atlas_create_page(page_w, page_h, group_id, 0)",
             "if (!eligible && stasis_sprite_atlas_fits_cold_page(w, h))",
-            "if (!stasis_sprite_atlas_is_cold_page(page) || page->planner_layout) continue;",
+            "if (!stasis_sprite_atlas_is_cold_page(page) || page->planner_layout || page->sealed) continue;",
             "stasis_sprite_atlas_create_page(width, height, group_id, 1)",
         ] {
             assert!(

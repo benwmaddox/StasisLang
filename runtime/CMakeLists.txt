@@ -374,6 +374,26 @@ if(STASIS_GRAPHICS_BUILD_TESTS AND (TARGET stasis_graphics_static OR TARGET stas
         set_tests_properties(stasis_sprite_atlas_staging_contract PROPERTIES
             ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy;STASIS_ENABLE_TEST_INPUT=1;STASIS_ASSET_ROOT=${_atlas_test_asset_root}"
             TIMEOUT 120)
+
+        add_executable(
+            stasis_sprite_atlas_lifecycle_test
+            tests/stasis_sprite_atlas_lifecycle_test.c)
+        if(TARGET stasis_graphics_static)
+            target_link_libraries(stasis_sprite_atlas_lifecycle_test PRIVATE stasis_graphics_static)
+        else()
+            target_link_libraries(stasis_sprite_atlas_lifecycle_test PRIVATE stasis_graphics)
+            set_target_properties(stasis_sprite_atlas_lifecycle_test PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+        endif()
+        target_link_libraries(stasis_sprite_atlas_lifecycle_test PRIVATE $<IF:$<TARGET_EXISTS:SDL3::SDL3>,SDL3::SDL3,SDL3::SDL3-static>)
+        target_include_directories(stasis_sprite_atlas_lifecycle_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_compile_definitions(stasis_sprite_atlas_lifecycle_test PRIVATE
+            STASIS_ATLAS_TEST_ASSET_ROOT="${_atlas_test_asset_root}"
+            STASIS_ATLAS_TEST_SMALL_PATH="${_atlas_test_small_path}")
+        add_test(NAME stasis_sprite_atlas_lifecycle_contract COMMAND stasis_sprite_atlas_lifecycle_test)
+        set_tests_properties(stasis_sprite_atlas_lifecycle_contract PROPERTIES
+            ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy;STASIS_ENABLE_TEST_INPUT=1;STASIS_ASSET_ROOT=${_atlas_test_asset_root}"
+            TIMEOUT 120)
     endif()
 
     if(WIN32)
