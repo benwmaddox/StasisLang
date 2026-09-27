@@ -144,6 +144,14 @@ The optional `web.loading_font` value must identify an existing `.ttf`, `.otf`, 
 `.woff2` file under the project `assets/` directory. Both `/assets/...` and `assets/...` forms are
 accepted; web packaging normalizes them to a package-relative URL for the static loading shell.
 
+Manifest-v2 projects may opt specific TTF assets into conservative release-only font subsetting
+with `release.font_subsetting`. The opt-in requires an assets-relative license notice, an explicit
+modification-permission assertion, and complete Reserved Font Name metadata. The compiler must
+also prove finite text coverage; otherwise packaging retains the complete font. Development and
+`--development-build` outputs always retain the source bytes. See
+[`text-coverage-proof.md`](text-coverage-proof.md) for the schema, exact tool pin, fallback rules,
+cache identity, and `stasis_font_subsets.json` report.
+
 The optional `web.viewport` object sets the authored logical game size used when the browser shell
 starts. Both dimensions must be integers from 1 through 8192. A Sheep Herder build authored at 1600 by 900 can use
 `{"width":1600,"height":900}` to keep its 1600-by-900 world coordinates stable while the browser
