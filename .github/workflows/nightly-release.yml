@@ -143,8 +143,8 @@ jobs:
             CC_aarch64_apple_ios_sim="${simulator_clang}" \
             CXX_aarch64_apple_ios_sim="${simulator_clang}" \
             cargo build -p stasis_network --target aarch64-apple-ios-sim --release
-          xcrun lipo -verify_arch arm64 target/aarch64-apple-ios/release/libstasis_network.a
-          xcrun lipo -verify_arch arm64 target/aarch64-apple-ios-sim/release/libstasis_network.a
+          xcrun lipo target/aarch64-apple-ios/release/libstasis_network.a -verify_arch arm64
+          xcrun lipo target/aarch64-apple-ios-sim/release/libstasis_network.a -verify_arch arm64
           if cmp -s \
             target/aarch64-apple-ios/release/libstasis_network.a \
             target/aarch64-apple-ios-sim/release/libstasis_network.a; then

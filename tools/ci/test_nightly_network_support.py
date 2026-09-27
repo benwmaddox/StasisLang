@@ -160,9 +160,14 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             self.workflow,
         )
         self.assertIn(
-            "xcrun lipo -verify_arch arm64 target/aarch64-apple-ios-sim/release/libstasis_network.a",
+            "xcrun lipo target/aarch64-apple-ios/release/libstasis_network.a -verify_arch arm64",
             self.workflow,
         )
+        self.assertIn(
+            "xcrun lipo target/aarch64-apple-ios-sim/release/libstasis_network.a -verify_arch arm64",
+            self.workflow,
+        )
+        self.assertNotIn("xcrun lipo -verify_arch arm64", self.workflow)
         self.assertIn(
             "device and simulator network archives are unexpectedly identical",
             self.workflow,
