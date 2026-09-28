@@ -90,6 +90,19 @@ jobs:
           "release_id=$($pin.release_id)" >> $env:GITHUB_OUTPUT
           "vendor_sha256=$($pin.sha256)" >> $env:GITHUB_OUTPUT
 
+      - name: Check Android launcher resources
+        if: steps.sentinel.outputs.relevant == 'true'
+        shell: pwsh
+        run: |
+          $manifest = Get-Content -LiteralPath stasis.json -Raw | ConvertFrom-Json -ErrorAction Stop
+          if ($null -ne $manifest.android) {
+            $resources = [string]$manifest.android.launcher_resources
+            if ([string]::IsNullOrWhiteSpace($resources) -or
+                -not (Test-Path -LiteralPath (Join-Path (Get-Location).Path $resources) -PathType Container)) {
+              throw "Android launcher resource directory is missing: $resources"
+            }
+          }
+
       - name: Restore immutable Stasis release
         if: steps.sentinel.outputs.relevant == 'true'
         shell: pwsh
