@@ -282,7 +282,10 @@ The PR workflow runs for every pull request without path filters and also suppor
 `workflow_dispatch`. It checks out the exact contributor head, emits a required relevant-change
 sentinel in one Ubuntu job, and keeps unrelated changes to that single billed job. Relevant changes validate the checked-in immutable
 `stasis.json` release and lowercase vendor SHA-256 pin, restore that exact release, verify the
-vendored snapshot, and run only `stasis fmt --check` and `stasis check`. The broad local
+vendored snapshot, and run only `stasis fmt --check` and `stasis check`. The PR gate also
+requires an existing `android.launcher_resources` directory when the project declares Android
+packaging; desktop-only projects do not need launcher artwork. `stasis check` checks the
+directory whenever that manifest field is set. The broad local
 `tools/validate-before-pr.ps1` pass accepts an explicit restored Stasis executable, proves its
 release/checksum identity matches the checked-in pin, runs vendor status, format, check, test, and
 desktop package once, and writes both a machine-readable JSON receipt and a Markdown PR summary.
