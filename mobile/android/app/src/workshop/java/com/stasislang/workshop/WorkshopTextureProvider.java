@@ -11,9 +11,12 @@ import android.os.Build;
 import android.util.SparseArray;
 import android.util.Log;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -47,6 +50,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private WorkshopSpriteAtlas atlasLayout;
     private SpriteTexture placeholderRegion;
     private int maximumTextureSize;
+    private int configuredSpriteAtlasPageSize;
     private long manifestStamp = Long.MIN_VALUE;
     private long nextManifestCheckNanos;
     private float rasterScale = 1.0f;
@@ -952,6 +956,7 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private void setProjectRoot(String root) {
         projectRootPath = root;
         manifest = new File(root, WorkshopAssetManifest.RELATIVE_PATH);
+        configuredSpriteAtlasPageSize = 0;
         manifestStamp = Long.MIN_VALUE;
         nextManifestCheckNanos = 0L;
     }
@@ -1156,8 +1161,51 @@ final class WorkshopTextureProvider implements StasisPreviewRenderer.TextureProv
     private void ensureAtlas() throws IOException {
         if (atlasLayout != null) return;
         maximumTextTextureSize();
-        atlasLayout = new WorkshopSpriteAtlas(maximumTextureSize);
+        if (configuredSpriteAtlasPageSize == 0) {
+            configuredSpriteAtlasPageSize = loadConfiguredSpriteAtlasPageSize();
+        }
+        try {
+            atlasLayout = new WorkshopSpriteAtlas(maximumTextureSize, configuredSpriteAtlasPageSize);
+        } catch (IllegalArgumentException error) {
+            throw new IOException(error.getMessage(), error);
+        }
         atlasPages.add(createAtlasPage(atlasLayout.pageSize(), atlasLayout.pageSize()));
+    }
+
+    private int loadConfiguredSpriteAtlasPageSize() throws IOException {
+        if (projectRootPath == null) return WorkshopSpriteAtlas.DEFAULT_PAGE_SIZE;
+        File projectManifest = new File(projectRootPath, "stasis.json");
+        if (!projectManifest.isFile()) return WorkshopSpriteAtlas.DEFAULT_PAGE_SIZE;
+        if (projectManifest.length() > 1024L * 1024L) {
+            throw new IOException("stasis.json is too large to read graphics settings");
+        }
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (FileInputStream input = new FileInputStream(projectManifest)) {
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = input.read(buffer)) >= 0) {
+                bytes.write(buffer, 0, count);
+            }
+        }
+        try {
+            JSONObject manifest = new JSONObject(new String(bytes.toByteArray(), StandardCharsets.UTF_8));
+            if (!manifest.has("graphics")) return WorkshopSpriteAtlas.DEFAULT_PAGE_SIZE;
+            JSONObject graphics = manifest.optJSONObject("graphics");
+            if (graphics == null) throw new IOException("graphics must be a JSON object in stasis.json");
+            if (!graphics.has("sprite_atlas_page_size")) return WorkshopSpriteAtlas.DEFAULT_PAGE_SIZE;
+            Object rawSize = graphics.opt("sprite_atlas_page_size");
+            if (!(rawSize instanceof Integer) && !(rawSize instanceof Long)) {
+                throw new IOException(
+                        "graphics.sprite_atlas_page_size must be an integer power of two between 256 and 4096");
+            }
+            long rawLong = ((Number)rawSize).longValue();
+            if (rawLong < Integer.MIN_VALUE || rawLong > Integer.MAX_VALUE) {
+                throw new IOException("graphics.sprite_atlas_page_size is outside the supported range");
+            }
+            return WorkshopSpriteAtlas.validateConfiguredPageSize((int)rawLong);
+        } catch (JSONException | IllegalArgumentException error) {
+            throw new IOException("failed to parse graphics.sprite_atlas_page_size from stasis.json", error);
+        }
     }
 
     private int maximumTextTextureSize() throws IOException {

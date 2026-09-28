@@ -2831,6 +2831,9 @@ fn run_play_in_process_inner(
         .map(PlayCaptureEnvironment::install)
         .transpose()?;
     let gfx = stasis_dynload::StasisGraphicsApi::load_default()?;
+    if let Some(configuration) = project_configuration.as_ref() {
+        gfx.set_sprite_atlas_page_size(configuration.sprite_atlas_page_size)?;
+    }
     if let Some(capture) = capture.as_ref() {
         gfx.set_recording_config(capture.width, capture.height, capture.fps)?;
     }

@@ -10,7 +10,8 @@ get_filename_component(GRAPHICS_NAME "${GRAPHICS}" NAME)
 file(COPY_FILE "${GRAPHICS}" "${TEST_ROOT}/package/${GRAPHICS_NAME}")
 get_filename_component(GAME_NAME "${GAME}" NAME)
 file(COPY_FILE "${GAME}" "${TEST_ROOT}/package/${GAME_NAME}")
-file(WRITE "${TEST_ROOT}/package/game.launch" "dll=${GAME_NAME}\nentry=main\nfps=60\n")
+file(WRITE "${TEST_ROOT}/package/game.launch"
+    "dll=${GAME_NAME}\nentry=main\nfps=60\nsprite_atlas_page_size=1024\n")
 
 execute_process(
     COMMAND "../package/game"
@@ -23,6 +24,26 @@ execute_process(
 if(NOT "${RESULT}" EQUAL 0 OR NOT "${STDOUT}" MATCHES "PACKAGED_RUNNER_OK")
     message(FATAL_ERROR "packaged runner failed (${RESULT})\nstdout=${STDOUT}\nstderr=${STDERR}")
 endif()
+
+file(WRITE "${TEST_ROOT}/package/game.launch"
+    "dll=${GAME_NAME}\nentry=main\nfps=60\nsprite_atlas_page_size=300\n")
+execute_process(
+    COMMAND "../package/game"
+    WORKING_DIRECTORY "${TEST_ROOT}/caller"
+    TIMEOUT 30
+    RESULT_VARIABLE INVALID_ATLAS_RESULT
+    OUTPUT_VARIABLE INVALID_ATLAS_STDOUT
+    ERROR_VARIABLE INVALID_ATLAS_STDERR
+)
+if("${INVALID_ATLAS_RESULT}" EQUAL 0 OR
+   NOT "${INVALID_ATLAS_STDERR}" MATCHES "invalid or duplicate sprite_atlas_page_size")
+    message(FATAL_ERROR
+        "packaged runner accepted an invalid sprite atlas page size (${INVALID_ATLAS_RESULT})\n"
+        "stdout=${INVALID_ATLAS_STDOUT}\nstderr=${INVALID_ATLAS_STDERR}")
+endif()
+
+file(WRITE "${TEST_ROOT}/package/game.launch"
+    "dll=${GAME_NAME}\nentry=main\nfps=60\nsprite_atlas_page_size=1024\n")
 
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env STASIS_TEST_WINDOW_INIT_FAILURE=1 "../package/game"

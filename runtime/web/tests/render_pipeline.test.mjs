@@ -62,7 +62,7 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false,
   return gl;
 }
 
-async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], spriteXOffset = null, spritePivot = [4, 5], spriteScale = [1, 1], instanceFlags = 0, runMetadata = [0, 0, 0, 0, 0], webgl = true, throwing = false, textureThrow = false, textureFailureAt = 0, drawError = false, textureGlErrorAt = 0, imageReady = true, timing = false, realTime = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null, hudQuery = "", atlasBudgetBytes = undefined, maxTextureSize = 4096, expectReady = true } = {}) {
+async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], spriteXOffset = null, spritePivot = [4, 5], spriteScale = [1, 1], instanceFlags = 0, runMetadata = [0, 0, 0, 0, 0], webgl = true, throwing = false, textureThrow = false, textureFailureAt = 0, drawError = false, textureGlErrorAt = 0, imageReady = true, timing = false, realTime = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null, hudQuery = "", atlasBudgetBytes = undefined, spriteAtlasPageSize = 512, omitSpriteAtlasPageSize = false, maxTextureSize = 4096, expectReady = true } = {}) {
   const memory = new WebAssembly.Memory({ initial: 16 });
   const i32 = new Int32Array(memory.buffer, 0, I32_COUNT);
   const f32 = new Float32Array(memory.buffer, F32_OFFSET, F32_COUNT);
@@ -226,6 +226,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     strings: {}, assets, asset_metadata: assetMetadata,
   };
   if (atlasBudgetBytes !== undefined) game.atlasBudgetBytes = atlasBudgetBytes;
+  if (!omitSpriteAtlasPageSize) game.spriteAtlasPageSize = spriteAtlasPageSize;
   installCollectionViewAbi(game, instance.exports);
   const raf = [];
   const windowListeners = new Map();
@@ -345,6 +346,10 @@ test("WebGL initialization failure has an unsupported state and no fallback code
   assert.doesNotMatch(source, /context\.drawImage\(target|context\.fillRect|context\.fillText/);
 });
 
+test("sprite shader keeps large-atlas texture coordinates at high precision", () => {
+  assert.match(source, /precision highp float;\s*uniform sampler2D sprite;/);
+});
+
 test("invalid atlas budgets fail visibly with the manifest field name", async () => {
   for (const atlasBudgetBytes of [0, -1, 1.5, "4096", null, Number.MAX_SAFE_INTEGER + 1]) {
     const runtime = await loadRuntime({ atlasBudgetBytes, expectReady: false });
@@ -353,6 +358,42 @@ test("invalid atlas budgets fail visibly with the manifest field name", async ()
     assert.match(runtime.body.dataset.gpuError, /web\.atlas_budget_bytes/);
     assert.equal(runtime.stats.createdTextures, 0);
   }
+});
+
+test("sprite atlas page size validates and deterministically clamps to the device limit", async () => {
+  for (const spriteAtlasPageSize of [0, 128, 192, 256.5, 8192, "2048", null]) {
+    const runtime = await loadRuntime({ spriteAtlasPageSize, expectReady: false });
+    assert.equal(runtime.body.dataset.ready, "false");
+    assert.match(runtime.errorBox.textContent, /graphics\.sprite_atlas_page_size/);
+    assert.equal(runtime.stats.createdTextures, 0);
+  }
+
+  const cases = [
+    { omitSpriteAtlasPageSize: true, maxTextureSize: 4096, expected: 2048 },
+    { spriteAtlasPageSize: 1024, maxTextureSize: 4096, expected: 1024 },
+    { spriteAtlasPageSize: 4096, maxTextureSize: 3072, expected: 2048 }
+  ];
+  for (const options of cases) {
+    const runtime = await loadRuntime({ sprites: 1, spriteHandles: [1], ...options });
+    runtime.frame();
+    assert.deepEqual(runtime.stats.pageSizes[0], [options.expected, options.expected]);
+    assert.equal(runtime.body.dataset.assetAtlasBytes, String(options.expected ** 2 * 4));
+  }
+
+  const belowMinimum = await loadRuntime({ maxTextureSize: 128, expectReady: false });
+  assert.equal(belowMinimum.body.dataset.ready, "false");
+  assert.match(belowMinimum.errorBox.textContent, /minimum sprite atlas page size 256/);
+  assert.equal(belowMinimum.stats.createdTextures, 0);
+});
+
+test("atlas memory budget must fit one full configured shared page", async () => {
+  const runtime = await loadRuntime({
+    sprites: 1, spriteHandles: [1], spriteAtlasPageSize: 2048,
+    atlasBudgetBytes: 2048 * 2048 * 4 - 1, expectReady: false
+  });
+  assert.equal(runtime.body.dataset.ready, "false");
+  assert.match(runtime.errorBox.textContent, /must fit one 2048x2048 sprite atlas page/);
+  assert.equal(runtime.stats.createdTextures, 0);
 });
 
 test("large same-handle sprite run uploads the private 64-byte records", async () => {
@@ -1320,18 +1361,44 @@ test("atlas efficiency measurement: separate images versus an authored sheet", a
   assert.equal(sheetFirst.draws, 1);
   assert.equal(sheetFirst.instanceUploadBytes, drawOrder.length * 64);
 
+  const configured = await loadRuntime({
+    sprites: drawOrder.length, spriteHandles: drawOrder, spriteSize: [252, 252],
+    spriteUv: [0, 0, 1, 1], spriteAtlasPageSize: 2048, realTime: true
+  });
+  configured.frame();
+  const configuredFirst = {
+    pages: configured.stats.pageSizes,
+    allocatedBytes: Number(configured.body.dataset.atlasAllocatedBytes),
+    pixelUploads: Number(configured.body.dataset.atlasUploadCount),
+    pixelUploadBytes: Number(configured.body.dataset.atlasUploadBytes),
+    instanceUploadBytes: Number(configured.body.dataset.uploadedBytes),
+    draws: Number(configured.body.dataset.drawCalls),
+    binds: Number(configured.body.dataset.textureBinds),
+    transitions: Number(configured.body.dataset.atlasTransitions)
+  };
+  assert.deepEqual(configuredFirst.pages, [[2048, 2048]]);
+  assert.equal(configuredFirst.allocatedBytes, 2048 * 2048 * 4);
+  assert.equal(configuredFirst.draws, 1);
+  assert.equal(configuredFirst.transitions, 0);
+  assert.equal(configuredFirst.instanceUploadBytes, drawOrder.length * 64);
+
   const firstSeparateUploadCount = Number(separate.body.dataset.atlasUploadCount);
   const firstSheetUploadCount = Number(sheet.body.dataset.atlasUploadCount);
+  const firstConfiguredUploadCount = Number(configured.body.dataset.atlasUploadCount);
   const separateReplay = [];
   const sheetReplay = [];
+  const configuredReplay = [];
   for (let frame = 0; frame < 25; frame += 1) {
     separate.frame();
     sheet.frame();
+    configured.frame();
     separateReplay.push(Number(separate.body.dataset.hostReplayMs));
     sheetReplay.push(Number(sheet.body.dataset.hostReplayMs));
+    configuredReplay.push(Number(configured.body.dataset.hostReplayMs));
   }
   assert.equal(Number(separate.body.dataset.atlasUploadCount), firstSeparateUploadCount);
   assert.equal(Number(sheet.body.dataset.atlasUploadCount), firstSheetUploadCount);
+  assert.equal(Number(configured.body.dataset.atlasUploadCount), firstConfiguredUploadCount);
   const median = values => [...values].sort((left, right) => left - right)[12];
   if (process.env.STASIS_ATLAS_REPORT === "1") {
     console.log("ATLAS_MEASUREMENT " + JSON.stringify({
@@ -1339,7 +1406,8 @@ test("atlas efficiency measurement: separate images versus an authored sheet", a
       padding: 2, paddedArea: spriteCount * 256 * 256,
       sheetSize: [1512, 756], drawCount: drawOrder.length,
       separate: { ...separateFirst, medianHostReplayMs: median(separateReplay) },
-      sheet: { ...sheetFirst, medianHostReplayMs: median(sheetReplay) }
+      sheet: { ...sheetFirst, medianHostReplayMs: median(sheetReplay) },
+      configuredSeparate: { ...configuredFirst, medianHostReplayMs: median(configuredReplay) }
     }));
   }
 });
@@ -1904,7 +1972,7 @@ test("legacy direct text follows the physical density tier without changing its 
 });
 
 test("text over the WebGL texture extent fails before Canvas allocation without a logical fallback", async () => {
-  const runtime = await loadRuntime({ dpr: 4, maxTextureSize: 64 });
+  const runtime = await loadRuntime({ dpr: 4, maxTextureSize: 256 });
   const font = runtime.env.load_font(0, 18);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(runtime.env.font_status(font), 3);
@@ -1912,7 +1980,7 @@ test("text over the WebGL texture extent fails before Canvas allocation without 
   const textureUploadsBefore = runtime.stats.textureUploads.length;
   const textFillsBefore = runtime.rasterStats.textFills.length;
   const createdTexturesBefore = runtime.stats.createdTextures;
-  runtime.setTextFixture(font, "x");
+  runtime.setTextFixture(font, "x".repeat(40));
   runtime.frame();
   assert.match(runtime.body.dataset.gpuError, /available texture extent/);
   assert.equal(runtime.stats.instanced, 0);

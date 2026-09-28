@@ -167,6 +167,28 @@ typedef struct {
     uint32_t max_logical_height;
 } StasisSpriteAtlasPolicyV3;
 
+static inline int stasis_sprite_atlas_page_size_valid(int page_size) {
+    return page_size >= 256 && page_size <= 4096 &&
+           (page_size & (page_size - 1)) == 0;
+}
+
+/* Shared pages use the largest power-of-two request supported by the device. */
+static inline int stasis_sprite_atlas_effective_page_size(
+    int configured_page_size,
+    int max_texture_extent,
+    int* out_page_size) {
+    if (!stasis_sprite_atlas_page_size_valid(configured_page_size) || !out_page_size) return 0;
+    if (max_texture_extent <= 0) max_texture_extent = configured_page_size;
+    if (max_texture_extent < 256) return 0;
+    int extent = configured_page_size < max_texture_extent
+        ? configured_page_size : max_texture_extent;
+    int page_size = 1;
+    while (page_size <= extent / 2) page_size *= 2;
+    if (page_size < 256) return 0;
+    *out_page_size = page_size;
+    return 1;
+}
+
 static inline StasisSpriteAtlasPolicyV3 stasis_sprite_atlas_policy_v3_standalone(void) {
     StasisSpriteAtlasPolicyV3 policy = {0, 0, 0, 0, 0, 0};
     return policy;

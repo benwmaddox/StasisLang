@@ -106,6 +106,7 @@ typedef int (*stasis_set_maximized_fn)(int enabled);
 typedef void (*stasis_set_window_size_fn)(int width, int height);
 typedef int (*stasis_graphics_runtime_abi_version_fn)(void);
 typedef int (*stasis_graphics_set_asset_root_fn)(const char *path);
+typedef int (*stasis_graphics_set_sprite_atlas_page_size_fn)(int page_size);
 
 static int stasis_env_flag(const char *name, int default_value)
 {
@@ -513,7 +514,8 @@ static int stasis_try_load_launch_config(
     size_t data_json_out_cap,
     char *data_meta_out,
     size_t data_meta_out_cap,
-    int *fps_out)
+    int *fps_out,
+    int *sprite_atlas_page_size_out)
 {
     char self_path[2048];
     char launch_path[2080];
@@ -524,6 +526,7 @@ static int stasis_try_load_launch_config(
     char line[2048];
     int saw_render_construction_lifecycle_version = 0;
     int render_construction_lifecycle_version = 0;
+    int saw_sprite_atlas_page_size = 0;
 
     if (!stasis_try_get_self_path(argv0, self_path, sizeof(self_path)))
     {
@@ -601,6 +604,10 @@ static int stasis_try_load_launch_config(
     if (fps_out)
     {
         *fps_out = 60;
+    }
+    if (sprite_atlas_page_size_out)
+    {
+        *sprite_atlas_page_size_out = 0;
     }
 
     while (fgets(line, sizeof(line), file))
@@ -692,6 +699,27 @@ static int stasis_try_load_launch_config(
             {
                 *fps_out = value_i32;
             }
+            continue;
+        }
+        if (strcmp(key, "sprite_atlas_page_size") == 0)
+        {
+            char *end = NULL;
+            long page_size = strtol(value, &end, 10);
+            if (saw_sprite_atlas_page_size || end == value || !end || *end != '\0' ||
+                page_size < 256 || page_size > 4096 ||
+                (page_size & (page_size - 1)) != 0)
+            {
+                fprintf(stderr,
+                        "error: invalid or duplicate sprite_atlas_page_size in %s (expected a power of two from 256 to 4096)\n",
+                        launch_path);
+                fclose(file);
+                return 0;
+            }
+            if (sprite_atlas_page_size_out)
+            {
+                *sprite_atlas_page_size_out = (int)page_size;
+            }
+            saw_sprite_atlas_page_size = 1;
             continue;
         }
     }
@@ -1831,6 +1859,7 @@ int main(int argc, char **argv)
     char launch_tick_buf[512];
     char launch_render_buf[512];
     int render_construction_lifecycle_version = 0;
+    int launch_sprite_atlas_page_size = 0;
     char launch_data_json_buf[2048];
     char launch_data_meta_buf[2048];
     int fps = 60;
@@ -1991,7 +2020,8 @@ int main(int argc, char **argv)
                 sizeof(launch_data_json_buf),
                 launch_data_meta_buf,
                 sizeof(launch_data_meta_buf),
-                &fps))
+                &fps,
+                &launch_sprite_atlas_page_size))
         {
             print_usage();
             return 1;
@@ -2124,12 +2154,13 @@ int main(int argc, char **argv)
     }
     if (runner_diag)
     {
-        fprintf(stderr, "RUNNER_DIAG: dll=%s entry=%s tick=%s render=%s render_construction_lifecycle_version=%d\n",
+        fprintf(stderr, "RUNNER_DIAG: dll=%s entry=%s tick=%s render=%s render_construction_lifecycle_version=%d sprite_atlas_page_size=%d\n",
                 dll_path ? dll_path : "(null)",
                 entry_name ? entry_name : "(null)",
                 tick_name_override ? tick_name_override : "(auto)",
                 render_name_override ? render_name_override : "(auto)",
-                render_construction_lifecycle_version);
+                render_construction_lifecycle_version,
+                launch_sprite_atlas_page_size);
         fflush(stderr);
     }
 
@@ -2161,6 +2192,19 @@ int main(int argc, char **argv)
             fprintf(stderr, "error: stasis_graphics.dll rejected the launcher asset root\n");
             FreeLibrary(lib);
             return 1;
+        }
+        if (launch_sprite_atlas_page_size > 0)
+        {
+            stasis_graphics_set_sprite_atlas_page_size_fn set_atlas_page_size =
+                (stasis_graphics_set_sprite_atlas_page_size_fn)GetProcAddress(
+                    gfx, "stasis_gfx_set_sprite_atlas_page_size");
+            if (!set_atlas_page_size || !set_atlas_page_size(launch_sprite_atlas_page_size))
+            {
+                fprintf(stderr, "error: stasis_graphics.dll rejected sprite atlas page size %d\n",
+                        launch_sprite_atlas_page_size);
+                FreeLibrary(lib);
+                return 1;
+            }
         }
         init_window = (stasis_init_window_fn)GetProcAddress(gfx, "stasis_init_window");
         set_fullscreen = (stasis_set_fullscreen_fn)GetProcAddress(gfx, "stasis_set_fullscreen");
@@ -2926,10 +2970,11 @@ int main(int argc, char **argv)
     {
         fprintf(
             stderr,
-            "RUNNER_DIAG: dll=%s entry=%s render_construction_lifecycle_version=%d\n",
+            "RUNNER_DIAG: dll=%s entry=%s render_construction_lifecycle_version=%d sprite_atlas_page_size=%d\n",
             dll_path ? dll_path : "(null)",
             entry_name ? entry_name : "(null)",
-            render_construction_lifecycle_version);
+            render_construction_lifecycle_version,
+            launch_sprite_atlas_page_size);
         fflush(stderr);
     }
 
@@ -2962,6 +3007,19 @@ int main(int argc, char **argv)
             fprintf(stderr, "error: packaged graphics runtime rejected the launcher asset root\n");
             dlclose(gfx_lib);
             return 1;
+        }
+        if (launch_sprite_atlas_page_size > 0)
+        {
+            stasis_graphics_set_sprite_atlas_page_size_fn set_atlas_page_size =
+                (stasis_graphics_set_sprite_atlas_page_size_fn)dlsym(
+                    gfx_lib, "stasis_gfx_set_sprite_atlas_page_size");
+            if (!set_atlas_page_size || !set_atlas_page_size(launch_sprite_atlas_page_size))
+            {
+                fprintf(stderr, "error: packaged graphics runtime rejected sprite atlas page size %d\n",
+                        launch_sprite_atlas_page_size);
+                dlclose(gfx_lib);
+                return 1;
+            }
         }
         stasis_init_window_fn init_window =
             (stasis_init_window_fn)dlsym(gfx_lib, "stasis_init_window");

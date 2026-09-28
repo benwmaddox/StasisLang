@@ -88,6 +88,7 @@ EXPORTS
     stasis_gfx_load_sprite
     stasis_gfx_set_next_sprite_atlas_eligible
     stasis_gfx_set_next_sprite_atlas_policy_v3
+    stasis_gfx_set_sprite_atlas_page_size
     stasis_gfx_sprite_atlas_query_v1
     stasis_gfx_sprite_atlas_stage_plan_v1
     stasis_gfx_sprite_atlas_commit_plan_v1

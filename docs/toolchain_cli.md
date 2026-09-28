@@ -84,6 +84,9 @@ game window.
     "loading_font": "/assets/fonts/display.ttf",
     "viewport": { "width": 1600, "height": 900 }
   },
+  "graphics": {
+    "sprite_atlas_page_size": 2048
+  },
   "vendor": {
     "stasis": {
       "release_id": "nightly-20260805-123",
@@ -157,6 +160,24 @@ starts. Both dimensions must be integers from 1 through 8192. A Sheep Herder bui
 `{"width":1600,"height":900}` to keep its 1600-by-900 world coordinates stable while the browser
 uniformly fits and centers that 16:9 view. Projects without this setting keep the 640-by-360
 default.
+
+Manifest-v2 `graphics.sprite_atlas_page_size` sets the square shared sprite-atlas page size for the
+project. It accepts powers of two from 256 through 4096 and defaults to 2048. A 2048 page reserves
+16 MiB of RGBA8 texture memory; each additional shared page reserves another 16 MiB. At startup,
+WebGL, SDL, the generated mobile runtime, and Android Workshop GLES clamp the requested size down
+to the greatest supported power of two. A device limit below 256 is an explicit startup/allocation
+error. If `web.atlas_budget_bytes` is set, manifest validation requires it to fit the configured
+page; the runtime also verifies the effective device-clamped page before allocation and does not
+silently shrink pages to fit the budget. Assets larger than the shared page retain the existing
+dedicated-page path. For example, use 1024 for a lower per-page allocation or 4096 for fewer page
+transitions on suitable devices:
+
+```json
+"graphics": { "sprite_atlas_page_size": 1024 }
+```
+
+This is a startup setting. It does not change font rasterization/legacy text-page sizing, sprite
+padding, draw order, or the render command ABI.
 
 `vendor.stasis.hash_version` versions the hash contract independently of `manifest_version` and
 the selected toolchain release. New projects and `stasis vendor update` write version 2. A version 2

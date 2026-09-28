@@ -1479,6 +1479,7 @@ pub struct StasisGraphicsApi {
     stasis_host_performance_metrics_enabled: usize,
     stasis_host_set_performance_metrics: usize,
     stasis_gfx_submit_u8: usize,
+    stasis_gfx_set_sprite_atlas_page_size: Option<usize>,
     atlas_query_v1: Option<usize>,
     atlas_stage_v1: Option<usize>,
     atlas_commit_v1: Option<usize>,
@@ -1545,6 +1546,9 @@ impl StasisGraphicsApi {
         let stasis_host_performance_metrics_enabled =
             lib.symbol_address("stasis_host_performance_metrics_enabled")?;
         let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
+        let stasis_gfx_set_sprite_atlas_page_size = lib
+            .symbol_address("stasis_gfx_set_sprite_atlas_page_size")
+            .ok();
         let atlas_query_v1 = lib.symbol_address("stasis_gfx_sprite_atlas_query_v1").ok();
         let atlas_stage_v1 = lib
             .symbol_address("stasis_gfx_sprite_atlas_stage_plan_v1")
@@ -1587,6 +1591,7 @@ impl StasisGraphicsApi {
             stasis_host_performance_metrics_enabled,
             stasis_host_set_performance_metrics,
             stasis_gfx_submit_u8,
+            stasis_gfx_set_sprite_atlas_page_size,
             atlas_query_v1,
             atlas_stage_v1,
             atlas_commit_v1,
@@ -1844,6 +1849,32 @@ impl StasisGraphicsApi {
                     "graphics runtime rejected asset root {}",
                     path.to_string_lossy()
                 ));
+            }
+            Ok(())
+        }
+    }
+
+    pub fn set_sprite_atlas_page_size(&self, page_size: u32) -> Result<(), String> {
+        let Some(address) = self.stasis_gfx_set_sprite_atlas_page_size else {
+            return if page_size == 2048 {
+                Ok(())
+            } else {
+                Err("graphics runtime does not support graphics.sprite_atlas_page_size".to_string())
+            };
+        };
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+            if callback(page_size as i32) == 0 {
+                return Err("graphics runtime rejected graphics.sprite_atlas_page_size".to_string());
+            }
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(address) };
+            if callback(page_size as i32) == 0 {
+                return Err("graphics runtime rejected graphics.sprite_atlas_page_size".to_string());
             }
             Ok(())
         }

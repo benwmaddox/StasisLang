@@ -10,6 +10,30 @@ import org.junit.Test;
 
 public final class WorkshopSpriteAtlasTest {
     @Test
+    public void configuredPageSizeUsesTheDeterministicDeviceClamp() {
+        assertEquals(512, new WorkshopSpriteAtlas(4096, 512).pageSize());
+        assertEquals(2048, new WorkshopSpriteAtlas(3072, 4096).pageSize());
+        assertEquals(1024, new WorkshopSpriteAtlas(2048, 1024).pageSize());
+        assertEquals(2048, new WorkshopSpriteAtlas(4096, 2048).pageSize());
+
+        boolean invalidSettingRejected = false;
+        try {
+            new WorkshopSpriteAtlas(4096, 300);
+        } catch (IllegalArgumentException expected) {
+            invalidSettingRejected = true;
+        }
+        assertTrue(invalidSettingRejected);
+
+        boolean unsupportedDeviceRejected = false;
+        try {
+            new WorkshopSpriteAtlas(128, 2048);
+        } catch (IllegalArgumentException expected) {
+            unsupportedDeviceRejected = true;
+        }
+        assertTrue(unsupportedDeviceRejected);
+    }
+
+    @Test
     public void dedicatedPageBoundaryReservesIndependentWidthAndHeightOverhead() {
         int widthCap = WorkshopSpriteAtlas.maximumRasterWidth(256);
         int heightCap = WorkshopSpriteAtlas.maximumRasterHeight(256);

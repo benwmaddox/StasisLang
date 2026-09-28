@@ -113,6 +113,11 @@ page bytes, and live page count when the budget would be exceeded. Releasing a s
 resource returns an empty page's bytes to the live budget; context restoration rebuilds the live
 accounting for the new WebGL context.
 
+Manifest-v2 projects default `graphics.sprite_atlas_page_size` to 2048 (16 MiB per RGBA8 page).
+If set, `web.atlas_budget_bytes` must fit one configured page; packaging rejects smaller budgets
+instead of silently shrinking the page. Device limits still deterministically clamp a supported
+page down to the greatest allowed power of two.
+
 Atlas pages use the browser's `MAX_TEXTURE_SIZE`. Texture creation, upload, context loss, and
 budget failures remain visible WebGL errors. The runtime does not downscale or switch to a
 Canvas2D fallback when a page cannot be allocated.

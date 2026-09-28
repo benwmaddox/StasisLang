@@ -10,6 +10,7 @@ final class WorkshopSpriteAtlas {
     static final int DEDICATED_HEIGHT_OVERHEAD = PADDING * 2 + PRIVATE_HEADER_HEIGHT;
     static final int DEFAULT_PAGE_SIZE = 2048;
     static final int MIN_PAGE_SIZE = 256;
+    static final int MAX_PAGE_SIZE = 4096;
 
     static final class Region {
         final int page;
@@ -37,8 +38,34 @@ final class WorkshopSpriteAtlas {
     private final ArrayList<ShelfPage> pages = new ArrayList<>();
 
     WorkshopSpriteAtlas(int maximumTextureSize) {
-        pageSize = Math.max(MIN_PAGE_SIZE,
-                Math.min(DEFAULT_PAGE_SIZE, Math.max(MIN_PAGE_SIZE, maximumTextureSize)));
+        this(maximumTextureSize, DEFAULT_PAGE_SIZE);
+    }
+
+    WorkshopSpriteAtlas(int maximumTextureSize, int configuredPageSize) {
+        pageSize = effectivePageSize(maximumTextureSize, configuredPageSize);
+    }
+
+    static int validateConfiguredPageSize(int configuredPageSize) {
+        if (configuredPageSize < MIN_PAGE_SIZE || configuredPageSize > MAX_PAGE_SIZE
+                || (configuredPageSize & (configuredPageSize - 1)) != 0) {
+            throw new IllegalArgumentException(
+                    "graphics.sprite_atlas_page_size must be a power of two between 256 and 4096");
+        }
+        return configuredPageSize;
+    }
+
+    static int effectivePageSize(int maximumTextureSize, int configuredPageSize) {
+        validateConfiguredPageSize(configuredPageSize);
+        if (maximumTextureSize < MIN_PAGE_SIZE) {
+            throw new IllegalArgumentException(
+                    "GLES maximum texture size is below the minimum sprite atlas page size 256");
+        }
+        int effective = Integer.highestOneBit(Math.min(maximumTextureSize, configuredPageSize));
+        if (effective < MIN_PAGE_SIZE) {
+            throw new IllegalArgumentException(
+                    "GLES maximum texture size cannot satisfy minimum sprite atlas page size 256");
+        }
+        return effective;
     }
 
     int pageSize() { return pageSize; }

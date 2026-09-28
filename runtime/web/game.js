@@ -94,6 +94,12 @@
     && game.atlasBudgetBytes > 0 ? game.atlasBudgetBytes : null;
   const atlasBudgetError = hasAtlasBudget && atlasBudgetBytes === null
     ? new StasisConfigError("web.atlas_budget_bytes must be a positive JavaScript safe integer") : null;
+  const hasSpriteAtlasPageSize = Object.prototype.hasOwnProperty.call(game, "spriteAtlasPageSize");
+  const spriteAtlasPageSize = hasSpriteAtlasPageSize ? game.spriteAtlasPageSize : 2048;
+  const spriteAtlasPageSizeError = !Number.isInteger(spriteAtlasPageSize)
+    || spriteAtlasPageSize < 256 || spriteAtlasPageSize > 4096
+    || (spriteAtlasPageSize & (spriteAtlasPageSize - 1)) !== 0
+    ? new StasisConfigError("graphics.sprite_atlas_page_size must be a power of two between 256 and 4096") : null;
   const COLLECTION_VIEW_ABI_VERSION = 2;
   const collectionViewAbiVersion = game.collectionViewAbiVersion ?? 1;
   const sprites = new Map();
@@ -464,10 +470,11 @@
   const GFX_ORDER_CLIP_POP = 6;
   const SPRITE_CAP = GFX_MAX_SPRITES;
   const spriteScratch = new Float32Array(SPRITE_CAP * 16);
-  const ATLAS_PAGE_SIZE = 512;
   // WebGL exposes MAX_TEXTURE_SIZE on real contexts; retain the historical
   // fallback only for test/minimal contexts that do not expose the query.
-  const ATLAS_PAGE_MAX = 2048;
+  const ATLAS_PAGE_MAX = 4096;
+  const ATLAS_PAGE_MIN = 256;
+  const TEXT_ATLAS_PAGE_SIZE = 512;
   const ATLAS_PADDING = 2;
   const startedAt = performance.now();
 
@@ -2728,7 +2735,8 @@
           textureUv = mix(uv.xy, uv.zw, p);
           vertexColor = color;
         }`, `#version 300 es
-        precision mediump float;
+        // Keep normalized atlas coordinates texel-accurate through 4096px pages.
+        precision highp float;
         uniform sampler2D sprite;
         in vec2 textureUv;
         in vec4 vertexColor;
@@ -2757,6 +2765,30 @@
       const atlasPages = [];
       const atlasByResource = new WeakMap();
       const maxTextureSize = Math.max(1, Number(gl.getParameter?.(gl.MAX_TEXTURE_SIZE)) || ATLAS_PAGE_MAX);
+      if (maxTextureSize < ATLAS_PAGE_MIN) {
+        throw new StasisConfigError(
+          `WebGL MAX_TEXTURE_SIZE ${maxTextureSize} is below the minimum sprite atlas page size ${ATLAS_PAGE_MIN}`
+        );
+      }
+      let sharedPageSize = Math.min(spriteAtlasPageSize, maxTextureSize);
+      while (sharedPageSize > 0 && (sharedPageSize & (sharedPageSize - 1)) !== 0) {
+        sharedPageSize &= sharedPageSize - 1;
+      }
+      if (sharedPageSize < ATLAS_PAGE_MIN) {
+        throw new StasisConfigError(
+          `WebGL MAX_TEXTURE_SIZE ${maxTextureSize} cannot satisfy the minimum sprite atlas page size ${ATLAS_PAGE_MIN}`
+        );
+      }
+      let textSharedPageSize = Math.min(TEXT_ATLAS_PAGE_SIZE, maxTextureSize);
+      while (textSharedPageSize > 0 && (textSharedPageSize & (textSharedPageSize - 1)) !== 0) {
+        textSharedPageSize &= textSharedPageSize - 1;
+      }
+      const sharedPageBytes = sharedPageSize * sharedPageSize * 4;
+      if (atlasBudgetBytes !== null && atlasBudgetBytes < sharedPageBytes) {
+        throw new StasisConfigError(
+          `web.atlas_budget_bytes must fit one ${sharedPageSize}x${sharedPageSize} sprite atlas page (${sharedPageBytes} bytes)`
+        );
+      }
       // Upload counters are cumulative for this helper/context lifetime;
       // page and live-entry counts describe the current atlas.
       let atlasUploadCount = 0;
@@ -2834,7 +2866,7 @@
           clearGpuError("context");
         });
       }
-      const createAtlasPage = size => {
+      const createAtlasPage = (size, domain = "sprite") => {
         if (size > maxTextureSize) throw gpuFailure("WebGL2 atlas page exceeds MAX_TEXTURE_SIZE");
         const pageBytes = size * size * 4;
         if (atlasBudgetBytes !== null && atlasAllocatedBytes + pageBytes > atlasBudgetBytes) {
@@ -2870,6 +2902,7 @@
         }
         const page = {
           texture, size, cursorX: 2, cursorY: 0, rowHeight: 2,
+          domain,
           allocatedBytes: pageBytes, solidUv: 0.5 / size,
           entries: new Set(), freeRects: []
         };
@@ -3037,12 +3070,20 @@
         if (paddedWidth > maxTextureSize || paddedHeight > maxTextureSize) {
           throw gpuFailure("Sprite exceeds WebGL2 MAX_TEXTURE_SIZE");
         }
-        let pageSize = ATLAS_PAGE_SIZE;
+        const domain = resource.atlasDomain === "text" ? "text" : "sprite";
+        const basePageSize = domain === "text" ? textSharedPageSize : sharedPageSize;
+        let pageSize = basePageSize;
         while (pageSize < paddedWidth || pageSize < paddedHeight) pageSize *= 2;
         pageSize = Math.min(pageSize, maxTextureSize);
         let page = null;
         let allocation = null;
         for (const candidate of atlasPages) {
+          const compatibleDomain = domain === "text"
+            ? candidate.domain === "text"
+              || (candidate.domain === "sprite" && candidate.size === textSharedPageSize)
+            : candidate.domain === "sprite"
+              || (candidate.domain === "text" && candidate.size === sharedPageSize);
+          if (!compatibleDomain) continue;
           if (paddedWidth > candidate.size || paddedHeight > candidate.size) continue;
           const candidateAllocation = allocateAtlasRect(candidate, paddedWidth, paddedHeight);
           if (candidateAllocation) {
@@ -3053,7 +3094,7 @@
         }
         let createdPage = false;
         if (!page) {
-          page = createAtlasPage(pageSize);
+          page = createAtlasPage(pageSize, domain);
           if (!page) return null;
           createdPage = true;
           allocation = allocateAtlasRect(page, paddedWidth, paddedHeight);
@@ -3182,7 +3223,9 @@
         stageResource,
         solidFor: preferredPage => {
           const page = (!preferredPage?.deleted && preferredPage)
-            || atlasPages.find(candidate => !candidate.deleted) || createAtlasPage(ATLAS_PAGE_SIZE);
+            || atlasPages.find(candidate => !candidate.deleted
+              && (candidate.domain === "sprite" || candidate.size === sharedPageSize))
+            || createAtlasPage(sharedPageSize, "sprite");
           return page ? { page, uv: page.solidUv } : null;
         },
         drawSprites: (values, count, page) => draw(values, count, page.texture),
@@ -3319,7 +3362,7 @@
     const resource = {
       ready: true, drawable: surface, width, height, logicalWidth, logicalHeight,
       rasterScale, generation: 1, baseline: font.baseline, text, fontHandle, byteLength,
-      transient: false
+      atlasDomain: "text", transient: false
     };
     if (resource.byteLength > PREPARED_TEXT_MAX_BYTES) {
       resource.transient = true;
@@ -4190,7 +4233,10 @@
     try {
       setLoading("Preparing…", "loading");
       if (atlasBudgetError) throw atlasBudgetError;
-      if (!getGpuBatcher()) throw new Error("WebGL2 is required by the Stasis Web renderer");
+      if (spriteAtlasPageSizeError) throw spriteAtlasPageSizeError;
+      if (!getGpuBatcher()) {
+        throw activeGpuErrors.get("renderer") || new Error("WebGL2 is required by the Stasis Web renderer");
+      }
       const result = await WebAssembly.instantiate(await wasmBytes(), imports);
       instance = result.instance;
       wasmModuleGeneration += 1;

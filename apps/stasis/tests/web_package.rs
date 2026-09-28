@@ -1471,6 +1471,8 @@ fn web_atlas_budget_projects_to_runtime_and_rejects_malformed_manifest_values() 
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest_path).expect("read atlas budget manifest"))
             .expect("parse atlas budget manifest");
+    manifest["manifest_version"] = serde_json::json!(2);
+    manifest["graphics"] = serde_json::json!({"sprite_atlas_page_size": 1024});
     let exact_budget = 9_u64 * 1024 * 1024 * 4;
     manifest["web"] = serde_json::json!({"atlas_budget_bytes": exact_budget});
     fs::write(
@@ -1486,6 +1488,10 @@ fn web_atlas_budget_projects_to_runtime_and_rejects_malformed_manifest_values() 
         runtime_config(&release_runtime)["atlasBudgetBytes"],
         exact_budget
     );
+    assert_eq!(
+        runtime_config(&release_runtime)["spriteAtlasPageSize"],
+        1024
+    );
     fs::remove_dir_all(&release_output).expect("clean release atlas package");
 
     let development_output =
@@ -1495,6 +1501,10 @@ fn web_atlas_budget_projects_to_runtime_and_rejects_malformed_manifest_values() 
     assert_eq!(
         runtime_config(&development_runtime)["atlasBudgetBytes"],
         exact_budget
+    );
+    assert_eq!(
+        runtime_config(&development_runtime)["spriteAtlasPageSize"],
+        1024
     );
     fs::remove_dir_all(&development_output).expect("clean development atlas package");
 
@@ -1513,8 +1523,8 @@ fn web_atlas_budget_projects_to_runtime_and_rejects_malformed_manifest_values() 
     fs::remove_dir_all(&omitted_output).expect("clean omitted atlas package");
 
     for (value, expected) in [
-        (serde_json::json!(1.0), 1_u64),
-        (serde_json::json!(1e6), 1_000_000_u64),
+        (serde_json::json!(4_194_304.0), 4_194_304_u64),
+        (serde_json::json!(5e6), 5_000_000_u64),
     ] {
         manifest["web"] = serde_json::json!({"atlas_budget_bytes": value});
         fs::write(
