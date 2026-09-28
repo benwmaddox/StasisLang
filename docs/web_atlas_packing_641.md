@@ -137,22 +137,21 @@ translucent order with their different HUD counts. The in-repo game assets
 rendered correctly in [cold two-page](web_atlas_efficiency_641_two_pages.png)
 and [warm one-page](web_atlas_efficiency_641_one_page.png) captures.
 
-## Narrow follow-up recommendation
+## Follow-up status (#642)
 
-Add an optional, bounded Web atlas page-sizing/prewarm policy for games whose
-known active raster set can fit within one 2048 page under the two-pixel
-padding rule. Keep the default 512-page behavior for small/unknown sets and
-honor `MAX_TEXTURE_SIZE` and `web.atlas_budget_bytes`. Acceptance should
-demonstrate deterministic co-residency for the 18-image and mixed fixtures,
-independent of asset completion order; record page bytes and at most one
-page-driven draw for the alternating fixture; retain exact transparency order,
-clip/capacity barriers, resource refresh rollback, and unchanged-asset
-residency. Measure memory and frame-time tradeoffs against this baseline before
-enabling the policy broadly. A compiler metadata path is unnecessary unless
-it supplies reliable sizes for this specific decision.
+Manifest-v2 `graphics.sprite_atlas_page_size` now defaults to 2048 and can be
+configured from 256 through 4096. For the same 18 separate 252x252 images, the
+explicit legacy 512 setting realizes the six-page baseline above; the 2048
+setting packs those entries into one shared page. That trades 10 MiB more
+resident page storage for one draw and zero page transitions on the alternating
+run. The updated fixture records realized page dimensions, allocation/upload
+bytes, draws, binds, and transitions in
+[`task-642-sprite-atlas-pages`](evidence/task-642-sprite-atlas-pages/README.md).
+Font rasterization and 512px text-only pages remain on their legacy path.
 
-Theory gained: the first ready resource determines whether later large images
-can share its page, because pages are never enlarged. A future policy that
-reserves a suitable page before asynchronous preparation completes should
-remove this load-order difference while still permitting small games to use
-small pages.
+Theory gained: fixed-size pages make the first ready resource determine whether
+later larger images fit that page. An explicit page-size policy removes the
+load-order split when the configured page can hold the active set, at the cost
+of reserving more memory for small sets. Device clamping and the Web atlas
+budget now define the deterministic limits rather than an allocator-selected
+initial size.

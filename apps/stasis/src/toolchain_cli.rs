@@ -895,6 +895,8 @@ struct ProjectManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     web: Option<WebProjectManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    graphics: Option<GraphicsProjectManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     settings: Option<ProjectSettingsManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     release: Option<ReleaseProjectManifest>,
@@ -924,6 +926,8 @@ struct LegacyProjectManifest {
     capabilities: Option<LegacyProjectCapabilities>,
     #[serde(default)]
     web: Option<LegacyWebProjectManifest>,
+    #[serde(default)]
+    graphics: Option<GraphicsProjectManifest>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1016,6 +1020,7 @@ impl From<LegacyProjectManifest> for ProjectManifest {
                 }),
                 atlas_budget_bytes: web.atlas_budget_bytes,
             }),
+            graphics: value.graphics,
             settings: None,
             release: None,
         }
@@ -1050,6 +1055,13 @@ struct WebProjectManifest {
     atlas_budget_bytes: Option<Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+struct GraphicsProjectManifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sprite_atlas_page_size: Option<Value>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct WebViewportManifest {
@@ -1062,6 +1074,9 @@ const DEFAULT_WEB_VIEWPORT: WebViewportManifest = WebViewportManifest {
     height: 360,
 };
 const WEB_VIEWPORT_MAX_DIMENSION: u32 = 8192;
+const DEFAULT_SPRITE_ATLAS_PAGE_SIZE: u32 = 2048;
+const MIN_SPRITE_ATLAS_PAGE_SIZE: u32 = 256;
+const MAX_SPRITE_ATLAS_PAGE_SIZE: u32 = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -1112,6 +1127,7 @@ impl ProjectManifest {
             android: None,
             capabilities: None,
             web: None,
+            graphics: None,
             settings: None,
             release: None,
         }
@@ -1129,6 +1145,9 @@ impl ProjectManifest {
         }
         if self.manifest_version == 1 && self.release.is_some() {
             return Err("release configuration requires manifest_version 2".to_string());
+        }
+        if self.manifest_version == 1 && self.graphics.is_some() {
+            return Err("graphics configuration requires manifest_version 2".to_string());
         }
         if let Some(settings) = self.settings.as_ref() {
             project_settings::validate_manifest(settings)?;
@@ -1234,7 +1253,15 @@ impl ProjectManifest {
             if let Some(path) = web.loading_font.as_deref() {
                 normalize_web_loading_font_path(path)?;
             }
-            validate_web_atlas_budget(web.atlas_budget_bytes.as_ref())?;
+            if let Some(budget) = validate_web_atlas_budget(web.atlas_budget_bytes.as_ref())? {
+                let page_size = configured_sprite_atlas_page_size(self.graphics.as_ref())?;
+                let required_bytes = u64::from(page_size) * u64::from(page_size) * 4;
+                if budget < required_bytes {
+                    return Err(format!(
+                        "web.atlas_budget_bytes must fit one configured {page_size}x{page_size} sprite atlas page ({required_bytes} bytes)"
+                    ));
+                }
+            }
             if let Some(viewport) = web.viewport {
                 for (field, value) in [
                     ("web.viewport.width", viewport.width),
@@ -1248,8 +1275,35 @@ impl ProjectManifest {
                 }
             }
         }
+        if let Some(graphics) = &self.graphics {
+            validate_sprite_atlas_page_size(graphics.sprite_atlas_page_size.as_ref())?;
+        }
         Ok(())
     }
+}
+
+fn validate_sprite_atlas_page_size(value: Option<&Value>) -> Result<u32, String> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_SPRITE_ATLAS_PAGE_SIZE);
+    };
+    let size = value.as_u64().and_then(|size| u32::try_from(size).ok());
+    let Some(size) = size.filter(|size| {
+        (MIN_SPRITE_ATLAS_PAGE_SIZE..=MAX_SPRITE_ATLAS_PAGE_SIZE).contains(size)
+            && size.is_power_of_two()
+    }) else {
+        return Err(format!(
+            "graphics.sprite_atlas_page_size must be a power of two between {MIN_SPRITE_ATLAS_PAGE_SIZE} and {MAX_SPRITE_ATLAS_PAGE_SIZE}"
+        ));
+    };
+    Ok(size)
+}
+
+fn configured_sprite_atlas_page_size(
+    graphics: Option<&GraphicsProjectManifest>,
+) -> Result<u32, String> {
+    validate_sprite_atlas_page_size(
+        graphics.and_then(|graphics| graphics.sprite_atlas_page_size.as_ref()),
+    )
 }
 
 const MAX_WEB_ATLAS_BUDGET_BYTES: u64 = 9_007_199_254_740_991;
@@ -2343,10 +2397,14 @@ pub(super) fn load_project_compilation_configuration(
     target: CanonicalTarget,
 ) -> Result<ProjectCompilationConfiguration, String> {
     let resolved = load_project_configuration(project_dir, target)?;
+    let manifest_bytes = fs::read(project_dir.join(MANIFEST_NAME))
+        .map_err(|error| format!("failed to read {MANIFEST_NAME}: {error}"))?;
+    let manifest = parse_project_manifest(&manifest_bytes)?;
     Ok(ProjectCompilationConfiguration {
         configuration: resolved.configuration,
         generated_path: project_settings::GENERATED_SETTINGS_FILE.to_string(),
         generated_source: resolved.generated_source,
+        sprite_atlas_page_size: configured_sprite_atlas_page_size(manifest.graphics.as_ref())?,
     })
 }
 
@@ -3305,6 +3363,9 @@ fn project_compilation_configuration(
         configuration: workspace.project_configuration()?.clone(),
         generated_path: generated_settings_path(workspace),
         generated_source: workspace.generated_settings_source()?.to_string(),
+        sprite_atlas_page_size: configured_sprite_atlas_page_size(
+            workspace.manifest.graphics.as_ref(),
+        )?,
     })
 }
 
@@ -6657,6 +6718,8 @@ fn web_runtime_config(
         "host_exports": process.host_exports(),
         "renderContractVersion": if render_construction_lifecycle_version == 1 { GFX_CMD_VERSION } else { GFX_CMD_LEGACY_VERSION },
         "renderConstructionLifecycleVersion": render_construction_lifecycle_version,
+        "spriteAtlasPageSize": configured_sprite_atlas_page_size(workspace.manifest.graphics.as_ref())
+            .expect("validated sprite atlas page size"),
         "replayCompatibility": replay_compatibility,
     });
     if let Some(web) = workspace.manifest.web.as_ref() {
@@ -8296,6 +8359,8 @@ fn assemble_mobile_shell(
     let app_name = android_manifest
         .map(|manifest| manifest.label.as_str())
         .unwrap_or(workspace.manifest.name.as_str());
+    let sprite_atlas_page_size =
+        configured_sprite_atlas_page_size(workspace.manifest.graphics.as_ref())?.to_string();
     let android_launcher_resources = if target.is_android() {
         stage_android_launcher_resources(
             workspace,
@@ -8360,6 +8425,10 @@ fn assemble_mobile_shell(
     };
     let replacements = [
         ("@STASIS_APP_NAME@", app_name),
+        (
+            "@STASIS_SPRITE_ATLAS_PAGE_SIZE@",
+            sprite_atlas_page_size.as_str(),
+        ),
         ("@STASIS_ANDROID_ICON_ATTRIBUTES@", android_icon_attributes),
         ("@STASIS_PACKAGE_ID@", package_id.as_str()),
         ("@STASIS_JNI_PACKAGE@", jni_package.as_str()),
@@ -11634,7 +11703,7 @@ mod tests {
         assert!(upload.contains("failIfBad();"));
 
         let allocation = WEB_RUNTIME_JS
-            .split("const createAtlasPage = size => {")
+            .split("const createAtlasPage = (size, domain = \"sprite\") => {")
             .nth(1)
             .and_then(|source| source.split("const deleteAtlasPage = page =>").next())
             .expect("WebGL atlas allocation function");
@@ -14018,6 +14087,9 @@ mod tests {
                     version_name: "2.1.0".to_string(),
                     launcher_resources: None,
                 }),
+                graphics: Some(GraphicsProjectManifest {
+                    sprite_atlas_page_size: Some(json!(1024)),
+                }),
                 ..ProjectManifest::new("mobile_smoke".to_string())
             },
             resolved_settings: Some(
@@ -14085,6 +14157,9 @@ mod tests {
             .replace("\r\n", "\n");
         assert!(mobile_main.contains("stasis_mobile_runtime_last_entry_result"));
         assert!(mobile_main.contains("stasis_mobile_runtime_last_entry"));
+        assert!(mobile_main.contains("#define STASIS_SPRITE_ATLAS_PAGE_SIZE 1024"));
+        assert!(mobile_main
+            .contains("stasis_gfx_set_sprite_atlas_page_size(STASIS_SPRITE_ATLAS_PAGE_SIZE)"));
         assert!(mobile_main.contains("entry_failure"));
         assert!(mobile_main.contains("Stasis seam:"));
         assert!(mobile_main.contains("seam_state_checksum"));
@@ -14810,17 +14885,20 @@ mod tests {
     #[test]
     fn manifest_validates_web_atlas_budget_as_a_javascript_safe_integer() {
         let mut manifest = ProjectManifest::new("atlas_budget".to_string());
+        manifest.graphics = Some(GraphicsProjectManifest {
+            sprite_atlas_page_size: Some(json!(1024)),
+        });
         manifest.web = Some(WebProjectManifest {
             entry: String::new(),
             replay: false,
             loading_font: None,
             viewport: None,
-            atlas_budget_bytes: Some(json!(1)),
+            atlas_budget_bytes: Some(json!(4_194_304)),
         });
         assert!(manifest.validate().is_ok());
         manifest.web.as_mut().unwrap().atlas_budget_bytes = Some(json!(MAX_WEB_ATLAS_BUDGET_BYTES));
         assert!(manifest.validate().is_ok());
-        for (value, expected) in [(json!(1.0), 1), (json!(1e6), 1_000_000)] {
+        for (value, expected) in [(json!(4_194_304.0), 4_194_304), (json!(5e6), 5_000_000)] {
             manifest.web.as_mut().unwrap().atlas_budget_bytes = Some(value);
             assert!(manifest.validate().is_ok());
             assert_eq!(
@@ -14845,6 +14923,68 @@ mod tests {
                 "web.atlas_budget_bytes must be a positive JavaScript safe integer"
             );
         }
+    }
+
+    #[test]
+    fn manifest_validates_graphics_sprite_atlas_page_size() {
+        let mut manifest = ProjectManifest::new("atlas_pages".to_string());
+        assert!(manifest.validate().is_ok());
+        assert_eq!(configured_sprite_atlas_page_size(None), Ok(2048));
+
+        for size in [256, 512, 1024, 2048, 4096] {
+            manifest.graphics = Some(GraphicsProjectManifest {
+                sprite_atlas_page_size: Some(json!(size)),
+            });
+            assert!(manifest.validate().is_ok(), "rejected page size {size}");
+            assert_eq!(
+                configured_sprite_atlas_page_size(manifest.graphics.as_ref()),
+                Ok(size)
+            );
+        }
+
+        manifest.graphics = None;
+        manifest.web = Some(WebProjectManifest {
+            entry: String::new(),
+            replay: false,
+            loading_font: None,
+            viewport: None,
+            atlas_budget_bytes: Some(json!(16 * 1024 * 1024 - 1)),
+        });
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .contains("must fit one configured 2048x2048 sprite atlas page"));
+        manifest.graphics = Some(GraphicsProjectManifest {
+            sprite_atlas_page_size: Some(json!(1024)),
+        });
+        assert!(manifest.validate().is_ok());
+
+        for value in [
+            json!(0),
+            json!(128),
+            json!(255),
+            json!(300),
+            json!(8192),
+            json!(2048.0),
+            json!("2048"),
+            Value::Null,
+        ] {
+            manifest.graphics = Some(GraphicsProjectManifest {
+                sprite_atlas_page_size: Some(value),
+            });
+            assert_eq!(
+                manifest.validate().unwrap_err(),
+                "graphics.sprite_atlas_page_size must be a power of two between 256 and 4096"
+            );
+        }
+
+        let mut v1 = ProjectManifest::new("atlas_pages".to_string());
+        v1.manifest_version = 1;
+        v1.graphics = Some(GraphicsProjectManifest::default());
+        assert_eq!(
+            v1.validate().unwrap_err(),
+            "graphics configuration requires manifest_version 2"
+        );
     }
 
     #[test]

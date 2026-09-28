@@ -467,8 +467,8 @@ static int g_sprite_max_pixels = -1;
 static int g_sprite_max_file_bytes = -1;
 static SpriteEntry g_sprite_fallback;
 
-#define STASIS_SDL_ATLAS_PAGE_SIZE 2048
-#define STASIS_SDL_ATLAS_COLD_PAGE_SIZE 512
+#define STASIS_SDL_ATLAS_DEFAULT_PAGE_SIZE 2048
+#define STASIS_SDL_ATLAS_MIN_PAGE_SIZE 256
 #define STASIS_SDL_ATLAS_MAX_PAGES 256
 #define STASIS_SDL_ATLAS_PADDING 1
 #define STASIS_SDL_ATLAS_WHITE_SIZE 2
@@ -507,6 +507,7 @@ typedef struct {
 } StasisSdlAtlasPage;
 static StasisSdlAtlasPage g_sprite_atlas_pages[STASIS_SDL_ATLAS_MAX_PAGES];
 static int g_sprite_atlas_page_count = 0;
+static int g_sprite_atlas_configured_page_size = STASIS_SDL_ATLAS_DEFAULT_PAGE_SIZE;
 static uint64_t g_sprite_atlas_asset_generation = 1;
 #if defined(STASIS_ATLAS_TEST_HOOKS)
 static int g_sprite_atlas_test_fail_allocation = 0;
@@ -563,6 +564,14 @@ STASIS_EXPORT void stasis_gfx_set_next_sprite_atlas_policy_v3(
         logical_pixel_area,
         max_logical_width,
         max_logical_height);
+}
+
+STASIS_EXPORT int stasis_gfx_set_sprite_atlas_page_size(int page_size) {
+    if (!stasis_sprite_atlas_page_size_valid(page_size) || g_sprite_atlas_page_count != 0) {
+        return 0;
+    }
+    g_sprite_atlas_configured_page_size = page_size;
+    return 1;
 }
 
 #define STASIS_ASSET_TASK_CAPACITY 64
@@ -5908,19 +5917,45 @@ static int stasis_sprite_atlas_reserve_on_page(
     return 1;
 }
 
+static int stasis_sprite_atlas_device_max_texture_extent(void) {
+    if (!g_renderer) return 0;
+    const Sint64 max_extent = SDL_GetNumberProperty(
+        SDL_GetRendererProperties(g_renderer), SDL_PROP_RENDERER_MAX_TEXTURE_SIZE_NUMBER, 0);
+    if (max_extent <= 0) return 0;
+    return max_extent > INT_MAX ? INT_MAX : (int)max_extent;
+}
+
+static int stasis_sprite_atlas_shared_page_size(void) {
+    int page_size = 0;
+    if (!stasis_sprite_atlas_effective_page_size(
+            g_sprite_atlas_configured_page_size,
+            stasis_sprite_atlas_device_max_texture_extent(), &page_size)) {
+        stasis_report_runtime_errorf(
+            "sprite atlas page size cannot satisfy device limit: configured=%d device_max=%d minimum=%d",
+            g_sprite_atlas_configured_page_size,
+            stasis_sprite_atlas_device_max_texture_extent(),
+            STASIS_SDL_ATLAS_MIN_PAGE_SIZE);
+        return 0;
+    }
+    return page_size;
+}
+
 static int stasis_sprite_atlas_is_cold_page(const StasisSdlAtlasPage* page) {
-    return page && page->texture && !page->dedicated && page->group_id == 0 &&
-           page->width == STASIS_SDL_ATLAS_COLD_PAGE_SIZE &&
-           page->height == STASIS_SDL_ATLAS_COLD_PAGE_SIZE;
+    const int shared_page_size = stasis_sprite_atlas_shared_page_size();
+    return page && page->texture && shared_page_size > 0 && !page->dedicated &&
+           page->group_id == 0 && page->width == shared_page_size &&
+           page->height == shared_page_size;
 }
 
 static int stasis_sprite_atlas_fits_cold_page(int w, int h) {
     /* Shared cold pages retain the reserved white/placeholder header at y=1.
      * Account for that header, the initial cursor inset, and edge padding. */
+    const int shared_page_size = stasis_sprite_atlas_shared_page_size();
+    if (shared_page_size <= 0) return 0;
     return w > 0 && h > 0 &&
-           w <= STASIS_SDL_ATLAS_COLD_PAGE_SIZE -
+           w <= shared_page_size -
                     (STASIS_SDL_ATLAS_PADDING * 2 + 1) &&
-           h <= STASIS_SDL_ATLAS_COLD_PAGE_SIZE -
+           h <= shared_page_size -
                     (STASIS_SDL_ATLAS_PADDING * 2 + 6);
 }
 
@@ -5931,27 +5966,21 @@ static int stasis_sprite_atlas_allocate(
 #if defined(STASIS_ATLAS_TEST_HOOKS)
     if (g_sprite_atlas_test_fail_allocation) return -1;
 #endif
+    (void)logical_w;
+    (void)logical_h;
+    const int shared_page_size = stasis_sprite_atlas_shared_page_size();
+    if (shared_page_size <= 0) return -1;
     const int eligible = policy && policy->eligible;
     const uint64_t group_id = eligible ? policy->group_id : 0;
-    if (eligible && w + 2 <= STASIS_SDL_ATLAS_PAGE_SIZE &&
-        h + 8 <= STASIS_SDL_ATLAS_PAGE_SIZE) {
+    if (eligible && w + 2 <= shared_page_size && h + 8 <= shared_page_size) {
         for (int i = 0; i < g_sprite_atlas_page_count; i++) {
             StasisSdlAtlasPage* page = &g_sprite_atlas_pages[i];
             if (!page->texture || page->dedicated || page->planner_layout || page->sealed ||
                 page->group_id != group_id) continue;
             if (stasis_sprite_atlas_reserve_on_page(page, w, h, out_x, out_y)) return i;
         }
-        int page_w = STASIS_SDL_ATLAS_PAGE_SIZE;
-        int page_h = STASIS_SDL_ATLAS_PAGE_SIZE;
-        if (!stasis_sprite_atlas_page_size_v3(policy, logical_w, logical_h, w, h,
-                STASIS_SDL_ATLAS_PAGE_SIZE, STASIS_SDL_ATLAS_PAGE_SIZE,
-                STASIS_SDL_ATLAS_PAGE_SIZE, STASIS_SDL_ATLAS_PADDING, &page_w, &page_h)) {
-            return -1;
-        }
-        if (page_w < 8) page_w = 8;
-        if (page_h < h + 8) page_h = stasis_sprite_atlas_next_extent(
-            h + 8, STASIS_SDL_ATLAS_PAGE_SIZE);
-        const int page_index = stasis_sprite_atlas_create_page(page_w, page_h, group_id, 0);
+        const int page_index = stasis_sprite_atlas_create_page(
+            shared_page_size, shared_page_size, group_id, 0);
         if (page_index < 0) return -1;
         return stasis_sprite_atlas_reserve_on_page(
             &g_sprite_atlas_pages[page_index], w, h, out_x, out_y) ? page_index : -1;
@@ -5963,8 +5992,8 @@ static int stasis_sprite_atlas_allocate(
             if (stasis_sprite_atlas_reserve_on_page(page, w, h, out_x, out_y)) return i;
         }
         const int page_index = stasis_sprite_atlas_create_page(
-            STASIS_SDL_ATLAS_COLD_PAGE_SIZE,
-            STASIS_SDL_ATLAS_COLD_PAGE_SIZE,
+            shared_page_size,
+            shared_page_size,
             0,
             0);
         if (page_index < 0) return -1;
@@ -5973,6 +6002,13 @@ static int stasis_sprite_atlas_allocate(
     }
     const int width = w + 10;
     const int height = h + 8;
+    const int device_max = stasis_sprite_atlas_device_max_texture_extent();
+    if (device_max > 0 && (width > device_max || height > device_max)) {
+        stasis_report_runtime_errorf(
+            "sprite exceeds renderer texture limit: requested=%dx%d max=%d",
+            width, height, device_max);
+        return -1;
+    }
     const int page_index = stasis_sprite_atlas_create_page(width, height, group_id, 1);
     if (page_index < 0) return -1;
     return stasis_sprite_atlas_reserve_on_page(
@@ -7447,6 +7483,8 @@ static SpriteEntry* sprite_fallback_get(void) {
     next.max_h = 2;
 
     if (!g_renderer) return NULL;
+    const int shared_page_size = stasis_sprite_atlas_shared_page_size();
+    if (shared_page_size <= 0) return NULL;
     int page_index = -1;
     for (int i = 0; i < g_sprite_atlas_page_count; i++) {
         if (g_sprite_atlas_pages[i].texture && !g_sprite_atlas_pages[i].dedicated) {
@@ -7455,7 +7493,7 @@ static SpriteEntry* sprite_fallback_get(void) {
         }
     }
     if (page_index < 0) page_index = stasis_sprite_atlas_create_page(
-        STASIS_SDL_ATLAS_PAGE_SIZE, STASIS_SDL_ATLAS_PAGE_SIZE, 0, 0);
+        shared_page_size, shared_page_size, 0, 0);
     if (page_index < 0) return NULL;
     StasisSdlAtlasPage* page = &g_sprite_atlas_pages[page_index];
     next.page_index = page_index;

@@ -560,6 +560,7 @@ pub struct ProjectCompilationConfiguration {
     pub configuration: ProjectConfiguration,
     pub generated_path: String,
     pub generated_source: String,
+    pub sprite_atlas_page_size: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5006,6 +5007,37 @@ fn monolith_configure_arguments(
     arguments
 }
 
+fn read_project_sprite_atlas_page_size(project_dir: &Path) -> Result<u32, String> {
+    let path = project_dir.join("stasis.json");
+    let text = std::fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "failed to read project manifest {}: {error}",
+            path.display()
+        )
+    })?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "failed to parse project manifest {}: {error}",
+            path.display()
+        )
+    })?;
+    let page_size = manifest
+        .get("graphics")
+        .and_then(|graphics| graphics.get("sprite_atlas_page_size"));
+    let Some(page_size) = page_size else {
+        return Ok(2048);
+    };
+    let page_size = page_size
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| (256..=4096).contains(value) && value.is_power_of_two())
+        .ok_or_else(|| {
+            "graphics.sprite_atlas_page_size must be a power of two between 256 and 4096"
+                .to_string()
+        })?;
+    Ok(page_size)
+}
+
 fn package_engine_bundle_monolithic_desktop(
     backend: &IncrementalCompilerBackend,
     bundle: &AotEngineBundle,
@@ -5177,7 +5209,11 @@ fn package_engine_bundle_monolithic_desktop(
             "@STASIS_APP_NAME@",
             &crate::escape_mobile_c_string_literal(app_name),
         )
-        .replace("@STASIS_ASSET_BASE@", ".");
+        .replace("@STASIS_ASSET_BASE@", ".")
+        .replace(
+            "@STASIS_SPRITE_ATLAS_PAGE_SIZE@",
+            &read_project_sprite_atlas_page_size(project_dir)?.to_string(),
+        );
     let shell_source_path = aot_root.join("stasis_desktop_main.c");
     std::fs::write(&shell_source_path, shell_source)
         .map_err(|error| format!("failed to write {}: {error}", shell_source_path.display()))?;
@@ -5625,6 +5661,10 @@ fn package_engine_bundle_release(
         format!("dll={linked_library_name}"),
         "entry=main".to_string(),
         "fps=60".to_string(),
+        format!(
+            "sprite_atlas_page_size={}",
+            read_project_sprite_atlas_page_size(project_dir)?
+        ),
     ];
     if tick_symbol.is_some() {
         launch_lines.push("tick=tick".to_string());
@@ -5709,6 +5749,38 @@ fn package_engine_bundle_release(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packaged_sprite_atlas_page_size_reads_default_and_override() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "stasis-atlas-page-size-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create test project");
+        let manifest = root.join("stasis.json");
+        std::fs::write(&manifest, r#"{"manifest_version":2,"name":"fixture"}"#)
+            .expect("write default manifest");
+        assert_eq!(read_project_sprite_atlas_page_size(&root), Ok(2048));
+        std::fs::write(
+            &manifest,
+            r#"{"manifest_version":2,"name":"fixture","graphics":{"sprite_atlas_page_size":1024}}"#,
+        )
+        .expect("write override manifest");
+        assert_eq!(read_project_sprite_atlas_page_size(&root), Ok(1024));
+        std::fs::write(
+            &manifest,
+            r#"{"manifest_version":2,"name":"fixture","graphics":{"sprite_atlas_page_size":300}}"#,
+        )
+        .expect("write invalid manifest");
+        assert!(read_project_sprite_atlas_page_size(&root)
+            .unwrap_err()
+            .contains("graphics.sprite_atlas_page_size"));
+        std::fs::remove_dir_all(root).expect("remove test project");
+    }
 
     #[cfg(windows)]
     #[test]

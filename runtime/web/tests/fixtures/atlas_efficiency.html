@@ -22,10 +22,12 @@
 
   const actualFetch = window.fetch.bind(window);
   const actualWasm = window.WebAssembly;
-  const mode = new URLSearchParams(location.search).get("case") || "representative";
+  const params = new URLSearchParams(location.search);
+  const mode = params.get("case") || "representative";
+  const requestedPageSize = params.has("page") ? Number(params.get("page")) : 512;
   const synthetic = mode === "separate" || mode === "sheet";
   if (synthetic) document.getElementById("fixture-title").textContent =
-    `Production WebGL2 atlas: 18 tiles as ${mode === "sheet" ? "one authored sheet" : "separate images"}`;
+    `Production WebGL2 atlas: 18 tiles as ${mode === "sheet" ? "one authored sheet" : "separate images"} (${requestedPageSize}px pages)`;
   const makeTile = (context, index, x, y) => {
     const hue = (index * 43) % 360;
     context.fillStyle = `hsl(${hue} 65% 60% / 0.82)`;
@@ -109,6 +111,7 @@
     }
   };
   const game = {
+    spriteAtlasPageSize: requestedPageSize,
     strings: synthetic ? Object.fromEntries(Array.from({ length: mode === "sheet" ? 1 : 18 },
       (_, index) => [index + 1, mode === "sheet" ? "assets/tiles-sheet.png" : `assets/tile-${index}.png`]))
       : { 1: "assets/arena_background.png", 2: "assets/smoke.png" },

@@ -10,6 +10,19 @@
 } while (0)
 
 int main(void) {
+    int effective_page_size = 0;
+    CHECK(stasis_sprite_atlas_page_size_valid(256));
+    CHECK(stasis_sprite_atlas_page_size_valid(4096));
+    CHECK(!stasis_sprite_atlas_page_size_valid(255));
+    CHECK(!stasis_sprite_atlas_page_size_valid(512 + 256));
+    CHECK(stasis_sprite_atlas_effective_page_size(2048, 4096, &effective_page_size));
+    CHECK(effective_page_size == 2048);
+    CHECK(stasis_sprite_atlas_effective_page_size(4096, 3072, &effective_page_size));
+    CHECK(effective_page_size == 2048);
+    CHECK(stasis_sprite_atlas_effective_page_size(1024, 4096, &effective_page_size));
+    CHECK(effective_page_size == 1024);
+    CHECK(!stasis_sprite_atlas_effective_page_size(2048, 128, &effective_page_size));
+
     CHECK(stasis_sprite_atlas_extent_fits(2048, 2048, 4096, 4096, 4096, 2));
     CHECK(stasis_sprite_atlas_extent_fits(4096, 4096, 8192, 8192, 8192, 2));
     CHECK(!stasis_sprite_atlas_extent_fits(4096, 4096, 8192, 8192, 2048, 2));

@@ -38,6 +38,9 @@ int stasis_audio_voice_is_playing(int voice_handle);
 #endif
 #include "stasis_mobile_runtime.h"
 #include "stasis_network_join_card.h"
+
+#define STASIS_SPRITE_ATLAS_PAGE_SIZE @STASIS_SPRITE_ATLAS_PAGE_SIZE@
+int stasis_gfx_set_sprite_atlas_page_size(int page_size);
 #if defined(__has_include)
 #if __has_include("published_replay_identity.h")
 #include "published_replay_identity.h"
@@ -665,6 +668,13 @@ int SDL_main(int argc, char **argv) {
         {0},
 #endif
     };
+    if (!stasis_gfx_set_sprite_atlas_page_size(STASIS_SPRITE_ATLAS_PAGE_SIZE)) {
+        stasis_host_report_runtime_error("Stasis rejected graphics.sprite_atlas_page_size");
+        SDL_Log("Stasis rejected graphics.sprite_atlas_page_size");
+        free(replay_bytes);
+        stasis_mobile_network_client_shutdown();
+        return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+    }
 #if defined(STASIS_ENABLE_SEAM_TESTS)
     const char *seam_test_id = SDL_getenv("STASIS_SEAM_TEST_ID");
     seam_it021_audio = seam_test_id != NULL && strcmp(seam_test_id, "IT-021") == 0;

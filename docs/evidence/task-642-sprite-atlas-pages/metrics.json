@@ -1,0 +1,61 @@
+{
+  "scenario": {
+    "renderer": "production WebGL2 runtime in Chromium",
+    "max_texture_size": 16384,
+    "source_images": 18,
+    "source_image_size_px": [252, 252],
+    "padding_each_side_px": 2,
+    "padded_entry_size_px": [256, 256],
+    "ordered_instances_per_frame": 146
+  },
+  "browser_hud": {
+    "before_512": {
+      "page_dimensions_px": [[512, 512], [512, 512], [512, 512], [512, 512], [512, 512], [512, 512]],
+      "page_count": 6,
+      "live_entries": 18,
+      "allocated_bytes": 6291456,
+      "draws": 134,
+      "texture_binds": 134,
+      "page_transitions": 133,
+      "instance_upload_bytes": 9344,
+      "pixel_upload_count": 24
+    },
+    "after_2048": {
+      "page_dimensions_px": [[2048, 2048]],
+      "page_count": 1,
+      "live_entries": 18,
+      "allocated_bytes": 16777216,
+      "draws": 1,
+      "texture_binds": 1,
+      "page_transitions": 0,
+      "instance_upload_bytes": 9344,
+      "pixel_upload_count": 19
+    }
+  },
+  "focused_node_measurement": {
+    "command": "$env:STASIS_ATLAS_REPORT='1'; node --test --test-name-pattern='atlas efficiency measurement: separate images versus an authored sheet' runtime/web/tests/render_pipeline.test.mjs; Remove-Item Env:STASIS_ATLAS_REPORT",
+    "note": "Deterministic fake-WebGL renderer harness; median host replay is not end-to-end GPU timing.",
+    "before_512": {
+      "page_dimensions_px": [[512, 512], [512, 512], [512, 512], [512, 512], [512, 512], [512, 512]],
+      "allocated_bytes": 6291456,
+      "pixel_upload_count": 24,
+      "pixel_upload_bytes": 4718688,
+      "instance_upload_bytes": 9344,
+      "draws": 134,
+      "texture_binds": 134,
+      "page_transitions": 133,
+      "median_host_replay_ms": 1.108
+    },
+    "after_2048": {
+      "page_dimensions_px": [[2048, 2048]],
+      "allocated_bytes": 16777216,
+      "pixel_upload_count": 19,
+      "pixel_upload_bytes": 4718608,
+      "instance_upload_bytes": 9344,
+      "draws": 1,
+      "texture_binds": 1,
+      "page_transitions": 0,
+      "median_host_replay_ms": 0.692
+    }
+  }
+}
