@@ -2,7 +2,7 @@
 
 The exporter renders atlases from the exact native page inventory and baseline placements returned by stasis_gfx_sprite_atlas_query_v1. It sends that inventory and directed pair weights to stasis_dynload::atlas_placement::plan_atlas_affinity, then paints only the returned placements. Python does not choose sprite pages or reproduce the planner.
 
-Finalized native pages follow the [native atlas page lifecycle](native_atlas_page_lifecycle.md). They carry the additive `SEALED` and `PROTECTED` flags and are excluded from affinity planning without changing the V1 inventory layout.
+Finalized native pages follow the [native atlas page lifecycle](native_atlas_page_lifecycle.md). They carry the additive `SEALED` and `PROTECTED` flags and are excluded from affinity planning without changing the V1 inventory layout. A post-seal snapshot contains the realized trimmed height and allocation bytes. The exporter uses those queried extents directly and records the normalized `u0`, `v0`, `u1`, and `v1` rectangle for every baseline and optimized placement; it does not reproduce the runtime's finalization calculation.
 
 ## Reproduce a named-game preview
 
@@ -18,7 +18,7 @@ The exporter validates the native schema and applies the production bridge's pag
 
 A complete, finite AOT v4 transition summary is preferred. Every directed from_identity → to_identity edge must resolve to exactly one resident handle. If the manifest is incomplete or any edge is unmapped, the tool records the rejection and uses the exact directed runtime histogram from the same native snapshot when available. An explicit --curated-pairs file can be used only with --allow-illustrative; such output is marked curated-illustrative and is not accepted telemetry.
 
-Outputs include unlabeled RGBA atlas PNGs at exact native page extents, 2000×900 contact sheets, and a JSON manifest with source hashes, the full page inventory, frozen-page reasons, placements, evidence provenance, and baseline/optimized planner metrics. Planner metrics cover only bridge-eligible pages; frozen page bytes remain in the full current/final memory accounting. Pages are reconstructed from source assets and exact positions; the query ABI does not return original texture pixels or reserved-header artwork, so those pixels remain transparent in the preview. The pair histogram is not used to infer native page-run or submission counts. GPU timing is reported as not-measured unless a supported host measurement is explicitly supplied.
+Outputs include unlabeled RGBA atlas PNGs at exact native page extents, 2000×900 contact sheets, and a JSON manifest with source hashes, the full page inventory, frozen-page reasons, placements, normalized UVs, evidence provenance, and baseline/optimized planner metrics. Planner metrics cover only bridge-eligible pages; frozen page bytes remain in the full current/final memory accounting. Pages are reconstructed from source assets and exact positions; the query ABI does not return original texture pixels or reserved-header artwork, so those pixels remain transparent in the preview. These reconstructed PNGs confirm manifest geometry but are not GPU readback evidence. The native lifecycle fixture separately captures and byte-compares real rendered PNGs before and after trim. The pair histogram is not used to infer native page-run or submission counts. GPU timing is reported as not-measured unless a supported host measurement is explicitly supplied.
 
 ## Evidence labels
 

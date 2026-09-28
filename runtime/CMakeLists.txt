@@ -389,7 +389,9 @@ if(STASIS_GRAPHICS_BUILD_TESTS AND (TARGET stasis_graphics_static OR TARGET stas
         target_include_directories(stasis_sprite_atlas_lifecycle_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
         target_compile_definitions(stasis_sprite_atlas_lifecycle_test PRIVATE
             STASIS_ATLAS_TEST_ASSET_ROOT="${_atlas_test_asset_root}"
-            STASIS_ATLAS_TEST_SMALL_PATH="${_atlas_test_small_path}")
+            STASIS_ATLAS_TEST_SMALL_PATH="${_atlas_test_small_path}"
+            STASIS_ATLAS_TEST_BEFORE_PNG="${CMAKE_CURRENT_BINARY_DIR}/atlas-seal-before.png"
+            STASIS_ATLAS_TEST_AFTER_PNG="${CMAKE_CURRENT_BINARY_DIR}/atlas-seal-after.png")
         add_test(NAME stasis_sprite_atlas_lifecycle_contract COMMAND stasis_sprite_atlas_lifecycle_test)
         set_tests_properties(stasis_sprite_atlas_lifecycle_contract PROPERTIES
             ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy;STASIS_ENABLE_TEST_INPUT=1;STASIS_ASSET_ROOT=${_atlas_test_asset_root}"

@@ -6312,20 +6312,6 @@ STASIS_EXPORT int stasis_gfx_sprite_atlas_last_frame_stats_v1(
     return 1;
 }
 
-STASIS_EXPORT int stasis_gfx_sprite_atlas_seal_page_v1(
-    uint64_t snapshot_token, uint32_t page_index) {
-    if (!snapshot_token || snapshot_token != stasis_sprite_atlas_snapshot_token() ||
-        page_index >= (uint32_t)g_sprite_atlas_page_count ||
-        g_sprite_atlas_staged_token != 0 || g_sprite_atlas_staged_plan_pages != NULL) {
-        return 0;
-    }
-    StasisSdlAtlasPage* page = &g_sprite_atlas_pages[page_index];
-    if (!page->texture || page->sealed) return 0;
-    page->sealed = 1;
-    stasis_sprite_atlas_bump_asset_generation();
-    return 1;
-}
-
 static int stasis_sprite_atlas_mark_occupied(
     uint8_t* bits, uint32_t page_width, uint32_t page_height,
     uint32_t x, uint32_t y, uint32_t width, uint32_t height
@@ -6358,6 +6344,41 @@ static void stasis_sprite_atlas_unpremultiply(unsigned char* pixels, int width, 
     }
 }
 
+static int stasis_sprite_atlas_stage_resident(
+    SpriteEntry* entry, StasisSdlAtlasPage* target, int x, int y, int alloc_w, int alloc_h
+) {
+    if (!entry || !target) return 0;
+    const int required_w = entry->required_w > 0
+        ? entry->required_w : stasis_current_scaled_extent(entry->max_w);
+    const int required_h = entry->required_h > 0
+        ? entry->required_h : stasis_current_scaled_extent(entry->max_h);
+    if (entry->needs_reraster || entry->reload_pending || required_w != entry->w ||
+        required_h != entry->h ||
+        !sprite_source_within_limits(entry->path, required_w, required_h) ||
+        get_file_mtime(entry->path) != entry->mtime) {
+        return 0;
+    }
+    unsigned char* pixels = NULL;
+    int width = 0, height = 0;
+    StasisSpriteSourceInfo source_info;
+    memset(&source_info, 0, sizeof(source_info));
+    if (!bake_image_to_rgba_sized(
+            entry->path, required_w, required_h, &pixels, &width, &height, &source_info)) {
+        return 0;
+    }
+    const uint64_t digest = stasis_sprite_atlas_pixel_hash(pixels, width, height);
+    if (width != entry->w || height != entry->h || digest != entry->raster_hash ||
+        get_file_mtime(entry->path) != entry->mtime) {
+        free(pixels);
+        return 0;
+    }
+    stasis_sprite_atlas_unpremultiply(pixels, width, height);
+    const int uploaded = stasis_sprite_atlas_upload_page(
+        target, x, y, pixels, width, height, alloc_w, alloc_h);
+    free(pixels);
+    return uploaded;
+}
+
 static void stasis_sprite_atlas_free_occupancy(uint8_t** occupancy, uint32_t count) {
     if (!occupancy) return;
     for (uint32_t i = 0; i < count; i++) free(occupancy[i]);
@@ -6377,6 +6398,91 @@ STASIS_EXPORT void stasis_gfx_test_set_atlas_allocation_failure(int enabled) {
     g_sprite_atlas_test_fail_allocation = enabled != 0;
 }
 #endif
+STASIS_EXPORT int stasis_gfx_sprite_atlas_seal_page_v1(
+    uint64_t snapshot_token, uint32_t page_index) {
+    if (!snapshot_token || snapshot_token != stasis_sprite_atlas_snapshot_token() ||
+        page_index >= (uint32_t)g_sprite_atlas_page_count ||
+        g_sprite_atlas_staged_token != 0 || g_sprite_atlas_staged_plan_pages != NULL) {
+        return 0;
+    }
+    StasisSdlAtlasPage* page = &g_sprite_atlas_pages[page_index];
+    if (!page->texture || page->sealed) return 0;
+
+    int required_height = 6;
+    for (int slot = 0; slot < g_sprite_capacity; slot++) {
+        const SpriteEntry* entry = &g_sprites[slot];
+        if (!stasis_sprite_atlas_entry_is_resident(entry) ||
+            entry->page_index != (int)page_index) continue;
+        if (entry->alloc_y < 0 || entry->alloc_h <= 0 ||
+            entry->alloc_y > page->height || entry->alloc_h > page->height - entry->alloc_y) {
+            return 0;
+        }
+        const int bottom = entry->alloc_y + entry->alloc_h;
+        if (bottom > required_height) required_height = bottom;
+    }
+    const int target_height = stasis_sprite_atlas_next_extent(required_height, page->height);
+    if (target_height <= 0 || target_height > page->height) return 0;
+    if (target_height == page->height) {
+        page->sealed = 1;
+        stasis_sprite_atlas_bump_asset_generation();
+        return 1;
+    }
+    if ((target_height & (target_height - 1)) != 0) return 0;
+
+    StasisSdlAtlasPage staged;
+    memset(&staged, 0, sizeof(staged));
+    if (!stasis_sprite_atlas_initialize_page(
+            &staged, page->width, target_height, page->group_id, page->dedicated)) {
+        return 0;
+    }
+#if defined(STASIS_ATLAS_TEST_HOOKS)
+    if (g_sprite_atlas_test_stage_failpoint == STASIS_ATLAS_TEST_FAIL_AFTER_PAGE_ALLOC) {
+        SDL_DestroyTexture(staged.texture);
+        return 0;
+    }
+#endif
+    uint32_t uploaded_count = 0;
+    for (int slot = 0; slot < g_sprite_capacity; slot++) {
+        SpriteEntry* entry = &g_sprites[slot];
+        if (!stasis_sprite_atlas_entry_is_resident(entry) ||
+            entry->page_index != (int)page_index) continue;
+        if (!stasis_sprite_atlas_stage_resident(
+                entry, &staged, entry->atlas_x, entry->atlas_y,
+                entry->alloc_w, entry->alloc_h)) {
+            SDL_DestroyTexture(staged.texture);
+            return 0;
+        }
+        uploaded_count++;
+#if defined(STASIS_ATLAS_TEST_HOOKS)
+        if (uploaded_count == 1 &&
+            g_sprite_atlas_test_stage_failpoint == STASIS_ATLAS_TEST_FAIL_AFTER_FIRST_UPLOAD) {
+            SDL_DestroyTexture(staged.texture);
+            return 0;
+        }
+#endif
+    }
+    if (snapshot_token != stasis_sprite_atlas_snapshot_token()) {
+        SDL_DestroyTexture(staged.texture);
+        return 0;
+    }
+
+    SDL_Texture* retired_texture = page->texture;
+    page->texture = staged.texture;
+    page->height = target_height;
+    page->sealed = 1;
+    for (int slot = 0; slot < g_sprite_capacity; slot++) {
+        SpriteEntry* entry = &g_sprites[slot];
+        if (!entry->used || entry->page_index != (int)page_index ||
+            entry->sdl_tex != retired_texture) continue;
+        entry->v0 = (float)entry->atlas_y / (float)target_height;
+        entry->v1 = (float)(entry->atlas_y + entry->h) / (float)target_height;
+        entry->sdl_tex = page->texture;
+    }
+    SDL_DestroyTexture(retired_texture);
+    stasis_sprite_atlas_bump_asset_generation();
+    return 1;
+}
+
 STASIS_EXPORT int stasis_gfx_sprite_atlas_stage_plan_v1(
     uint64_t snapshot_token, const StasisSpriteAtlasPlanPageV1* pages, uint32_t page_count,
     const StasisSpriteAtlasPlanPlacementV1* placements, uint32_t placement_count) {
@@ -6549,31 +6655,8 @@ STASIS_EXPORT int stasis_gfx_sprite_atlas_stage_plan_v1(
         SpriteEntry* e = &g_sprites[slot];
         StasisSdlAtlasPage* staged = &g_sprite_atlas_staged_pages[
             pages[p->page_index].source_page_index];
-        const int rw = e->required_w > 0
-            ? e->required_w : stasis_current_scaled_extent(e->max_w);
-        const int rh = e->required_h > 0
-            ? e->required_h : stasis_current_scaled_extent(e->max_h);
-        if (e->needs_reraster || e->reload_pending || rw != e->w || rh != e->h ||
-            !sprite_source_within_limits(e->path, rw, rh) || get_file_mtime(e->path) != e->mtime) {
-            goto done;
-        }
-        unsigned char* pixels = NULL;
-        int width = 0, height = 0;
-        StasisSpriteSourceInfo source_info;
-        memset(&source_info, 0, sizeof(source_info));
-        if (!bake_image_to_rgba_sized(
-                e->path, rw, rh, &pixels, &width, &height, &source_info)) goto done;
-        const uint64_t digest = stasis_sprite_atlas_pixel_hash(pixels, width, height);
-        if (width != e->w || height != e->h || digest != e->raster_hash ||
-            get_file_mtime(e->path) != e->mtime) {
-            free(pixels);
-            goto done;
-        }
-        stasis_sprite_atlas_unpremultiply(pixels, width, height);
-        const int uploaded = stasis_sprite_atlas_upload_page(staged, (int)p->x, (int)p->y,
-            pixels, width, height, width + 2, height + 2);
-        free(pixels);
-        if (!uploaded) goto done;
+        if (!stasis_sprite_atlas_stage_resident(
+                e, staged, (int)p->x, (int)p->y, e->w + 2, e->h + 2)) goto done;
         staged->live_allocations++;
         uploaded_count++;
 #if defined(STASIS_ATLAS_TEST_HOOKS)

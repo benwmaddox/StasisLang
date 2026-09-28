@@ -653,6 +653,43 @@ def baseline_render_placements(snapshot: dict[str, Any]) -> list[dict[str, Any]]
     return result
 
 
+def attach_normalized_uvs(
+    placements: list[dict[str, Any]], page_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Record the runtime UV rectangle from the queried, realized page extent."""
+    page_by_id = {require_int(row.get("id"), "page.id"): row for row in page_rows}
+    result = []
+    for placement in placements:
+        sprite_id = require_int(placement.get("sprite_id"), "placement.sprite_id", minimum=1)
+        page_id = require_int(placement.get("page_id"), f"placement {sprite_id}.page_id")
+        page = page_by_id.get(page_id)
+        if page is None:
+            raise ValueError(f"placement {sprite_id} references unknown page {page_id}")
+        page_width = require_int(page.get("width"), f"page {page_id}.width", minimum=1)
+        page_height = require_int(page.get("height"), f"page {page_id}.height", minimum=1)
+        x = require_int(placement.get("x"), f"placement {sprite_id}.x")
+        y = require_int(placement.get("y"), f"placement {sprite_id}.y")
+        width = require_int(placement.get("width"), f"placement {sprite_id}.width", minimum=1)
+        height = require_int(placement.get("height"), f"placement {sprite_id}.height", minimum=1)
+        if x < 0 or y < 0 or x + width > page_width or y + height > page_height:
+            raise ValueError(
+                f"placement {sprite_id} exceeds realized page {page_id} extent "
+                f"{page_width}x{page_height}"
+            )
+        result.append(
+            {
+                **placement,
+                "uv": {
+                    "u0": x / page_width,
+                    "v0": y / page_height,
+                    "u1": (x + width) / page_width,
+                    "v1": (y + height) / page_height,
+                },
+            }
+        )
+    return result
+
+
 def render_layout(
     layout_name: str,
     placements: list[dict[str, Any]],
@@ -847,7 +884,7 @@ def normalize_native_snapshot(
         raise ValueError("native query returned no pages")
 
     eligible_page_flag = 1 << 4
-    protected_page_flags = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3)
+    protected_page_flags = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 5)
     blocked_pages: set[int] = set()
     for row in raw_sprites:
         if not isinstance(row, dict):
@@ -1249,7 +1286,9 @@ def run(
     assets = prepare_assets(render_snapshot, project_root, output_root)
     plan = run_production_planner(repo_root, cargo, planner_input_tsv(snapshot, pair_weights))
     contacts = write_contact_sheets(game, assets, output_root)
-    baseline_placements = baseline_render_placements(snapshot)
+    baseline_placements = attach_normalized_uvs(
+        baseline_render_placements(snapshot), snapshot["native_pages"]
+    )
     baseline_pages = render_layout(
         f"{safe_name(game)}-baseline",
         baseline_placements,
@@ -1389,7 +1428,9 @@ def run(
     frozen_placements = [
         row for row in baseline_placements if row["sprite_id"] in frozen_sprite_ids
     ]
-    complete_optimized_placements = [*optimized_placements, *frozen_placements]
+    complete_optimized_placements = attach_normalized_uvs(
+        [*optimized_placements, *frozen_placements], optimized_page_rows + frozen_pages
+    )
     for page in frozen_pages:
         page["sprite_count"] = sum(1 for row in frozen_placements if row["page_id"] == page["id"])
     optimized_page_rows.extend(frozen_pages)
