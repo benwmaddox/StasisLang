@@ -1,0 +1,14 @@
+{
+  "schema": "stasis.android_seam_expectations.v1",
+  "test_id": "ANDROID-GENERICS",
+  "stable_frame": 30,
+  "logical_size": [1280, 720],
+  "regions": [
+    {"name": "digest_teal", "center": [128, 96], "rgb": [41, 184, 133], "tolerance": 30}
+  ],
+  "android_generics": {
+    "digest": 507,
+    "bounds_indices": {"low": -1, "high": 2},
+    "bounds_signal": "SIGILL"
+  }
+}

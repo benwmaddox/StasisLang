@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       release_shell_test_id:
-        description: "Optional release-shell seam test ID (for example IT-023)"
+        description: "Optional release-shell seam test ID (for example IT-023 or ANDROID-GENERICS)"
         required: false
         default: ""
         type: string
@@ -24,6 +24,9 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: "2"
       STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
       STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
+      STASIS_RELEASE_ID: ci-android-emulator-${{ github.run_id }}
+      STASIS_SOURCE_COMMIT: ${{ github.sha }}
+      STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/android-emulator-host-runtime/bin/libstasis_graphics.so
     steps:
       - name: Checkout Stasis
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -49,6 +52,35 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Install host graphics build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libx11-dev libxext-dev libxrandr-dev \
+            libxcursor-dev libxfixes-dev libxi-dev libxss-dev libxtst-dev \
+            libxkbcommon-dev libegl1 libgl1-mesa-dri
+
+      - name: Compute matching CLI/runtime toolchain identity
+        run: |
+          fingerprint="$(python tools/compute_toolchain_fingerprint.py \
+            --source-commit "$STASIS_SOURCE_COMMIT" --release-id "$STASIS_RELEASE_ID")"
+          echo "STASIS_BUILD_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
+
+      - name: Build matching host graphics runtime for the package compiler
+        timeout-minutes: 15
+        run: |
+          cmake -S runtime -B target/android-emulator-host-runtime \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
+            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
+            -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
+            -DSTASIS_BUILD_RUNNER=OFF \
+            -DSTASIS_BUILD_SYS=OFF \
+            -DSTASIS_RELEASE_ID="$STASIS_RELEASE_ID" \
+            -DSTASIS_BUILD_FINGERPRINT="$STASIS_BUILD_FINGERPRINT"
+          cmake --build target/android-emulator-host-runtime --config Release \
+            --target stasis_graphics
+          test -f "$STASIS_RUNTIME_LIBRARY_PATH"
 
       - name: Install Android Rust targets
         run: rustup target add aarch64-linux-android x86_64-linux-android
@@ -154,6 +186,15 @@ jobs:
           archive: true
           name: android-lifecycle-entry-failure-seam
           path: artifacts/android_entry_failures/*/e
+          if-no-files-found: warn
+
+      - name: Upload Android generics acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: true
+          name: android-generics-collections-evidence
+          path: artifacts/android_generics_collections/e
           if-no-files-found: warn
 
   workshop-seams:

@@ -12,6 +12,7 @@ stasis --workspace samples/generics_collections run --headless --ticks 1
 stasis --workspace samples/generics_collections package --target desktop --development-build
 stasis --workspace samples/generics_collections package --target web --development-build
 stasis --workspace samples/generics_collections package-mobile --target android-arm64 --out build/android-arm64 --development-build
+stasis --workspace samples/generics_collections package-mobile --target android-x86_64 --out build/android-x86_64 --development-build
 stasis --workspace samples/generics_collections package-mobile --target ios-arm64 --out build/ios-arm64 --development-build
 stasis --workspace samples/generics_collections package-mobile --target ios-simulator-arm64 --out build/ios-simulator-arm64 --development-build
 ```
@@ -23,7 +24,12 @@ post-run state digest through `generics_collections_state_digest()`, while
 `tick()` retains its zero-success lifecycle contract. Packaged Web reads the
 captured digest through the supported global accessor. The Web acceptance also verifies the
 real browser's WebGL2 frame and the fixed-array bounds trap. Android uses this
-same full entry and valid frame lifecycle.
+same full entry and valid frame lifecycle on an x86_64 emulator. Its bounded
+test seam reads the digest global as `507`, verifies the digest-gated teal frame,
+checks the successful launch log for crash/error evidence, and runs `tick()` with
+indices `-1` and `2` in separate emulator processes to prove both `Entity[2]`
+bounds traps. The production arm64 package/link check remains a separate CI
+build; no physical arm64 device run is required.
 The iOS acceptance packages the same unchanged entry separately for device and
 arm64 Simulator ABIs. Hosted Simulator execution requires lifecycle result `0`,
 reads the packaged digest global as `507`, inspects the teal frame, and runs

@@ -32,6 +32,153 @@ def write_rgb_png(
 
 
 class AndroidReleaseShellSeamTests(unittest.TestCase):
+    def test_android_generics_digest_marker_is_exactly_the_frame_one_oracle(self):
+        expectations = {
+            "android_generics": {
+                "digest": 507,
+                "bounds_indices": {"low": -1, "high": 2},
+                "bounds_signal": "SIGILL",
+            }
+        }
+        log = (
+            'I/Stasis: Stasis Android generics: '
+            '{"schema":"stasis.android.generics.v1",'
+            '"test_id":"ANDROID-GENERICS","event":"oracle",'
+            '"digest":507,"frame":1}\n'
+        )
+        receipt = seam.validate_android_generics_acceptance(log, expectations)
+        self.assertEqual(507, receipt["digest"])
+        self.assertEqual(1, receipt["frame"])
+        with self.assertRaisesRegex(seam.SeamError, "digest marker mismatch"):
+            seam.validate_android_generics_acceptance(log.replace("507", "506"), expectations)
+        with self.assertRaisesRegex(seam.SeamError, "exactly one"):
+            seam.validate_android_generics_acceptance(log + log, expectations)
+
+    def test_android_generics_success_log_is_bounded_and_error_free(self):
+        self.assertEqual(
+            {"line_count": 1, "byte_count": len("I/Stasis: frame\n".encode())},
+            seam.validate_android_generics_clean_log("I/Stasis: frame\n"),
+        )
+        provenance = (
+            'I/Stasis  (11080):     "mobile/shells/ios/StasisMobile/'
+            'stasis_ios_external_url.m": "5018aa34029e90e5606df13bd09199e6b2c060d19e01978c5234c4aa8ab29aeb4",\n'
+        )
+        self.assertEqual(
+            {"line_count": 1, "byte_count": len(provenance.encode())},
+            seam.validate_android_generics_clean_log(provenance),
+        )
+        for log in (
+            "F libc: Fatal signal 4 (SIGILL)\n",
+            "E/Stasis: Stasis runtime error\n",
+            "I/Stasis  (11080): Stasis runtime error: no\n",
+        ):
+            with self.subTest(log=log):
+                with self.assertRaises(seam.SeamError):
+                    seam.validate_android_generics_clean_log(log)
+        with self.assertRaisesRegex(seam.SeamError, "exceeded its bound"):
+            seam.validate_android_generics_clean_log("x\n" * 2501)
+
+    def test_android_generics_bounds_probe_requires_expected_isolated_sigill(self):
+        log = (
+            'I/Stasis  (4100): Stasis seam: '
+            '{"schema":"stasis.seam_test.v1","test_id":"ANDROID-GENERICS",'
+            '"event":"initialized","frame":0}\n'
+            "I/Stasis  (4100): Stasis Android generics bounds probe index=-1\n"
+            "F/libc    (4100): Fatal signal 4 (SIGILL), code 2, in tid 4101 (SDLThread), "
+            "pid 4100 (SDLActivity)\n"
+        )
+        result = seam.validate_android_generics_bounds_trap(
+            log,
+            -1,
+            "com.stasislang.generics_collections",
+            "SIGILL",
+        )
+        self.assertEqual(-1, result["index"])
+        self.assertEqual(4100, result["pid"])
+        mismatched_index_pid = log.replace(
+            "I/Stasis  (4100): Stasis Android generics bounds probe index=-1",
+            "I/Stasis  (4101): Stasis Android generics bounds probe index=-1",
+        )
+        with self.assertRaisesRegex(seam.SeamError, "same package process"):
+            seam.validate_android_generics_bounds_trap(
+                mismatched_index_pid,
+                -1,
+                "com.stasislang.generics_collections",
+                "SIGILL",
+            )
+        with self.assertRaisesRegex(seam.SeamError, "did not produce exactly one"):
+            seam.validate_android_generics_bounds_trap(
+                log.replace("SIGILL", "SIGSEGV"),
+                -1,
+                "com.stasislang.generics_collections",
+                "SIGILL",
+            )
+        with self.assertRaisesRegex(seam.SeamError, "did not apply index"):
+            seam.validate_android_generics_bounds_trap(
+                log.replace("index=-1", "index=0"),
+                -1,
+                "com.stasislang.generics_collections",
+                "SIGILL",
+            )
+        with self.assertRaisesRegex(seam.SeamError, "exceeded its bound"):
+            seam.validate_android_generics_bounds_trap(
+                "x\n" * 2501,
+                -1,
+                "com.stasislang.generics_collections",
+                "SIGILL",
+            )
+
+    def test_android_generics_probe_correlates_log_pid_without_pretrap_pidof(self):
+        package_id = "com.stasislang.generics_collections"
+        component = f"{package_id}/.MainActivity"
+        log = (
+            'I/Stasis  (4100): Stasis seam: '
+            '{"schema":"stasis.seam_test.v1","test_id":"ANDROID-GENERICS",'
+            '"event":"initialized","frame":0}\n'
+            "I/Stasis  (4100): Stasis Android generics bounds probe index=-1\n"
+            "F/libc    (4100): Fatal signal 4 (SIGILL), code 2, in tid 4101 (SDLThread), "
+            "pid 4100 (SDLActivity)\n"
+        )
+        calls = []
+
+        def fake_run(_adb, _serial, *arguments, **_options):
+            calls.append(arguments)
+            if arguments[:2] == ("logcat", "-b"):
+                return log
+            return ""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output_path = Path(temporary) / "bounds-low.log"
+            with (
+                mock.patch.object(seam, "_run", side_effect=fake_run),
+                mock.patch.object(seam.time, "sleep"),
+            ):
+                result = seam.run_android_generics_bounds_probe(
+                    Path("adb"),
+                    "emulator-5554",
+                    package_id,
+                    component,
+                    -1,
+                    "low",
+                    "SIGILL",
+                    output_path,
+                )
+
+        self.assertEqual(4100, result["pid"])
+        self.assertTrue(result["process_exited"])
+        log_poll_index = next(
+            index
+            for index, arguments in enumerate(calls)
+            if arguments[:2] == ("logcat", "-b")
+        )
+        pidof_indices = [
+            index
+            for index, arguments in enumerate(calls)
+            if arguments[:3] == ("shell", "pidof", package_id)
+        ]
+        self.assertTrue(pidof_indices)
+        self.assertTrue(all(index > log_poll_index for index in pidof_indices))
+
     def test_optional_adb_command_timeout_returns_for_marker_polling(self):
         timeout = seam.subprocess.TimeoutExpired(
             ["adb", "shell", "am", "start"], 10
@@ -1620,6 +1767,61 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             self.assertEqual([242, 51, 204], observed[0]["rgb"])
             with self.assertRaisesRegex(
                 seam.SeamError, "pointer_marker color mismatch"
+            ):
+                seam.validate_regions(
+                    path,
+                    {
+                        key: value
+                        for key, value in expectations.items()
+                        if key != "fitted_viewport"
+                    },
+                )
+
+    def test_generics_teal_oracle_uses_stable_native_viewport(self):
+        marker = {
+            "schema": seam.SCHEMA,
+            "test_id": "ANDROID-GENERICS",
+            "event": "stable",
+            "input_presentation": {
+                "native_viewport": [17.0, 3.0, 68.0, 38.0],
+            },
+        }
+        markers = seam.parse_markers(
+            f"Stasis seam: {json.dumps(marker)}", "ANDROID-GENERICS"
+        )
+        surface = (100, 45)
+        viewport = seam.native_input_viewport(markers, surface)
+        center = seam.logical_to_native([128, 96], [1280, 720], surface, viewport)
+        expectations = seam.expectations_with_fitted_viewport(
+            {
+                "logical_size": [1280, 720],
+                "regions": [
+                    {
+                        "name": "digest_teal",
+                        "center": [128, 96],
+                        "rgb": [41, 184, 133],
+                        "tolerance": 0,
+                    }
+                ],
+            },
+            viewport,
+        )
+
+        self.assertEqual((24, 8), center)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "capture.png"
+            rows = [[(10, 20, 40)] * surface[0] for _ in range(surface[1])]
+            for y in range(center[1] - 3, center[1] + 4):
+                for x in range(center[0] - 3, center[0] + 4):
+                    rows[y][x] = (41, 184, 133)
+            write_rgb_png(path, surface[0], surface[1], rows)
+
+            observed = seam.validate_regions(path, expectations)
+
+            self.assertEqual([24, 8], observed[0]["pixel"])
+            self.assertEqual([41, 184, 133], observed[0]["rgb"])
+            with self.assertRaisesRegex(
+                seam.SeamError, "digest_teal color mismatch"
             ):
                 seam.validate_regions(
                     path,

@@ -138,6 +138,21 @@ requires exactly one ready emulator, rejects physical-device serials, verifies
 workflow owns AVD startup and shutdown. Physical-device runs remain useful
 supplemental release evidence but do not gate CI readiness.
 
+The same entrypoint runs `ANDROID-GENERICS` against the full
+`samples/generics_collections` project. It checks the frame-one digest receipt
+(`507`), verifies the authored teal rectangle in the compositor capture, and
+rejects fatal or application error evidence in the bounded successful-launch
+log. Two subsequent fresh activity processes inject only the allowlisted
+`Entity[2]` indices `-1` and `2`; each must terminate with the x86_64 `SIGILL`
+bounds trap before rendering a frame. This is emulator execution coverage; the
+arm64 package/link/provenance check remains a separate package-only CI lane.
+
+Run this seam against an already-started x86_64 emulator with:
+
+```powershell
+mobile/android/test_release_shell_emulator.ps1 -TestId ANDROID-GENERICS
+```
+
 ## Android storage persistence seam
 
 `IT-023` packages `samples/android_storage_seam` and verifies the AOT storage
