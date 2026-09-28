@@ -17,7 +17,7 @@ The focused test generates four fixed-SoA fixtures at capacities 4, 64, and 900:
 - `wall_dense`: every lane crosses an x/y boundary on the first tick.
 - `brickout_active`: the representative Brickout `active` gate, scaled movement, radius clamps, bounce streak, and top deactivation. Distributed active slots exercise 2/4, 32/64, and the production cap of 90/900; helper/random jiggle calls are deliberately excluded so the measured body remains the vectorizable portion.
 
-For each case, the real JIT executes five ticks and compares every field after every tick against a separate indexed-array reference. This checks ordinary updates, boundary collisions, and interleaved active/inactive holes, including 810 inactive lanes in the 900/90 Brickout case. The test then captures production AOT CLIF and emits `aarch64-linux-android` ELF objects with Cranelift `speed_and_size`. The analyzer disassembles the actual `tick` object with NDK `llvm-objdump` and rejects packed-lane work in production output, including `qN` vector loads and stores.
+For each case, the real JIT executes five ticks and compares every field after every tick against a separate indexed-array reference. This checks ordinary updates, boundary collisions, and interleaved active/inactive holes, including 810 inactive lanes in the 900/90 Brickout case. The test then captures production AOT CLIF and emits `aarch64-linux-android` ELF objects with Cranelift `speed_and_size`. The analyzer disassembles the actual `tick` object with NDK `llvm-objdump` and records packed-lane work, including `qN` vector loads and stores. Vector absence is a dated observation in this snapshot, not a compiler invariant.
 
 Compile samples are whole `AotProcess` time (frontend plus Cranelift codegen), not isolated backend time: one warmup and five measured repetitions on an AZW GTi14, Intel Core Ultra 9 185H, 68,179,521,536 bytes RAM, Windows 11 build 26200, Rust/Cargo 1.92.0, and NDK 27.0.12077973. Raw samples and median absolute deviations are in [the JSON snapshot](simd_soa_measurement_2026-09-27.json).
 
@@ -75,10 +75,12 @@ python tools/measure_simd_soa.py --output build/simd-soa-evidence-rerun --warmup
 
 The command runs the focused semantic/AOT test through `tools/cargo_cache.py`, writes source, CLIF, objects, disassembly, raw samples, device inventory, and `analysis.json`, then compiles the scratch-only scalar/NEON pair. Generated artifacts stay under the chosen ignored build directory. The checked-in JSON is the final 2026-09-27 run.
 
+The Rust characterization test is ignored by the normal compiler test suite because it performs repeated measurement compiles and records incidental code shape. The reproduction tool invokes it explicitly with `--ignored`; future vector lowering should be reported in new evidence rather than treated as a regression.
+
 Validation on the measured branch:
 
 - `cargo fmt --all -- --check`: passed through `tools/cargo_cache.py`.
-- Focused characterization: 1/1 passed.
+- Focused ignored characterization: 1/1 passed through the reproduction tool.
 - `cargo check --workspace --all-targets --locked`: passed.
 - `cargo test -p stasis_compiler --lib -- --test-threads=1`: 904/904 passed.
 - `tools/validate_repo.sh`: every preceding policy, contract, architecture, Python, Node, render-parity, compiler, app library/main, and asset-stress lane passed; the final workspace matrix stopped at the Windows `desktop_display_metrics_seam` because native display-event injection returned 0 instead of 1. The exact isolated rerun failed identically. This is the pre-existing host/display seam also recorded by #734 and does not execute or depend on the test-only compiler characterization.
