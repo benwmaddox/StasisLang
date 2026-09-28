@@ -3302,6 +3302,20 @@ fn format_files(
 }
 
 fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
+    if let Some(resources) = workspace
+        .manifest
+        .android
+        .as_ref()
+        .and_then(|android| android.launcher_resources.as_deref())
+    {
+        let directory = workspace.root.join(resources);
+        if !directory.is_dir() {
+            return Err(format!(
+                "android.launcher_resources must name an existing directory: {}",
+                directory.display()
+            ));
+        }
+    }
     if let Some(font_subsetting) = workspace
         .manifest
         .release
@@ -11289,6 +11303,35 @@ mod tests {
         check_workspace(&workspace).expect("generated project checks");
         remove_temp(&root);
     }
+
+    #[test]
+    fn check_requires_declared_android_launcher_directory() {
+        let root = temp_dir("check_android_launcher_directory");
+        create_project(root.clone(), "check_android_launcher_directory".to_string())
+            .expect("create project");
+        let manifest_path = root.join(MANIFEST_NAME);
+        let mut manifest: ProjectManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read manifest"))
+                .expect("parse manifest");
+        manifest.android = Some(AndroidProjectManifest {
+            application_id: "com.example.game".to_string(),
+            label: "Example Game".to_string(),
+            orientation: "sensorLandscape".to_string(),
+            version_code: 1,
+            version_name: "1.0.0".to_string(),
+            launcher_resources: Some("branding/android/res".to_string()),
+        });
+        write_manifest(&manifest_path, &manifest).expect("write Android manifest");
+        let workspace = load_workspace(Some(&root))
+            .expect("load Android project")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve host settings");
+        let error = check_workspace(&workspace).expect_err("missing launcher directory must fail");
+        assert!(error.contains("android.launcher_resources must name an existing directory"));
+        fs::create_dir_all(root.join("branding/android/res")).expect("create launcher directory");
+        check_workspace(&workspace).expect("existing launcher directory passes check");
+        remove_temp(&root);
+    }
     use stasis_compiler::frontend::types::TYPE_ID_U8;
     use std::collections::BTreeMap;
 
@@ -15354,6 +15397,10 @@ mod tests {
         let manifest: ProjectManifest =
             serde_json::from_slice(&fs::read(root.join(MANIFEST_NAME)).expect("read manifest"))
                 .expect("parse generated manifest");
+        assert!(
+            manifest.android.is_none(),
+            "new projects start as desktop projects"
+        );
         let pin = manifest
             .vendor
             .as_ref()
@@ -15383,6 +15430,12 @@ mod tests {
         assert!(pr.contains("git fetch --no-tags --depth=1 stasis-base \"$BASE_SHA\""));
         assert!(pr.contains("STASIS_PR_GATE_SENTINEL|relevant_change="));
         assert!(pr.contains("name: Stasis PR gate"));
+        assert!(pr.contains("name: Check Android launcher resources"));
+        assert!(pr.contains("$null -ne $manifest.android"));
+        assert!(pr.contains("$manifest.android.launcher_resources"));
+        assert!(pr.contains(
+            "Test-Path -LiteralPath (Join-Path (Get-Location).Path $resources) -PathType Container"
+        ));
         assert_eq!(pr.matches("runs-on: ubuntu-latest").count(), 1);
         assert!(!pr.contains("needs: relevant-change"));
         assert!(pr.contains("$pin.release_id"));
