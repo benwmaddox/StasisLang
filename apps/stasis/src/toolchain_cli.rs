@@ -11703,7 +11703,7 @@ mod tests {
         assert!(upload.contains("failIfBad();"));
 
         let allocation = WEB_RUNTIME_JS
-            .split("const createAtlasPage = size => {")
+            .split("const createAtlasPage = (size, domain = \"sprite\") => {")
             .nth(1)
             .and_then(|source| source.split("const deleteAtlasPage = page =>").next())
             .expect("WebGL atlas allocation function");
@@ -14885,17 +14885,20 @@ mod tests {
     #[test]
     fn manifest_validates_web_atlas_budget_as_a_javascript_safe_integer() {
         let mut manifest = ProjectManifest::new("atlas_budget".to_string());
+        manifest.graphics = Some(GraphicsProjectManifest {
+            sprite_atlas_page_size: Some(json!(1024)),
+        });
         manifest.web = Some(WebProjectManifest {
             entry: String::new(),
             replay: false,
             loading_font: None,
             viewport: None,
-            atlas_budget_bytes: Some(json!(1)),
+            atlas_budget_bytes: Some(json!(4_194_304)),
         });
         assert!(manifest.validate().is_ok());
         manifest.web.as_mut().unwrap().atlas_budget_bytes = Some(json!(MAX_WEB_ATLAS_BUDGET_BYTES));
         assert!(manifest.validate().is_ok());
-        for (value, expected) in [(json!(1.0), 1), (json!(1e6), 1_000_000)] {
+        for (value, expected) in [(json!(4_194_304.0), 4_194_304), (json!(5e6), 5_000_000)] {
             manifest.web.as_mut().unwrap().atlas_budget_bytes = Some(value);
             assert!(manifest.validate().is_ok());
             assert_eq!(
