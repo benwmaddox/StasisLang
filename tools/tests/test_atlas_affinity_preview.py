@@ -192,6 +192,64 @@ class AotImageGeometryTests(unittest.TestCase):
 
 
 class NativePageExtentTests(unittest.TestCase):
+    def test_post_seal_extent_drives_uvs_and_sealed_pages_stay_frozen(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = {
+                "schema": "atlas-affinity-native-query/v1",
+                "snapshot_token": 4,
+                "renderer_generation": 8,
+                "asset_generation": 13,
+                "flags": 0,
+                "stage_peak_cap_bytes": 100_000_000,
+                "evidence_provenance": "bounded-runtime-histogram",
+                "pages": [
+                    {
+                        "page_index": 0,
+                        "width": 512,
+                        "height": 256,
+                        "usable_x": 1,
+                        "usable_y": 6,
+                        "padding": 1,
+                        "reserved_header_height": 6,
+                        "flags": (1 << 4) | (1 << 5),
+                        "compatibility_flags": 1,
+                        "group_id": 7,
+                        "allocation_bytes": 524_288,
+                    }
+                ],
+                "sprites": [],
+                "pairs": [],
+            }
+            snapshot = preview.normalize_native_snapshot(
+                raw, root / "snapshot.json", "SheepHerder", root, None, None
+            )
+            self.assertEqual(snapshot["pages"], [])
+            self.assertEqual(
+                snapshot["native_pages"][0]["planner_exclusion_reason"],
+                "protected_or_dedicated_page_flags",
+            )
+            placements = preview.attach_normalized_uvs(
+                [
+                    {
+                        "sprite_id": 1,
+                        "page_id": 0,
+                        "x": 128,
+                        "y": 64,
+                        "width": 128,
+                        "height": 64,
+                    }
+                ],
+                snapshot["native_pages"],
+            )
+            self.assertEqual(
+                placements[0]["uv"],
+                {"u0": 0.25, "v0": 0.25, "u1": 0.5, "v1": 0.5},
+            )
+
     def test_variable_eligible_extent_and_frozen_dedicated_page_are_preserved(self):
         import tempfile
         from pathlib import Path

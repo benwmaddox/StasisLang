@@ -16,6 +16,8 @@ void stasis_gfx_set_next_sprite_atlas_policy_v3(
 void stasis_gfx_submit(int32_t* cmd_i32, const float* cmd_f32);
 void stasis_gfx_notify_file_changed(const char* path);
 int stasis_gfx_poll_reload(int handle);
+int stasis_gfx_dump_png(const char* path);
+void stasis_gfx_test_set_atlas_stage_failpoint(int failpoint);
 void stasis_gfx_test_set_atlas_allocation_failure(int enabled);
 void stasis_gfx_test_reset_renderer_resources(void);
 int SDL_setenv_unsafe(const char* name, const char* value, int overwrite);
@@ -91,12 +93,45 @@ static StasisSpriteAtlasPageV1* page_for(uint32_t page_index) {
 
 static void set_group_policy(void) {
     stasis_gfx_set_next_sprite_atlas_policy_v3(
-        1, TEST_GROUP, 8, UINT64_C(8) * 64u * 64u, 64u, 64u);
+        1, TEST_GROUP, 2, UINT64_C(512) * 480u, 200u, 200u);
 }
 
 static int load_grouped(int width, int height) {
     set_group_policy();
     return stasis_gfx_load_sprite(STASIS_ATLAS_TEST_SMALL_PATH, width, height);
+}
+
+static int load_with_policy(
+    uint64_t group_id, uint64_t logical_pixel_area,
+    uint32_t max_logical_width, uint32_t max_logical_height,
+    int width, int height) {
+    stasis_gfx_set_next_sprite_atlas_policy_v3(
+        1, group_id, 2, logical_pixel_area, max_logical_width, max_logical_height);
+    return stasis_gfx_load_sprite(STASIS_ATLAS_TEST_SMALL_PATH, width, height);
+}
+
+static void read_file(const char* path, unsigned char** out_bytes, size_t* out_size) {
+    FILE* file = fopen(path, "rb");
+    CHECK(file != NULL);
+    CHECK(fseek(file, 0, SEEK_END) == 0);
+    const long length = ftell(file);
+    CHECK(length > 0 && fseek(file, 0, SEEK_SET) == 0);
+    unsigned char* bytes = (unsigned char*)malloc((size_t)length);
+    CHECK(bytes != NULL);
+    CHECK(fread(bytes, 1, (size_t)length, file) == (size_t)length);
+    CHECK(fclose(file) == 0);
+    *out_bytes = bytes;
+    *out_size = (size_t)length;
+}
+
+static void assert_render_snapshots_equal(void) {
+    unsigned char *before = NULL, *after = NULL;
+    size_t before_size = 0, after_size = 0;
+    read_file(STASIS_ATLAS_TEST_BEFORE_PNG, &before, &before_size);
+    read_file(STASIS_ATLAS_TEST_AFTER_PNG, &after, &after_size);
+    CHECK(before_size == after_size && memcmp(before, after, before_size) == 0);
+    free(before);
+    free(after);
 }
 
 static void render_one(int handle, float draw_width, float draw_height,
@@ -167,7 +202,7 @@ int main(void) {
     query_native(); /* Initializes the protected fallback page. */
     int first = load_grouped(20, 20);
     int second = load_grouped(21, 21);
-    int third = load_grouped(22, 22);
+    int third = load_grouped(200, 200);
     CHECK(first > 0 && second > 0 && third > 0);
     query_native();
     StasisSpriteAtlasResidentV1* first_resident = resident_for(first);
@@ -176,6 +211,12 @@ int main(void) {
     CHECK(first_resident && second_resident && third_resident);
     const uint32_t sealed_page = first_resident->page_index;
     CHECK(second_resident->page_index == sealed_page && third_resident->page_index == sealed_page);
+    const uint32_t initial_x[3] = {first_resident->x, second_resident->x, third_resident->x};
+    const uint32_t initial_y[3] = {first_resident->y, second_resident->y, third_resident->y};
+    StasisSpriteAtlasPageV1* original_page = page_for(sealed_page);
+    CHECK(original_page && original_page->width == 512u && original_page->height == 512u);
+    CHECK(original_page->allocation_bytes == UINT64_C(1048576));
+    const uint32_t original_width = original_page->width;
 
     StasisSpriteAtlasPlanPageV1 plan_page;
     StasisSpriteAtlasPlanPlacementV1 placements[TEST_MAX_SPRITES] = {{0}};
@@ -186,6 +227,23 @@ int main(void) {
     CHECK(stasis_gfx_sprite_atlas_seal_page_v1(g_token, sealed_page) == 0);
     CHECK(stasis_gfx_sprite_atlas_commit_plan_v1(g_token ^ UINT64_C(0x8000000000000000)) == 0);
 
+    query_native();
+    const uint64_t rollback_token = g_token;
+    stasis_gfx_test_set_atlas_stage_failpoint(1);
+    CHECK(stasis_gfx_sprite_atlas_seal_page_v1(g_token, sealed_page) == 0);
+    query_native();
+    CHECK(g_token == rollback_token && page_for(sealed_page)->height == 512u &&
+          (page_for(sealed_page)->flags & STASIS_SPRITE_ATLAS_PAGE_FLAG_SEALED) == 0);
+    stasis_gfx_test_set_atlas_stage_failpoint(2);
+    CHECK(stasis_gfx_sprite_atlas_seal_page_v1(g_token, sealed_page) == 0);
+    stasis_gfx_test_set_atlas_stage_failpoint(0);
+    query_native();
+    CHECK(g_token == rollback_token && page_for(sealed_page)->height == 512u);
+
+    render_one(first, 10.0f, 12.0f, 10.0f, 12.0f);
+    CHECK(stasis_gfx_dump_png(STASIS_ATLAS_TEST_BEFORE_PNG) == 1);
+    query_native();
+
     const uint64_t before_seal_token = g_token;
     const uint64_t before_seal_generation = g_asset_generation;
     CHECK(stasis_gfx_sprite_atlas_seal_page_v1(
@@ -195,10 +253,22 @@ int main(void) {
     StasisSpriteAtlasPageV1* sealed = page_for(sealed_page);
     CHECK(g_token != before_seal_token && g_asset_generation == before_seal_generation + 1);
     CHECK(sealed && (sealed->flags & STASIS_SPRITE_ATLAS_PAGE_FLAG_SEALED));
+    CHECK(sealed->height == 256u && sealed->width == original_width);
+    CHECK(sealed->allocation_bytes == UINT64_C(524288));
     CHECK(sealed->flags & STASIS_SPRITE_ATLAS_PAGE_FLAG_PROTECTED);
     CHECK((sealed->flags & STASIS_SPRITE_ATLAS_PAGE_FLAG_PLAN_ELIGIBLE) == 0);
     CHECK(stasis_gfx_sprite_atlas_seal_page_v1(before_seal_token, sealed_page) == 0);
     CHECK(stasis_gfx_sprite_atlas_seal_page_v1(g_token, sealed_page) == 0);
+    first_resident = resident_for(first);
+    second_resident = resident_for(second);
+    third_resident = resident_for(third);
+    CHECK(first_resident && second_resident && third_resident);
+    CHECK(first_resident->x == initial_x[0] && first_resident->y == initial_y[0]);
+    CHECK(second_resident->x == initial_x[1] && second_resident->y == initial_y[1]);
+    CHECK(third_resident->x == initial_x[2] && third_resident->y == initial_y[2]);
+    render_one(first, 10.0f, 12.0f, 10.0f, 12.0f);
+    CHECK(stasis_gfx_dump_png(STASIS_ATLAS_TEST_AFTER_PNG) == 1);
+    assert_render_snapshots_equal();
 
     first_resident = resident_for(first);
     CHECK(first_resident);
@@ -252,6 +322,50 @@ int main(void) {
     CHECK(empty_page_probe > 0);
     query_native();
     CHECK(resident_for(empty_page_probe) && resident_for(empty_page_probe)->page_index != sealed_page);
+
+    stasis_gfx_release_sprite(replacement);
+    stasis_gfx_release_sprite(empty_page_probe);
+    int tall = load_with_policy(
+        TEST_GROUP + 1u, UINT64_C(2048) * 2048u, 100u, 100u, 100, 100);
+    CHECK(tall > 0);
+    query_native();
+    StasisSpriteAtlasResidentV1* tall_resident = resident_for(tall);
+    CHECK(tall_resident != NULL);
+    const uint32_t tall_page_index = tall_resident->page_index;
+    CHECK(page_for(tall_page_index) && page_for(tall_page_index)->width == 2048u &&
+          page_for(tall_page_index)->height == 2048u &&
+          page_for(tall_page_index)->allocation_bytes == UINT64_C(16777216));
+    CHECK(stasis_gfx_sprite_atlas_seal_page_v1(g_token, tall_page_index) == 1);
+    query_native();
+    CHECK(page_for(tall_page_index) && page_for(tall_page_index)->height == 128u);
+    CHECK(page_for(tall_page_index)->allocation_bytes == UINT64_C(1048576));
+
+    int full_height = load_with_policy(TEST_GROUP + 2u, 1u, 56u, 56u, 56, 56);
+    CHECK(full_height > 0);
+    query_native();
+    StasisSpriteAtlasResidentV1* full_resident = resident_for(full_height);
+    CHECK(full_resident != NULL);
+    const uint32_t full_page_index = full_resident->page_index;
+    CHECK(page_for(full_page_index) && page_for(full_page_index)->height == 64u);
+    CHECK(stasis_gfx_sprite_atlas_seal_page_v1(g_token, full_page_index) == 1);
+    query_native();
+    CHECK(page_for(full_page_index) && page_for(full_page_index)->height == 64u &&
+          (page_for(full_page_index)->flags & STASIS_SPRITE_ATLAS_PAGE_FLAG_SEALED));
+
+    stasis_gfx_set_next_sprite_atlas_policy_v3(0, 0, 0, 0, 0, 0);
+    int dedicated = stasis_gfx_load_sprite(STASIS_ATLAS_TEST_SMALL_PATH, 600, 600);
+    CHECK(dedicated > 0);
+    query_native();
+    StasisSpriteAtlasResidentV1* dedicated_resident = resident_for(dedicated);
+    CHECK(dedicated_resident != NULL);
+    const uint32_t dedicated_page_index = dedicated_resident->page_index;
+    const uint32_t dedicated_height = page_for(dedicated_page_index)->height;
+    CHECK(dedicated_height > 0u && (dedicated_height & (dedicated_height - 1u)) != 0u);
+    CHECK(stasis_gfx_sprite_atlas_seal_page_v1(g_token, dedicated_page_index) == 1);
+    query_native();
+    CHECK(page_for(dedicated_page_index) &&
+          page_for(dedicated_page_index)->height == dedicated_height &&
+          (page_for(dedicated_page_index)->flags & STASIS_SPRITE_ATLAS_PAGE_FLAG_SEALED));
 
     const uint32_t before_restore_renderer_generation = g_renderer_generation;
     stasis_gfx_test_reset_renderer_resources();

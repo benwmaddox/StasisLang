@@ -6619,6 +6619,12 @@ function render(): void {{ {draws} return; }}
         }
         assert!(!upload_source.contains("clear"));
         assert!(!upload_source.contains("mipmap"));
+        assert!(STASIS_GRAPHICS_SOURCE.contains(
+            "entry, &staged, entry->atlas_x, entry->atlas_y,\n                entry->alloc_w, entry->alloc_h"
+        ));
+        assert!(
+            STASIS_GRAPHICS_SOURCE.contains("e, staged, (int)p->x, (int)p->y, e->w + 2, e->h + 2")
+        );
     }
 
     #[test]
