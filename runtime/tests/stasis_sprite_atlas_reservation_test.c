@@ -4,6 +4,7 @@
 
 int stasis_init_window(int width, int height, const char* title);
 void stasis_shutdown(void);
+int stasis_gfx_set_sprite_atlas_page_size(int page_size);
 int stasis_gfx_load_sprite(const char* path, int max_w, int max_h);
 int stasis_test_get_sprite_state(int handle, int32_t* out_i32, int32_t capacity);
 
@@ -28,6 +29,7 @@ static int overlaps(const int32_t a[18], const int32_t b[18]) {
 
 static void prepare_last_shelf(int32_t first[18], int32_t second[18], int32_t third[18]) {
     CHECK(stasis_init_window(512, 512, "Atlas reservation regression") == 1);
+    CHECK(stasis_gfx_set_sprite_atlas_page_size(512) == 1);
     /* Standalone images share real 512px cold pages; includes the 1px gutters. */
     load(400, 394, first);
     load(100, 4, second);
