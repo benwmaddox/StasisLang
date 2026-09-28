@@ -45,6 +45,17 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.rust_bridge_script = read("mobile/android/build_rust_bridge.ps1")
         cls.provenance_script = read("mobile/android/rust_bridge_provenance.ps1")
         cls.mobile_main = read("mobile/shells/common/stasis_mobile_main.c")
+        cls.main_activity = read(
+            "mobile/shells/android/app/src/main/java/com/stasislang/game/MainActivity.java"
+        )
+        cls.android_assets_bridge = read(
+            "mobile/shells/android/app/src/main/cpp/stasis_android_assets.c"
+        )
+        cls.generics_expectations = json.loads(
+            read("samples/generics_collections/android_seam_expectations.json")
+        )
+        cls.generics_readme = read("samples/generics_collections/README.md")
+        cls.shell_readme = read("mobile/shells/android/README.md")
         cls.workshop_resource_scope = read(
             "mobile/android/app/src/workshop/java/com/stasislang/workshop/"
             "WorkshopResourceScopeAcceptance.java"
@@ -86,6 +97,72 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertNotIn("self-hosted", self.workflow)
         self.assertNotIn("runs-on: [self-hosted, Windows, android-device]", self.workflow)
         self.assertNotIn("ANDROID_SERIAL", self.workflow)
+
+    def test_generics_sample_runs_in_emulator_with_bounded_digest_and_traps(self):
+        expectations = self.generics_expectations
+        self.assertEqual("ANDROID-GENERICS", expectations["test_id"])
+        self.assertEqual(507, expectations["android_generics"]["digest"])
+        self.assertEqual(
+            {"low": -1, "high": 2},
+            expectations["android_generics"]["bounds_indices"],
+        )
+        self.assertEqual("SIGILL", expectations["android_generics"]["bounds_signal"])
+        self.assertEqual("digest_teal", expectations["regions"][0]["name"])
+        self.assertIn('TestId = "ANDROID-GENERICS"', self.emulator_script)
+        self.assertIn('Project = "samples/generics_collections"', self.emulator_script)
+        self.assertIn("package_id", self.release_runner)
+        self.assertIn("validate_android_generics_acceptance", self.release_runner)
+        self.assertIn("validate_android_generics_bounds_trap", self.release_runner)
+        self.assertIn("input_viewport = native_input_viewport(", self.release_runner)
+        self.assertIn(
+            "region_expectations = expectations_with_fitted_viewport(",
+            self.release_runner,
+        )
+        self.assertIn('"process_exited": True', self.release_runner)
+        self.assertIn('"-t",\n                "2000"', self.release_runner)
+        self.assertIn('f"--pid={first_pid}"', self.release_runner)
+        self.assertIn('"stasis.generics_bounds_index"', self.main_activity)
+        self.assertIn('"ANDROID-GENERICS".equals(seamTestId)', self.main_activity)
+        self.assertIn("nativeSetGenericsBoundsProbeIndex", self.android_assets_bridge)
+        self.assertIn('strcmp(test_id, "ANDROID-GENERICS")', self.android_assets_bridge)
+        self.assertIn("index != -1 && index != 2", self.android_assets_bridge)
+        self.assertIn('"STASIS_ANDROID_GENERICS_BOUNDS_INDEX"', self.mobile_main)
+        self.assertIn('"generics_collections_digest_value"', self.mobile_main)
+        self.assertIn("android-generics-collections-evidence", self.workflow)
+        self.assertIn("x86_64 emulator", self.generics_readme)
+        self.assertIn("ANDROID-GENERICS", self.shell_readme)
+
+    def test_generics_emulator_coverage_preserves_arm64_package_link_lane(self):
+        self.assertIn(
+            "--target android-arm64 --out dist/generics-android --development-build",
+            self.pr_workflow,
+        )
+        self.assertIn("verify_android_native_library.py", self.pr_workflow)
+        self.assertIn("mobile_aot_bundle_manifest.json", self.pr_workflow)
+
+    def test_release_shell_builds_cli_with_a_verified_toolchain_fingerprint(self):
+        fingerprint = self.release_script.index("tools/compute_toolchain_fingerprint.py")
+        build = self.release_script.index("cargo build -p stasis")
+        self.assertLess(fingerprint, build)
+        self.assertIn("STASIS_BUILD_FINGERPRINT = $buildFingerprint", self.release_script)
+        self.assertIn("STASIS_SOURCE_COMMIT = $sourceCommit", self.release_script)
+        self.assertIn("STASIS_RELEASE_ID = $releaseId", self.release_script)
+        self.assertIn("STASIS_RUNTIME_LIBRARY_PATH:", self.workflow)
+        self.assertIn("Build matching host graphics runtime", self.workflow)
+        self.assertIn("STASIS_BUILD_FINGERPRINT=\"$STASIS_BUILD_FINGERPRINT\"", self.workflow)
+        self.assertIn("timeout-minutes: 15", self.workflow)
+
+    def test_local_emulator_harness_establishes_and_reuses_matching_host_runtime(self):
+        self.assertIn('"android-emulator-$sourceCommit"', self.emulator_script)
+        self.assertIn("$env:STASIS_SOURCE_COMMIT = $sourceCommit", self.emulator_script)
+        self.assertIn("$env:STASIS_BUILD_FINGERPRINT = $buildFingerprint", self.emulator_script)
+        self.assertIn("if ($env:STASIS_RUNTIME_LIBRARY_PATH) {", self.emulator_script)
+        self.assertIn("else {\n    if (-not $env:STASIS_SDL3_SOURCE", self.emulator_script)
+        self.assertIn("Invoke-BoundedCMake $configureArguments", self.emulator_script)
+        self.assertIn('"--target", "stasis_graphics", "--parallel", "2"', self.emulator_script)
+        self.assertIn("HostRuntimeBuildTimeoutSeconds = 900", self.emulator_script)
+        self.assertIn("$process.Kill($true)", self.emulator_script)
+        self.assertIn("$runtimeBuildDirectory = Join-Path $repoRoot \"target/android-emulator-host-runtime\"", self.emulator_script)
 
     def test_pr_ci_slow_seams_are_boolean_input_gated(self):
         input_declaration = (
@@ -280,13 +357,14 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
                     "android-asset-rejection-seam",
                     "android-storage-persistence-seam",
                     "android-lifecycle-entry-failure-seam",
+                    "android-generics-collections-evidence",
                 )
             ),
             sorted(release_artifacts),
         )
         self.assertEqual(["android-workshop-it025-it032-seams"], workshop_artifacts)
-        self.assertEqual(9, self.workflow.count("          name: android-"))
-        self.assertEqual(9, self.workflow.count("        if: always()"))
+        self.assertEqual(10, self.workflow.count("          name: android-"))
+        self.assertEqual(10, self.workflow.count("        if: always()"))
         self.assertNotIn("\n      if: always()", self.workflow)
 
     def test_emulator_boot_timeout_kills_the_launched_process_tree(self):

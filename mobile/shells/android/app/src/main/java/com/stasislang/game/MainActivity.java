@@ -51,6 +51,7 @@ public final class MainActivity extends SDLActivity {
     private static native void nativeSetReplayPath(String path);
     private static native void nativeSetReplayImportError(String diagnostic);
     private static native void nativeSetSeamTestId(String testId);
+    private static native void nativeSetGenericsBoundsProbeIndex(int index);
     private static native boolean nativeReadPerformanceMetrics(float[] output);
     private static native void nativeSetPerformanceMetricsEnabled(boolean enabled);
     private static native String nativeReadRuntimeError();
@@ -121,6 +122,11 @@ public final class MainActivity extends SDLActivity {
         String assetVariant = getIntent().getStringExtra("stasis.asset_variant");
         if (BuildConfig.STASIS_SEAM_TESTS && seamTestId != null) {
             nativeSetSeamTestId(seamTestId);
+            if ("ANDROID-GENERICS".equals(seamTestId)
+                    && getIntent().hasExtra("stasis.generics_bounds_index")) {
+                nativeSetGenericsBoundsProbeIndex(
+                        getIntent().getIntExtra("stasis.generics_bounds_index", Integer.MIN_VALUE));
+            }
         }
         File invalidAssetRoot = new File(getFilesDir(), INVALID_ASSET_ROOT + "."
                 + Long.toHexString(System.nanoTime()));

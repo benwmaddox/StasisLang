@@ -41,6 +41,26 @@ Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeSetSeamTestId(
     }
     (*env)->ReleaseStringUTFChars(env, value, test_id);
 }
+
+JNIEXPORT void JNICALL
+Java_@STASIS_JNI_PACKAGE@_MainActivity_nativeSetGenericsBoundsProbeIndex(
+    JNIEnv *env,
+    jclass activity,
+    jint index
+) {
+    (void)env;
+    (void)activity;
+    const char *test_id = getenv("STASIS_SEAM_TEST_ID");
+    if (test_id == NULL || strcmp(test_id, "ANDROID-GENERICS") != 0 ||
+            (index != -1 && index != 2)) {
+        return;
+    }
+    char value[16];
+    int written = snprintf(value, sizeof(value), "%d", (int)index);
+    if (written > 0 && (size_t)written < sizeof(value)) {
+        setenv("STASIS_ANDROID_GENERICS_BOUNDS_INDEX", value, 1);
+    }
+}
 #endif
 
 JNIEXPORT void JNICALL

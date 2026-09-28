@@ -2,7 +2,8 @@ param(
     [string]$Serial = $env:ANDROID_SERIAL,
     [string]$ArtifactRoot = "artifacts",
     [string]$TestId = "",
-    [int]$PerSeamTimeoutSeconds = 660
+    [int]$PerSeamTimeoutSeconds = 660,
+    [int]$HostRuntimeBuildTimeoutSeconds = 900
 )
 
 $ErrorActionPreference = "Stop"
@@ -103,6 +104,11 @@ $seams = @(
         Output = "android_nested_self_mutation"
         RequiredScalarBindingSymbol = "stasis_state_scalar__state__zzz_commands__count"
         MinimumScalarBindingOrdinal = 2049
+    },
+    @{
+        TestId = "ANDROID-GENERICS"
+        Project = "samples/generics_collections"
+        Output = "android_generics_collections"
     }
 )
 
@@ -116,8 +122,132 @@ $selectedSeams = if ($TestId) {
     $seams
 }
 
+$sourceCommit = $env:STASIS_SOURCE_COMMIT
+if (-not $sourceCommit) {
+    $sourceCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $sourceCommit) {
+        throw "Unable to resolve the source commit for the Android emulator run"
+    }
+}
+$releaseId = $env:STASIS_RELEASE_ID
+if (-not $releaseId) { $releaseId = "android-emulator-$sourceCommit" }
+$buildFingerprint = (& python (Join-Path $repoRoot "tools/compute_toolchain_fingerprint.py") `
+    --source-commit $sourceCommit --release-id $releaseId).Trim()
+if ($LASTEXITCODE -ne 0 -or $buildFingerprint -notmatch '^[0-9a-f]{64}$') {
+    throw "Unable to compute the verified toolchain fingerprint for the Android emulator run"
+}
+if ($env:STASIS_BUILD_FINGERPRINT -and $env:STASIS_BUILD_FINGERPRINT -ne $buildFingerprint) {
+    throw "STASIS_BUILD_FINGERPRINT does not match STASIS_SOURCE_COMMIT and STASIS_RELEASE_ID"
+}
+$env:STASIS_SOURCE_COMMIT = $sourceCommit
+$env:STASIS_RELEASE_ID = $releaseId
+$env:STASIS_BUILD_FINGERPRINT = $buildFingerprint
+
+function Invoke-BoundedCMake([string[]]$Arguments, [string]$Phase) {
+    $remainingSeconds = [math]::Floor(
+        $script:hostRuntimeBuildTimeoutSeconds - $script:hostRuntimeBuildTimer.Elapsed.TotalSeconds
+    )
+    if ($remainingSeconds -le 0) {
+        throw "Android host runtime build exceeded its $($script:hostRuntimeBuildTimeoutSeconds)s budget before $Phase"
+    }
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $script:cmakeExecutable
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in $Arguments) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw "$Phase could not start" }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $timedOut = -not $process.WaitForExit([int]($remainingSeconds * 1000))
+    if ($timedOut) {
+        $process.Kill($true)
+        $process.WaitForExit(5000) | Out-Null
+    }
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+    $exitCode = $process.ExitCode
+    $process.Dispose()
+    if ($stdout) { Write-Host $stdout }
+    if ($stderr) { Write-Host $stderr }
+    if ($timedOut) {
+        throw "Android host runtime $Phase exceeded its bounded build budget"
+    }
+    if ($exitCode -ne 0) {
+        throw "Android host runtime $Phase failed with exit code ${exitCode}"
+    }
+}
+
+if ($env:STASIS_RUNTIME_LIBRARY_PATH) {
+    if (-not [System.IO.Path]::IsPathRooted($env:STASIS_RUNTIME_LIBRARY_PATH)) {
+        $env:STASIS_RUNTIME_LIBRARY_PATH = [System.IO.Path]::GetFullPath(
+            (Join-Path $repoRoot $env:STASIS_RUNTIME_LIBRARY_PATH)
+        )
+    }
+    if (-not (Test-Path -LiteralPath $env:STASIS_RUNTIME_LIBRARY_PATH -PathType Leaf)) {
+        throw "Configured STASIS_RUNTIME_LIBRARY_PATH does not exist: $env:STASIS_RUNTIME_LIBRARY_PATH"
+    }
+} else {
+    if (-not $env:STASIS_SDL3_SOURCE -or -not $env:STASIS_SDL3_IMAGE_SOURCE) {
+        throw "Set STASIS_SDL3_SOURCE and STASIS_SDL3_IMAGE_SOURCE to the pinned source trees"
+    }
+    if (-not (Test-Path -LiteralPath $env:STASIS_SDL3_SOURCE -PathType Container) -or
+            -not (Test-Path -LiteralPath $env:STASIS_SDL3_IMAGE_SOURCE -PathType Container)) {
+        throw "The configured SDL3/SDL3_image source paths must both exist"
+    }
+    $cmakeCommand = Get-Command cmake -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $cmakeCommand) { throw "cmake is required to build the matching Android emulator host runtime" }
+    $script:cmakeExecutable = $cmakeCommand.Source
+    $script:hostRuntimeBuildTimeoutSeconds = $HostRuntimeBuildTimeoutSeconds
+    if ($script:hostRuntimeBuildTimeoutSeconds -le 0) {
+        throw "HostRuntimeBuildTimeoutSeconds must be positive"
+    }
+    $script:hostRuntimeBuildTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $runtimeBuildDirectory = Join-Path $repoRoot "target/android-emulator-host-runtime"
+    $configureArguments = @(
+        "-S", (Join-Path $repoRoot "runtime"),
+        "-B", $runtimeBuildDirectory,
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DSTASIS_GRAPHICS_BUILD_SHARED=ON",
+        "-DSTASIS_GRAPHICS_BUILD_STATIC=OFF",
+        "-DSTASIS_GRAPHICS_BUNDLE_SDL=ON",
+        "-DSTASIS_BUILD_RUNNER=OFF",
+        "-DSTASIS_BUILD_SYS=OFF",
+        "-DSTASIS_RELEASE_ID=$releaseId",
+        "-DSTASIS_BUILD_FINGERPRINT=$buildFingerprint"
+    )
+    Invoke-BoundedCMake $configureArguments "configure"
+    Invoke-BoundedCMake @(
+        "--build", $runtimeBuildDirectory, "--config", "Release",
+        "--target", "stasis_graphics", "--parallel", "2"
+    ) "compile"
+    $runtimeOutputDirectory = Join-Path $runtimeBuildDirectory "bin"
+    if ($runningOnWindows) {
+        $runtimeOutputDirectory = Join-Path $runtimeOutputDirectory "Release"
+        $runtimeFileName = "stasis_graphics.dll"
+    } elseif ($IsMacOS) {
+        $runtimeFileName = "libstasis_graphics.dylib"
+    } else {
+        $runtimeFileName = "libstasis_graphics.so"
+    }
+    $env:STASIS_RUNTIME_LIBRARY_PATH = [System.IO.Path]::GetFullPath(
+        (Join-Path $runtimeOutputDirectory $runtimeFileName)
+    )
+    if (-not (Test-Path -LiteralPath $env:STASIS_RUNTIME_LIBRARY_PATH -PathType Leaf)) {
+        throw "Matching Android emulator host runtime was not produced: $env:STASIS_RUNTIME_LIBRARY_PATH"
+    }
+}
+
 foreach ($seam in $selectedSeams) {
     $seamTimeout = if ($seam.TestId -eq "IT-022") {
+        900
+    } elseif ($seam.TestId -eq "ANDROID-GENERICS") {
         900
     } elseif ($seam.TestId -eq "IT-024") {
         360

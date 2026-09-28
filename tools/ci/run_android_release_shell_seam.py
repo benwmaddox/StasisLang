@@ -18,7 +18,11 @@ from pathlib import Path
 
 SCHEMA = "stasis.seam_test.v1"
 MARKER = re.compile(r"Stasis seam: (\{[^\r\n]+\})")
+GENERICS_ACCEPTANCE_MARKER = re.compile(r"Stasis Android generics: (\{[^\r\n]+\})")
 ASSET_DIAGNOSTIC = re.compile(r"code=([^ ]+) path=(.*?) detail=(.+)")
+ANDROID_LOG_RECORD_PID = re.compile(r"^[VDIWEF]/\S+\s+\((\d+)\):")
+ANDROID_GENERICS_MAX_LOG_LINES = 2500
+ANDROID_GENERICS_MAX_LOG_BYTES = 1_000_000
 
 
 class SeamError(RuntimeError):
@@ -422,6 +426,178 @@ def validate_markers(markers: list[dict], expectations: dict) -> dict:
     if mismatches:
         raise SeamError(f"Android stable-frame marker mismatch: {mismatches}")
     return stable
+
+
+def validate_android_generics_acceptance(log: str, expectations: dict) -> dict:
+    """Require the sample's bounded Android-only digest receipt on frame one."""
+    contract = expectations.get("android_generics")
+    if not isinstance(contract, dict):
+        raise SeamError("ANDROID-GENERICS has no digest and bounds contract")
+    receipts = []
+    for match in GENERICS_ACCEPTANCE_MARKER.finditer(log):
+        try:
+            receipts.append(json.loads(match.group(1)))
+        except json.JSONDecodeError as error:
+            raise SeamError(f"ANDROID-GENERICS digest marker is malformed: {error}") from error
+    if len(receipts) != 1:
+        raise SeamError(
+            "ANDROID-GENERICS expected exactly one frame-one digest marker, "
+            f"found {len(receipts)}"
+        )
+    receipt = receipts[0]
+    expected = {
+        "schema": "stasis.android.generics.v1",
+        "test_id": "ANDROID-GENERICS",
+        "event": "oracle",
+        "digest": contract["digest"],
+        "frame": 1,
+    }
+    mismatches = {
+        key: {"expected": value, "actual": receipt.get(key)}
+        for key, value in expected.items()
+        if receipt.get(key) != value
+    }
+    if mismatches:
+        raise SeamError(f"ANDROID-GENERICS digest marker mismatch: {mismatches}")
+    return receipt
+
+
+def validate_android_generics_clean_log(log: str) -> dict[str, int]:
+    """Bound the successful package log and reject application crash/error evidence."""
+    line_count = len(log.splitlines())
+    byte_count = len(log.encode("utf-8"))
+    if (
+        line_count > ANDROID_GENERICS_MAX_LOG_LINES
+        or byte_count > ANDROID_GENERICS_MAX_LOG_BYTES
+    ):
+        raise SeamError(
+            "ANDROID-GENERICS successful launch log exceeded its bound: "
+            f"lines={line_count} bytes={byte_count}"
+        )
+    fatal = re.search(r"FATAL EXCEPTION|Fatal signal|Abort message|has died", log, re.I)
+    if fatal is not None:
+        raise SeamError(
+            f"ANDROID-GENERICS successful launch has fatal evidence: {fatal.group(0)}"
+        )
+    app_error = re.search(
+        r"(?im)^\s*E/[^\r\n]*"
+        r"|^\s*[IWD]/Stasis\s*(?:\([^)]*\))?:\s*"
+        r"(?:Stasis error\b|Stasis could not\b|"
+        r"Stasis [^\r\n]*\b(?:failed|invalid|panic)\b|"
+        r"[^\r\n]*\bruntime error\b)[^\r\n]*",
+        log,
+    )
+    if app_error is not None:
+        raise SeamError(
+            "ANDROID-GENERICS successful launch has an application error: "
+            f"{app_error.group(0).strip()}"
+        )
+    return {"line_count": line_count, "byte_count": byte_count}
+
+
+def android_log_record_pid(line: str) -> int | None:
+    match = ANDROID_LOG_RECORD_PID.match(line)
+    return int(match.group(1)) if match is not None else None
+
+
+def validate_android_generics_bounds_trap(
+    log: str,
+    index: int,
+    package_id: str,
+    expected_signal: str,
+) -> dict[str, int | str]:
+    """Require the fixed-array trap in one fresh package process."""
+    line_count = len(log.splitlines())
+    byte_count = len(log.encode("utf-8"))
+    if (
+        line_count > ANDROID_GENERICS_MAX_LOG_LINES
+        or byte_count > ANDROID_GENERICS_MAX_LOG_BYTES
+    ):
+        raise SeamError(
+            "ANDROID-GENERICS bounds launch log exceeded its bound: "
+            f"lines={line_count} bytes={byte_count}"
+        )
+    signal_matches = list(
+        re.finditer(r"Fatal signal (\d+) \((SIG[A-Z]+)\)[^\r\n]*", log)
+    )
+    if len(signal_matches) != 1 or signal_matches[0].group(2) != expected_signal:
+        observed = [match.group(0) for match in signal_matches]
+        raise SeamError(
+            "ANDROID-GENERICS bounds probe did not produce exactly one expected "
+            f"native trap: expected={expected_signal} observed={observed}"
+    )
+    fatal_line = signal_matches[0].group(0)
+    pid_match = re.search(r"\bpid\s+(\d+)", fatal_line)
+    if pid_match is None:
+        raise SeamError(
+            "ANDROID-GENERICS bounds trap has no process id: " f"{fatal_line}"
+        )
+    fatal_pid = int(pid_match.group(1))
+    fatal_record_pids = [
+        record_pid
+        for line in log.splitlines()
+        if fatal_line in line
+        if (record_pid := android_log_record_pid(line)) is not None
+    ]
+    if fatal_record_pids != [fatal_pid]:
+        raise SeamError(
+            "ANDROID-GENERICS fatal record PID does not match its signal PID: "
+            f"{fatal_line}"
+        )
+    required_index = f"Stasis Android generics bounds probe index={index}"
+    if required_index not in log:
+        raise SeamError(
+            f"ANDROID-GENERICS bounds launch did not apply index {index}"
+        )
+    initialized_pids = []
+    index_pids = []
+    for line in log.splitlines():
+        marker_match = MARKER.search(line)
+        if marker_match is not None:
+            try:
+                marker = json.loads(marker_match.group(1))
+            except json.JSONDecodeError as error:
+                raise SeamError(
+                    f"ANDROID-GENERICS bounds marker is malformed: {error}"
+                ) from error
+            if (
+                marker.get("test_id") == "ANDROID-GENERICS"
+                and marker.get("event") == "initialized"
+            ):
+                record_pid = android_log_record_pid(line)
+                if record_pid is not None:
+                    initialized_pids.append(record_pid)
+        if required_index in line:
+            record_pid = android_log_record_pid(line)
+            if record_pid is not None:
+                index_pids.append(record_pid)
+    if len(initialized_pids) != 1 or len(index_pids) != 1:
+        raise SeamError(
+            "ANDROID-GENERICS bounds launch must contain one PID-tagged initialized "
+            f"marker and index record for {package_id}: initialized={initialized_pids} "
+            f"index={index_pids}"
+        )
+    if initialized_pids[0] != fatal_pid or index_pids[0] != fatal_pid:
+        raise SeamError(
+            "ANDROID-GENERICS initialized/index/fatal records are not from the "
+            f"same package process: initialized={initialized_pids[0]} "
+            f"index={index_pids[0]} fatal={fatal_pid}"
+        )
+    markers = parse_markers(log, "ANDROID-GENERICS")
+    events = {marker.get("event") for marker in markers}
+    if "initialized" not in events:
+        raise SeamError("ANDROID-GENERICS bounds process did not initialize the sample")
+    if "frame" in events or "stable" in events:
+        raise SeamError("ANDROID-GENERICS bounds process rendered past the trapped tick")
+    if re.search(r"FATAL EXCEPTION|Abort message", log, re.I):
+        raise SeamError("ANDROID-GENERICS bounds launch contained a Java or abort failure")
+    return {
+        "index": index,
+        "signal": expected_signal,
+        "pid": fatal_pid,
+        "log_line_count": line_count,
+        "log_byte_count": byte_count,
+    }
 
 
 def validate_storage_relative_path(relative_path: str) -> str:
@@ -1546,7 +1722,7 @@ def native_input_viewport(
     )
     if stable is None:
         raise SeamError(
-            "Android touch seam has no stable marker for its input viewport"
+            "Android seam has no stable marker for its native presentation viewport"
         )
     presentation = stable.get("input_presentation")
     viewport = (
@@ -1556,7 +1732,7 @@ def native_input_viewport(
     )
     if not isinstance(viewport, list) or len(viewport) != 4:
         raise SeamError(
-            "Android touch seam stable marker is missing its native input viewport"
+            "Android seam stable marker is missing its native input viewport"
         )
     if any(
         isinstance(value, bool)
@@ -1565,7 +1741,7 @@ def native_input_viewport(
         for value in viewport
     ):
         raise SeamError(
-            f"Android touch seam native input viewport is not finite numeric data: {viewport}"
+            f"Android seam native input viewport is not finite numeric data: {viewport}"
         )
     x, y, width, height = (float(value) for value in viewport)
     native_width, native_height = native_size
@@ -1578,7 +1754,7 @@ def native_input_viewport(
         or y + height > native_height + 1
     ):
         raise SeamError(
-            "Android touch seam native input viewport is outside the captured surface: "
+            "Android seam native input viewport is outside the captured surface: "
             f"viewport={viewport} surface={native_size}"
         )
     return x, y, width, height
@@ -2104,6 +2280,99 @@ def restore_device_state(
     return errors
 
 
+def run_android_generics_bounds_probe(
+    adb: Path,
+    serial: str | None,
+    package_id: str,
+    component: str,
+    index: int,
+    label: str,
+    expected_signal: str,
+    output_path: Path,
+    timeout_seconds: float = 25.0,
+) -> dict:
+    """Run one allowlisted out-of-bounds index in a fresh Android process."""
+    if index not in (-1, 2) or label not in ("low", "high"):
+        raise SeamError(
+            f"ANDROID-GENERICS refuses an unallowlisted {label} index: {index}"
+        )
+    _run(adb, serial, "shell", "am", "force-stop", package_id)
+    _run(adb, serial, "logcat", "-c")
+    _run(
+        adb,
+        serial,
+        "shell",
+        "am",
+        "start",
+        "-S",
+        "-W",
+        "-n",
+        component,
+        "--es",
+        "stasis.seam_test_id",
+        "ANDROID-GENERICS",
+        "--ei",
+        "stasis.generics_bounds_index",
+        str(index),
+        required=False,
+        timeout=10,
+    )
+    deadline = time.monotonic() + timeout_seconds
+    log = ""
+    try:
+        while time.monotonic() < deadline:
+            log = _run(
+                adb,
+                serial,
+                "logcat",
+                "-b",
+                "all",
+                "-d",
+                "-v",
+                "brief",
+                "-t",
+                "2000",
+                required=False,
+            )
+            if "Fatal signal" in log:
+                result = validate_android_generics_bounds_trap(
+                    log, index, package_id, expected_signal
+                )
+                pid = str(result["pid"])
+                while time.monotonic() < deadline:
+                    processes = _run(
+                        adb,
+                        serial,
+                        "shell",
+                        "pidof",
+                        package_id,
+                        required=False,
+                    ).split()
+                    if pid not in processes:
+                        if processes:
+                            raise SeamError(
+                                "ANDROID-GENERICS bounds launch restarted after its "
+                                f"native trap: trapped_pid={pid} active_pids={processes}"
+                            )
+                        return {
+                            **result,
+                            "process_exited": True,
+                            "log": str(output_path),
+                        }
+                    time.sleep(0.2)
+                raise SeamError(
+                    "ANDROID-GENERICS bounds process survived its native trap: "
+                    f"pid={pid}"
+                )
+            time.sleep(0.2)
+        raise SeamError(
+            "ANDROID-GENERICS bounds probe timed out without its native trap: "
+            f"index={index} log={log[-1200:]}"
+        )
+    finally:
+        output_path.write_text(log, encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--adb", type=Path, required=True)
@@ -2431,6 +2700,12 @@ def main() -> int:
             )
             return 0
         stable = validate_markers(markers, expectations)
+        generics_contract = expectations.get("android_generics")
+        generics_receipt = (
+            validate_android_generics_acceptance(log, expectations)
+            if generics_contract is not None
+            else None
+        )
         if test_id == "IT-021" or "assets" in expectations:
             evidence["assets"] = validate_asset_audio_markers(
                 markers, expectations, package, args.package_manifest
@@ -2794,6 +3069,30 @@ def main() -> int:
             log = "\n".join(log_history)
         log_path.write_text(log, encoding="utf-8")
         validate_resource_diagnostics(log, expectations)
+        if generics_contract is not None:
+            # Android captures include black display chrome around the 16:9
+            # app surface. Use the runtime's stable presentation receipt (the
+            # same coordinate contract used for touch probes) instead of
+            # fitting the logical canvas against the full screencap.
+            initial_capture_path.write_bytes(
+                _run(args.adb, args.serial, "exec-out", "screencap", "-p", text=False)
+            )
+            native_width, native_height, _ = read_png_rgb(initial_capture_path)
+            input_viewport = native_input_viewport(
+                markers, (native_width, native_height)
+            )
+            evidence["artifacts"]["initial_capture"] = str(initial_capture_path)
+            evidence["input_surface"] = {
+                "width": native_width,
+                "height": native_height,
+            }
+            evidence["native_input_viewport"] = list(input_viewport)
+            evidence["native_input_viewport_source"] = (
+                "stable_marker_test_gated_presentation_receipt"
+            )
+            region_expectations = expectations_with_fitted_viewport(
+                expectations, input_viewport
+            )
         if test_id == "IT-023":
             regions = []
             resource_regions = []
@@ -2835,6 +3134,58 @@ def main() -> int:
         ).strip()
         if second_pid != first_pid:
             raise SeamError("generated Android shell did not remain alive after stable frames")
+        generics_evidence = None
+        if generics_contract is not None:
+            device_log_path = args.output / "android-logcat.txt"
+            device_log = _run(
+                args.adb,
+                args.serial,
+                "logcat",
+                "-b",
+                "all",
+                "-d",
+                "-v",
+                "brief",
+                "-t",
+                "2000",
+                f"--pid={first_pid}",
+            )
+            log_bounds = validate_android_generics_clean_log(device_log)
+            device_log_path.write_text(device_log, encoding="utf-8")
+            bounds_probes = []
+            for label in ("low", "high"):
+                index = generics_contract["bounds_indices"][label]
+                probe_path = args.output / f"bounds-{label}-logcat.txt"
+                bounds_probes.append(
+                    run_android_generics_bounds_probe(
+                        args.adb,
+                        args.serial,
+                        package_id,
+                        component,
+                        index,
+                        label,
+                        generics_contract["bounds_signal"],
+                        probe_path,
+                    )
+                )
+            if bounds_probes[0]["pid"] == bounds_probes[1]["pid"]:
+                raise SeamError(
+                    "ANDROID-GENERICS low/high bounds probes reused one process id"
+                )
+            evidence["artifacts"].update(
+                {
+                    "device_log": str(device_log_path),
+                    "bounds_low_log": str(args.output / "bounds-low-logcat.txt"),
+                    "bounds_high_log": str(args.output / "bounds-high-logcat.txt"),
+                }
+            )
+            generics_evidence = {
+                "digest_receipt": generics_receipt,
+                "successful_log": log_bounds,
+                "bounds_probes": bounds_probes,
+                "frame_capture": str(capture_path),
+                "teal_region": regions,
+            }
         evidence.update(
             {
                 "status": "passed",
@@ -2850,6 +3201,8 @@ def main() -> int:
                 ),
             }
         )
+        if generics_evidence is not None:
+            evidence["android_generics"] = generics_evidence
         if touch_probes:
             evidence["touch_probes"] = touch_probes
         if orientation_probes:

@@ -50,6 +50,23 @@ $testId = (Get-Content -Raw $ExpectationsPath | ConvertFrom-Json).test_id
 if (-not $testId) { throw "Android seam expectations do not name test_id" }
 
 $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
+$sourceCommit = $env:STASIS_SOURCE_COMMIT
+if (-not $sourceCommit) {
+    $sourceCommit = (& git rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $sourceCommit) {
+        throw "Unable to resolve the source commit for $testId"
+    }
+}
+$releaseId = $env:STASIS_RELEASE_ID
+if (-not $releaseId) { $releaseId = "android-seam-$testId-$stamp" }
+$buildFingerprint = (& python tools/compute_toolchain_fingerprint.py `
+    --source-commit $sourceCommit --release-id $releaseId).Trim()
+if ($LASTEXITCODE -ne 0 -or $buildFingerprint -notmatch '^[0-9a-f]{64}$') {
+    throw "Unable to compute the verified toolchain fingerprint for $testId"
+}
+$env:STASIS_SOURCE_COMMIT = $sourceCommit
+$env:STASIS_RELEASE_ID = $releaseId
+$env:STASIS_BUILD_FINGERPRINT = $buildFingerprint
 if (-not $OutputPath) {
     $OutputPath = Join-Path $repoRoot "target\$($testId.ToLowerInvariant().Replace('-', ''))\$stamp"
 }

@@ -721,6 +721,8 @@ int SDL_main(int argc, char **argv) {
     int32_t last_lifecycle[6] = {-1, -1, -1, -1, -1, -1};
     int ios_generics_acceptance =
         seam_test_id != NULL && strcmp(seam_test_id, "IOS-GENERICS") == 0;
+    int android_generics_acceptance =
+        seam_test_id != NULL && strcmp(seam_test_id, "ANDROID-GENERICS") == 0;
     if (ios_generics_acceptance) {
         const char *bounds_index = SDL_getenv("STASIS_IOS_GENERICS_BOUNDS_INDEX");
         if (bounds_index != NULL && bounds_index[0] != '\0') {
@@ -734,6 +736,22 @@ int SDL_main(int argc, char **argv) {
                 stasis_jit_global_i32_store(
                     hash_global_path("web_bounds_probe_index"), (int32_t)parsed);
                 SDL_Log("Stasis iOS generics bounds probe index=%ld", parsed);
+            }
+        }
+    }
+    if (android_generics_acceptance) {
+        const char *bounds_index = SDL_getenv("STASIS_ANDROID_GENERICS_BOUNDS_INDEX");
+        if (bounds_index != NULL && bounds_index[0] != '\0') {
+            char *end = NULL;
+            long parsed = strtol(bounds_index, &end, 10);
+            if (end == bounds_index || *end != '\0' ||
+                    (parsed != -1 && parsed != 2)) {
+                SDL_Log("Stasis Android generics invalid bounds index: %s", bounds_index);
+                status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+            } else {
+                stasis_jit_global_i32_store(
+                    hash_global_path("web_bounds_probe_index"), (int32_t)parsed);
+                SDL_Log("Stasis Android generics bounds probe index=%ld", parsed);
             }
         }
     }
@@ -756,6 +774,14 @@ int SDL_main(int argc, char **argv) {
                     !write_ios_generics_receipt(frame)) {
                 SDL_Log("Stasis iOS generics acceptance could not write its receipt");
                 status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+            }
+            if (android_generics_acceptance && frame == 1) {
+                SDL_Log(
+                    "Stasis Android generics: {\"schema\":\"stasis.android.generics.v1\","
+                    "\"test_id\":\"ANDROID-GENERICS\",\"event\":\"oracle\","
+                    "\"digest\":%d,\"frame\":%d}",
+                    seam_i32("generics_collections_digest_value"),
+                    frame);
             }
             if (seam_it021_audio && !seam_it021_audio_collected &&
                     seam_i32("seam_audio_handle") > 0 &&
