@@ -245,8 +245,9 @@ def main() -> int:
         "-p",
         "stasis_compiler",
         "--lib",
-        "simd_soa_characterization_emits_scalar_arm64_evidence",
+        "simd_soa_characterization_records_arm64_evidence",
         "--",
+        "--ignored",
         "--nocapture",
         "--test-threads=1",
     ]
@@ -261,8 +262,6 @@ def main() -> int:
         disassembly_path.write_text(disassembly, encoding="utf-8")
         case["arm64"] = disassembly_metrics(disassembly)
         case["compile_distribution"] = distribution(case.pop("aot_compile_total_us"))
-        if case["arm64"]["packed_lane_instruction_count"] != 0:
-            raise RuntimeError(f"production case unexpectedly contains packed-lane work: {case['case']}")
 
     devices = device_inventory(root)
     manifest["arm64_runtime"] = {

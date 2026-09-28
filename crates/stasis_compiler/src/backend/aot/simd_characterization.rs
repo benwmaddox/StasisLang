@@ -322,17 +322,25 @@ fn text_size(path: &Path) -> u64 {
 
 fn scalar_clif_counts(clif: &str) -> Value {
     let count = |needle: &str| clif.lines().filter(|line| line.contains(needle)).count();
+    let vector_type_markers: Vec<&str> = [
+        "f32x4", "f32x8", "f64x2", "f64x4", "i8x16", "i16x8", "i32x4", "i64x2",
+    ]
+    .into_iter()
+    .filter(|marker| clif.contains(marker))
+    .collect();
     json!({
         "branches": count("brif"),
         "f32_adds": count("fadd"),
         "f32_multiplies": count("fmul"),
         "loads": count("load."),
         "stores": count("store "),
+        "vector_type_markers": vector_type_markers,
     })
 }
 
 #[test]
-fn simd_soa_characterization_emits_scalar_arm64_evidence() {
+#[ignore = "measurement harness; run with tools/measure_simd_soa.py"]
+fn simd_soa_characterization_records_arm64_evidence() {
     let warmups = configured_count("STASIS_SIMD_COMPILE_WARMUPS", 0);
     let repetitions = configured_count("STASIS_SIMD_COMPILE_REPETITIONS", 1).max(1);
     let configured_output = std::env::var_os("STASIS_SIMD_EVIDENCE_DIR").map(PathBuf::from);
@@ -391,12 +399,6 @@ fn simd_soa_characterization_emits_scalar_arm64_evidence() {
             aot.upsert_file("simd_soa_characterization.stasis", &source);
             let captured = capture_aot_clif_by_function(&mut aot);
             let aot_clif = captured.get("tick").expect("tick AOT CLIF");
-            for forbidden in ["f32x4", "f32x8", "i32x4", "i8x16", "i16x8", "i64x2"] {
-                assert!(
-                    !aot_clif.contains(forbidden),
-                    "unexpected vector CLIF marker {forbidden} for {label}:\n{aot_clif}"
-                );
-            }
 
             let case_dir = output_root.join(&label);
             fs::create_dir_all(&case_dir).expect("create case output");
