@@ -338,6 +338,18 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 (destination.parent / "client.txt").write_bytes(
                     {"offline": b"0 0", "network": b"1 0", "network_client": b"0 1"}[mode]
                 )
+                atlas_source = release / "mobile/shells/common/atlas.c"
+                atlas_source.parent.mkdir(parents=True)
+                atlas_source.write_bytes(b"page_size=@STASIS_SPRITE_ATLAS_PAGE_SIZE@\n")
+                atlas_destination = package / "common/atlas.c"
+                atlas_destination.parent.mkdir(parents=True, exist_ok=True)
+                atlas_size = 1024 if mode == "network" else 2048
+                atlas_destination.write_bytes(f"page_size={atlas_size}\n".encode())
+                if mode == "network":
+                    (package / "stasis.json").write_text(
+                        json.dumps({"graphics": {"sprite_atlas_page_size": atlas_size}}),
+                        encoding="utf-8",
+                    )
                 launcher = package / "android/app/src/main/res/mipmap-mdpi/ic_launcher.png"
                 launcher.parent.mkdir(parents=True)
                 launcher.write_bytes(b"project-owned launcher resource")
@@ -346,7 +358,6 @@ class ReleaseProvenanceTests(unittest.TestCase):
                     (network / "include").mkdir(parents=True)
                     (network / "libstasis_network.a").write_bytes(b"library")
                     (network / "include/stasis_network.h").write_bytes(b"header")
-                (package / "common").mkdir()
                 (package / "common/stasis_package_provenance.h").write_bytes(
                     b"#ifndef STASIS_PACKAGE_PROVENANCE_H\n#define STASIS_PACKAGE_PROVENANCE_H\n"
                     b'#define STASIS_PACKAGE_RELEASE_TAG "development"\n'
@@ -359,13 +370,20 @@ class ReleaseProvenanceTests(unittest.TestCase):
                         path.relative_to(release).as_posix(): hashlib.sha256(
                             path.read_bytes()
                         ).hexdigest()
-                        for path in (source, activity_source)
+                        for path in (source, activity_source, atlas_source)
                     },
                 }
                 project_configuration = self.project_configuration("android-arm64")
                 verify_mobile_shells(
                     Parser(), release, package, manifest, project_configuration
                 )
+                if mode == "network":
+                    atlas_destination.write_bytes(b"page_size=2048\n")
+                    with self.assertRaisesRegex(ValueError, "does not match release transform"):
+                        verify_mobile_shells(
+                            Parser(), release, package, manifest, project_configuration
+                        )
+                    atlas_destination.write_bytes(b"page_size=1024\n")
                 mismatched_configuration = self.project_configuration("web")
                 receipt["project_configuration"] = mismatched_configuration
                 (package / "stasis_mobile_package.json").write_text(

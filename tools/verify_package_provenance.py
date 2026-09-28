@@ -323,6 +323,21 @@ def verify_mobile_shells(
     if receipt_configuration is not None \
             and receipt_configuration.get("target") != target:
         parser.error("mobile package project configuration target differs from receipt target")
+    project_manifest_path = package_root / "stasis.json"
+    project_manifest = (
+        json.loads(project_manifest_path.read_text(encoding="utf-8"))
+        if project_manifest_path.is_file() else {}
+    )
+    graphics = project_manifest.get("graphics") or {}
+    if not isinstance(graphics, dict):
+        parser.error("mobile package graphics configuration is malformed")
+    atlas_page_size = graphics.get("sprite_atlas_page_size")
+    if atlas_page_size is None:
+        atlas_page_size = 2048
+    if type(atlas_page_size) is not int or not (
+        256 <= atlas_page_size <= 4096 and atlas_page_size.bit_count() == 1
+    ):
+        parser.error("mobile package sprite atlas page size is invalid")
     platform = target.split("-", 1)[0]
     package_id = receipt.get("package_id") or mobile_package_id(receipt["name"])
     network_enabled = receipt.get("network") is True
@@ -334,6 +349,7 @@ def verify_mobile_shells(
         parser.error("mobile package Android launcher resources path is malformed")
     replacements = {
         "@STASIS_APP_NAME@": receipt.get("app_name") or receipt["name"],
+        "@STASIS_SPRITE_ATLAS_PAGE_SIZE@": str(atlas_page_size),
         "@STASIS_ANDROID_ICON_ATTRIBUTES@": (
             '        android:icon="@mipmap/ic_launcher"\n'
             '        android:roundIcon="@mipmap/ic_launcher"'
