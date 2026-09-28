@@ -6636,13 +6636,13 @@ function render(): void {{ {draws} return; }}
             "stasis_gfx_set_next_sprite_atlas_policy_v3",
             "stasis_asset_request_sprite_with_policy_v3",
             "task->atlas_policy",
-            "stasis_sprite_atlas_page_size_v3",
-            "#define STASIS_SDL_ATLAS_COLD_PAGE_SIZE 512",
-            "if (eligible && w + 2 <= STASIS_SDL_ATLAS_PAGE_SIZE",
+            "stasis_sprite_atlas_shared_page_size",
+            "stasis_sprite_atlas_effective_page_size",
+            "if (eligible && w + 2 <= shared_page_size",
             "if (!page->texture || page->dedicated || page->planner_layout || page->sealed ||",
             "page->group_id != group_id) continue;",
             "if (!page || page->sealed) return 0;",
-            "stasis_sprite_atlas_create_page(page_w, page_h, group_id, 0)",
+            "shared_page_size, shared_page_size, group_id, 0",
             "if (!eligible && stasis_sprite_atlas_fits_cold_page(w, h))",
             "if (!stasis_sprite_atlas_is_cold_page(page) || page->planner_layout || page->sealed) continue;",
             "stasis_sprite_atlas_create_page(width, height, group_id, 1)",
@@ -6660,6 +6660,10 @@ function render(): void {{ {draws} return; }}
             .expect("sprite atlas allocation helper boundary")
             + allocation_start;
         let allocation_source = &STASIS_GRAPHICS_SOURCE[allocation_start..allocation_end];
+        assert!(
+            !allocation_source.contains("stasis_sprite_atlas_page_size_v3"),
+            "runtime allocation must use the configured exact shared-page size instead of adaptive v3 sizing"
+        );
         let eligible_branch = allocation_source
             .find("if (eligible &&")
             .expect("compiler-eligible group allocation");
@@ -6671,7 +6675,7 @@ function render(): void {{ {draws} return; }}
             .expect("oversized standalone allocation");
         assert!(
             eligible_branch < cold_branch && cold_branch < dedicated_branch,
-            "eligible groups must keep v3 sizing, fitting standalone sprites must use cold pages, and oversized standalone sprites must remain dedicated"
+            "eligible groups and fitting standalone sprites must use configured shared pages before oversized sprites fall back to dedicated pages"
         );
         let publish_start = STASIS_GRAPHICS_SOURCE
             .find("static int sprite_publish_pixels_into_entry(")
