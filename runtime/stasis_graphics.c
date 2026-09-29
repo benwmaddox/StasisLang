@@ -1748,6 +1748,7 @@ STASIS_EXPORT void stasis_host_bulk_apply_requests(
     const int32_t HOST_REQ_FLAG_WINDOWED = 1;
     const int32_t HOST_REQ_FLAG_FULLSCREEN = 2;
     const int32_t HOST_REQ_FLAG_MAXIMIZED = 4;
+    const int32_t HOST_REQ_FLAG_CANVAS = 8;
 
     if (!host_req_seq || !host_req_flags)
     {
@@ -1788,6 +1789,15 @@ STASIS_EXPORT void stasis_host_bulk_apply_requests(
             stasis_set_logical_size(*host_req_window_w_px, *host_req_window_h_px);
         }
         (void)stasis_set_maximized(1);
+    }
+    else if ((flags & HOST_REQ_FLAG_CANVAS) != 0)
+    {
+        if (host_req_window_w_px && host_req_window_h_px &&
+            *host_req_window_w_px > 0 && *host_req_window_h_px > 0)
+        {
+            stasis_set_logical_size(*host_req_window_w_px, *host_req_window_h_px);
+            stasis_sync_display_metrics();
+        }
     }
 }
 
@@ -2826,6 +2836,8 @@ static int bake_svg_to_rgba(const char* path, unsigned char** out_pixels, int* o
  * and centered with transparent padding. This keeps sprite textures 1:1 with draw sizes to
  * avoid fuzz from resampling.
  */
+static void premultiply_rgba(unsigned char* pixels, int w, int h);
+
 static int bake_svg_to_rgba_sized(const char* resolved_path, int max_w, int max_h,
                                    unsigned char** out_pixels, int* out_w, int* out_h,
                                    StasisSpriteSourceInfo* source_info) {
@@ -2844,6 +2856,9 @@ static int bake_svg_to_rgba_sized(const char* resolved_path, int max_w, int max_
         fprintf(stderr, "bake_svg_to_rgba_sized: failed to parse %s\n", resolved_path);
         return 0;
     }
+    // ThorVG returns straight-alpha RGBA. Atlas staging expects premultiplied
+    // pixels, just like the raster image path below.
+    premultiply_rgba(*out_pixels, *out_w, *out_h);
     return 1;
 }
 
@@ -2894,6 +2909,23 @@ static void premultiply_rgba(unsigned char* pixels, int w, int h) {
         p[2] = (unsigned char)((p[2] * a + 127) / 255);
     }
 }
+
+#if defined(STASIS_ATLAS_TEST_HOOKS)
+STASIS_EXPORT int stasis_test_svg_bake_alpha_contract(const char* path, int* partial_count) {
+    unsigned char* pixels = NULL;
+    int w = 0, h = 0;
+    if (partial_count) *partial_count = 0;
+    if (!path || !bake_svg_to_rgba_sized(path, 10, 10, &pixels, &w, &h, NULL)) return 0;
+    int valid = 1;
+    for (int i = 0; i < w * h; i++) {
+        const unsigned char* p = pixels + i * 4;
+        if (p[3] > 0 && p[3] < 255 && partial_count) (*partial_count)++;
+        if (p[0] > p[3] || p[1] > p[3] || p[2] > p[3]) valid = 0;
+    }
+    free(pixels);
+    return valid;
+}
+#endif
 
 static int bake_raster_to_rgba_sized(const char* resolved_path, int max_w, int max_h,
                                      unsigned char** out_pixels, int* out_w, int* out_h,
