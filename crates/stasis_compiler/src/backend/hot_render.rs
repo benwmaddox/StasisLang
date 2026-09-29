@@ -1275,9 +1275,14 @@ fn stable_identity(expr: &SimpleExpr, env: &BTreeMap<String, Option<String>>) ->
             env.get(path).cloned().unwrap_or_else(|| Some(path.clone()))
         }
         SimpleExpr::IndexedPath {
+            nested_index: Some(_),
+            ..
+        } => None,
+        SimpleExpr::IndexedPath {
             collection_path,
             index,
             suffix,
+            nested_index: None,
         } => {
             let index = eval_const_i64(index)?;
             Some(if suffix.is_empty() {
@@ -1301,9 +1306,14 @@ fn resolve_identities(
             .cloned()
             .unwrap_or_else(|| IdentitySet::Known(BTreeSet::from([path.clone()]))),
         SimpleExpr::IndexedPath {
+            nested_index: Some(_),
+            ..
+        } => IdentitySet::Unknown,
+        SimpleExpr::IndexedPath {
             collection_path,
             index,
             suffix,
+            nested_index: None,
         } => {
             if let Some(index) = eval_const_i64(index) {
                 return IdentitySet::Known(BTreeSet::from([if suffix.is_empty() {
@@ -1363,11 +1373,33 @@ fn visit_calls(statements: &[SimpleStmt], callback: &mut impl FnMut(&str, &[Simp
 fn visit_stmt_exprs(statement: &SimpleStmt, callback: &mut impl FnMut(&str, &[SimpleExpr])) {
     match statement {
         SimpleStmt::Let { expression, .. }
-        | SimpleStmt::Assign { expression, .. }
         | SimpleStmt::Expr(expression)
         | SimpleStmt::Return(expression) => visit_expr(expression, callback),
-        SimpleStmt::Convert { source, .. } => visit_expr(source, callback),
+        SimpleStmt::Assign {
+            target, expression, ..
+        } => {
+            visit_target_exprs(target, callback);
+            visit_expr(expression, callback);
+        }
+        SimpleStmt::Convert { target, source, .. } => {
+            visit_target_exprs(target, callback);
+            visit_expr(source, callback);
+        }
         _ => {}
+    }
+}
+
+fn visit_target_exprs(target: &AssignTarget, callback: &mut impl FnMut(&str, &[SimpleExpr])) {
+    if let AssignTarget::IndexedPath {
+        index,
+        nested_index,
+        ..
+    } = target
+    {
+        visit_expr(index, callback);
+        if let Some(nested_index) = nested_index {
+            visit_expr(nested_index, callback);
+        }
     }
 }
 
@@ -1402,7 +1434,16 @@ fn visit_expr(expr: &SimpleExpr, callback: &mut impl FnMut(&str, &[SimpleExpr]))
             visit_expr(lhs, callback);
             visit_expr(rhs, callback);
         }
-        SimpleExpr::IndexedPath { index, .. } => visit_expr(index, callback),
+        SimpleExpr::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } => {
+            visit_expr(index, callback);
+            if let Some(nested_index) = nested_index {
+                visit_expr(nested_index, callback);
+            }
+        }
         _ => {}
     }
 }

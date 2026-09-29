@@ -706,9 +706,13 @@ fn visit_assign_target_with_environment(
         collection_path,
         index,
         suffix,
+        nested_index,
     } = target
     {
         visit_expr_with_environment(index, constants, environment, usage, calls);
+        if let Some(nested_index) = nested_index {
+            visit_expr_with_environment(nested_index, constants, environment, usage, calls);
+        }
         if reads_current_value && suffix.is_empty() {
             observe_collection_index_with_environment(
                 collection_path,
@@ -758,8 +762,12 @@ fn visit_expr_with_environment(
             collection_path,
             index,
             suffix,
+            nested_index,
         } => {
             visit_expr_with_environment(index, constants, environment, usage, calls);
+            if let Some(nested_index) = nested_index {
+                visit_expr_with_environment(nested_index, constants, environment, usage, calls);
+            }
             if suffix.is_empty() {
                 observe_collection_index_with_environment(
                     collection_path,

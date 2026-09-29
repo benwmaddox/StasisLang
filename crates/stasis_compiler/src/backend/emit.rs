@@ -1,6 +1,6 @@
 use crate::backend::compile_analysis::{
-    is_collection_handle_type, is_i32_abi_compatible_type, is_i32_numeric_type,
-    is_i32_scalar_lane_type, is_struct_view_type, resolve_call_signature,
+    fixed_array_lane_type_and_len, is_collection_handle_type, is_i32_abi_compatible_type,
+    is_i32_numeric_type, is_i32_scalar_lane_type, is_struct_view_type, resolve_call_signature,
     validate_owned_local_fixed_array_contract, CallSignature, CallSignatureMap, CollectionInfoMap,
     ConstantValue, ConstantValueMap, ExternImportKey, ForeachCollectionInfo, GlobalPathTypeMap,
     NamedStructFieldTypeMap,
@@ -1579,6 +1579,7 @@ pub(crate) fn try_emit_indexed_struct_copy_assignment(
         collection_path: target_collection,
         index: target_index,
         suffix: target_suffix,
+        ..
     } = target
     else {
         return Ok(false);
@@ -1590,6 +1591,7 @@ pub(crate) fn try_emit_indexed_struct_copy_assignment(
         collection_path: source_collection,
         index: source_index,
         suffix: source_suffix,
+        ..
     } = expression
     else {
         return Ok(false);
@@ -1876,6 +1878,7 @@ pub(crate) fn try_emit_struct_copy_from_indexed_to_global(
         collection_path: source_collection,
         index: source_index,
         suffix: source_suffix,
+        ..
     } = expression
     else {
         return Ok(false);
@@ -1988,6 +1991,7 @@ pub(crate) fn try_emit_struct_copy_from_global_to_indexed(
         collection_path: target_collection,
         index: target_index,
         suffix: target_suffix,
+        ..
     } = target
     else {
         return Ok(false);
@@ -3071,7 +3075,50 @@ pub(crate) fn emit_simple_statements(
                         collection_path,
                         index,
                         suffix,
+                        nested_index,
                     } => {
+                        if let Some(nested_index) = nested_index {
+                            let Some(collection_info) = collection_infos.get(collection_path)
+                            else {
+                                return Err(format!(
+                                    "unknown nested indexed assignment collection '{}' in current jit path",
+                                    collection_path
+                                ));
+                            };
+                            let (flat_info, _element_type, inner_len) =
+                                nested_fixed_lane_info(collection_info, suffix, type_table)?;
+                            let flat_index = emit_nested_index_offset(
+                                builder,
+                                index,
+                                nested_index,
+                                collection_info.len,
+                                inner_len,
+                                collection_path,
+                                values_by_name,
+                                runtime_call_refs,
+                                internal_calls,
+                                call_signatures,
+                                type_table,
+                                global_path_types,
+                                constant_values,
+                                collection_infos,
+                                named_struct_field_types,
+                                foreach_bindings,
+                            )?;
+                            emit_indexed_collection_assignment(
+                                builder,
+                                runtime_call_refs,
+                                type_table,
+                                collection_path,
+                                &flat_info,
+                                suffix,
+                                flat_index,
+                                true,
+                                *op,
+                                rhs,
+                            )?;
+                            continue;
+                        }
                         if let Some(local_collection) = values_by_name.get(collection_path).copied()
                         {
                             let index_binding = emit_simple_expression(
@@ -3281,6 +3328,7 @@ pub(crate) fn emit_simple_statements(
                         collection_path,
                         index,
                         suffix,
+                        nested_index,
                     } => {
                         let Some(collection_info) = collection_infos.get(collection_path) else {
                             return Err(format!(
@@ -3288,7 +3336,49 @@ pub(crate) fn emit_simple_statements(
                                 collection_path
                             ));
                         };
-                        let target_type = resolve_collection_value_type(collection_info, suffix)?;
+                        let (target_type, flat_info, index_binding) =
+                            if let Some(nested_index) = nested_index {
+                                let (flat_info, target_type, inner_len) =
+                                    nested_fixed_lane_info(collection_info, suffix, type_table)?;
+                                let flat_index = emit_nested_index_offset(
+                                    builder,
+                                    index,
+                                    nested_index,
+                                    collection_info.len,
+                                    inner_len,
+                                    collection_path,
+                                    values_by_name,
+                                    runtime_call_refs,
+                                    internal_calls,
+                                    call_signatures,
+                                    type_table,
+                                    global_path_types,
+                                    constant_values,
+                                    collection_infos,
+                                    named_struct_field_types,
+                                    foreach_bindings,
+                                )?;
+                                (target_type, flat_info, flat_index)
+                            } else {
+                                let target_type =
+                                    resolve_collection_value_type(collection_info, suffix)?;
+                                let index_binding = emit_simple_expression(
+                                    builder,
+                                    index,
+                                    Some(TYPE_ID_I32),
+                                    values_by_name,
+                                    runtime_call_refs,
+                                    internal_calls,
+                                    call_signatures,
+                                    type_table,
+                                    global_path_types,
+                                    constant_values,
+                                    collection_infos,
+                                    named_struct_field_types,
+                                    foreach_bindings,
+                                )?;
+                                (target_type, collection_info.clone(), index_binding)
+                            };
                         let target_name = format!("{collection_path}[...].{suffix}");
                         let converted = emit_conversion_assignment_value(
                             builder,
@@ -3297,32 +3387,18 @@ pub(crate) fn emit_simple_statements(
                             target_type,
                             &target_name,
                         )?;
-                        let index_binding = emit_simple_expression(
-                            builder,
-                            index,
-                            Some(TYPE_ID_I32),
-                            values_by_name,
-                            runtime_call_refs,
-                            internal_calls,
-                            call_signatures,
-                            type_table,
-                            global_path_types,
-                            constant_values,
-                            collection_infos,
-                            named_struct_field_types,
-                            foreach_bindings,
-                        )?;
-                        let bounds_proven = static_index_bounds_proven(
-                            index,
-                            collection_info.len as usize,
-                            values_by_name,
-                        );
+                        let bounds_proven = nested_index.is_some()
+                            || static_index_bounds_proven(
+                                index,
+                                collection_info.len as usize,
+                                values_by_name,
+                            );
                         emit_indexed_collection_assignment(
                             builder,
                             runtime_call_refs,
                             type_table,
                             collection_path,
-                            collection_info,
+                            &flat_info,
                             suffix,
                             index_binding,
                             bounds_proven,
@@ -4376,6 +4452,7 @@ fn try_emit_owned_fixed_array_compound_assignment(
         collection_path,
         index,
         suffix,
+        ..
     } = target
     else {
         return Ok(false);
@@ -4627,7 +4704,16 @@ fn collect_call_targets_from_hir(hir: &FunctionHIR) -> BTreeSet<String> {
     fn expression(value: &SimpleExpr, out: &mut BTreeSet<String>) {
         match value {
             SimpleExpr::Condition(condition) => condition_targets(condition, out),
-            SimpleExpr::IndexedPath { index, .. } => expression(index, out),
+            SimpleExpr::IndexedPath {
+                index,
+                nested_index,
+                ..
+            } => {
+                expression(index, out);
+                if let Some(nested_index) = nested_index {
+                    expression(nested_index, out);
+                }
+            }
             SimpleExpr::Call { target, args } => {
                 out.insert(target.clone());
                 for argument in args {
@@ -4662,17 +4748,43 @@ fn collect_call_targets_from_hir(hir: &FunctionHIR) -> BTreeSet<String> {
         }
     }
 
+    fn target(value: &AssignTarget, out: &mut BTreeSet<String>) {
+        if let AssignTarget::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } = value
+        {
+            expression(index, out);
+            if let Some(nested_index) = nested_index {
+                expression(nested_index, out);
+            }
+        }
+    }
+
     fn statement(value: &SimpleStmt, out: &mut BTreeSet<String>) {
         match value {
             SimpleStmt::Let {
                 expression: value, ..
             }
-            | SimpleStmt::Assign {
-                expression: value, ..
-            }
             | SimpleStmt::Expr(value)
             | SimpleStmt::Return(value) => expression(value, out),
-            SimpleStmt::Convert { source, .. } => expression(source, out),
+            SimpleStmt::Assign {
+                target: assign_target,
+                expression: value,
+                ..
+            } => {
+                target(assign_target, out);
+                expression(value, out);
+            }
+            SimpleStmt::Convert {
+                target: assign_target,
+                source,
+                ..
+            } => {
+                target(assign_target, out);
+                expression(source, out);
+            }
             SimpleStmt::If {
                 condition,
                 then_statements,
@@ -4805,6 +4917,7 @@ pub(crate) fn try_emit_struct_view_value(
             collection_path,
             index,
             suffix,
+            ..
         } => {
             if !suffix.is_empty() {
                 return Ok(None);
@@ -11333,7 +11446,46 @@ pub(crate) fn emit_simple_expression(
             collection_path,
             index,
             suffix,
+            nested_index,
         } => {
+            if let Some(nested_index) = nested_index {
+                let Some(collection_info) = collection_infos.get(collection_path) else {
+                    return Err(format!(
+                        "unknown nested indexed collection '{}' in current jit path",
+                        collection_path
+                    ));
+                };
+                let (flat_info, _element_type, inner_len) =
+                    nested_fixed_lane_info(collection_info, suffix, type_table)?;
+                let flat_index = emit_nested_index_offset(
+                    builder,
+                    index,
+                    nested_index,
+                    collection_info.len,
+                    inner_len,
+                    collection_path,
+                    values_by_name,
+                    runtime_call_refs,
+                    internal_calls,
+                    call_signatures,
+                    type_table,
+                    global_path_types,
+                    constant_values,
+                    collection_infos,
+                    named_struct_field_types,
+                    foreach_bindings,
+                )?;
+                return emit_indexed_collection_load(
+                    builder,
+                    runtime_call_refs,
+                    type_table,
+                    collection_path,
+                    &flat_info,
+                    suffix,
+                    flat_index,
+                    true,
+                );
+            }
             if let Some(local_collection) = values_by_name.get(collection_path).copied() {
                 let index_binding = emit_simple_expression(
                     builder,
@@ -12034,6 +12186,97 @@ pub(crate) fn emit_simple_expression(
             })
         }
     }
+}
+
+fn nested_fixed_lane_info(
+    collection_info: &ForeachCollectionInfo,
+    suffix: &str,
+    type_table: &TypeTable,
+) -> Result<(ForeachCollectionInfo, TypeId, i32), String> {
+    let field_type = resolve_collection_value_type(collection_info, suffix)?;
+    let (element_type, inner_len) = fixed_array_lane_type_and_len(type_table, field_type)
+        .ok_or_else(|| {
+            format!(
+                "nested indexed collection field '{}.{}' must be a fixed array",
+                collection_info.element_shape, suffix
+            )
+        })?;
+    let flattened_len = collection_info
+        .len
+        .checked_mul(inner_len)
+        .ok_or_else(|| "nested fixed-array lane capacity overflow".to_string())?;
+    let mut flattened = collection_info.clone();
+    flattened.len = flattened_len;
+    flattened
+        .field_types
+        .insert(suffix.to_string(), element_type);
+    Ok((flattened, element_type, inner_len))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_nested_index_offset(
+    builder: &mut FunctionBuilder<'_>,
+    outer_index: &SimpleExpr,
+    inner_index: &SimpleExpr,
+    outer_len: i32,
+    inner_len: i32,
+    collection_path: &str,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<ValueBinding, String> {
+    let outer = emit_simple_expression(
+        builder,
+        outer_index,
+        Some(TYPE_ID_I32),
+        values_by_name,
+        runtime_call_refs,
+        internal_calls,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        foreach_bindings,
+    )?;
+    let outer = normalize_index_binding(outer, type_table)?;
+    let outer_limit = builder.ins().iconst(types::I32, i64::from(outer_len));
+    emit_array_bounds_trap(builder, outer.value, outer_limit, true);
+
+    let inner = emit_simple_expression(
+        builder,
+        inner_index,
+        Some(TYPE_ID_I32),
+        values_by_name,
+        runtime_call_refs,
+        internal_calls,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        foreach_bindings,
+    )?;
+    let inner = normalize_index_binding(inner, type_table)?;
+    let inner_limit = builder.ins().iconst(types::I32, i64::from(inner_len));
+    emit_array_bounds_trap(builder, inner.value, inner_limit, true);
+
+    let flat = builder.ins().imul_imm(outer.value, i64::from(inner_len));
+    let flat = builder.ins().iadd(flat, inner.value);
+    let _ = collection_path;
+    Ok(ValueBinding {
+        value: flat,
+        type_id: TYPE_ID_I32,
+    })
 }
 
 pub(crate) fn coerce_numeric_operands_to_f32(

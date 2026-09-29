@@ -495,6 +495,64 @@ mod tests {
     }
 
     #[test]
+    fn nested_fixed_array_lane_uses_flat_runtime_metadata_and_migrates_on_same_layout_swap() {
+        let source = "const ROW_COUNT: i32 = 2; const VALUE_COUNT: i32 = 3; struct Row { b: i32[VALUE_COUNT]; } struct App { a: Row[ROW_COUNT]; } global app: App; function main(): i32 { return 1; }";
+        let mut active = JitProcess::new();
+        active.upsert_file("main.stasis", source);
+        active
+            .compile()
+            .expect("active nested-array source compiles");
+        assert_eq!(active.global_collection_capacity("app.a"), Some(2));
+        assert_eq!(active.global_collection_capacity("app.a.b"), None);
+        assert!(active
+            .read_global_collection_scalar("app.a.b", "", 0)
+            .is_err());
+        assert!(active
+            .write_global_collection_scalar("app.a.b", "", 0, JitScalarValue::I32(73))
+            .is_err());
+        assert_eq!(active.global_collection_capacity("app.a.b"), None);
+        active
+            .write_global_collection_scalar("app.a", "b", 5, JitScalarValue::I32(73))
+            .expect("write last flattened nested-array lane element");
+        assert_eq!(
+            active.read_global_collection_scalar("app.a", "b", 5),
+            Ok(JitScalarValue::I32(73))
+        );
+        assert!(active
+            .read_global_collection_scalar("app.a", "b", 6)
+            .is_err());
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file("main.stasis", &source.replace("return 1", "return 2"));
+        candidate
+            .compile_staged()
+            .expect("same-layout candidate compiles");
+        let current = Rc::new(Cell::new(1));
+        let mut host = TestHost {
+            current: Rc::clone(&current),
+            next: 2,
+            fail_stage: false,
+            fail_publish: false,
+            restores: 0,
+        };
+        let receipt = commit_development_swap(
+            &mut active,
+            candidate,
+            DevelopmentSwapDescriptor::new(vec!["main".to_string()], true),
+            &mut host,
+            |_| Ok::<(), String>(()),
+        )
+        .expect("same-layout nested-array migration succeeds");
+        assert_eq!(receipt.status, DevelopmentSwapStatus::Accepted);
+        assert!(!receipt.layout_changed);
+        assert_eq!(active.execute_i32_noarg_by_name("main"), Ok(2));
+        assert_eq!(
+            active.read_global_collection_scalar("app.a", "b", 5),
+            Ok(JitScalarValue::I32(73))
+        );
+    }
+
+    #[test]
     fn hook_failure_restores_host_and_runtime_state() {
         let source = "global State { score: i32; } function main(): i32 { State.score = 7; return 0; } function tick(): i32 { return State.score; }";
         let (mut active, _) = active_and_candidate(source);

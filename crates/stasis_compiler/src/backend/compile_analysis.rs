@@ -94,6 +94,39 @@ pub(crate) struct ForeachCollectionInfo {
     pub(crate) fully_migratable: bool,
 }
 
+pub(crate) fn fixed_array_lane_type_and_len(
+    type_table: &TypeTable,
+    type_id: TypeId,
+) -> Option<(TypeId, i32)> {
+    if type_table.type_info(type_id)?.category != crate::frontend::types::TypeCategory::ArrayFixed {
+        return None;
+    }
+    Some((
+        type_table.indexed_element_type_id(type_id)?,
+        type_table.fixed_collection_len(type_id)?,
+    ))
+}
+
+pub(crate) fn is_nested_fixed_array_collection_path(
+    path: &str,
+    collection_infos: &CollectionInfoMap,
+    type_table: &TypeTable,
+) -> bool {
+    collection_infos
+        .iter()
+        .any(|(collection_path, collection)| {
+            let Some(suffix) = path
+                .strip_prefix(collection_path)
+                .and_then(|suffix| suffix.strip_prefix('.'))
+            else {
+                return false;
+            };
+            collection.field_types.get(suffix).is_some_and(|type_id| {
+                fixed_array_lane_type_and_len(type_table, *type_id).is_some()
+            })
+        })
+}
+
 pub(crate) fn collect_supported_call_signatures(
     functions: &[FunctionMeta],
     extern_signatures: &[ResolvedExternCallSignature],
@@ -499,7 +532,17 @@ pub(crate) fn validate_owned_local_fixed_array_contract(
             SimpleExpr::Identifier(name) if owned.contains(name) => Err(format!(
                 "owned local fixed array '{name}' is non-escaping; index or iterate it directly instead of using it as a value"
             )),
-            SimpleExpr::IndexedPath { index, .. } => validate_expr(index, owned),
+            SimpleExpr::IndexedPath {
+                index,
+                nested_index,
+                ..
+            } => {
+                validate_expr(index, owned)?;
+                if let Some(nested_index) = nested_index {
+                    validate_expr(nested_index, owned)?;
+                }
+                Ok(())
+            }
             SimpleExpr::Call { args, .. } => {
                 for argument in args {
                     validate_expr(argument, owned)?;
@@ -570,11 +613,32 @@ pub(crate) fn validate_owned_local_fixed_array_contract(
                         }
                     }
                     validate_expr(expression, owned)?;
-                    if let crate::ir::hir::AssignTarget::IndexedPath { index, .. } = target {
+                    if let crate::ir::hir::AssignTarget::IndexedPath {
+                        index,
+                        nested_index,
+                        ..
+                    } = target
+                    {
                         validate_expr(index, owned)?;
+                        if let Some(nested_index) = nested_index {
+                            validate_expr(nested_index, owned)?;
+                        }
                     }
                 }
-                SimpleStmt::Convert { source, .. } => validate_expr(source, owned)?,
+                SimpleStmt::Convert { target, source, .. } => {
+                    validate_expr(source, owned)?;
+                    if let crate::ir::hir::AssignTarget::IndexedPath {
+                        index,
+                        nested_index,
+                        ..
+                    } = target
+                    {
+                        validate_expr(index, owned)?;
+                        if let Some(nested_index) = nested_index {
+                            validate_expr(nested_index, owned)?;
+                        }
+                    }
+                }
                 SimpleStmt::If {
                     condition,
                     then_statements,

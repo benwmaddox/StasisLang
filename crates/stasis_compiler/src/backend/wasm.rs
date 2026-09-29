@@ -6,8 +6,8 @@
 
 use crate::backend::compile_analysis::{
     are_call_argument_and_param_compatible, build_compile_analysis_cache,
-    compute_files_fingerprint, is_i32_numeric_type, resolve_extern_call_signatures_with,
-    ConstantValue,
+    compute_files_fingerprint, fixed_array_lane_type_and_len, is_i32_numeric_type,
+    is_nested_fixed_array_collection_path, resolve_extern_call_signatures_with, ConstantValue,
 };
 use crate::backend::hash::{hash_global_path, hash_string_literal};
 use crate::backend::program_snapshot::{ProgramSnapshot, ProjectConfiguration};
@@ -851,6 +851,9 @@ fn build_memory_bindings(
     let mut offset = 0u32;
     let mut bindings = BTreeMap::new();
     for (path, collection) in &analysis.collection_infos {
+        if is_nested_fixed_array_collection_path(path, &analysis.collection_infos, types) {
+            continue;
+        }
         if let Some(type_id) = collection.element_type {
             let width = storage_width(type_id, types, &analysis.named_struct_field_types).map_err(
                 |error| format!("web collection '{path}' has unsupported element storage: {error}"),
@@ -877,13 +880,27 @@ fn build_memory_bindings(
                 )
                 .ok_or_else(|| "web memory layout overflow".to_string())?;
         }
-        for (field, type_id) in &collection.field_types {
-            let width = storage_width(*type_id, types, &analysis.named_struct_field_types)
-                .map_err(|error| {
+        for (field, declared_type) in &collection.field_types {
+            let (type_id, field_len) = fixed_array_lane_type_and_len(types, *declared_type)
+                .map(|(element_type, inner_len)| {
+                    (
+                        element_type,
+                        collection.len.checked_mul(inner_len).unwrap_or(-1),
+                    )
+                })
+                .unwrap_or((*declared_type, collection.len));
+            if field_len < 0 {
+                return Err(format!(
+                    "web nested array lane capacity overflow for '{path}.{field}'"
+                ));
+            }
+            let width = storage_width(type_id, types, &analysis.named_struct_field_types).map_err(
+                |error| {
                     format!(
                         "web collection '{path}.{field}' has unsupported field storage: {error}"
                     )
-                })?;
+                },
+            )?;
             offset = align_up(offset, width)?;
             let field_path = format!("{path}.{field}");
             bindings.insert(
@@ -891,8 +908,8 @@ fn build_memory_bindings(
                 MemoryBinding {
                     handle: 0,
                     offset,
-                    type_id: *type_id,
-                    len: collection.len,
+                    type_id,
+                    len: field_len,
                     width,
                     stride: width,
                     scalar: false,
@@ -900,7 +917,7 @@ fn build_memory_bindings(
             );
             offset = offset
                 .checked_add(
-                    u32::try_from(collection.len)
+                    u32::try_from(field_len)
                         .map_err(|_| format!("negative web collection length for '{path}'"))?
                         .checked_mul(width)
                         .ok_or_else(|| "web memory layout overflow".to_string())?,
@@ -1998,7 +2015,16 @@ fn collect_calls(statements: &[SimpleStmt], out: &mut BTreeSet<String>) {
                 expression(rhs, out);
             }
             SimpleExpr::Condition(condition) => condition_calls(condition, out),
-            SimpleExpr::IndexedPath { index, .. } => expression(index, out),
+            SimpleExpr::IndexedPath {
+                index,
+                nested_index,
+                ..
+            } => {
+                expression(index, out);
+                if let Some(nested_index) = nested_index {
+                    expression(nested_index, out);
+                }
+            }
             _ => {}
         }
     }
@@ -2016,17 +2042,43 @@ fn collect_calls(statements: &[SimpleStmt], out: &mut BTreeSet<String>) {
             SimpleCondition::Not(value) => condition_calls(value, out),
         }
     }
+
+    fn target(value: &AssignTarget, out: &mut BTreeSet<String>) {
+        if let AssignTarget::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } = value
+        {
+            expression(index, out);
+            if let Some(nested_index) = nested_index {
+                expression(nested_index, out);
+            }
+        }
+    }
     for statement in statements {
         match statement {
             SimpleStmt::Let {
                 expression: value, ..
             }
-            | SimpleStmt::Assign {
-                expression: value, ..
-            }
             | SimpleStmt::Expr(value)
             | SimpleStmt::Return(value) => expression(value, out),
-            SimpleStmt::Convert { source, .. } => expression(source, out),
+            SimpleStmt::Assign {
+                target: assign_target,
+                expression: value,
+                ..
+            } => {
+                target(assign_target, out);
+                expression(value, out);
+            }
+            SimpleStmt::Convert {
+                target: assign_target,
+                source,
+                ..
+            } => {
+                target(assign_target, out);
+                expression(source, out);
+            }
             SimpleStmt::If {
                 condition,
                 then_statements,
@@ -2179,7 +2231,14 @@ fn encode_function(
     let saved_view_start = scratch_index + 8;
     let saved_view_len = scratch_index + 9;
     let saved_owned_index = scratch_index + 10;
-    local_types.extend([I32, I32, I32, I32, I32, F32, F64, I32, I32, I32, I32]);
+    let nested_outer_index = scratch_index + 11;
+    let nested_inner_index = scratch_index + 12;
+    let nested_value_i32 = scratch_index + 13;
+    let nested_value_f32 = scratch_index + 14;
+    let nested_value_f64 = scratch_index + 15;
+    local_types.extend([
+        I32, I32, I32, I32, I32, F32, F64, I32, I32, I32, I32, I32, I32, I32, F32, F64,
+    ]);
     let mut body = Vec::new();
     encode_local_declarations(&local_types, &mut body);
     let context = EncodeContext {
@@ -2209,6 +2268,11 @@ fn encode_function(
         saved_view_start,
         saved_view_len,
         saved_owned_index,
+        nested_outer_index,
+        nested_inner_index,
+        nested_value_i32,
+        nested_value_f32,
+        nested_value_f64,
         foreach: BTreeMap::new(),
         continue_depth: None,
     };
@@ -2355,6 +2419,11 @@ struct EncodeContext<'a> {
     saved_view_start: u32,
     saved_view_len: u32,
     saved_owned_index: u32,
+    nested_outer_index: u32,
+    nested_inner_index: u32,
+    nested_value_i32: u32,
+    nested_value_f32: u32,
+    nested_value_f64: u32,
     foreach: BTreeMap<String, WebForeachBinding>,
     continue_depth: Option<u32>,
 }
@@ -2502,6 +2571,7 @@ fn encode_statements(
                         collection_path,
                         index,
                         suffix,
+                        ..
                     } = target
                     {
                         if suffix.is_empty()
@@ -2726,11 +2796,12 @@ fn encode_owned_fixed_array_compound_assignment(
         collection_path,
         index,
         suffix,
+        nested_index,
     } = target
     else {
         return Ok(false);
     };
-    if !suffix.is_empty() {
+    if nested_index.is_some() || !suffix.is_empty() {
         return Ok(false);
     }
     let Some(binding) = context.locals.get(collection_path).copied() else {
@@ -2770,10 +2841,14 @@ fn encode_receiver_array_compound_assignment(
         collection_path,
         index,
         suffix,
+        nested_index,
     } = target
     else {
         return Ok(false);
     };
+    if nested_index.is_some() {
+        return Ok(false);
+    }
     if let Some(binding) = local_named_struct_array_binding(context, collection_path)? {
         if suffix.is_empty() {
             return Ok(false);
@@ -3005,7 +3080,24 @@ fn encode_target_get(
             collection_path,
             index,
             suffix,
+            nested_index,
         } => {
+            if let Some(nested_index) = nested_index {
+                let binding = memory_binding(context, collection_path, suffix)?;
+                let (outer_len, inner_len) =
+                    nested_array_dimensions(context, collection_path, suffix)?;
+                encode_nested_memory_address(
+                    binding,
+                    index,
+                    nested_index,
+                    outer_len,
+                    inner_len,
+                    context,
+                    out,
+                )?;
+                encode_memory_load(binding.type_id, out)?;
+                return Ok(binding.type_id);
+            }
             if let Some(binding) = local_named_struct_array_binding(context, collection_path)? {
                 if suffix.is_empty() {
                     return Err(format!(
@@ -3111,7 +3203,29 @@ fn encode_target_set(
             collection_path,
             index,
             suffix,
+            nested_index,
         } => {
+            if let Some(nested_index) = nested_index {
+                let binding = memory_binding(context, collection_path, suffix)?;
+                let value_local = nested_assignment_value_local(context, binding.type_id)?;
+                out.push(0x21);
+                uleb(value_local, out);
+                let (outer_len, inner_len) =
+                    nested_array_dimensions(context, collection_path, suffix)?;
+                encode_nested_memory_address(
+                    binding,
+                    index,
+                    nested_index,
+                    outer_len,
+                    inner_len,
+                    context,
+                    out,
+                )?;
+                out.push(0x20);
+                uleb(value_local, out);
+                encode_memory_store(binding.type_id, out)?;
+                return Ok(());
+            }
             if let Some(binding) = local_named_struct_array_binding(context, collection_path)? {
                 if suffix.is_empty() {
                     return Err(format!(
@@ -4414,6 +4528,7 @@ fn encode_struct_view_expr(
             collection_path,
             index,
             suffix,
+            ..
         } if suffix.is_empty() => {
             if let Some(binding) = local_named_struct_array_binding(context, collection_path)? {
                 let index_type = encode_expr_as(index, Some(TYPE_ID_I32), context, out)?;
@@ -5123,6 +5238,119 @@ fn encode_memory_address(
     out.push(0x6c);
     out.push(0x6a);
     Ok(())
+}
+
+fn nested_array_dimensions(
+    context: &EncodeContext<'_>,
+    collection_path: &str,
+    suffix: &str,
+) -> Result<(i32, i32), String> {
+    let outer_type = context
+        .global_types
+        .get(collection_path)
+        .copied()
+        .or_else(|| {
+            context
+                .locals
+                .get(collection_path)
+                .map(|binding| binding.type_id)
+        })
+        .ok_or_else(|| format!("unknown web nested collection '{collection_path}'"))?;
+    let outer_len = context
+        .types
+        .fixed_collection_len(outer_type)
+        .or_else(|| {
+            context
+                .locals
+                .get(collection_path)
+                .and_then(|binding| binding.owned_fixed)
+                .map(|owned| owned.len as i32)
+        })
+        .ok_or_else(|| {
+            format!("web nested collection '{collection_path}' must have fixed length")
+        })?;
+    let field_path = format!("{collection_path}.{suffix}");
+    let element_type = context.types.indexed_element_type_id(outer_type);
+    let field_type = element_type
+        .and_then(|element| context.named_structs.get(&element))
+        .and_then(|fields| fields.get(suffix))
+        .copied()
+        .or_else(|| context.global_types.get(&field_path).copied())
+        .ok_or_else(|| format!("unknown web nested collection field '{field_path}'"))?;
+    let inner_len = context
+        .types
+        .fixed_collection_len(field_type)
+        .ok_or_else(|| {
+            format!("web nested collection field '{field_path}' must be a fixed array")
+        })?;
+    Ok((outer_len, inner_len))
+}
+
+fn encode_nested_memory_address(
+    binding: &MemoryBinding,
+    outer_index: &SimpleExpr,
+    inner_index: &SimpleExpr,
+    outer_len: i32,
+    inner_len: i32,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let outer_type = encode_expr_as(outer_index, Some(TYPE_ID_I32), context, out)?;
+    if !is_web_index_type(outer_type, context) {
+        return Err(format!(
+            "web outer collection index must be i32-compatible, found type {outer_type}"
+        ));
+    }
+
+    let inner_type = encode_expr_as(inner_index, Some(TYPE_ID_I32), context, out)?;
+    if !is_web_index_type(inner_type, context) {
+        return Err(format!(
+            "web inner collection index must be i32-compatible, found type {inner_type}"
+        ));
+    }
+    out.push(0x21);
+    uleb(context.nested_inner_index, out);
+    // Keep the outer value on the operand stack while evaluating the inner
+    // expression. A nested indexed read inside that expression can reuse the
+    // function's scratch locals; only commit the parent's indices after the
+    // child expression has completed.
+    out.push(0x21);
+    uleb(context.nested_outer_index, out);
+    emit_index_bounds_check(context.nested_outer_index, outer_len, out);
+    emit_index_bounds_check(context.nested_inner_index, inner_len, out);
+
+    out.push(0x20);
+    uleb(context.nested_outer_index, out);
+    out.push(0x41);
+    sleb(inner_len, out);
+    out.push(0x6c);
+    out.push(0x20);
+    uleb(context.nested_inner_index, out);
+    out.push(0x6a);
+    out.push(0x21);
+    uleb(context.scratch_index, out);
+
+    out.push(0x41);
+    sleb(binding.offset as i32, out);
+    out.push(0x20);
+    uleb(context.scratch_index, out);
+    out.push(0x41);
+    sleb(binding.width as i32, out);
+    out.push(0x6c);
+    out.push(0x6a);
+    Ok(())
+}
+
+fn nested_assignment_value_local(
+    context: &EncodeContext<'_>,
+    type_id: TypeId,
+) -> Result<u32, String> {
+    match wasm_value_type(type_id)? {
+        I32 => Ok(context.nested_value_i32),
+        F32 => Ok(context.nested_value_f32),
+        F64 => Ok(context.nested_value_f64),
+        _ => Err("unsupported web nested-assignment value type".to_string()),
+    }
 }
 
 fn local_collection_memory_candidates<'a>(
@@ -6011,7 +6239,24 @@ fn encode_expr_as(
             collection_path,
             index,
             suffix,
+            nested_index,
         } => {
+            if let Some(nested_index) = nested_index {
+                let binding = memory_binding(context, collection_path, suffix)?;
+                let (outer_len, inner_len) =
+                    nested_array_dimensions(context, collection_path, suffix)?;
+                encode_nested_memory_address(
+                    binding,
+                    index,
+                    nested_index,
+                    outer_len,
+                    inner_len,
+                    context,
+                    out,
+                )?;
+                encode_memory_load(binding.type_id, out)?;
+                return Ok(binding.type_id);
+            }
             if suffix.is_empty()
                 && expected.is_some_and(|type_id| {
                     is_wasm_struct_view_type(type_id, context.types, context.named_structs)
@@ -6295,7 +6540,16 @@ fn collect_string_literals(
                 }
             }
             SimpleExpr::Condition(value) => condition(value, constants, out)?,
-            SimpleExpr::IndexedPath { index, .. } => expression(index, constants, out)?,
+            SimpleExpr::IndexedPath {
+                index,
+                nested_index,
+                ..
+            } => {
+                expression(index, constants, out)?;
+                if let Some(nested_index) = nested_index {
+                    expression(nested_index, constants, out)?;
+                }
+            }
             SimpleExpr::Call { args, .. } => {
                 for arg in args {
                     expression(arg, constants, out)?;
@@ -6328,6 +6582,24 @@ fn collect_string_literals(
         }
         Ok(())
     }
+    fn target(
+        value: &AssignTarget,
+        constants: &BTreeMap<String, ConstantValue>,
+        out: &mut BTreeMap<i32, String>,
+    ) -> Result<(), String> {
+        if let AssignTarget::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } = value
+        {
+            expression(index, constants, out)?;
+            if let Some(nested_index) = nested_index {
+                expression(nested_index, constants, out)?;
+            }
+        }
+        Ok(())
+    }
     fn statements(
         values: &[SimpleStmt],
         constants: &BTreeMap<String, ConstantValue>,
@@ -6338,12 +6610,24 @@ fn collect_string_literals(
                 SimpleStmt::Let {
                     expression: value, ..
                 }
-                | SimpleStmt::Assign {
-                    expression: value, ..
-                }
                 | SimpleStmt::Expr(value)
                 | SimpleStmt::Return(value) => expression(value, constants, out)?,
-                SimpleStmt::Convert { source, .. } => expression(source, constants, out)?,
+                SimpleStmt::Assign {
+                    target: assign_target,
+                    expression: value,
+                    ..
+                } => {
+                    target(assign_target, constants, out)?;
+                    expression(value, constants, out)?;
+                }
+                SimpleStmt::Convert {
+                    target: assign_target,
+                    source,
+                    ..
+                } => {
+                    target(assign_target, constants, out)?;
+                    expression(source, constants, out)?;
+                }
                 SimpleStmt::If {
                     condition: value,
                     then_statements,

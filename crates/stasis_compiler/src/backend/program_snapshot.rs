@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::backend::assets::{discover_asset_references, AssetReference};
 use crate::backend::compile_analysis::{
-    build_compile_analysis_cache, compute_files_fingerprint,
+    build_compile_analysis_cache, compute_files_fingerprint, is_nested_fixed_array_collection_path,
     resolve_preferred_extern_call_signatures, CompileAnalysisCache,
 };
 use crate::backend::hash::hash_string_literal;
@@ -473,12 +473,15 @@ impl ProgramSnapshot {
         let mut collections: Vec<ProgramCollectionMetadata> = analysis
             .collection_infos
             .iter()
-            .map(|(path, info)| {
+            .filter_map(|(path, info)| {
+                if is_nested_fixed_array_collection_path(path, &analysis.collection_infos, types) {
+                    return None;
+                }
                 let layout = state_layout
                     .collections
                     .iter()
                     .find(|collection| collection.path == *path);
-                ProgramCollectionMetadata {
+                Some(ProgramCollectionMetadata {
                     path: path.clone(),
                     capacity: info.len,
                     element_type_id: info.element_type,
@@ -487,7 +490,7 @@ impl ProgramSnapshot {
                         .map(|collection| collection.element_shape.clone())
                         .unwrap_or_else(|| info.element_shape.clone()),
                     fully_migratable: layout.is_some_and(|collection| collection.fully_migratable),
-                }
+                })
             })
             .collect();
         for (path, descriptor) in &analysis.typed_collection_descriptors {

@@ -1,4 +1,7 @@
-use super::compile_analysis::{CollectionInfoMap, GlobalPathTypeMap, TypedCollectionInfoMap};
+use super::compile_analysis::{
+    fixed_array_lane_type_and_len, is_nested_fixed_array_collection_path, CollectionInfoMap,
+    GlobalPathTypeMap, TypedCollectionInfoMap,
+};
 use crate::frontend::types::{
     TypeCategory, TypeTable, TypedCollectionDescriptor, TypedCollectionKind, TYPE_ID_BOOL,
     TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8,
@@ -118,6 +121,9 @@ pub(crate) fn collection_field_element_count(
             logical_capacity.div_ceil(32)
         }
         Some(count) if count == current_capacity => logical_capacity,
+        Some(count) if current_capacity > 0 && count % current_capacity == 0 => logical_capacity
+            .checked_mul(count / current_capacity)
+            .unwrap_or(u64::MAX),
         Some(count) => count,
     }
 }
@@ -525,6 +531,10 @@ fn collection_field_active_count(
     let field_capacity = collection_field_element_count(collection, field, logical_capacity);
     if is_bitset_collection(collection) && field.field == "words" {
         active_count.div_ceil(32).min(field_capacity)
+    } else if logical_capacity > 0 && field_capacity % logical_capacity == 0 {
+        active_count
+            .saturating_mul(field_capacity / logical_capacity)
+            .min(field_capacity)
     } else {
         active_count.min(field_capacity)
     }
@@ -576,40 +586,63 @@ pub(crate) fn build_state_layout(
             })
         })
         .collect();
-    let mut collections: Vec<StateCollectionLayout> = collection_infos
-        .iter()
-        .map(|(path, info)| {
-            let mut fields = Vec::new();
-            if let Some((type_name, storage_type_name)) = info
-                .element_type
-                .and_then(|type_id| state_value_type_names(type_table, type_id))
+    let mut collections: Vec<StateCollectionLayout> = Vec::new();
+    for (path, info) in collection_infos {
+        if is_nested_fixed_array_collection_path(path, collection_infos, type_table) {
+            continue;
+        }
+        let mut fields = Vec::new();
+        if let Some((type_name, storage_type_name)) = info
+            .element_type
+            .and_then(|type_id| state_value_type_names(type_table, type_id))
+        {
+            fields.push(StateCollectionFieldLayout {
+                field: String::new(),
+                type_name,
+                storage_type_name,
+                element_count: None,
+            });
+        }
+        for (field, type_id) in &info.field_types {
+            if let Some((element_type, inner_len)) =
+                fixed_array_lane_type_and_len(type_table, *type_id)
+            {
+                let Some((type_name, storage_type_name)) =
+                    state_value_type_names(type_table, element_type)
+                else {
+                    continue;
+                };
+                let element_count = u64::try_from(info.len)
+                    .unwrap_or(0)
+                    .checked_mul(u64::try_from(inner_len).unwrap_or(0))
+                    .ok_or_else(|| {
+                        format!("state layout nested lane count overflow for '{path}.{field}'")
+                    })?;
+                fields.push(StateCollectionFieldLayout {
+                    field: field.clone(),
+                    type_name,
+                    storage_type_name,
+                    element_count: Some(element_count),
+                });
+            } else if let Some((type_name, storage_type_name)) =
+                state_value_type_names(type_table, *type_id)
             {
                 fields.push(StateCollectionFieldLayout {
-                    field: String::new(),
+                    field: field.clone(),
                     type_name,
                     storage_type_name,
                     element_count: None,
                 });
             }
-            fields.extend(info.field_types.iter().filter_map(|(field, type_id)| {
-                state_value_type_names(type_table, *type_id).map(
-                    |(type_name, storage_type_name)| StateCollectionFieldLayout {
-                        field: field.clone(),
-                        type_name,
-                        storage_type_name,
-                        element_count: None,
-                    },
-                )
-            }));
-            StateCollectionLayout {
-                path: path.clone(),
-                capacity: info.len,
-                element_shape: info.element_shape.clone(),
-                fully_migratable: info.fully_migratable,
-                fields,
-            }
-        })
-        .collect();
+        }
+        collections.push(StateCollectionLayout {
+            path: path.clone(),
+            capacity: info.len,
+            element_shape: info.element_shape.clone(),
+            fully_migratable: info.fully_migratable,
+            fields,
+        });
+    }
     for (path, descriptor) in typed_collection_descriptors {
         let mut fields = Vec::new();
         for lane in &descriptor.lanes {
