@@ -46,7 +46,7 @@ add a second one:
 | Owner / package shape | Lifecycle 1 behavior | Lifecycle 0 or absent behavior |
 | --- | --- | --- |
 | Non-monolithic generated bridge | Reset -> authored render -> finish exactly once. | Direct authored render; no generated reset/finish. |
-| Windows monolithic generated bindings | Generated AOT binding performs reset -> authored render -> finish exactly once. | Direct authored render. |
+| Windows network monolithic generated bindings | Generated AOT binding performs reset -> authored render -> finish exactly once. | Direct authored render. |
 | Android generated AOT bindings | Shared mobile AOT entry performs `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
 | iOS generated AOT bindings | Shared mobile AOT entry performs `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
 | `stasis_runner` | Verifies state/launch sidecar metadata when present and invokes the exported render entry; it never wraps again. | Rejects an exported render entry as obsolete; tick-only and render-less packages remain direct/manual. |

@@ -392,7 +392,11 @@ restore release assets.
   remains supported as a one-argument external hook for existing cross-platform build flows.
 - `package --target desktop`: create a standalone directory with the AOT executable, manifest,
   assets, graphics runtime when present, and verified release provenance. Windows packages keep
-  the game-named executable as the only root file and place all support files under `app/`.
+  the game-named runner as the only root file and place the game DLL, launch sidecar,
+  `stasis_graphics.dll`, `stasis_dynload.dll`, assets, and metadata under `app/`. Ordinary Windows
+  packages reuse those prebuilt runtime binaries from the installed toolchain; only the game AOT
+  objects and DLL are compiled and linked per package. Windows network host/client packages remain
+  monolithic until the network runtime has an explicitly supported shared-library contract.
 - `package-mobile --target android-arm64|ios-arm64|ios-simulator-arm64 [--entry PATH]`: atomically assemble the
   shared AOT output, SDL-only runtime, bundled assets, verified provenance, and thin Gradle or
   Xcode app shell. Network-enabled iOS packages require macOS/Xcode, stage and link the

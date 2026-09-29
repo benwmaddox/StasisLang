@@ -184,7 +184,7 @@ construction. A packaged render entry must publish lifecycle 1 for
 | Owner / package shape | Lifecycle 1 behavior | Lifecycle 0 or absent behavior |
 | --- | --- | --- |
 | Non-monolithic generated bridge | Generated entry calls `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated entry calls authored render directly; it does not synthesize reset or finish. |
-| Windows monolithic generated bindings | Generated AOT binding calls reset -> authored render -> finish exactly once. | Binding calls authored render directly. |
+| Windows network monolithic generated bindings | Generated AOT binding calls reset -> authored render -> finish exactly once. | Binding calls authored render directly. |
 | Android generated AOT bindings | Shared mobile AOT entry calls `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
 | iOS generated AOT bindings | Shared mobile AOT entry calls `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls authored render directly. |
 | `stasis_runner` | Parses/verifies state/launch sidecar metadata when present, invokes the already-exported render entry, and never wraps it or adds reset/finish. | Rejects an exported render entry as obsolete; tick-only and render-less packages remain direct/manual. |

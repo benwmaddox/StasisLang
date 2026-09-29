@@ -2076,7 +2076,10 @@ fn ensure_stasis_dynload_link_library() -> Result<PathBuf, String> {
 }
 
 #[cfg(windows)]
-fn stage_stasis_dynload_runtime(link_library: &Path, output: &Path) -> Result<(), String> {
+fn stage_stasis_dynload_runtime(
+    link_library: &Path,
+    output: &Path,
+) -> Result<Option<PathBuf>, String> {
     let file_name = link_library
         .file_name()
         .and_then(|name| name.to_str())
@@ -2100,12 +2103,16 @@ fn stage_stasis_dynload_runtime(link_library: &Path, output: &Path) -> Result<()
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(dll_name);
-    copy_file_creating_parent(&dll, &destination)
+    copy_file_creating_parent(&dll, &destination)?;
+    Ok(Some(destination))
 }
 
 #[cfg(not(windows))]
-fn stage_stasis_dynload_runtime(_link_library: &Path, _output: &Path) -> Result<(), String> {
-    Ok(())
+fn stage_stasis_dynload_runtime(
+    _link_library: &Path,
+    _output: &Path,
+) -> Result<Option<PathBuf>, String> {
+    Ok(None)
 }
 
 fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
@@ -5464,10 +5471,8 @@ fn package_engine_bundle_release(
         )
     })?;
 
-    let monolithic_desktop = matches!(
-        backend.aot_compile_config.target,
-        stasis_jit::AotTarget::Native
-    ) && (cfg!(windows) || desktop_network.is_some());
+    let monolithic_desktop =
+        uses_monolithic_desktop_package(&backend.aot_compile_config.target, desktop_network);
     let support_root = if monolithic_desktop {
         output_exe.parent().unwrap_or_else(|| Path::new("."))
     } else {
@@ -5503,7 +5508,7 @@ fn package_engine_bundle_release(
     .map_err(|error| error.to_string())?;
     let host_exports = stasis_compiler::host_exports::HostExports::from_manifest(&host_manifest)?;
     std::fs::write(
-        packaged_output_exe.with_extension("host_exports.h"),
+        backend.aot_artifact_root.join("stasis_host_exports.h"),
         host_exports.header()?,
     )
     .map_err(|error| error.to_string())?;
@@ -5629,9 +5634,11 @@ fn package_engine_bundle_release(
             return Err(initial_error);
         }
     }
-    if let Some(link_library) = dynload_link_library.as_deref() {
-        stage_stasis_dynload_runtime(link_library, &linked_library_path)?;
-    }
+    let staged_dynload_runtime = if let Some(link_library) = dynload_link_library.as_deref() {
+        stage_stasis_dynload_runtime(link_library, &linked_library_path)?
+    } else {
+        None
+    };
 
     let (runner_src, graphics_src) = ensure_runtime_release_artifacts()?;
     eprintln!(
@@ -5723,6 +5730,9 @@ fn package_engine_bundle_release(
     sign_output_artifact_if_configured(packaged_output_exe)?;
     sign_output_artifact_if_configured(&linked_library_path)?;
     sign_output_artifact_if_configured(&graphics_dst)?;
+    if let Some(dynload_runtime) = staged_dynload_runtime.as_deref() {
+        sign_output_artifact_if_configured(dynload_runtime)?;
+    }
     if let Some(app_bundle) = runner_layout.app_bundle.as_deref() {
         sign_output_artifact_if_configured(app_bundle)?;
     }
@@ -5746,9 +5756,46 @@ fn package_engine_bundle_release(
     })
 }
 
+fn uses_monolithic_desktop_package(
+    target: &stasis_jit::AotTarget,
+    desktop_network: Option<&DesktopNetworkLink>,
+) -> bool {
+    matches!(target, stasis_jit::AotTarget::Native) && desktop_network.is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordinary_desktop_packages_use_runner_while_network_stays_monolithic() {
+        let host = DesktopNetworkLink {
+            library: PathBuf::from("network.lib"),
+            include_dir: PathBuf::from("include"),
+            mode: DesktopNetworkMode::Host,
+        };
+        let client = DesktopNetworkLink {
+            mode: DesktopNetworkMode::Client,
+            ..host.clone()
+        };
+
+        assert!(!uses_monolithic_desktop_package(
+            &stasis_jit::AotTarget::Native,
+            None,
+        ));
+        assert!(uses_monolithic_desktop_package(
+            &stasis_jit::AotTarget::Native,
+            Some(&host),
+        ));
+        assert!(uses_monolithic_desktop_package(
+            &stasis_jit::AotTarget::Native,
+            Some(&client),
+        ));
+        assert!(!uses_monolithic_desktop_package(
+            &stasis_jit::AotTarget::AndroidArm64 { min_sdk: 26 },
+            Some(&host),
+        ));
+    }
 
     #[test]
     fn packaged_sprite_atlas_page_size_reads_default_and_override() {
@@ -10107,7 +10154,7 @@ fn run_self_host_aot_cli_with_backend_and_options(
         }
         link_objects_to_executable(&object_paths, output_exe, &entry_symbol, &link_config)?;
         if let Some(link_library) = dynload_link_library.as_deref() {
-            stage_stasis_dynload_runtime(link_library, output_exe)?;
+            let _ = stage_stasis_dynload_runtime(link_library, output_exe)?;
         }
         maybe_sign_output_executable(output_exe)?;
         let object_bundle_path =
