@@ -35,7 +35,9 @@ class WindowsSigningPolicyTests(unittest.TestCase):
         workflow_header = source.split("jobs:", 1)[0]
         self.assertIn("permissions:\n  contents: read", workflow_header)
         self.assertNotIn("contents: write", workflow_header)
-        self.assertIn("needs: [detect, mobile_network_support]", source)
+        self.assertIn(
+            "needs: [detect, mobile_network_support, android_runtime_support]", source
+        )
         build_job = source.split("  build:", 1)[1].split("  windows_signing:", 1)[0]
         signing_job = source.split("  windows_signing:", 1)[1].split("  vscode_extension:", 1)[0]
         self.assertNotIn("secrets.STASIS_SIGNING", build_job)
