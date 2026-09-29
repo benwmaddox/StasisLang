@@ -6919,6 +6919,32 @@ function render(): void {{ {draws} return; }}
     }
 
     #[test]
+    fn canvas_request_changes_logical_size_without_changing_window_mode() {
+        assert!(
+            STASIS_WINDOW_REQUEST_STDLIB.contains("const HOST_REQ_FLAG_CANVAS: i32 = 8;")
+                && STASIS_WINDOW_REQUEST_STDLIB
+                    .contains("function host_request_canvas(width: i32, height: i32): void")
+                && STASIS_GRAPHICS_STDLIB
+                    .contains("function set_canvas_size(width: i32, height: i32): void")
+        );
+        let apply_start = STASIS_GRAPHICS_SOURCE
+            .find("else if ((flags & HOST_REQ_FLAG_CANVAS) != 0)")
+            .expect("canvas-only request should have its own host branch");
+        let apply_end = STASIS_GRAPHICS_SOURCE[apply_start..]
+            .find("STASIS_EXPORT void stasis_host_set_performance_metrics(")
+            .expect("request branch should precede performance metrics")
+            + apply_start;
+        let canvas_source = &STASIS_GRAPHICS_SOURCE[apply_start..apply_end];
+        assert!(
+            canvas_source.contains("stasis_set_logical_size(")
+                && canvas_source.contains("stasis_sync_display_metrics();")
+                && !canvas_source.contains("stasis_set_window_size(")
+                && !canvas_source.contains("stasis_set_maximized(")
+                && !canvas_source.contains("stasis_set_fullscreen(")
+        );
+    }
+
+    #[test]
     fn macos_runner_is_packaged_for_retina_drawables() {
         let runner_plist = STASIS_RUNNER_MACOS_PLIST.replace("\r\n", "\n");
         for required in [

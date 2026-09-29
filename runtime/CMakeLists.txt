@@ -263,6 +263,13 @@ if(STASIS_GRAPHICS_BUILD_TESTS AND TARGET stasis_graphics_static)
     )
     target_link_libraries(stasis_window_placement_test PRIVATE stasis_graphics_static)
     add_test(NAME stasis_window_placement_contract COMMAND stasis_window_placement_test)
+    add_executable(stasis_svg_alpha_contract_test tests/stasis_svg_alpha_contract_test.c)
+    target_link_libraries(stasis_svg_alpha_contract_test PRIVATE stasis_graphics_static)
+    add_test(
+        NAME stasis_svg_alpha_contract
+        COMMAND stasis_svg_alpha_contract_test
+            "${CMAKE_CURRENT_LIST_DIR}/tests/fixtures/viewport-clip.svg"
+    )
     if(WIN32)
         set_tests_properties(
             stasis_window_placement_contract
