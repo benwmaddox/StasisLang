@@ -66,6 +66,7 @@ pub(crate) enum AssignTarget {
         collection_path: String,
         index: SimpleExpr,
         suffix: String,
+        nested_index: Option<SimpleExpr>,
     },
 }
 
@@ -112,6 +113,7 @@ pub(crate) enum SimpleExpr {
         collection_path: String,
         index: Box<SimpleExpr>,
         suffix: String,
+        nested_index: Option<Box<SimpleExpr>>,
     },
     Call {
         target: String,

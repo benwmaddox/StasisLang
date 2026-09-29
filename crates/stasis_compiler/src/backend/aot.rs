@@ -1,8 +1,9 @@
 use crate::backend::compile_analysis::{
     build_compile_analysis_cache, compile_analysis_requires_reemit, compute_files_fingerprint,
-    is_i32_abi_compatible_type, resolve_preferred_extern_call_signatures, select_emit_function_ids,
-    CallSignatureMap, CollectionInfoMap, ConstantValue, ConstantValueMap, GlobalPathTypeMap,
-    NamedStructFieldTypeMap, TypedCollectionInfoMap,
+    fixed_array_lane_type_and_len, is_i32_abi_compatible_type,
+    is_nested_fixed_array_collection_path, resolve_preferred_extern_call_signatures,
+    select_emit_function_ids, CallSignatureMap, CollectionInfoMap, ConstantValue, ConstantValueMap,
+    GlobalPathTypeMap, NamedStructFieldTypeMap, TypedCollectionInfoMap,
 };
 use crate::backend::emit::*;
 use crate::backend::hot_render::{
@@ -723,7 +724,12 @@ impl AotProcess {
                     storage_type_name.to_string(),
                     hash_global_path(&collection.path),
                     hash_foreach_field_suffix(&field.field),
-                    Some(collection.capacity),
+                    Some(i32::try_from(element_count).map_err(|_| {
+                        format!(
+                            "standalone AOT field element count {element_count} for '{}.{}' exceeds i32",
+                            collection.path, field.field
+                        )
+                    })?),
                 ));
             }
         }
@@ -1258,6 +1264,9 @@ fn build_aot_direct_storage_bindings(
         }
     }
     for (path, info) in collection_infos {
+        if is_nested_fixed_array_collection_path(path, collection_infos, type_table) {
+            continue;
+        }
         if let Some(type_id) = info.element_type {
             let lane =
                 aot_array_lane(path, type_id, global_path_types, type_table).ok_or_else(|| {
@@ -1279,12 +1288,23 @@ fn build_aot_direct_storage_bindings(
             );
         }
         for (field, type_id) in &info.field_types {
-            let lane =
-                aot_array_lane(path, *type_id, global_path_types, type_table).ok_or_else(|| {
+            let (lane_type, lane_len) = fixed_array_lane_type_and_len(type_table, *type_id)
+                .map(|(element_type, inner_len)| {
+                    (element_type, info.len.checked_mul(inner_len).unwrap_or(-1))
+                })
+                .unwrap_or((*type_id, info.len));
+            if lane_len < 0 {
+                return Err(format!(
+                    "AOT nested array lane capacity overflow for '{path}.{field}'"
+                ));
+            }
+            let lane = aot_array_lane(path, lane_type, global_path_types, type_table).ok_or_else(
+                || {
                     format!(
                         "unsupported AOT direct storage field type {type_id} for '{path}.{field}'"
                     )
-                })?;
+                },
+            )?;
             let symbol = aot_storage_symbol(AotStorageSymbolKind::Array, path, field);
             claim_aot_storage_symbol(
                 &mut claimed_symbols,
@@ -1296,7 +1316,7 @@ fn build_aot_direct_storage_bindings(
                 crate::backend::emit::DirectArrayStorageBinding {
                     slot: DirectStorageBinding::Symbol(symbol),
                     storage_bytes: aot_lane_bytes(lane),
-                    static_len: Some(info.len as usize),
+                    static_len: Some(lane_len as usize),
                 },
             );
         }
@@ -1560,8 +1580,16 @@ fn record_string_literals_in_assign_target(
 ) -> Result<(), String> {
     match target {
         AssignTarget::Local(_) | AssignTarget::GlobalPath(_) => Ok(()),
-        AssignTarget::IndexedPath { index, .. } => {
-            record_string_literals_in_expr(index, constant_values, out)
+        AssignTarget::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } => {
+            record_string_literals_in_expr(index, constant_values, out)?;
+            if let Some(nested_index) = nested_index {
+                record_string_literals_in_expr(nested_index, constant_values, out)?;
+            }
+            Ok(())
         }
     }
 }
@@ -1607,8 +1635,16 @@ fn record_string_literals_in_expr(
         SimpleExpr::Condition(condition) => {
             record_string_literals_in_condition(condition, constant_values, out)
         }
-        SimpleExpr::IndexedPath { index, .. } => {
-            record_string_literals_in_expr(index, constant_values, out)
+        SimpleExpr::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } => {
+            record_string_literals_in_expr(index, constant_values, out)?;
+            if let Some(nested_index) = nested_index {
+                record_string_literals_in_expr(nested_index, constant_values, out)?;
+            }
+            Ok(())
         }
         SimpleExpr::Call { args, .. } => {
             for arg in args {

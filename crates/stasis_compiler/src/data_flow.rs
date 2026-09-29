@@ -1081,7 +1081,12 @@ fn collect_internal_calls_in_statements(
                     edges,
                     callers,
                 );
-                if let AssignTarget::IndexedPath { index, .. } = target {
+                if let AssignTarget::IndexedPath {
+                    index,
+                    nested_index,
+                    ..
+                } = target
+                {
                     collect_internal_calls_in_expression(
                         index,
                         caller,
@@ -1091,6 +1096,17 @@ fn collect_internal_calls_in_statements(
                         edges,
                         callers,
                     );
+                    if let Some(nested_index) = nested_index {
+                        collect_internal_calls_in_expression(
+                            nested_index,
+                            caller,
+                            context,
+                            local_types,
+                            aliases,
+                            edges,
+                            callers,
+                        );
+                    }
                 }
             }
             SimpleStmt::Convert { target, source, .. } => {
@@ -1103,7 +1119,12 @@ fn collect_internal_calls_in_statements(
                     edges,
                     callers,
                 );
-                if let AssignTarget::IndexedPath { index, .. } = target {
+                if let AssignTarget::IndexedPath {
+                    index,
+                    nested_index,
+                    ..
+                } = target
+                {
                     collect_internal_calls_in_expression(
                         index,
                         caller,
@@ -1113,6 +1134,17 @@ fn collect_internal_calls_in_statements(
                         edges,
                         callers,
                     );
+                    if let Some(nested_index) = nested_index {
+                        collect_internal_calls_in_expression(
+                            nested_index,
+                            caller,
+                            context,
+                            local_types,
+                            aliases,
+                            edges,
+                            callers,
+                        );
+                    }
                 }
             }
             SimpleStmt::If {
@@ -1328,15 +1360,32 @@ fn collect_internal_calls_in_expression(
             edges,
             callers,
         ),
-        SimpleExpr::IndexedPath { index, .. } => collect_internal_calls_in_expression(
+        SimpleExpr::IndexedPath {
             index,
-            caller,
-            context,
-            local_types,
-            aliases,
-            edges,
-            callers,
-        ),
+            nested_index,
+            ..
+        } => {
+            collect_internal_calls_in_expression(
+                index,
+                caller,
+                context,
+                local_types,
+                aliases,
+                edges,
+                callers,
+            );
+            if let Some(nested_index) = nested_index {
+                collect_internal_calls_in_expression(
+                    nested_index,
+                    caller,
+                    context,
+                    local_types,
+                    aliases,
+                    edges,
+                    callers,
+                );
+            }
+        }
         SimpleExpr::Call { target, args } => {
             if typed_collection_operation_for_call(target, args, context, local_types).is_none() {
                 if let Some(target_id) =
@@ -1597,7 +1646,12 @@ fn validate_guarded_statements(
                     local_types,
                     state,
                 )?;
-                if let AssignTarget::IndexedPath { index, .. } = target {
+                if let AssignTarget::IndexedPath {
+                    index,
+                    nested_index,
+                    ..
+                } = target
+                {
                     validate_guarded_expression(
                         index,
                         context,
@@ -1605,12 +1659,26 @@ fn validate_guarded_statements(
                         local_types,
                         state,
                     )?;
+                    if let Some(nested_index) = nested_index {
+                        validate_guarded_expression(
+                            nested_index,
+                            context,
+                            required_proofs,
+                            local_types,
+                            state,
+                        )?;
+                    }
                 }
                 state.invalidate();
             }
             SimpleStmt::Convert { target, source, .. } => {
                 validate_guarded_expression(source, context, required_proofs, local_types, state)?;
-                if let AssignTarget::IndexedPath { index, .. } = target {
+                if let AssignTarget::IndexedPath {
+                    index,
+                    nested_index,
+                    ..
+                } = target
+                {
                     validate_guarded_expression(
                         index,
                         context,
@@ -1618,6 +1686,15 @@ fn validate_guarded_statements(
                         local_types,
                         state,
                     )?;
+                    if let Some(nested_index) = nested_index {
+                        validate_guarded_expression(
+                            nested_index,
+                            context,
+                            required_proofs,
+                            local_types,
+                            state,
+                        )?;
+                    }
                 }
                 state.invalidate();
             }
@@ -1796,8 +1873,22 @@ fn validate_guarded_expression(
         SimpleExpr::Condition(condition) => {
             validate_guarded_condition(condition, context, required_proofs, local_types, state)
         }
-        SimpleExpr::IndexedPath { index, .. } => {
-            validate_guarded_expression(index, context, required_proofs, local_types, state)
+        SimpleExpr::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } => {
+            validate_guarded_expression(index, context, required_proofs, local_types, state)?;
+            if let Some(nested_index) = nested_index {
+                validate_guarded_expression(
+                    nested_index,
+                    context,
+                    required_proofs,
+                    local_types,
+                    state,
+                )?;
+            }
+            Ok(())
         }
         SimpleExpr::Call { target, args } => {
             if let Some(operation) =
@@ -1894,7 +1985,16 @@ fn safe_requires_expansion_argument(expression: &SimpleExpr) -> bool {
     match expression {
         SimpleExpr::Call { .. } => false,
         SimpleExpr::Condition(condition) => safe_requires_expansion_condition(condition),
-        SimpleExpr::IndexedPath { index, .. } => safe_requires_expansion_argument(index),
+        SimpleExpr::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } => {
+            safe_requires_expansion_argument(index)
+                && nested_index
+                    .as_deref()
+                    .is_none_or(safe_requires_expansion_argument)
+        }
         SimpleExpr::Binary { lhs, rhs, .. } => {
             safe_requires_expansion_argument(lhs) && safe_requires_expansion_argument(rhs)
         }
@@ -1948,6 +2048,7 @@ fn substitute_required_expression(
             collection_path,
             index,
             suffix,
+            nested_index,
         } => SimpleExpr::IndexedPath {
             collection_path: substitutions
                 .get(collection_path)
@@ -1958,6 +2059,9 @@ fn substitute_required_expression(
                 .unwrap_or_else(|| collection_path.clone()),
             index: Box::new(substitute_required_expression(index, substitutions)),
             suffix: suffix.clone(),
+            nested_index: nested_index
+                .as_ref()
+                .map(|index| Box::new(substitute_required_expression(index, substitutions))),
         },
         SimpleExpr::Call { target, args } => SimpleExpr::Call {
             target: target.clone(),
@@ -2757,11 +2861,17 @@ fn semantic_assignment_target_type(
         AssignTarget::IndexedPath {
             collection_path,
             suffix,
+            nested_index,
             ..
         } => {
             let collection = path_type(collection_path, context, local_types, &BTreeMap::new())?;
             let element = context.types.indexed_element_type_id(collection)?;
-            field_suffix_type(element, suffix, &context.field_types)
+            let field_type = field_suffix_type(element, suffix, &context.field_types)?;
+            if nested_index.is_some() {
+                context.types.indexed_element_type_id(field_type)
+            } else {
+                Some(field_type)
+            }
         }
     }
 }
@@ -2851,8 +2961,12 @@ fn validate_assignment_target_access(
             collection_path,
             index,
             suffix,
+            nested_index,
         } => {
             validate_expression_access(index, context, local_types)?;
+            if let Some(nested_index) = nested_index {
+                validate_expression_access(nested_index, context, local_types)?;
+            }
             validate_indexed_property_access(collection_path, suffix, context, local_types)
         }
     }
@@ -2892,8 +3006,12 @@ fn validate_expression_access(
             collection_path,
             index,
             suffix,
+            nested_index,
         } => {
             validate_expression_access(index, context, local_types)?;
+            if let Some(nested_index) = nested_index {
+                validate_expression_access(nested_index, context, local_types)?;
+            }
             if is_typed_collection_path_or_descendant(collection_path, context, local_types)
                 || is_typed_collection_path_or_descendant(
                     &indexed_state_path(collection_path, suffix),
@@ -3550,10 +3668,15 @@ fn hash_expression_shape(expression: &SimpleExpr, hasher: &mut DefaultHasher) {
             collection_path,
             index,
             suffix,
+            nested_index,
         } => {
             collection_path.hash(hasher);
             hash_expression_shape(index, hasher);
             suffix.hash(hasher);
+            nested_index.is_some().hash(hasher);
+            if let Some(nested_index) = nested_index {
+                hash_expression_shape(nested_index, hasher);
+            }
         }
         SimpleExpr::Call { target, args } => {
             target.hash(hasher);
@@ -4199,8 +4322,12 @@ fn analyze_assignment_target(
             collection_path,
             index,
             suffix,
+            nested_index,
         } => {
             analyze_expression(index, context, locals, local_types, aliases, effects);
+            if let Some(nested_index) = nested_index {
+                analyze_expression(nested_index, context, locals, local_types, aliases, effects);
+            }
             normalize_state_path(collection_path, context, locals, aliases)
                 .map(|path| indexed_state_path(&path, suffix))
         }
@@ -4557,8 +4684,12 @@ fn analyze_expression(
             collection_path,
             index,
             suffix,
+            nested_index,
         } => {
             analyze_expression(index, context, locals, local_types, aliases, effects);
+            if let Some(nested_index) = nested_index {
+                analyze_expression(nested_index, context, locals, local_types, aliases, effects);
+            }
             if let Some(path) = normalize_state_path(collection_path, context, locals, aliases) {
                 effects.insert_read(indexed_state_path(&path, suffix));
             }
@@ -4713,8 +4844,15 @@ fn analyze_view_argument(
 ) {
     match expression {
         SimpleExpr::Identifier(_) => {}
-        SimpleExpr::IndexedPath { index, .. } => {
-            analyze_expression(index, context, locals, local_types, aliases, effects)
+        SimpleExpr::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } => {
+            analyze_expression(index, context, locals, local_types, aliases, effects);
+            if let Some(nested_index) = nested_index {
+                analyze_expression(nested_index, context, locals, local_types, aliases, effects);
+            }
         }
         _ => analyze_expression(expression, context, locals, local_types, aliases, effects),
     }
@@ -4784,6 +4922,7 @@ fn expression_type(
         SimpleExpr::IndexedPath {
             collection_path,
             suffix,
+            nested_index,
             ..
         } => {
             // Indexed wildcard paths are compiler-global metadata.  A local
@@ -4791,7 +4930,7 @@ fn expression_type(
             // unrelated global array can override its element type.
             let root = root_name(collection_path);
             let has_lexical_root = local_types.contains_key(root) || aliases.contains_key(root);
-            if !has_lexical_root {
+            if nested_index.is_none() && !has_lexical_root {
                 if let Some(type_id) = context
                     .path_types
                     .get(&indexed_state_path(collection_path, suffix))
@@ -4801,7 +4940,12 @@ fn expression_type(
             }
             let collection = path_type(collection_path, context, local_types, aliases)?;
             let element = context.types.indexed_element_type_id(collection)?;
-            field_suffix_type(element, suffix, &context.field_types)
+            let field_type = field_suffix_type(element, suffix, &context.field_types)?;
+            if nested_index.is_some() {
+                context.types.indexed_element_type_id(field_type)
+            } else {
+                Some(field_type)
+            }
         }
         SimpleExpr::Call { target, args } => {
             if let Some(operation) =
@@ -5389,14 +5533,19 @@ fn display_expression(expression: &SimpleExpr) -> String {
             collection_path,
             index,
             suffix,
+            nested_index,
         } => format!(
-            "{collection_path}[{}]{}",
+            "{collection_path}[{}]{}{}",
             display_expression(index),
             if suffix.is_empty() {
                 String::new()
             } else {
                 format!(".{}", suffix.trim_start_matches('.'))
-            }
+            },
+            nested_index
+                .as_ref()
+                .map(|index| format!("[{}]", display_expression(index)))
+                .unwrap_or_default()
         ),
         SimpleExpr::Call { target, .. } => format!("{target}(...)"),
         SimpleExpr::Binary { lhs, op, rhs } => format!(
@@ -7491,6 +7640,7 @@ mod tests {
                 collection_path: "actors".to_string(),
                 index: Box::new(SimpleExpr::Int(0)),
                 suffix: "values".to_string(),
+                nested_index: None,
             },
         ] {
             let error = validate_expression_access(&expression, &context, &local_types)
@@ -7505,6 +7655,7 @@ mod tests {
                 collection_path: "actors".to_string(),
                 index: SimpleExpr::Int(0),
                 suffix: "values".to_string(),
+                nested_index: None,
             },
         ] {
             let error = validate_assignment_target_access(&target, &context, &local_types)

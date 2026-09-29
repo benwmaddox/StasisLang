@@ -1,8 +1,9 @@
 use crate::backend::compile_analysis::{
     build_compile_analysis_cache_from_resolved_externs, collect_supported_extern_call_signatures,
-    compute_files_fingerprint, resolve_extern_call_signatures_with_index, CallSignatureMap,
-    CollectionInfoMap, CompileAnalysisCache, ConstantValueMap, ExternCallSignature,
-    ExternSymbolAddressMap, GlobalPathTypeMap, NamedStructFieldTypeMap,
+    compute_files_fingerprint, fixed_array_lane_type_and_len,
+    is_nested_fixed_array_collection_path, resolve_extern_call_signatures_with_index,
+    CallSignatureMap, CollectionInfoMap, CompileAnalysisCache, ConstantValueMap,
+    ExternCallSignature, ExternSymbolAddressMap, GlobalPathTypeMap, NamedStructFieldTypeMap,
     ResolvedExternCallSignature, TypedCollectionInfoMap,
 };
 use crate::backend::emit::{
@@ -132,6 +133,7 @@ fn collect_expression_references(
             collection_path,
             index,
             suffix,
+            nested_index,
         } => {
             if !path_is_local(collection_path, scopes) {
                 references.paths.insert(collection_path.clone());
@@ -142,6 +144,9 @@ fn collect_expression_references(
                 }
             }
             collect_expression_references(index, references, scopes);
+            if let Some(nested_index) = nested_index {
+                collect_expression_references(nested_index, references, scopes);
+            }
         }
         SimpleExpr::Call { target, args } => {
             references.calls.insert(target.clone());
@@ -171,8 +176,15 @@ fn collect_target_references(
 ) {
     match target {
         AssignTarget::Local(_) | AssignTarget::GlobalPath(_) => {}
-        AssignTarget::IndexedPath { index, .. } => {
+        AssignTarget::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } => {
             collect_expression_references(index, references, scopes);
+            if let Some(nested_index) = nested_index {
+                collect_expression_references(nested_index, references, scopes);
+            }
         }
     }
 }
@@ -2143,8 +2155,14 @@ impl JitProcess {
             .as_ref()
             .ok_or_else(|| "JIT collection metadata is unavailable".to_string())?;
         let analysis = &snapshot.analysis;
+        if is_nested_fixed_array_collection_path(path, &analysis.collection_infos, snapshot.types())
+        {
+            return Err(format!(
+                "global collection path '{path}' is a nested fixed-array lane, not an independent collection"
+            ));
+        }
         if let Some(info) = analysis.collection_infos.get(path) {
-            let type_id = if field.is_empty() {
+            let declared_type = if field.is_empty() {
                 info.element_type
             } else {
                 info.field_types.get(field).copied()
@@ -2152,7 +2170,15 @@ impl JitProcess {
             .ok_or_else(|| {
                 format!("global collection path '{path}' field '{field}' was not found")
             })?;
-            return Ok((type_id, info.len));
+            if let Some((element_type, inner_len)) =
+                fixed_array_lane_type_and_len(snapshot.types(), declared_type)
+            {
+                let flattened_len = info.len.checked_mul(inner_len).ok_or_else(|| {
+                    format!("JIT nested array lane capacity overflow for '{path}.{field}'")
+                })?;
+                return Ok((element_type, flattened_len));
+            }
+            return Ok((declared_type, info.len));
         }
         if let Some(descriptor) = snapshot.typed_collection_descriptors().get(path) {
             if let Some(lane) = descriptor.lanes.iter().find(|lane| lane.name == field) {
@@ -3082,6 +3108,9 @@ fn build_direct_storage_bindings(
         }
     }
     for (path, info) in collection_infos {
+        if is_nested_fixed_array_collection_path(path, collection_infos, type_table) {
+            continue;
+        }
         let path_hash = crate::backend::emit::hash_global_path(path);
         if let Some(type_id) = info.element_type {
             let text_storage = global_path_types
@@ -3129,7 +3158,16 @@ fn build_direct_storage_bindings(
             )?;
         }
         for (field, type_id) in &info.field_types {
-            let kind = array_storage_kind(type_table, *type_id).ok_or_else(|| {
+            let (lane_type, lane_len) = match fixed_array_lane_type_and_len(type_table, *type_id) {
+                Some((element_type, inner_len)) => (
+                    element_type,
+                    info.len.checked_mul(inner_len).ok_or_else(|| {
+                        format!("JIT nested array lane capacity overflow for '{path}.{field}'")
+                    })?,
+                ),
+                None => (*type_id, info.len),
+            };
+            let kind = array_storage_kind(type_table, lane_type).ok_or_else(|| {
                 format!("unsupported direct storage field type {type_id} for '{path}.{field}'")
             })?;
             let field_hash = crate::backend::emit::hash_foreach_field_suffix(field);
@@ -3147,7 +3185,7 @@ fn build_direct_storage_bindings(
                     kind,
                     path_hash,
                     field_hash,
-                    info.len as usize,
+                    lane_len as usize,
                 )?;
             }
             insert_jit_array_binding(
@@ -3156,7 +3194,7 @@ fn build_direct_storage_bindings(
                 crate::backend::emit::DirectArrayStorageBinding {
                     slot: DirectStorageBinding::Absolute(address),
                     storage_bytes: storage_kind_bytes(kind),
-                    static_len: Some(info.len as usize),
+                    static_len: Some(lane_len as usize),
                 },
                 &format!("array lane '{path}.{field}'"),
             )?;

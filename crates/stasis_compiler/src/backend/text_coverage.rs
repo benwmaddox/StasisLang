@@ -297,15 +297,30 @@ impl Analyzer<'_> {
                         AssignTarget::IndexedPath {
                             collection_path,
                             index,
+                            nested_index,
                             ..
                         } => {
                             self.visit_expr(function_id, index, env, stack);
+                            if let Some(nested_index) = nested_index {
+                                self.visit_expr(function_id, nested_index, env, stack);
+                            }
                             self.poison_buffer(env, collection_path, "indexed buffer assignment");
                         }
                     }
                 }
                 SimpleStmt::Convert { target, source, .. } => {
                     self.visit_expr(function_id, source, env, stack);
+                    if let AssignTarget::IndexedPath {
+                        index,
+                        nested_index,
+                        ..
+                    } = target
+                    {
+                        self.visit_expr(function_id, index, env, stack);
+                        if let Some(nested_index) = nested_index {
+                            self.visit_expr(function_id, nested_index, env, stack);
+                        }
+                    }
                     self.poison_assign_target(env, target, "converted buffer assignment");
                 }
                 SimpleStmt::Expr(source) => self.visit_expr(function_id, source, env, stack),
@@ -441,8 +456,15 @@ impl Analyzer<'_> {
             SimpleExpr::Condition(condition) => {
                 self.visit_condition(function_id, condition, env, stack)
             }
-            SimpleExpr::IndexedPath { index, .. } => {
-                self.visit_expr(function_id, index, env, stack)
+            SimpleExpr::IndexedPath {
+                index,
+                nested_index,
+                ..
+            } => {
+                self.visit_expr(function_id, index, env, stack);
+                if let Some(nested_index) = nested_index {
+                    self.visit_expr(function_id, nested_index, env, stack);
+                }
             }
             SimpleExpr::DefaultValue(_)
             | SimpleExpr::Int(_)

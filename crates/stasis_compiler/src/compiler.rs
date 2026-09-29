@@ -12,7 +12,8 @@ use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::types::{TypeId, TypeTable};
 use crate::identity::{overload_discriminator, FnId, SymbolId};
 use crate::ir::hir::{
-    DebugStatement, FunctionHIR, ParsedSimpleStatements, SimpleCondition, SimpleExpr, SimpleStmt,
+    AssignTarget, DebugStatement, FunctionHIR, ParsedSimpleStatements, SimpleCondition, SimpleExpr,
+    SimpleStmt,
 };
 
 pub type FunctionId = FnId;
@@ -2113,15 +2114,33 @@ fn qualify_module_calls(
                 resolution,
                 qualify_bare_calls,
             ),
-            SimpleExpr::IndexedPath { index, .. } => expression(
+            SimpleExpr::IndexedPath {
                 index,
-                caller_path,
-                graph,
-                files,
-                functions,
-                resolution,
-                qualify_bare_calls,
-            ),
+                nested_index,
+                ..
+            } => {
+                expression(
+                    index,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+                if let Some(nested_index) = nested_index {
+                    expression(
+                        nested_index,
+                        caller_path,
+                        graph,
+                        files,
+                        functions,
+                        resolution,
+                        qualify_bare_calls,
+                    )?;
+                }
+                Ok(())
+            }
             SimpleExpr::Call { target, args } => {
                 for argument in args.iter_mut() {
                     expression(
@@ -2262,6 +2281,45 @@ fn qualify_module_calls(
         }
     }
 
+    fn assign_target(
+        target: &mut AssignTarget,
+        caller_path: &str,
+        graph: &ModuleGraph,
+        files: &[SourceFile],
+        functions: &[FunctionMeta],
+        resolution: &ModuleResolutionIndex,
+        qualify_bare_calls: bool,
+    ) -> Result<(), String> {
+        if let AssignTarget::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } = target
+        {
+            expression(
+                index,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            )?;
+            if let Some(nested_index) = nested_index {
+                expression(
+                    nested_index,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn statement(
         value: &mut SimpleStmt,
         caller_path: &str,
@@ -2275,9 +2333,6 @@ fn qualify_module_calls(
             SimpleStmt::Let {
                 expression: value, ..
             }
-            | SimpleStmt::Assign {
-                expression: value, ..
-            }
             | SimpleStmt::Expr(value)
             | SimpleStmt::Return(value) => expression(
                 value,
@@ -2288,15 +2343,50 @@ fn qualify_module_calls(
                 resolution,
                 qualify_bare_calls,
             ),
-            SimpleStmt::Convert { source, .. } => expression(
-                source,
-                caller_path,
-                graph,
-                files,
-                functions,
-                resolution,
-                qualify_bare_calls,
-            ),
+            SimpleStmt::Assign {
+                target,
+                expression: value,
+                ..
+            } => {
+                assign_target(
+                    target,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+                expression(
+                    value,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )
+            }
+            SimpleStmt::Convert { target, source, .. } => {
+                assign_target(
+                    target,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )?;
+                expression(
+                    source,
+                    caller_path,
+                    graph,
+                    files,
+                    functions,
+                    resolution,
+                    qualify_bare_calls,
+                )
+            }
             SimpleStmt::If {
                 condition,
                 then_statements,
@@ -2459,7 +2549,15 @@ fn first_unexpanded_mandatory_call(
                 args.iter()
                     .find_map(|argument| expression(argument, candidates))
             }
-            SimpleExpr::IndexedPath { index, .. } => expression(index, candidates),
+            SimpleExpr::IndexedPath {
+                index,
+                nested_index,
+                ..
+            } => expression(index, candidates).or_else(|| {
+                nested_index
+                    .as_deref()
+                    .and_then(|index| expression(index, candidates))
+            }),
             SimpleExpr::Binary { lhs, rhs, .. } => {
                 expression(lhs, candidates).or_else(|| expression(rhs, candidates))
             }
@@ -2489,17 +2587,39 @@ fn first_unexpanded_mandatory_call(
         }
     }
 
+    fn assign_target(
+        target: &AssignTarget,
+        candidates: &[InlineExpressionCandidate],
+    ) -> Option<String> {
+        match target {
+            AssignTarget::IndexedPath {
+                index,
+                nested_index,
+                ..
+            } => expression(index, candidates).or_else(|| {
+                nested_index
+                    .as_ref()
+                    .and_then(|index| expression(index, candidates))
+            }),
+            AssignTarget::Local(_) | AssignTarget::GlobalPath(_) => None,
+        }
+    }
+
     fn statement(value: &SimpleStmt, candidates: &[InlineExpressionCandidate]) -> Option<String> {
         match value {
             SimpleStmt::Let {
                 expression: value, ..
             }
-            | SimpleStmt::Assign {
-                expression: value, ..
-            }
             | SimpleStmt::Expr(value)
             | SimpleStmt::Return(value) => expression(value, candidates),
-            SimpleStmt::Convert { source, .. } => expression(source, candidates),
+            SimpleStmt::Assign {
+                target,
+                expression: rhs,
+                ..
+            } => assign_target(target, candidates).or_else(|| expression(rhs, candidates)),
+            SimpleStmt::Convert { target, source, .. } => {
+                assign_target(target, candidates).or_else(|| expression(source, candidates))
+            }
             SimpleStmt::If {
                 condition,
                 then_statements,
@@ -2550,7 +2670,11 @@ fn inline_expression_calls(
                     collection_path,
                     index,
                     suffix: argument_suffix,
+                    nested_index,
                 }) => {
+                    if nested_index.is_some() {
+                        return SimpleExpr::Identifier(path.to_string());
+                    }
                     let combined_suffix = if argument_suffix.is_empty() {
                         suffix.to_string()
                     } else {
@@ -2560,6 +2684,7 @@ fn inline_expression_calls(
                         collection_path: collection_path.clone(),
                         index: index.clone(),
                         suffix: combined_suffix,
+                        nested_index: None,
                     };
                 }
                 _ => {}
@@ -2576,7 +2701,11 @@ fn inline_expression_calls(
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
             | SimpleExpr::Identifier(_) => true,
-            SimpleExpr::IndexedPath { index, .. } => is_safe_argument(index),
+            SimpleExpr::IndexedPath {
+                index,
+                nested_index,
+                ..
+            } => is_safe_argument(index) && nested_index.as_deref().is_none_or(is_safe_argument),
             SimpleExpr::Binary { lhs, rhs, .. } => is_safe_argument(lhs) && is_safe_argument(rhs),
             SimpleExpr::Condition(condition) => is_safe_condition(condition),
             SimpleExpr::Call { .. } => false,
@@ -2637,6 +2766,7 @@ fn inline_expression_calls(
             SimpleExpr::IndexedPath {
                 collection_path,
                 index,
+                nested_index,
                 ..
             } => {
                 if let Some(arguments) = arguments {
@@ -2647,6 +2777,9 @@ fn inline_expression_calls(
                     }
                 }
                 expression(index, candidates, caller_id, arguments, stack);
+                if let Some(nested_index) = nested_index {
+                    expression(nested_index, candidates, caller_id, arguments, stack);
+                }
             }
             SimpleExpr::Call { target, args } => {
                 for argument in args.iter_mut() {
@@ -2699,6 +2832,25 @@ fn inline_expression_calls(
         }
     }
 
+    fn assign_target(
+        value: &mut AssignTarget,
+        candidates: &[InlineExpressionCandidate],
+        caller_id: FunctionId,
+        stack: &mut Vec<FunctionId>,
+    ) {
+        if let AssignTarget::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } = value
+        {
+            expression(index, candidates, caller_id, None, stack);
+            if let Some(nested_index) = nested_index {
+                expression(nested_index, candidates, caller_id, None, stack);
+            }
+        }
+    }
+
     fn statement(
         value: &mut SimpleStmt,
         candidates: &[InlineExpressionCandidate],
@@ -2709,12 +2861,18 @@ fn inline_expression_calls(
             SimpleStmt::Let {
                 expression: value, ..
             }
-            | SimpleStmt::Assign {
-                expression: value, ..
-            }
             | SimpleStmt::Expr(value)
             | SimpleStmt::Return(value) => expression(value, candidates, caller_id, None, stack),
-            SimpleStmt::Convert { source, .. } => {
+            SimpleStmt::Assign {
+                target,
+                expression: value,
+                ..
+            } => {
+                assign_target(target, candidates, caller_id, stack);
+                expression(value, candidates, caller_id, None, stack);
+            }
+            SimpleStmt::Convert { target, source, .. } => {
+                assign_target(target, candidates, caller_id, stack);
                 expression(source, candidates, caller_id, None, stack)
             }
             SimpleStmt::If {
@@ -2839,6 +2997,7 @@ mod tests {
                 collection_path,
                 index,
                 suffix,
+                nested_index: None,
             }) if collection_path == "enemies"
                 && matches!(index.as_ref(), SimpleExpr::Int(0))
                 && suffix == "hp"

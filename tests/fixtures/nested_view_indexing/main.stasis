@@ -1,0 +1,58 @@
+const ROW_COUNT: i32 = 2;
+const VALUE_COUNT: i32 = 3;
+
+struct Row {
+    b: i32[VALUE_COUNT];
+}
+
+struct App {
+    a: Row[ROW_COUNT];
+}
+
+global app: App;
+
+function selected_column(): i32 {
+    return VALUE_COUNT - 1;
+}
+
+function main(): i32 {
+    let row: i32 = 1;
+    app.a[0].b[0] = 10;
+    app.a[0].b[1] = 1;
+    app.a[0].b[2] = 20;
+    app.a[1].b[0] = 30;
+    app.a[1].b[1] = 41;
+    app.a[row].b[selected_column()] = 42;
+    app.a[row].b[selected_column()] += 1;
+    if (app.a[0].b[0] != 10 || app.a[0].b[2] != 20 || app.a[1].b[0] != 30) {
+        return -1;
+    }
+    if (app.a[1].b[app.a[0].b[1]] != 41) {
+        return -1;
+    }
+    return app.a[row].b[selected_column()];
+}
+
+function @host_export(trap_outer_negative) trap_outer_negative(): i32 {
+    let row: i32 = -1;
+    let column: i32 = 0;
+    return app.a[row].b[column];
+}
+
+function @host_export(trap_outer_upper) trap_outer_upper(): i32 {
+    let row: i32 = ROW_COUNT;
+    let column: i32 = 0;
+    return app.a[row].b[column];
+}
+
+function @host_export(trap_inner_negative) trap_inner_negative(): i32 {
+    let row: i32 = 0;
+    let column: i32 = -1;
+    return app.a[row].b[column];
+}
+
+function @host_export(trap_inner_upper) trap_inner_upper(): i32 {
+    let row: i32 = 0;
+    let column: i32 = VALUE_COUNT;
+    return app.a[row].b[column];
+}

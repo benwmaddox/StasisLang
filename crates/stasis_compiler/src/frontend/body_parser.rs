@@ -299,6 +299,7 @@ pub(crate) fn parse_assignment_target(
     let (first, mut next) = parse_identifier(source, cursor)?;
     let mut collection_path = first.to_string();
     let mut index_expr: Option<SimpleExpr> = None;
+    let mut nested_index: Option<SimpleExpr> = None;
     let mut suffix = String::new();
 
     loop {
@@ -307,6 +308,12 @@ pub(crate) fn parse_assignment_target(
             break;
         };
         if byte == b'.' {
+            if nested_index.is_some() {
+                return Err(format!(
+                    "field access after a second collection index is unsupported in assignment target near '{}'",
+                    snippet_from(source, next)
+                ));
+            }
             next += 1;
             next = skip_ascii_whitespace(source, next);
             let (segment, after_segment) = parse_identifier(source, next)?;
@@ -323,9 +330,9 @@ pub(crate) fn parse_assignment_target(
             continue;
         }
         if byte == b'[' {
-            if index_expr.is_some() {
+            if index_expr.is_some() && (nested_index.is_some() || suffix.is_empty()) {
                 return Err(format!(
-                    "multiple index segments are unsupported in assignment target near '{}'",
+                    "second collection index requires one field path in assignment target near '{}'",
                     snippet_from(source, next)
                 ));
             }
@@ -342,14 +349,19 @@ pub(crate) fn parse_assignment_target(
                     snippet_from(source, next)
                 ));
             }
-            index_expr = Some(parse_simple_expression(index_text)?);
-            if let Some(const_i64) = eval_const_i64(index_expr.as_ref().expect("index expr set")) {
+            let expression = parse_simple_expression(index_text)?;
+            if let Some(const_i64) = eval_const_i64(&expression) {
                 if const_i64 < 0 {
                     return Err(
                         "negative collection indices are unsupported (use .length/.max_length)"
                             .to_string(),
                     );
                 }
+            }
+            if index_expr.is_some() {
+                nested_index = Some(expression);
+            } else {
+                index_expr = Some(expression);
             }
             next = close + 1;
             continue;
@@ -363,6 +375,7 @@ pub(crate) fn parse_assignment_target(
                 collection_path,
                 index,
                 suffix,
+                nested_index,
             },
             next,
         ))
@@ -1701,9 +1714,16 @@ impl ExprParser<'_> {
     fn parse_identifier_access_chain(&mut self, first: String) -> Result<SimpleExpr, String> {
         let mut collection_path = first;
         let mut index_expr: Option<SimpleExpr> = None;
+        let mut nested_index: Option<SimpleExpr> = None;
         let mut suffix = String::new();
         loop {
             if matches!(self.tokens.get(self.cursor), Some(ExprToken::Dot)) {
+                if nested_index.is_some() {
+                    return Err(
+                        "field access after a second collection index is unsupported in expression path"
+                            .to_string(),
+                    );
+                }
                 if let Some(ExprToken::Identifier(method)) =
                     self.tokens.get(self.cursor + 1).cloned()
                 {
@@ -1737,6 +1757,7 @@ impl ExprParser<'_> {
                             collection_path,
                             index: Box::new(index),
                             suffix,
+                            nested_index: nested_index.map(Box::new),
                         }
                     } else {
                         SimpleExpr::Identifier(collection_path)
@@ -1781,11 +1802,6 @@ impl ExprParser<'_> {
                 continue;
             }
             if matches!(self.tokens.get(self.cursor), Some(ExprToken::LBracket)) {
-                if index_expr.is_some() {
-                    return Err(
-                        "multiple index segments are unsupported in expression path".to_string()
-                    );
-                }
                 self.cursor += 1;
                 let expression = self.parse_precedence(0)?;
                 if let Some(const_i64) = eval_const_i64(&expression) {
@@ -1799,7 +1815,16 @@ impl ExprParser<'_> {
                 match self.tokens.get(self.cursor) {
                     Some(ExprToken::RBracket) => {
                         self.cursor += 1;
-                        index_expr = Some(expression);
+                        if index_expr.is_none() {
+                            index_expr = Some(expression);
+                        } else if nested_index.is_none() && !suffix.is_empty() {
+                            nested_index = Some(expression);
+                        } else {
+                            return Err(
+                                "second collection index requires one field path in expression path"
+                                    .to_string(),
+                            );
+                        }
                     }
                     _ => return Err("expected ']' in expression path".to_string()),
                 }
@@ -1812,6 +1837,7 @@ impl ExprParser<'_> {
                 collection_path,
                 index: Box::new(index),
                 suffix,
+                nested_index: nested_index.map(Box::new),
             })
         } else {
             Ok(SimpleExpr::Identifier(collection_path))
