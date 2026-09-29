@@ -16,6 +16,7 @@
 #include <string.h>
 #include "stasis_asset_path.h"
 #include "stasis_audio_assets.h"
+#include "stasis_recording_audio.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -2062,8 +2063,76 @@ static int g_audio_write_sample = 0;
 static int g_audio_queued_samples = 0;
 static int64_t g_audio_running_frame_index = 0;
 static int g_recording_audio_enabled = 0;
+static int g_recording_audio_simulation_enabled = 0;
+static int g_recording_audio_device_accepting = 1;
+static int g_recording_audio_device_paused = 0;
+
+#define STASIS_RECORDING_AUDIO_SILENCE_THRESHOLD 0.0001f
+
+static StasisRecordingAudioHealthV1 g_recording_audio_health;
+static double g_recording_audio_sum_squares = 0.0;
+static uint64_t g_recording_audio_sample_count = 0;
+static uint32_t g_recording_audio_current_silent_run = 0;
 
 static StasisAudioAssetStore g_audio_assets;
+
+static uint32_t stasis_recording_audio_saturating_add(uint32_t left, uint32_t right) {
+    return UINT32_MAX - left < right ? UINT32_MAX : left + right;
+}
+
+static void stasis_recording_audio_reset_health(void) {
+    memset(&g_recording_audio_health, 0, sizeof(g_recording_audio_health));
+    g_recording_audio_health.struct_size = (uint32_t)sizeof(g_recording_audio_health);
+    g_recording_audio_health.version = STASIS_RECORDING_AUDIO_HEALTH_V1_VERSION;
+    g_recording_audio_health.first_sound_frame = UINT32_MAX;
+    g_recording_audio_sum_squares = 0.0;
+    g_recording_audio_sample_count = 0;
+    g_recording_audio_current_silent_run = 0;
+}
+
+static void stasis_recording_audio_record_output(const float* output, int frame_count) {
+    if (!output || frame_count <= 0) return;
+    for (int frame = 0; frame < frame_count; frame++) {
+        const float left = output[frame * 2];
+        const float right = output[frame * 2 + 1];
+        const float peak = fmaxf(fabsf(left), fabsf(right));
+        g_recording_audio_sum_squares += (double)left * (double)left;
+        g_recording_audio_sum_squares += (double)right * (double)right;
+        g_recording_audio_sample_count += 2;
+        if (peak > g_recording_audio_health.peak) {
+            g_recording_audio_health.peak = peak;
+        }
+
+        const uint32_t output_frame = g_recording_audio_health.output_frames;
+        if (peak > STASIS_RECORDING_AUDIO_SILENCE_THRESHOLD) {
+            if (g_recording_audio_health.first_sound_frame == UINT32_MAX) {
+                g_recording_audio_health.first_sound_frame = output_frame;
+            } else if (g_recording_audio_current_silent_run >
+                       g_recording_audio_health.longest_silent_run_after_sound) {
+                g_recording_audio_health.longest_silent_run_after_sound =
+                    g_recording_audio_current_silent_run;
+            }
+            g_recording_audio_current_silent_run = 0;
+            g_recording_audio_health.trailing_silent_frames = 0;
+        } else if (g_recording_audio_health.first_sound_frame != UINT32_MAX) {
+            g_recording_audio_current_silent_run = stasis_recording_audio_saturating_add(
+                g_recording_audio_current_silent_run, 1);
+            g_recording_audio_health.trailing_silent_frames =
+                g_recording_audio_current_silent_run;
+            if (g_recording_audio_current_silent_run >
+                g_recording_audio_health.longest_silent_run_after_sound) {
+                g_recording_audio_health.longest_silent_run_after_sound =
+                    g_recording_audio_current_silent_run;
+            }
+        }
+        g_recording_audio_health.output_frames = stasis_recording_audio_saturating_add(
+            g_recording_audio_health.output_frames, 1);
+    }
+    if (g_recording_audio_sample_count > 0) {
+        g_recording_audio_health.rms = (float)sqrt(
+            g_recording_audio_sum_squares / (double)g_recording_audio_sample_count);
+    }
+}
 
 static int resolve_asset_path(const char* path, char* out, size_t out_size);
 
@@ -8127,7 +8196,9 @@ STASIS_EXPORT int stasis_audio_get_queued_frames(void) {
 }
 
 STASIS_EXPORT int stasis_audio_get_underruns(void) {
-    if (g_recording_audio_enabled) return 0;
+    if (g_recording_audio_enabled) {
+        return g_recording_audio_simulation_enabled ? g_audio_underruns : 0;
+    }
     if (!stasis_audio_ensure_init()) return 0;
 
     int underruns = 0;
@@ -8140,6 +8211,19 @@ STASIS_EXPORT int stasis_audio_get_underruns(void) {
 STASIS_EXPORT int stasis_audio_push_f32_interleaved(const float* interleaved_lr, int frame_count) {
     if (!interleaved_lr || frame_count <= 0) return 0;
     if (g_recording_audio_enabled) {
+        if (g_recording_audio_simulation_enabled) {
+            g_recording_audio_health.push_attempts = stasis_recording_audio_saturating_add(
+                g_recording_audio_health.push_attempts, 1);
+            g_recording_audio_health.requested_frames = stasis_recording_audio_saturating_add(
+                g_recording_audio_health.requested_frames, (uint32_t)frame_count);
+            if (!g_recording_audio_device_accepting || g_recording_audio_device_paused) {
+                g_recording_audio_health.refused_pushes = stasis_recording_audio_saturating_add(
+                    g_recording_audio_health.refused_pushes, 1);
+                g_recording_audio_health.refused_frames = stasis_recording_audio_saturating_add(
+                    g_recording_audio_health.refused_frames, (uint32_t)frame_count);
+                return 0;
+            }
+        }
         if (!stasis_audio_ensure_ring_init()) return 0;
     } else if (!stasis_audio_ensure_init()) {
         return 0;
@@ -8164,20 +8248,121 @@ STASIS_EXPORT int stasis_audio_push_f32_interleaved(const float* interleaved_lr,
     if (g_audio_stream) SDL_UnlockAudioStream(g_audio_stream);
 
     if (g_audio_channels <= 0) return 0;
-    return accepted_samples / g_audio_channels;
+    const int accepted_frames = accepted_samples / g_audio_channels;
+    if (g_recording_audio_enabled && g_recording_audio_simulation_enabled) {
+        g_recording_audio_health.accepted_frames = stasis_recording_audio_saturating_add(
+            g_recording_audio_health.accepted_frames, (uint32_t)accepted_frames);
+        if (accepted_frames < frame_count) {
+            g_recording_audio_health.refused_pushes = stasis_recording_audio_saturating_add(
+                g_recording_audio_health.refused_pushes, 1);
+            g_recording_audio_health.refused_frames = stasis_recording_audio_saturating_add(
+                g_recording_audio_health.refused_frames,
+                (uint32_t)(frame_count - accepted_frames));
+        }
+    }
+    return accepted_frames;
 }
 
 STASIS_EXPORT int stasis_set_recording_audio_config(int enabled) {
     if (g_audio_stream || g_audio_initialized) return 0;
-    if (!enabled && g_recording_audio_enabled) {
-        stasis_asset_tasks_shutdown();
-        stasis_audio_shutdown_internal();
+    if (!enabled) {
+        if (g_recording_audio_enabled) {
+            stasis_asset_tasks_shutdown();
+            stasis_audio_shutdown_internal();
+        }
+        g_recording_audio_enabled = 0;
+        g_recording_audio_simulation_enabled = 0;
+        g_recording_audio_device_accepting = 1;
+        g_recording_audio_device_paused = 0;
+        stasis_recording_audio_reset_health();
+        return 1;
     }
-    g_recording_audio_enabled = enabled != 0;
-    if (g_recording_audio_enabled) {
-        g_audio_sample_rate = 48000;
-        g_audio_channels = 2;
+    g_recording_audio_enabled = 1;
+    g_audio_sample_rate = 48000;
+    g_audio_channels = 2;
+    g_recording_audio_simulation_enabled = 0;
+    g_recording_audio_device_accepting = 1;
+    g_recording_audio_device_paused = 0;
+    stasis_recording_audio_reset_health();
+    return 1;
+}
+
+STASIS_EXPORT int stasis_recording_audio_configure_device_v1(
+    const StasisRecordingAudioDeviceConfigV1* config
+) {
+    if (!g_recording_audio_enabled || !config ||
+        config->struct_size < sizeof(StasisRecordingAudioDeviceConfigV1) ||
+        config->version != STASIS_RECORDING_AUDIO_DEVICE_CONFIG_V1_VERSION ||
+        config->callback_hz == 0 ||
+        config->callback_hz > STASIS_RECORDING_AUDIO_MAX_CALLBACK_HZ ||
+        config->refuse_push_for_ms > STASIS_RECORDING_AUDIO_MAX_REFUSAL_MS ||
+        !stasis_audio_ensure_ring_init()) {
+        return 0;
     }
+    g_audio_read_sample = 0;
+    g_audio_write_sample = 0;
+    g_audio_queued_samples = 0;
+    g_audio_underruns = 0;
+    g_audio_running_frame_index = 0;
+    g_recording_audio_device_accepting = config->refuse_push_for_ms == 0;
+    g_recording_audio_device_paused = 0;
+    g_recording_audio_simulation_enabled = 1;
+    stasis_recording_audio_reset_health();
+    return 1;
+}
+
+STASIS_EXPORT int stasis_recording_audio_set_device_state_v1(
+    int accepting_pushes,
+    int paused
+) {
+    if (!g_recording_audio_enabled || !g_recording_audio_simulation_enabled ||
+        (accepting_pushes != 0 && accepting_pushes != 1) ||
+        (paused != 0 && paused != 1)) {
+        return 0;
+    }
+    if (paused && !g_recording_audio_device_paused) {
+        g_audio_read_sample = 0;
+        g_audio_write_sample = 0;
+        g_audio_queued_samples = 0;
+    }
+    g_recording_audio_device_accepting = accepting_pushes;
+    g_recording_audio_device_paused = paused;
+    return 1;
+}
+
+STASIS_EXPORT int stasis_recording_audio_advance_v1(
+    float* output_stereo,
+    int frame_count
+) {
+    if (!g_recording_audio_enabled || !g_recording_audio_simulation_enabled ||
+        !output_stereo || frame_count <= 0 || frame_count > INT_MAX / 2) {
+        return 0;
+    }
+    const int requested_samples = frame_count * 2;
+    if (g_recording_audio_device_paused) {
+        SDL_memset(output_stereo, 0, (size_t)requested_samples * sizeof(float));
+    } else {
+        if (g_audio_queued_samples < requested_samples && !stasis_audio_has_active_voice()) {
+            if (g_audio_underruns < INT_MAX) g_audio_underruns++;
+            g_recording_audio_health.underruns = stasis_recording_audio_saturating_add(
+                g_recording_audio_health.underruns, 1);
+        }
+        if (stasis_audio_mix_output(output_stereo, frame_count) != frame_count) return 0;
+    }
+    g_recording_audio_health.callbacks = stasis_recording_audio_saturating_add(
+        g_recording_audio_health.callbacks, 1);
+    stasis_recording_audio_record_output(output_stereo, frame_count);
+    return frame_count;
+}
+
+STASIS_EXPORT int stasis_recording_audio_get_health_v1(
+    StasisRecordingAudioHealthV1* output
+) {
+    if (!g_recording_audio_enabled || !g_recording_audio_simulation_enabled || !output ||
+        output->struct_size < sizeof(StasisRecordingAudioHealthV1)) {
+        return 0;
+    }
+    *output = g_recording_audio_health;
     return 1;
 }
 

@@ -589,6 +589,7 @@ if(STASIS_MOBILE_RUNTIME_BUILD_TESTS)
             stasis_recording_audio_test
             tests/stasis_recording_audio_test.c
         )
+        target_include_directories(stasis_recording_audio_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
         target_link_libraries(stasis_recording_audio_test PRIVATE stasis_graphics_static)
         target_compile_definitions(
             stasis_recording_audio_test

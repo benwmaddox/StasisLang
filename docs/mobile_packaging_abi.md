@@ -159,6 +159,12 @@ Rules:
   not require dynamic game code replacement.
 - Audio and graphics device unavailability must leave gameplay state coherent
   and report diagnostics instead of faking successful device setup.
+- `AudioStream.available` is a refreshed health signal; it does not guarantee
+  that an individual push will be accepted. `push()` returns the accepted frame
+  count, and a short or zero result can be transient while the device is full,
+  paused, or waiting for focus. Producers should use `frames_wanted()` with
+  `queued_frames` and retry after refresh instead of disabling a stream on the
+  first refusal. Android may reject stream pushes until audio focus is granted.
 
 ## Non-Goals As Compatibility Rules
 

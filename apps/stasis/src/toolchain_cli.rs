@@ -17,7 +17,8 @@ use stasis::{
     run_self_host_aot_cli_with_project_configuration,
     run_self_host_aot_cli_with_project_configuration_and_release_asset_transforms, sign_artifacts,
     signing_status, verify_artifacts, DesktopNetworkMode, LiveRunConfig, PlayReplayConfig,
-    ProjectCompilationConfiguration, SigningOptions, StasisTestRunSession,
+    ProjectCompilationConfiguration, RecordingAudioDeviceSimulation, SigningOptions,
+    StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, resolve_project_asset_paths,
@@ -110,6 +111,7 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_package_provenance_reader.h",
     "stasis_audio_assets.c",
     "stasis_audio_assets.h",
+    "stasis_recording_audio.h",
     "stasis_graphics.c",
     "stasis_mixed_quad_planner.h",
     "stasis_sprite_atlas_policy.h",
@@ -430,6 +432,9 @@ enum ToolchainCommand {
         tick: String,
         #[arg(long, default_value = "render")]
         render: String,
+        /// Simulate deterministic callback/refusal behavior from a versioned JSON profile.
+        #[arg(long, value_name = "PATH")]
+        audio_device_profile: Option<PathBuf>,
     },
     #[command(name = "__validate-runtime", hide = true)]
     ValidateRuntime {
@@ -443,6 +448,8 @@ enum ToolchainCommand {
         tick: String,
         #[arg(long, default_value = "render")]
         render: String,
+        #[arg(long, value_name = "PATH")]
+        audio_device_profile: Option<PathBuf>,
     },
     /// JIT-compile and run main() in the headless toolchain runtime.
     Run {
@@ -1813,8 +1820,17 @@ fn execute(
                     setup,
                     tick,
                     render,
+                    audio_device_profile,
                 } => validate_runtime_command(
-                    &workspace, path, op, value, frames, setup, tick, render,
+                    &workspace,
+                    path,
+                    op,
+                    value,
+                    frames,
+                    setup,
+                    tick,
+                    render,
+                    audio_device_profile.as_deref(),
                 ),
                 ToolchainCommand::ValidateRuntime {
                     frames,
@@ -1822,6 +1838,7 @@ fn execute(
                     setup,
                     tick,
                     render,
+                    audio_device_profile,
                 } => validate_fresh_runtime(
                     &workspace,
                     frames,
@@ -1829,6 +1846,7 @@ fn execute(
                     &setup,
                     &tick,
                     &render,
+                    audio_device_profile.as_deref(),
                 ),
                 ToolchainCommand::Run {
                     watch,
@@ -3550,6 +3568,7 @@ fn validate_fresh_runtime(
     setup: &str,
     tick: &str,
     render: &str,
+    audio_device_profile_path: Option<&Path>,
 ) -> Result<CommandResult, String> {
     if frames > 600 {
         return Err("frames exceeds the 600-frame limit".to_string());
@@ -3572,6 +3591,21 @@ fn validate_fresh_runtime(
     }
     let entry = workspace.root.join(&workspace.manifest.entry);
     validate_workspace_destination(workspace, "entry", &entry)?;
+    let audio_device_profile = audio_device_profile_path
+        .map(|path| record::load_audio_device_profile(workspace, path, None))
+        .transpose()?;
+    let audio_gfx = audio_device_profile
+        .as_ref()
+        .map(|_| stasis_dynload::StasisGraphicsApi::load_default())
+        .transpose()?;
+    if let Some(gfx) = audio_gfx.as_ref() {
+        gfx.set_recording_audio_config(true)?;
+    }
+    let _recording_audio_guard = audio_gfx.as_ref().map(RecordingAudioConfigGuard::new);
+    let mut audio_simulation = match (audio_gfx.as_ref(), audio_device_profile) {
+        (Some(gfx), Some(profile)) => Some(RecordingAudioDeviceSimulation::new(gfx, profile)?),
+        _ => None,
+    };
     let source = fs::read_to_string(&entry)
         .map_err(|error| format!("failed to read entry {}: {error}", entry.display()))?;
     let mut jit = JitProcess::new();
@@ -3581,9 +3615,21 @@ fn validate_fresh_runtime(
     jit.upsert_file(display_path(&entry), source);
     jit.compile()
         .map_err(|error| format!("fresh validation compile failed: {error:?}"))?;
+    if let Some(simulation) = audio_simulation.as_mut() {
+        simulation.advance_to_tick(0)?;
+    }
     execute_noarg_entry(&jit, setup)?;
-    for _ in 0..frames {
+    for tick_index in 0..frames {
+        if let Some(simulation) = audio_simulation.as_mut() {
+            simulation.advance_to_tick(u64::from(tick_index))?;
+        }
         execute_noarg_entry(&jit, tick)?;
+        if let Some(simulation) = audio_simulation.as_mut() {
+            simulation.finish_tick(tick_index.saturating_add(1))?;
+        }
+    }
+    if let Some(simulation) = audio_simulation.as_mut() {
+        simulation.advance_to_tick(u64::from(frames))?;
     }
     execute_noarg_entry(&jit, render)?;
 
@@ -3610,16 +3656,48 @@ fn validate_fresh_runtime(
             "passed": passed,
         }));
     }
-    Ok(CommandResult::success(
-        "fresh runtime validation complete",
-        json!({
-            "baseline": "fresh",
-            "entrypoints": {"setup": setup, "tick": tick, "render": render},
-            "frames": frames,
-            "requirements_met": requirements_met,
-            "checks": checks,
-        }),
-    ))
+    let mut data = json!({
+        "baseline": "fresh",
+        "entrypoints": {"setup": setup, "tick": tick, "render": render},
+        "frames": frames,
+        "requirements_met": requirements_met,
+        "checks": checks,
+    });
+    let audio_health = audio_simulation
+        .as_ref()
+        .map(RecordingAudioDeviceSimulation::health)
+        .transpose()?;
+    let audio_failed = audio_health
+        .as_ref()
+        .is_some_and(|health| health.status == "failed");
+    if let Some(health) = audio_health {
+        data["audio_health"] = serde_json::to_value(&health)
+            .map_err(|error| format!("failed to encode audio health report: {error}"))?;
+    }
+    let result = CommandResult {
+        code: i32::from(audio_failed),
+        human: if audio_failed {
+            "fresh runtime audio validation failed".to_string()
+        } else {
+            "fresh runtime validation complete".to_string()
+        },
+        data,
+    };
+    Ok(result)
+}
+
+struct RecordingAudioConfigGuard<'a>(&'a stasis_dynload::StasisGraphicsApi);
+
+impl<'a> RecordingAudioConfigGuard<'a> {
+    fn new(gfx: &'a stasis_dynload::StasisGraphicsApi) -> Self {
+        Self(gfx)
+    }
+}
+
+impl Drop for RecordingAudioConfigGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.set_recording_audio_config(false);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3632,6 +3710,7 @@ fn validate_runtime_command(
     setup: String,
     tick: String,
     render: String,
+    audio_device_profile_path: Option<&Path>,
 ) -> Result<CommandResult, String> {
     let expected = serde_json::from_str(&value).unwrap_or(Value::String(value));
     let requirements = serde_json::to_string(&[RuntimeValidationRequirement {
@@ -3640,7 +3719,18 @@ fn validate_runtime_command(
         value: expected,
     }])
     .map_err(|error| format!("failed encoding runtime requirement: {error}"))?;
-    let result = validate_fresh_runtime(workspace, frames, &requirements, &setup, &tick, &render)?;
+    let result = validate_fresh_runtime(
+        workspace,
+        frames,
+        &requirements,
+        &setup,
+        &tick,
+        &render,
+        audio_device_profile_path,
+    )?;
+    if result.code != 0 {
+        return Ok(result);
+    }
     if !result
         .data
         .get("requirements_met")
@@ -12572,8 +12662,9 @@ mod tests {
         ])
         .expect("requirements");
 
-        let result = validate_fresh_runtime(&workspace, 2, &requirements, "main", "tick", "render")
-            .expect("validation");
+        let result =
+            validate_fresh_runtime(&workspace, 2, &requirements, "main", "tick", "render", None)
+                .expect("validation");
 
         assert_eq!(result.data["baseline"], "fresh");
         assert_eq!(result.data["requirements_met"], true);
@@ -13407,6 +13498,7 @@ mod tests {
                     before_tick: None,
                     replay: None,
                     record_replay: None,
+                    audio_device_profile: None,
                 },
             },
             Some(root.clone()),

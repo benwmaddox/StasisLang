@@ -74,8 +74,68 @@ for frame `n` are exactly `floor(n * 48000 / fps)`, so fractional rates do not
 accumulate rounding drift and no physical audio device is opened. This captures
 game-generated `AudioVoice` playback and `AudioStream.push()` samples only; it
 does not capture a microphone or system audio. PNG mode does not stage offline
-audio; guest code may still initialize and use the normal interactive audio API
-when that path is requested.
+audio unless `--audio-device-profile` is supplied; that profile exercises the
+guest stream API without adding an audio track to the PNG artifact.
+
+## Simulate a device-backed audio stream
+
+Pass `--audio-device-profile PATH` to `record` or `validate` to drive the public
+`AudioStream` API against a deterministic virtual device. The bounded, strict
+JSON profile is versioned and contains all of these fields:
+
+```json
+{
+  "schema_version": 1,
+  "tick_hz": 120,
+  "callback_hz": 50,
+  "refuse_push_for_ms": 17,
+  "pause_windows": [{ "start_ms": 120, "end_ms": 160 }],
+  "producer_stalls": [{ "after_tick": 5, "duration_ms": 80 }]
+}
+```
+
+The file is limited to 32 KiB. `tick_hz` is 1..240; `callback_hz` is 1..1000.
+For `record`, `tick_hz` must equal `--fps`; `validate` uses the profile's tick
+rate for its fresh setup/tick/render sequence. The refusal delay and pause
+endpoints are bounded to 600,000 ms. There may be at most 64 sorted,
+non-overlapping pause windows and 64 producer stalls. Stall `after_tick`
+values must increase strictly, and their combined duration is bounded to
+600,000 ms. Unknown or duplicate fields, unsupported versions, unbounded or
+unsorted events, and malformed values are rejected before guest startup.
+
+The host advances virtual audio callbacks independently from guest ticks using
+the 48 kHz sample clock. Producer stalls advance device health measurements but
+do not change the requested video frame count or the exact WAV sample schedule.
+For MP4/MP3 recording, the same callback output used for device health feeds the
+WAV stage; callback samples drained only during producer stalls are discarded.
+The WAV is bounded to exactly `floor(frames * 48000 / fps)` samples, using a
+partial final callback append and silence padding only if needed.
+The virtual device can refuse pushes during startup, pause and resume at the
+listed windows, and continue draining while a producer stall is in effect.
+
+`AudioStream.frames_wanted(target_frames)` refreshes `queued_frames` and returns
+the deficit needed to fill the queue toward the target. A zero result or a
+`push()` result smaller than requested can be transient: keep the stream alive,
+refresh queue health, and retry. `available` reports availability and health;
+it does not promise that the next push will be accepted. Android may refuse
+stream pushes until the app has audio focus.
+
+Profiled results include a stable `audio_health` JSON object with `status`,
+`peak`, `rms`, `first_sound_frame` (`4294967295` means no audible frame),
+`longest_silent_run_after_sound`, `trailing_silent_frames`, push
+attempt/requested/accepted/refused counts, `underruns`, and `warnings`. No push
+attempts are reported as `not_exercised`. A stream that was called but never
+produced audible accepted frames is `failed`: `validate` exits unsuccessfully
+and still returns the health object. `record` keeps a successfully published
+visual/audio artifact and reports an audio warning in its summary and JSON.
+Long trailing silence and underruns are reported as warnings so an intentional
+pause or short producer stall does not make a retrying stream fail validation.
+
+The checked-in producer fixtures exercise both sides of the contract:
+`tests/fixtures/audio_device_profile/broken.stasis` disables its stream on the
+first refusal, while `retry.stasis` continues to fill its queue. Their 120 Hz
+and 50 Hz profiles also cover mismatched callback rates, pause/resume, and a
+producer stall without requiring FFmpeg.
 
 Use an `.mp3` output for audio-only recording. It advances the same hidden desktop
 simulation, input, tick, render, and offline mixer loop but does not stage PNG frames:

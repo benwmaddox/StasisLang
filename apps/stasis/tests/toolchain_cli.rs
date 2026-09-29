@@ -1651,6 +1651,226 @@ fn fresh_runtime_validation_runs_in_a_separate_cli_process() {
 }
 
 #[test]
+fn audio_device_profiles_fail_abandoned_refusal_and_accept_retries_at_120_and_50_hz() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("repository root");
+    let fixture = root.join("tests/fixtures/audio_device_profile");
+    let parent = temp_dir("audio_device_profile");
+    let project = parent.join("profile_project");
+    fs::create_dir_all(&project).expect("create temporary profile project");
+    fs::write(
+        project.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"audio_device_profile","entry":"main.stasis","tests":"tests","output":"build","stdlib":"toolchain"}"#,
+    )
+    .expect("write profile project manifest");
+    fs::copy(
+        fixture.join("tick-120-callback-50.json"),
+        project.join("profile-120.json"),
+    )
+    .expect("copy 120 Hz profile");
+    fs::copy(
+        fixture.join("tick-50-callback-120.json"),
+        project.join("profile-50.json"),
+    )
+    .expect("copy 50 Hz profile");
+    fs::copy(
+        fixture.join("tick-120-callback-50-short-pause.json"),
+        project.join("profile-short-pause.json"),
+    )
+    .expect("copy mismatched-rate short-pause profile");
+    let cli_dir = parent.join("cli");
+    fs::create_dir_all(&cli_dir).expect("create isolated CLI directory");
+    let built_cli = PathBuf::from(env!("CARGO_BIN_EXE_stasis"));
+    let Some(runtime) = std::env::var_os("STASIS_TEST_AUDIO_RUNTIME_PATH").map(PathBuf::from)
+    else {
+        eprintln!(
+            "audio device profile integration skipped: STASIS_TEST_AUDIO_RUNTIME_PATH does not name a freshly built graphics runtime"
+        );
+        fs::remove_dir_all(&parent).ok();
+        return;
+    };
+    if !runtime.is_file() {
+        eprintln!(
+            "audio device profile integration skipped: fresh graphics runtime is unavailable at {}",
+            runtime.display()
+        );
+        fs::remove_dir_all(&parent).ok();
+        return;
+    }
+    let staged_cli = cli_dir.join(built_cli.file_name().expect("built CLI filename"));
+    fs::copy(&built_cli, &staged_cli).expect("stage CLI without a sibling runtime");
+    let built_cli_dir = built_cli.parent().expect("built CLI directory");
+    let bridge_name = format!(
+        "{}stasis_dynload{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let bridge_candidates = [
+        built_cli_dir.join(&bridge_name),
+        built_cli_dir.join("deps").join(&bridge_name),
+    ];
+    let bridge = bridge_candidates
+        .iter()
+        .find(|path| path.is_file())
+        .expect("built CLI runtime bridge");
+    fs::copy(bridge, cli_dir.join(&bridge_name)).expect("stage CLI runtime bridge");
+
+    for (tick_hz, profile_name) in [(120, "profile-120.json"), (50, "profile-50.json")] {
+        for (source_name, expected_status, expected_exit) in [
+            ("retry.stasis", "warning", 0),
+            ("broken.stasis", "failed", 1),
+        ] {
+            fs::copy(fixture.join(source_name), project.join("main.stasis"))
+                .expect("install audio producer fixture");
+            let workspace = project.to_str().expect("workspace path is UTF-8");
+            let profile = project
+                .join(profile_name)
+                .to_str()
+                .expect("profile path is UTF-8")
+                .to_string();
+            let frames = "40";
+            let mut command = Command::new(&staged_cli);
+            command
+                .env_remove("STASIS_RUNTIME_DLL_PATH")
+                .env("STASIS_RUNTIME_LIBRARY_PATH", &runtime)
+                .args([
+                    "--json",
+                    "--workspace",
+                    workspace,
+                    "validate",
+                    "ticks",
+                    "eq",
+                    frames,
+                    "--frames",
+                    frames,
+                ])
+                .arg("--audio-device-profile")
+                .arg(&profile);
+            let output = command.output().unwrap_or_else(|error| {
+                panic!("run {tick_hz} Hz {source_name} validation: {error}")
+            });
+            assert_eq!(
+                output.status.code(),
+                Some(expected_exit),
+                "stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let receipt: Value = serde_json::from_slice(&output.stdout)
+                .expect("parse audio profile validation JSON");
+            assert_eq!(receipt["result"]["audio_health"]["status"], expected_status);
+            assert!(receipt["result"]["audio_health"]["push_attempts"]
+                .as_u64()
+                .is_some_and(|count| count > 0));
+            if expected_status == "failed" {
+                assert_eq!(receipt["result"]["audio_health"]["accepted_frames"], 0);
+                assert!(!receipt["result"]["audio_health"]["warnings"]
+                    .as_array()
+                    .expect("health warnings")
+                    .is_empty());
+            } else {
+                assert!(receipt["result"]["audio_health"]["accepted_frames"]
+                    .as_u64()
+                    .is_some_and(|count| count > 0));
+            }
+        }
+    }
+
+    fs::copy(
+        fixture.join("resume-once.stasis"),
+        project.join("main.stasis"),
+    )
+    .expect("install one-shot producer for pause/resume regression");
+    let workspace = project.to_str().expect("workspace path is UTF-8");
+    let profile = project.join("profile-short-pause.json");
+    let mut short_pause = Command::new(&staged_cli);
+    short_pause
+        .env_remove("STASIS_RUNTIME_DLL_PATH")
+        .env("STASIS_RUNTIME_LIBRARY_PATH", &runtime)
+        .args([
+            "--json",
+            "--workspace",
+            workspace,
+            "validate",
+            "ticks",
+            "eq",
+            "40",
+            "--frames",
+            "40",
+        ])
+        .arg("--audio-device-profile")
+        .arg(&profile);
+    let short_pause_output = short_pause
+        .output()
+        .expect("run mismatched-rate pause/resume validation");
+    assert_eq!(
+        short_pause_output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&short_pause_output.stdout),
+        String::from_utf8_lossy(&short_pause_output.stderr)
+    );
+    let short_pause_receipt: Value = serde_json::from_slice(&short_pause_output.stdout)
+        .expect("parse mismatched-rate pause/resume receipt");
+    assert!(
+        short_pause_receipt["result"]["audio_health"]["accepted_frames"]
+            .as_u64()
+            .is_some_and(|count| count > 0)
+    );
+    assert_eq!(
+        short_pause_receipt["result"]["audio_health"]["first_sound_frame"], 960,
+        "the first callback after resume must retain the one-shot producer buffer"
+    );
+
+    fs::copy(fixture.join("broken.stasis"), project.join("main.stasis"))
+        .expect("install broken producer for record warning check");
+    let workspace = project.to_str().expect("workspace path is UTF-8");
+    let profile = project.join("profile-120.json");
+    let output_dir = project.join("recorded-warning");
+    let mut record = Command::new(&staged_cli);
+    record
+        .env_remove("STASIS_RUNTIME_DLL_PATH")
+        .env("STASIS_RUNTIME_LIBRARY_PATH", &runtime)
+        .args([
+            "--json",
+            "--workspace",
+            workspace,
+            "record",
+            "main.stasis",
+            "--output",
+        ])
+        .arg(&output_dir)
+        .args([
+            "--width", "2", "--height", "2", "--fps", "120", "--frames", "40",
+        ])
+        .arg("--audio-device-profile")
+        .arg(&profile);
+    let record_output = record.output().expect("run profiled PNG record");
+    assert_eq!(
+        record_output.status.code(),
+        Some(0),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&record_output.stdout),
+        String::from_utf8_lossy(&record_output.stderr)
+    );
+    let record_stdout = String::from_utf8_lossy(&record_output.stdout);
+    let record_json = record_stdout
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("{\"command\":\"record\""))
+        .expect("record JSON receipt follows renderer diagnostics");
+    let record_receipt: Value = serde_json::from_str(record_json).expect("parse record JSON");
+    assert_eq!(record_receipt["result"]["audio_health"]["status"], "failed");
+    assert!(record_receipt["result"]["audio_health"]["warnings"]
+        .as_array()
+        .is_some_and(|warnings| !warnings.is_empty()));
+    assert!(output_dir.join("frame-000001.png").is_file());
+    fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
 fn usage_compile_test_and_guest_exit_codes_are_stable() {
     let parent = temp_dir("failures");
     fs::create_dir_all(&parent).expect("create temp parent");

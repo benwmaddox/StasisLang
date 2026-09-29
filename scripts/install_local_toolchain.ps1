@@ -34,6 +34,7 @@ $runtimeSourceFiles = @(
   "stasis_package_provenance_reader.h",
   "stasis_audio_assets.c",
   "stasis_audio_assets.h",
+  "stasis_recording_audio.h",
   "stasis_graphics.c",
   "stasis_mixed_quad_planner.h",
   "stasis_sprite_atlas_policy.h",

@@ -335,7 +335,12 @@ restore release assets.
   the default. `--ticks` invokes `tick()` exactly `COUNT` times without calling `render()` or
   loading the graphics runtime. `--fast-forward` makes the no-pacing contract explicit and
   requires a positive tick count.
-- `record [ENTRY] --output PATH --width PX --height PX --fps FPS (--frames N|--duration S) [--before-tick FUNCTION]`:
+- `validate PATH OP VALUE [--frames N] [--audio-device-profile PATH]`: execute a fresh setup/tick/render
+  sequence and compare one scalar requirement. An audio-device profile runs the same bounded,
+  deterministic callback simulation used by `record`; no profile preserves the normal validation
+  path. A profiled stream that is called but never produces audible accepted frames fails while
+  retaining the `audio_health` result in JSON.
+- `record [ENTRY] --output PATH --width PX --height PX --fps FPS (--frames N|--duration S) [--before-tick FUNCTION] [--audio-device-profile PATH]`:
   execute the normal desktop JIT/render path on a hidden fixed-size SDL software presentation.
   An extensionless output path publishes an exact, numbered PNG sequence; an `.mp4` path stages
   those PNGs and the existing mixed game audio, then invokes FFmpeg H.264/yuv420p plus AAC at
@@ -348,7 +353,9 @@ restore release assets.
   frames once after input/live overrides and before tick, render, and capture/mix. Hook state changes
   are visible to the normal tick and render. Dimensions, rates,
   counts, output format, staged frame/WAV validation, encoder failures, and partial-output cleanup
-  are bounded and diagnosed. See
+  are bounded and diagnosed. A matching version-one audio-device profile includes queue refusal,
+  pause/resume, callback-rate, and producer-stall health in `audio_health` JSON without changing
+  the fixed media duration. See
   [Deterministic headless recording](headless_recording.md).
 - `replay RECORDING [--entry ENTRY] [--tick-sleep-us N]`: validate the recording identity,
   rebuild each complete HostFrame from sparse exact-bit changes, execute the normal JIT `tick()`
