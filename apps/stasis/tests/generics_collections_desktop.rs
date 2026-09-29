@@ -212,7 +212,10 @@ fn assert_binary_only_package(package: &Path) {
             } else {
                 let extension = child.extension().and_then(|value| value.to_str());
                 assert!(
-                    !matches!(extension, Some("stasis" | "rs" | "rlib" | "rmeta" | "toml")),
+                    !matches!(
+                        extension,
+                        Some("h" | "stasis" | "rs" | "rlib" | "rmeta" | "toml")
+                    ),
                     "desktop package leaked source or compiler metadata: {}",
                     child.display()
                 );
@@ -290,6 +293,19 @@ fn full_generics_desktop_package_launches_with_provenance_and_digest_frame() {
         executable.display()
     );
     assert!(provenance_path.is_file(), "missing package provenance");
+    if cfg!(windows) {
+        for relative in [
+            "generics_collections.dll",
+            "generics_collections.exe.launch",
+            "stasis_dynload.dll",
+            "stasis_graphics.dll",
+        ] {
+            assert!(
+                payload.join(relative).is_file(),
+                "missing Windows package payload {relative}"
+            );
+        }
+    }
     assert_binary_only_package(&package);
 
     let provenance: Value = serde_json::from_slice(
@@ -329,28 +345,19 @@ fn full_generics_desktop_package_launches_with_provenance_and_digest_frame() {
     } else {
         executable.with_file_name(format!("{executable_name}.launch"))
     };
-    let (launch_manifest, lifecycle_owner) = if cfg!(windows) {
-        assert!(
-            !launch_path.is_file(),
-            "Windows monolithic package must not require a runner launch sidecar: {}",
-            launch_path.display()
-        );
-        (None, "windows_monolithic_generated_bindings")
-    } else {
-        let launch_manifest =
-            fs::read_to_string(&launch_path).expect("read packaged desktop launch manifest");
-        let lifecycle_versions = launch_manifest
-            .lines()
-            .filter_map(|line| line.strip_prefix("render_construction_lifecycle_version="))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            lifecycle_versions,
-            vec!["1"],
-            "packaged desktop launch manifest must contain exactly one authoritative lifecycle-v1 entry: {}",
-            launch_path.display()
-        );
-        (Some(launch_manifest), "non_monolithic_generated_bridge")
-    };
+    let launch_manifest =
+        fs::read_to_string(&launch_path).expect("read packaged desktop launch manifest");
+    let lifecycle_versions = launch_manifest
+        .lines()
+        .filter_map(|line| line.strip_prefix("render_construction_lifecycle_version="))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lifecycle_versions,
+        vec!["1"],
+        "packaged desktop launch manifest must contain exactly one authoritative lifecycle-v1 entry: {}",
+        launch_path.display()
+    );
+    let lifecycle_owner = "non_monolithic_generated_bridge";
 
     let screenshot = tree.0.join("desktop-frame.png");
     let mut launch_command = Command::new(&executable);
@@ -383,23 +390,16 @@ fn full_generics_desktop_package_launches_with_provenance_and_digest_frame() {
         String::from_utf8_lossy(&launched.stdout),
         String::from_utf8_lossy(&launched.stderr)
     );
-    let lifecycle_diagnostic = if cfg!(windows) {
-        assert!(
-            !runner_diagnostics.contains("invalid_magic"),
-            "Windows monolithic render reported an invalid command header; diagnostics={runner_diagnostics}"
-        );
-        None
-    } else {
-        let expected = "render_construction_lifecycle_version=1";
-        assert!(
-            runner_diagnostics.lines().any(|line| {
-                line.starts_with("RUNNER_DIAG:")
-                    && line.split_ascii_whitespace().any(|field| field == expected)
-            }),
-            "packaged runner did not report lifecycle-v1 ownership; diagnostics={runner_diagnostics}"
-        );
-        Some(expected)
-    };
+    let lifecycle_diagnostic = "render_construction_lifecycle_version=1";
+    assert!(
+        runner_diagnostics.lines().any(|line| {
+            line.starts_with("RUNNER_DIAG:")
+                && line
+                    .split_ascii_whitespace()
+                    .any(|field| field == lifecycle_diagnostic)
+        }),
+        "packaged runner did not report lifecycle-v1 ownership; diagnostics={runner_diagnostics}"
+    );
     assert!(
         screenshot.is_file(),
         "packaged runtime did not capture a frame"

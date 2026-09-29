@@ -878,7 +878,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
         self.assertIn("process.communicate(timeout=5)", workflow)
         self.assertIn("except subprocess.TimeoutExpired:", workflow)
 
-    def test_windows_graphics_smoke_requires_monolithic_package_payload(self):
+    def test_windows_graphics_smoke_requires_runner_and_dll_package_payload(self):
         for workflow_name in (
             ".github/workflows/nightly-release.yml",
             ".github/workflows/bootstrap-artifacts.yml",
@@ -902,16 +902,19 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 r'if \(-not \(Test-Path "[^"\n]+/app/stasis_provenance\.json"\)\) \{ throw "game package provenance missing" \}',
                 workflow_name,
             )
-            self.assertRegex(
-                windows_block,
-                r'if \(Test-Path "[^"\n]+/app/ci_smoke\.dll"\) \{ throw "obsolete game package library present; monolithic Windows package must not contain app/ci_smoke\.dll" \}',
-                workflow_name,
-            )
-            self.assertNotRegex(
-                windows_block,
-                r'if \(-not \(Test-Path "[^"\n]+/app/ci_smoke\.dll"\)\)',
-                workflow_name,
-            )
+            for relative, message in (
+                ("ci_smoke.dll", "game package library missing"),
+                ("ci_smoke.exe.launch", "game package launch sidecar missing"),
+                ("stasis_graphics.dll", "game package graphics runtime missing"),
+                ("stasis_dynload.dll", "game package dynamic loader missing"),
+            ):
+                with self.subTest(workflow=workflow_name, relative=relative):
+                    self.assertRegex(
+                        windows_block,
+                        rf'if \(-not \(Test-Path "[^"\n]+/app/{re.escape(relative)}"\)\) '
+                        rf'\{{ throw "{re.escape(message)}" \}}',
+                        workflow_name,
+                    )
 
     def test_nightly_release_filters_top_level_regular_assets(self):
         workflow = (ROOT / ".github/workflows/nightly-release.yml").read_text(
