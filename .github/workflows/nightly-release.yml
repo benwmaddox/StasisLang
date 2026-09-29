@@ -853,6 +853,40 @@ jobs:
           toolchain="$(find target/android-prebuilt-toolchain -path '*/bin/stasis' -print -quit)"
           test -x "${toolchain}"
           sample="samples/mobile_storage_link"
+          python3 - "${sample}" <<'PY'
+          import base64, json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          manifest_path = root / "stasis.json"
+          value = json.loads(manifest_path.read_text())
+          value["android"] = {
+              "application_id": "com.stasislang.androidruntimeacceptance",
+              "label": "Android Runtime Acceptance",
+              "orientation": "sensorLandscape",
+              "version_code": 1,
+              "version_name": "1.0",
+              "launcher_resources": "branding/android/res",
+          }
+          manifest_path.write_text(json.dumps(value, indent=2) + "\n")
+          resources = root / "branding/android/res"
+          png = base64.b64decode(
+              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+          )
+          for density in ("mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"):
+              destination = resources / f"mipmap-{density}/ic_launcher.png"
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              destination.write_bytes(png)
+          foreground = resources / "drawable/icon_foreground.png"
+          foreground.parent.mkdir(parents=True, exist_ok=True)
+          foreground.write_bytes(png)
+          adaptive = resources / "mipmap-anydpi-v26/ic_launcher.xml"
+          adaptive.parent.mkdir(parents=True, exist_ok=True)
+          adaptive.write_text(
+              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+              '  <background android:drawable="@android:color/black" />\n'
+              '  <foreground android:drawable="@drawable/icon_foreground" />\n'
+              '</adaptive-icon>\n'
+          )
+          PY
           package_started="$(date +%s)"
           "${toolchain}" --workspace "${sample}" package-mobile --target android-arm64 --out dist/prebuilt-offline
           python3 - "${sample}/stasis.json" host <<'PY'

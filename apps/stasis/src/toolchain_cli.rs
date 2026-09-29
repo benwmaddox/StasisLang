@@ -8429,9 +8429,7 @@ fn assemble_mobile_shell(
     let platform_destination = staging_root.join(platform);
     copy_required_dir(&mobile_assets.join("common"), &common_destination)?;
     copy_required_dir(&mobile_assets.join(platform), &platform_destination)?;
-    let development_build = provenance["development_build"].as_bool() == Some(true);
-    let prebuilt_android_runtime =
-        matches!(target, PackageTarget::AndroidArm64) && !development_build;
+    let prebuilt_android_runtime = uses_prebuilt_android_runtime(target, provenance);
     let android_runtime_variant = if workspace
         .manifest
         .capabilities
@@ -8876,6 +8874,12 @@ fn validate_android_runtime_kit(
         "source_hashes": sources,
         "compile_contract": manifest["compile_contract"].clone(),
     }))
+}
+
+fn uses_prebuilt_android_runtime(target: PackageTarget, provenance: &Value) -> bool {
+    matches!(target, PackageTarget::AndroidArm64)
+        && provenance["development_build"].as_bool() == Some(false)
+        && provenance["release_tag"].as_str().is_some()
 }
 
 fn write_json_file(path: &Path, value: &Value) -> Result<(), String> {
@@ -14347,6 +14351,39 @@ mod tests {
             .expect_err("reject absent client variant");
         assert!(error.contains("missing the client variant"));
         remove_temp(&root);
+    }
+
+    #[test]
+    fn android_prebuilt_runtime_is_limited_to_verified_release_packages() {
+        let official = json!({
+            "development_build": false,
+            "release_tag": "nightly-20260929-747"
+        });
+        let local_release = json!({
+            "development_build": false,
+            "release_tag": Value::Null
+        });
+        let development = json!({
+            "development_build": true,
+            "release_tag": Value::Null
+        });
+
+        assert!(uses_prebuilt_android_runtime(
+            PackageTarget::AndroidArm64,
+            &official
+        ));
+        assert!(!uses_prebuilt_android_runtime(
+            PackageTarget::AndroidArm64,
+            &local_release
+        ));
+        assert!(!uses_prebuilt_android_runtime(
+            PackageTarget::AndroidArm64,
+            &development
+        ));
+        assert!(!uses_prebuilt_android_runtime(
+            PackageTarget::AndroidX86_64,
+            &official
+        ));
     }
 
     #[test]

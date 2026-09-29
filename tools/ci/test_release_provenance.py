@@ -301,6 +301,14 @@ class ReleaseProvenanceTests(unittest.TestCase):
                     "project_configuration": self.project_configuration(
                         "android-arm64"
                     ),
+                    "android_runtime": {
+                        "mode": "source",
+                        "variant": {
+                            "offline": "offline",
+                            "network": "host",
+                            "network_client": "client",
+                        }[mode],
+                    },
                 }
                 (package / "stasis_mobile_package.json").write_text(
                     json.dumps(receipt), encoding="utf-8"
@@ -338,6 +346,17 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 (destination.parent / "client.txt").write_bytes(
                     {"offline": b"0 0", "network": b"1 0", "network_client": b"0 1"}[mode]
                 )
+                runtime_source = source.parent / "runtime.txt"
+                runtime_source.write_bytes(
+                    b"@STASIS_ANDROID_RUNTIME_MODE@ @STASIS_ANDROID_RUNTIME_VARIANT@"
+                )
+                (destination.parent / "runtime.txt").write_bytes(
+                    {
+                        "offline": b"source offline",
+                        "network": b"source host",
+                        "network_client": b"source client",
+                    }[mode]
+                )
                 atlas_source = release / "mobile/shells/common/atlas.c"
                 atlas_source.parent.mkdir(parents=True)
                 atlas_source.write_bytes(b"page_size=@STASIS_SPRITE_ATLAS_PAGE_SIZE@\n")
@@ -370,7 +389,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
                         path.relative_to(release).as_posix(): hashlib.sha256(
                             path.read_bytes()
                         ).hexdigest()
-                        for path in (source, activity_source, atlas_source)
+                        for path in (source, activity_source, runtime_source, atlas_source)
                     },
                 }
                 project_configuration = self.project_configuration("android-arm64")

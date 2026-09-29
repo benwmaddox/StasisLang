@@ -90,6 +90,8 @@ class AndroidRuntimeBuildTests(unittest.TestCase):
         self.assertIn("package-mobile (three variants)", workflow)
         self.assertIn('apksigner verify --verbose "${apk}"', workflow)
         self.assertIn('--required-asset "" "${apk}"', workflow)
+        self.assertIn('"launcher_resources": "branding/android/res"', workflow)
+        self.assertIn('mipmap-anydpi-v26/ic_launcher.xml', workflow)
         self.assertIn("does not claim the private consumer job is under 60 seconds", workflow)
 
 
