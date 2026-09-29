@@ -116,6 +116,113 @@ pub struct PlayProfileConfig {
     pub output_path: Option<PathBuf>,
 }
 
+/// Deterministic version-one profile for simulating a device-backed audio
+/// stream during a headless validation or recording run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioDeviceProfileV1 {
+    pub schema_version: u32,
+    pub tick_hz: u32,
+    pub callback_hz: u32,
+    pub refuse_push_for_ms: u32,
+    pub pause_windows: Vec<AudioDevicePauseWindowV1>,
+    pub producer_stalls: Vec<AudioDeviceProducerStallV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioDevicePauseWindowV1 {
+    pub start_ms: u32,
+    pub end_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AudioDeviceProducerStallV1 {
+    pub after_tick: u32,
+    pub duration_ms: u32,
+}
+
+const AUDIO_DEVICE_PROFILE_MAX_TIME_MS: u32 = 600_000;
+const AUDIO_DEVICE_PROFILE_MAX_EVENTS: usize = 64;
+
+impl AudioDeviceProfileV1 {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != 1 {
+            return Err(format!(
+                "audio device profile schema_version must be 1 (got {})",
+                self.schema_version
+            ));
+        }
+        if !(1..=240).contains(&self.tick_hz) {
+            return Err("audio device profile tick_hz must be between 1 and 240".to_string());
+        }
+        if !(1..=1000).contains(&self.callback_hz) {
+            return Err("audio device profile callback_hz must be between 1 and 1000".to_string());
+        }
+        if self.refuse_push_for_ms > AUDIO_DEVICE_PROFILE_MAX_TIME_MS {
+            return Err(format!(
+                "audio device profile refuse_push_for_ms must not exceed {AUDIO_DEVICE_PROFILE_MAX_TIME_MS}"
+            ));
+        }
+        if self.pause_windows.len() > AUDIO_DEVICE_PROFILE_MAX_EVENTS {
+            return Err(format!(
+                "audio device profile may contain at most {AUDIO_DEVICE_PROFILE_MAX_EVENTS} pause windows"
+            ));
+        }
+        let mut previous_end = 0;
+        for (index, window) in self.pause_windows.iter().enumerate() {
+            if window.start_ms >= window.end_ms {
+                return Err(format!(
+                    "audio device profile pause window {index} must end after it starts"
+                ));
+            }
+            if window.end_ms > AUDIO_DEVICE_PROFILE_MAX_TIME_MS {
+                return Err(format!(
+                    "audio device profile pause window {index} must end by {AUDIO_DEVICE_PROFILE_MAX_TIME_MS} ms"
+                ));
+            }
+            if index > 0 && window.start_ms < previous_end {
+                return Err(
+                    "audio device profile pause windows must be sorted and non-overlapping"
+                        .to_string(),
+                );
+            }
+            previous_end = window.end_ms;
+        }
+        if self.producer_stalls.len() > AUDIO_DEVICE_PROFILE_MAX_EVENTS {
+            return Err(format!(
+                "audio device profile may contain at most {AUDIO_DEVICE_PROFILE_MAX_EVENTS} producer stalls"
+            ));
+        }
+        let mut previous_tick = 0;
+        let mut total_stall_ms = 0u32;
+        for (index, stall) in self.producer_stalls.iter().enumerate() {
+            if stall.after_tick == 0 || stall.after_tick <= previous_tick {
+                return Err(
+                    "audio device profile producer stalls must use strictly increasing after_tick values starting at 1"
+                        .to_string(),
+                );
+            }
+            if stall.duration_ms == 0 || stall.duration_ms > AUDIO_DEVICE_PROFILE_MAX_TIME_MS {
+                return Err(format!(
+                    "audio device profile producer stall {index} duration_ms must be between 1 and {AUDIO_DEVICE_PROFILE_MAX_TIME_MS}"
+                ));
+            }
+            total_stall_ms = total_stall_ms
+                .checked_add(stall.duration_ms)
+                .ok_or_else(|| "audio device profile total stall duration overflow".to_string())?;
+            if total_stall_ms > AUDIO_DEVICE_PROFILE_MAX_TIME_MS {
+                return Err(format!(
+                    "audio device profile total producer stall duration must not exceed {AUDIO_DEVICE_PROFILE_MAX_TIME_MS} ms"
+                ));
+            }
+            previous_tick = stall.after_tick;
+        }
+        Ok(())
+    }
+}
+
 /// Fixed-rate capture inserted into the existing JIT play loop.
 ///
 /// The runtime owns presentation and PNG encoding; the host only schedules one
@@ -129,6 +236,254 @@ pub struct PlayFrameCaptureConfig {
     pub frame_count: u64,
     pub audio_output: Option<PathBuf>,
     pub before_tick_function: Option<String>,
+    pub audio_device_profile: Option<AudioDeviceProfileV1>,
+    pub audio_health_output: Option<PathBuf>,
+}
+
+/// Deterministic callback clock shared by profiled headless record and validate.
+pub struct RecordingAudioDeviceSimulation<'a> {
+    gfx: &'a stasis_dynload::StasisGraphicsApi,
+    profile: AudioDeviceProfileV1,
+    next_callback: u64,
+    stall_offset_us: u64,
+    state_time_us: u64,
+    state: Option<(bool, bool)>,
+    audio_output: Option<RecordingAudioDeviceOutput>,
+}
+
+impl<'a> RecordingAudioDeviceSimulation<'a> {
+    pub fn new(
+        gfx: &'a stasis_dynload::StasisGraphicsApi,
+        profile: AudioDeviceProfileV1,
+    ) -> Result<Self, String> {
+        Self::new_inner(gfx, profile, None)
+    }
+
+    fn new_with_audio_output(
+        gfx: &'a stasis_dynload::StasisGraphicsApi,
+        profile: AudioDeviceProfileV1,
+        sink: RecordingAudioSink,
+        frame_limit: u64,
+    ) -> Result<Self, String> {
+        Self::new_inner(
+            gfx,
+            profile,
+            Some(RecordingAudioDeviceOutput { sink, frame_limit }),
+        )
+    }
+
+    fn new_inner(
+        gfx: &'a stasis_dynload::StasisGraphicsApi,
+        profile: AudioDeviceProfileV1,
+        audio_output: Option<RecordingAudioDeviceOutput>,
+    ) -> Result<Self, String> {
+        profile.validate()?;
+        gfx.configure_recording_audio_device_v1(profile.callback_hz, profile.refuse_push_for_ms)?;
+        let mut simulation = Self {
+            gfx,
+            profile,
+            next_callback: 0,
+            stall_offset_us: 0,
+            state_time_us: 0,
+            state: None,
+            audio_output,
+        };
+        simulation.set_state_at(0)?;
+        Ok(simulation)
+    }
+
+    /// Advance callbacks until the start of a zero-based guest tick.
+    pub fn advance_to_tick(&mut self, tick_index: u64) -> Result<(), String> {
+        let tick_us = tick_index
+            .checked_mul(1_000_000)
+            .ok_or_else(|| "audio profile tick schedule overflow".to_string())?
+            / u64::from(self.profile.tick_hz);
+        let target_us = tick_us
+            .checked_add(self.stall_offset_us)
+            .ok_or_else(|| "audio profile stalled clock overflow".to_string())?;
+        self.advance_to_us(target_us, true)
+    }
+
+    /// Advance the device through the interval after a completed one-based tick.
+    pub fn finish_tick(&mut self, completed_ticks: u32) -> Result<(), String> {
+        let tick_us = u64::from(completed_ticks)
+            .checked_mul(1_000_000)
+            .ok_or_else(|| "audio profile tick schedule overflow".to_string())?
+            / u64::from(self.profile.tick_hz);
+        let normal_target_us = tick_us
+            .checked_add(self.stall_offset_us)
+            .ok_or_else(|| "audio profile stalled clock overflow".to_string())?;
+        self.advance_to_us(normal_target_us, true)?;
+        if let Some(stall) = self
+            .profile
+            .producer_stalls
+            .iter()
+            .find(|stall| stall.after_tick == completed_ticks)
+        {
+            let stall_us = u64::from(stall.duration_ms)
+                .checked_mul(1000)
+                .ok_or_else(|| "audio profile stall schedule overflow".to_string())?;
+            let stalled_target_us = normal_target_us
+                .checked_add(stall_us)
+                .ok_or_else(|| "audio profile stalled clock overflow".to_string())?;
+            self.advance_to_us(stalled_target_us, false)?;
+            self.stall_offset_us = self
+                .stall_offset_us
+                .checked_add(stall_us)
+                .ok_or_else(|| "audio profile stalled clock overflow".to_string())?;
+        }
+        Ok(())
+    }
+
+    pub fn health(&self) -> Result<AudioHealthReportV1, String> {
+        self.gfx
+            .recording_audio_health_v1()
+            .map(audio_health_report_v1)
+    }
+
+    fn finish_audio_output(&mut self) -> Result<bool, String> {
+        let Some(output) = self.audio_output.take() else {
+            return Ok(false);
+        };
+        output.finish()?;
+        Ok(true)
+    }
+
+    fn advance_to_us(&mut self, target_us: u64, keep_audio_output: bool) -> Result<(), String> {
+        if target_us < self.state_time_us {
+            return Err("audio profile device clock moved backward".to_string());
+        }
+        loop {
+            let callback_end_index = self
+                .next_callback
+                .checked_add(1)
+                .ok_or_else(|| "audio profile callback schedule overflow".to_string())?;
+            let callback_end = callback_end_index
+                .checked_mul(1_000_000)
+                .ok_or_else(|| "audio profile callback schedule overflow".to_string())?
+                / u64::from(self.profile.callback_hz);
+            if callback_end > target_us {
+                break;
+            }
+            // Callback output is observed when the callback completes. Using
+            // this event time keeps state transitions monotone across guest
+            // tick boundaries when device and tick rates differ.
+            self.set_state_at(callback_end)?;
+            let first_frame = self
+                .next_callback
+                .checked_mul(48_000)
+                .ok_or_else(|| "audio profile sample schedule overflow".to_string())?
+                / u64::from(self.profile.callback_hz);
+            let last_frame = callback_end_index
+                .checked_mul(48_000)
+                .ok_or_else(|| "audio profile sample schedule overflow".to_string())?
+                / u64::from(self.profile.callback_hz);
+            let frame_count = usize::try_from(last_frame - first_frame)
+                .map_err(|_| "audio profile callback is too large".to_string())?;
+            let mut output = vec![0.0f32; frame_count.saturating_mul(2)];
+            self.gfx
+                .advance_recording_audio_device_f32_interleaved(&mut output)?;
+            if let Some(audio_output) = self.audio_output.as_mut() {
+                audio_output.append_callback(&output, keep_audio_output)?;
+            }
+            self.next_callback = callback_end_index;
+        }
+        self.set_state_at(target_us)
+    }
+
+    fn set_state_at(&mut self, time_us: u64) -> Result<(), String> {
+        if time_us < self.state_time_us {
+            return Err("audio profile device state time moved backward".to_string());
+        }
+        let accepting = time_us >= u64::from(self.profile.refuse_push_for_ms) * 1000;
+        let paused = self.profile.pause_windows.iter().any(|window| {
+            time_us >= u64::from(window.start_ms) * 1000
+                && time_us < u64::from(window.end_ms) * 1000
+        });
+        if self.state != Some((accepting, paused)) {
+            self.gfx
+                .set_recording_audio_device_state_v1(accepting, paused)?;
+            self.state = Some((accepting, paused));
+        }
+        self.state_time_us = time_us;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AudioHealthReportV1 {
+    pub status: String,
+    pub peak: f32,
+    pub rms: f32,
+    pub first_sound_frame: u32,
+    pub longest_silent_run_after_sound: u32,
+    pub trailing_silent_frames: u32,
+    pub push_attempts: u32,
+    pub requested_frames: u32,
+    pub accepted_frames: u32,
+    pub refused_pushes: u32,
+    pub refused_frames: u32,
+    pub underruns: u32,
+    pub warnings: Vec<String>,
+}
+
+pub fn audio_health_report_v1(
+    health: stasis_dynload::RecordingAudioHealthV1,
+) -> AudioHealthReportV1 {
+    let mut warnings = Vec::new();
+    let failed = health.push_attempts > 0
+        && (health.accepted_frames == 0
+            || health.first_sound_frame == u32::MAX
+            || health.peak <= f32::EPSILON);
+    if failed {
+        warnings.push(
+            "AudioStream.push() was called but the simulated device produced no audible output"
+                .to_string(),
+        );
+    } else if health.push_attempts > 0 {
+        if health.refused_pushes > 0 {
+            warnings.push(format!(
+                "the simulated device refused {} push attempt(s); the guest accepted {} frame(s)",
+                health.refused_pushes, health.accepted_frames
+            ));
+        }
+        if health.underruns > 0 {
+            warnings.push(format!(
+                "the simulated device had {} underrun(s)",
+                health.underruns
+            ));
+        }
+        if health.trailing_silent_frames > 48_000 {
+            warnings.push(format!(
+                "audio ended with {} trailing silent frame(s) after sound",
+                health.trailing_silent_frames
+            ));
+        }
+    }
+    let status = if health.push_attempts == 0 {
+        "not_exercised"
+    } else if failed {
+        "failed"
+    } else if warnings.is_empty() {
+        "healthy"
+    } else {
+        "warning"
+    };
+    AudioHealthReportV1 {
+        status: status.to_string(),
+        peak: health.peak,
+        rms: health.rms,
+        first_sound_frame: health.first_sound_frame,
+        longest_silent_run_after_sound: health.longest_silent_run_after_sound,
+        trailing_silent_frames: health.trailing_silent_frames,
+        push_attempts: health.push_attempts,
+        requested_frames: health.requested_frames,
+        accepted_frames: health.accepted_frames,
+        refused_pushes: health.refused_pushes,
+        refused_frames: health.refused_frames,
+        underruns: health.underruns,
+        warnings,
+    }
 }
 
 const RECORDING_AUDIO_SAMPLE_RATE: u64 = 48_000;
@@ -147,6 +502,22 @@ fn recording_audio_target_samples(frame: u64, fps: u32) -> Result<u64, String> {
 struct RecordingAudioSink {
     file: fs::File,
     frame_count: u64,
+}
+
+struct RecordingAudioDeviceOutput {
+    sink: RecordingAudioSink,
+    frame_limit: u64,
+}
+
+impl RecordingAudioDeviceOutput {
+    fn append_callback(&mut self, samples: &[f32], retain: bool) -> Result<(), String> {
+        self.sink
+            .append_device_callback(samples, self.frame_limit, retain)
+    }
+
+    fn finish(self) -> Result<(), String> {
+        self.sink.finish_exact(self.frame_limit)
+    }
 }
 
 struct RecordingAudioTeardown<'a> {
@@ -200,6 +571,44 @@ impl RecordingAudioSink {
             .frame_count
             .saturating_add((samples.len() / usize::from(RECORDING_AUDIO_CHANNELS)) as u64);
         Ok(())
+    }
+
+    fn append_device_callback(
+        &mut self,
+        samples: &[f32],
+        frame_limit: u64,
+        retain: bool,
+    ) -> Result<(), String> {
+        if samples.len() % usize::from(RECORDING_AUDIO_CHANNELS) != 0 {
+            return Err("recording audio callback returned non-stereo samples".to_string());
+        }
+        if !retain {
+            return Ok(());
+        }
+        let remaining = frame_limit.saturating_sub(self.frame_count);
+        let callback_frames = (samples.len() / usize::from(RECORDING_AUDIO_CHANNELS)) as u64;
+        let frames_to_append = callback_frames.min(remaining);
+        let sample_count = usize::try_from(frames_to_append)
+            .ok()
+            .and_then(|frames| frames.checked_mul(usize::from(RECORDING_AUDIO_CHANNELS)))
+            .ok_or_else(|| "recording audio callback sample count overflow".to_string())?;
+        self.append(&samples[..sample_count])
+    }
+
+    fn finish_exact(mut self, frame_limit: u64) -> Result<(), String> {
+        if self.frame_count > frame_limit {
+            return Err(format!(
+                "profiled recording produced {} audio frames, exceeding its exact {frame_limit}-frame duration",
+                self.frame_count
+            ));
+        }
+        const SILENCE: [f32; 2048] = [0.0; 2048];
+        while self.frame_count < frame_limit {
+            let remaining = frame_limit - self.frame_count;
+            let frames = remaining.min((SILENCE.len() / 2) as u64) as usize;
+            self.append(&SILENCE[..frames * 2])?;
+        }
+        self.finish()
     }
 
     fn finish(mut self) -> Result<(), String> {
@@ -2839,7 +3248,7 @@ fn run_play_in_process_inner(
     }
     let _recording_audio_teardown = capture
         .as_ref()
-        .filter(|capture| capture.audio_output.is_some())
+        .filter(|capture| capture.audio_output.is_some() || capture.audio_device_profile.is_some())
         .map(|_| {
             gfx.set_recording_audio_config(true)?;
             Ok::<_, String>(RecordingAudioTeardown { gfx: &gfx })
@@ -2850,6 +3259,32 @@ fn run_play_in_process_inner(
         .and_then(|capture| capture.audio_output.as_deref())
         .map(RecordingAudioSink::create)
         .transpose()?;
+    let profiled_audio_target = capture
+        .as_ref()
+        .filter(|capture| capture.audio_device_profile.is_some() && capture.audio_output.is_some())
+        .map(|capture| recording_audio_target_samples(capture.frame_count, capture.fps))
+        .transpose()?;
+    let mut audio_device_simulation = match capture
+        .as_ref()
+        .and_then(|capture| capture.audio_device_profile.clone())
+    {
+        Some(profile) => {
+            if let Some(frame_limit) = profiled_audio_target {
+                let sink = recording_audio
+                    .take()
+                    .ok_or_else(|| "profiled WAV sink was not initialized".to_string())?;
+                Some(RecordingAudioDeviceSimulation::new_with_audio_output(
+                    &gfx,
+                    profile,
+                    sink,
+                    frame_limit,
+                )?)
+            } else {
+                Some(RecordingAudioDeviceSimulation::new(&gfx, profile)?)
+            }
+        }
+        None => None,
+    };
     let renderer_asset_root = prepared_asset_root
         .as_deref()
         .unwrap_or(&project_root)
@@ -3006,6 +3441,9 @@ fn run_play_in_process_inner(
     let mut ticks_executed: u64 = 0;
     let mut frame_pacer = FramePacer::from_micros(tick_sleep_micros, Instant::now())?;
     loop {
+        if let Some(simulation) = audio_device_simulation.as_mut() {
+            simulation.advance_to_tick(ticks_executed)?;
+        }
         if let Some(live) = live.as_mut() {
             live.process_boundary(
                 ticks_executed,
@@ -3381,22 +3819,30 @@ fn run_play_in_process_inner(
         );
         gfx.gfx_submit_u8(&mut gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
         if let (Some(capture), Some(audio)) = (capture.as_ref(), recording_audio.as_mut()) {
-            let frame = ticks_executed.saturating_add(1);
-            let target_samples = recording_audio_target_samples(frame, capture.fps)?;
-            let delta = target_samples.saturating_sub(audio.frame_count);
-            let sample_count = delta
-                .checked_mul(u64::from(RECORDING_AUDIO_CHANNELS))
-                .ok_or_else(|| "recording audio stage buffer size overflow".to_string())?;
-            let sample_count = usize::try_from(sample_count)
-                .map_err(|_| "recording audio stage buffer is too large".to_string())?;
-            let mut samples = vec![0.0f32; sample_count];
-            gfx.pull_recording_audio_f32_interleaved(&mut samples)
-                .map_err(|error| {
-                    format!("recording audio mix stage failed at frame {frame}: {error}")
+            if capture.audio_device_profile.is_none() {
+                let frame = ticks_executed.saturating_add(1);
+                let target_samples = recording_audio_target_samples(frame, capture.fps)?;
+                let delta = target_samples.saturating_sub(audio.frame_count);
+                let sample_count = delta
+                    .checked_mul(u64::from(RECORDING_AUDIO_CHANNELS))
+                    .ok_or_else(|| "recording audio stage buffer size overflow".to_string())?;
+                let sample_count = usize::try_from(sample_count)
+                    .map_err(|_| "recording audio stage buffer is too large".to_string())?;
+                let mut samples = vec![0.0f32; sample_count];
+                gfx.pull_recording_audio_f32_interleaved(&mut samples)
+                    .map_err(|error| {
+                        format!("recording audio mix stage failed at frame {frame}: {error}")
+                    })?;
+                audio.append(&samples).map_err(|error| {
+                    format!("recording audio WAV stage failed at frame {frame}: {error}")
                 })?;
-            audio.append(&samples).map_err(|error| {
-                format!("recording audio WAV stage failed at frame {frame}: {error}")
-            })?;
+            }
+        }
+        if let Some(simulation) = audio_device_simulation.as_mut() {
+            let completed_ticks = ticks_executed.saturating_add(1);
+            let completed_ticks = u32::try_from(completed_ticks)
+                .map_err(|_| "audio profile tick count exceeds u32".to_string())?;
+            simulation.finish_tick(completed_ticks)?;
         }
         if let Some(evidence) = frame_evidence.as_mut() {
             let submission = gfx.test_render_submission_state()?.ok_or_else(|| {
@@ -3448,11 +3894,32 @@ fn run_play_in_process_inner(
     if let Some(profile) = profile.as_ref() {
         finish_play_profile(&jit, profile)?;
     }
-    let audio_finish = recording_audio
-        .take()
-        .map(RecordingAudioSink::finish)
-        .transpose();
-    audio_finish?;
+    if let (Some(capture), Some(simulation)) = (capture.as_ref(), audio_device_simulation.as_ref())
+    {
+        let health = simulation.health()?;
+        if let Some(path) = capture.audio_health_output.as_ref() {
+            let mut encoded = serde_json::to_vec_pretty(&health)
+                .map_err(|error| format!("failed to encode audio health report: {error}"))?;
+            encoded.push(b'\n');
+            fs::write(path, encoded).map_err(|error| {
+                format!(
+                    "failed to write audio health report {}: {error}",
+                    path.display()
+                )
+            })?;
+        }
+    }
+    let profiled_audio_finished = audio_device_simulation
+        .as_mut()
+        .map(RecordingAudioDeviceSimulation::finish_audio_output)
+        .transpose()?
+        .unwrap_or(false);
+    if !profiled_audio_finished {
+        recording_audio
+            .take()
+            .map(RecordingAudioSink::finish)
+            .transpose()?;
+    }
     if let Some(recorder) = replay_recorder {
         let path = recorder.publish()?;
         println!("replay_recording={}", path.display());
@@ -5064,6 +5531,70 @@ mod tests {
     }
 
     #[test]
+    fn audio_device_profile_v1_rejects_unknown_and_unsorted_bounded_events() {
+        let valid = r#"{
+            "schema_version": 1,
+            "tick_hz": 120,
+            "callback_hz": 50,
+            "refuse_push_for_ms": 17,
+            "pause_windows": [{"start_ms": 120, "end_ms": 160}],
+            "producer_stalls": [{"after_tick": 5, "duration_ms": 80}]
+        }"#;
+        let profile: AudioDeviceProfileV1 = serde_json::from_str(valid).expect("profile JSON");
+        assert!(profile.validate().is_ok());
+
+        let unknown = valid.replace("\"callback_hz\": 50,", "\"callback_hz\": 50, \"extra\": 1,");
+        assert!(serde_json::from_str::<AudioDeviceProfileV1>(&unknown).is_err());
+        let duplicate = valid.replace("\"tick_hz\": 120,", "\"tick_hz\": 120, \"tick_hz\": 120,");
+        assert!(serde_json::from_str::<AudioDeviceProfileV1>(&duplicate).is_err());
+
+        let mut overlapping = profile.clone();
+        overlapping.pause_windows = vec![
+            AudioDevicePauseWindowV1 {
+                start_ms: 100,
+                end_ms: 200,
+            },
+            AudioDevicePauseWindowV1 {
+                start_ms: 150,
+                end_ms: 250,
+            },
+        ];
+        assert!(overlapping.validate().is_err());
+
+        let mut unsorted_stalls = profile;
+        unsorted_stalls.producer_stalls = vec![
+            AudioDeviceProducerStallV1 {
+                after_tick: 9,
+                duration_ms: 10,
+            },
+            AudioDeviceProducerStallV1 {
+                after_tick: 8,
+                duration_ms: 10,
+            },
+        ];
+        assert!(unsorted_stalls.validate().is_err());
+    }
+
+    #[test]
+    fn audio_health_report_marks_refused_then_abandoned_stream_failed() {
+        let report = audio_health_report_v1(stasis_dynload::RecordingAudioHealthV1 {
+            push_attempts: 1,
+            requested_frames: 800,
+            refused_pushes: 1,
+            refused_frames: 800,
+            ..stasis_dynload::RecordingAudioHealthV1::default()
+        });
+        assert_eq!(report.status, "failed");
+        assert_eq!(report.accepted_frames, 0);
+        assert!(!report.warnings.is_empty());
+
+        let not_exercised =
+            audio_health_report_v1(stasis_dynload::RecordingAudioHealthV1::default());
+        assert_eq!(not_exercised.status, "not_exercised");
+        assert!(not_exercised.warnings.is_empty());
+    }
+
+    #[test]
     fn recording_audio_sink_writes_pcm16_stereo_wav() {
         let path = std::env::temp_dir().join(format!(
             "stasis-recording-audio-{}-{}.wav",
@@ -5088,6 +5619,78 @@ mod tests {
             8
         );
         assert_eq!(bytes.len(), 52);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn profiled_device_wav_keeps_callback_audio_discards_stalls_and_truncates_exactly() {
+        let path = std::env::temp_dir().join(format!(
+            "stasis-profiled-recording-audio-{}-{}.wav",
+            std::process::id(),
+            UNIX_EPOCH.elapsed().unwrap_or_default().as_nanos()
+        ));
+        let mut output = RecordingAudioDeviceOutput {
+            sink: RecordingAudioSink::create(&path).expect("create profiled WAV sink"),
+            frame_limit: 4,
+        };
+        output
+            .append_callback(&[0.25, -0.25], true)
+            .expect("append normal callback");
+        output
+            .append_callback(&[0.9, -0.9, 0.9, -0.9], false)
+            .expect("discard producer-stall callback");
+        output
+            .append_callback(&[0.5, -0.5, 0.6, -0.6, 0.7, -0.7, 0.8, -0.8], true)
+            .expect("append only the callback prefix needed for the exact duration");
+        output.finish().expect("finalize exact profiled WAV");
+
+        let bytes = fs::read(&path).expect("read profiled WAV");
+        assert_eq!(bytes.len(), 44 + 4 * 4);
+        assert_eq!(
+            u32::from_le_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]),
+            16
+        );
+        let left_samples = (0..4)
+            .map(|frame| {
+                let offset = 44 + frame * 4;
+                i16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+            })
+            .collect::<Vec<_>>();
+        assert!(left_samples[0] > 0);
+        assert!(left_samples[1] > 0);
+        assert!(left_samples[2] > 0);
+        assert_eq!(left_samples[0], (0.25 * f32::from(i16::MAX)).round() as i16);
+        assert_eq!(left_samples[1], (0.5 * f32::from(i16::MAX)).round() as i16);
+        assert_eq!(left_samples[2], (0.6 * f32::from(i16::MAX)).round() as i16);
+        assert_eq!(left_samples[3], (0.7 * f32::from(i16::MAX)).round() as i16);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn profiled_device_wav_pads_discarded_stall_output_to_fixed_duration() {
+        let path = std::env::temp_dir().join(format!(
+            "stasis-profiled-recording-audio-pad-{}-{}.wav",
+            std::process::id(),
+            UNIX_EPOCH.elapsed().unwrap_or_default().as_nanos()
+        ));
+        let mut output = RecordingAudioDeviceOutput {
+            sink: RecordingAudioSink::create(&path).expect("create profiled WAV sink"),
+            frame_limit: 4,
+        };
+        output
+            .append_callback(&[0.25, -0.25], true)
+            .expect("append normal callback");
+        output
+            .append_callback(&[0.9, -0.9, 0.9, -0.9], false)
+            .expect("discard producer-stall callback");
+        output
+            .finish()
+            .expect("pad and finalize exact profiled WAV");
+
+        let bytes = fs::read(&path).expect("read padded profiled WAV");
+        assert_eq!(bytes.len(), 44 + 4 * 4);
+        assert!(i16::from_le_bytes([bytes[44], bytes[45]]) > 0);
+        assert!(bytes[48..].iter().all(|byte| *byte == 0));
         fs::remove_file(path).ok();
     }
 

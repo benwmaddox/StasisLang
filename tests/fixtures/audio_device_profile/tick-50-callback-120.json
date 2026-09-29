@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "tick_hz": 50,
+  "callback_hz": 120,
+  "refuse_push_for_ms": 15,
+  "pause_windows": [
+    { "start_ms": 100, "end_ms": 160 }
+  ],
+  "producer_stalls": [
+    { "after_tick": 5, "duration_ms": 75 }
+  ]
+}

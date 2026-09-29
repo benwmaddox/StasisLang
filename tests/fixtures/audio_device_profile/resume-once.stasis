@@ -1,0 +1,33 @@
+import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";
+
+global stream: AudioStream;
+global samples: f32[3200];
+global ticks: i32;
+
+function main(): i32 {
+    if (!stream.open(48000, 2, 1600)) {
+        return 1;
+    }
+    return 0;
+}
+
+function tick(): i32 {
+    ticks += 1;
+    if (ticks == 5) {
+        let wanted: i32 = stream.frames_wanted(1600);
+        let index: i32 = 0;
+        for (index = 0; index < wanted * 2; index += 1) {
+            samples[index] = 0.5;
+        }
+        stream.push(samples, wanted);
+    }
+    return 0;
+}
+
+function render(): i32 {
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

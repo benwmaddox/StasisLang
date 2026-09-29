@@ -1468,6 +1468,72 @@ fn read_graphics_runtime_string(
     Ok(value.to_string())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RecordingAudioHealthV1 {
+    pub push_attempts: u32,
+    pub requested_frames: u32,
+    pub accepted_frames: u32,
+    pub refused_pushes: u32,
+    pub refused_frames: u32,
+    pub callbacks: u32,
+    pub output_frames: u32,
+    pub underruns: u32,
+    /// `u32::MAX` means that no frame exceeded the runtime's silence threshold.
+    pub first_sound_frame: u32,
+    pub longest_silent_run_after_sound: u32,
+    pub trailing_silent_frames: u32,
+    pub peak: f32,
+    pub rms: f32,
+}
+
+impl Default for RecordingAudioHealthV1 {
+    fn default() -> Self {
+        Self {
+            push_attempts: 0,
+            requested_frames: 0,
+            accepted_frames: 0,
+            refused_pushes: 0,
+            refused_frames: 0,
+            callbacks: 0,
+            output_frames: 0,
+            underruns: 0,
+            first_sound_frame: u32::MAX,
+            longest_silent_run_after_sound: 0,
+            trailing_silent_frames: 0,
+            peak: 0.0,
+            rms: 0.0,
+        }
+    }
+}
+
+#[repr(C)]
+struct RecordingAudioDeviceConfigV1Raw {
+    struct_size: u32,
+    version: u32,
+    callback_hz: u32,
+    refuse_push_for_ms: u32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct RecordingAudioHealthV1Raw {
+    struct_size: u32,
+    version: u32,
+    push_attempts: u32,
+    requested_frames: u32,
+    accepted_frames: u32,
+    refused_pushes: u32,
+    refused_frames: u32,
+    callbacks: u32,
+    output_frames: u32,
+    underruns: u32,
+    first_sound_frame: u32,
+    longest_silent_run_after_sound: u32,
+    trailing_silent_frames: u32,
+    peak: f32,
+    rms: f32,
+}
+
 pub struct StasisGraphicsApi {
     _lib: Library,
     runtime_path: PathBuf,
@@ -1486,6 +1552,10 @@ pub struct StasisGraphicsApi {
     stasis_set_recording_config: Option<usize>,
     stasis_set_recording_audio_config: Option<usize>,
     stasis_recording_audio_pull_f32_interleaved: Option<usize>,
+    stasis_recording_audio_configure_device_v1: Option<usize>,
+    stasis_recording_audio_set_device_state_v1: Option<usize>,
+    stasis_recording_audio_advance_v1: Option<usize>,
+    stasis_recording_audio_get_health_v1: Option<usize>,
     stasis_test_get_render_submission_state: Option<usize>,
     stasis_gfx_notify_file_changed: Option<usize>,
     stasis_load_font: Option<usize>,
@@ -1562,6 +1632,17 @@ impl StasisGraphicsApi {
         let stasis_recording_audio_pull_f32_interleaved = lib
             .symbol_address("stasis_recording_audio_pull_f32_interleaved")
             .ok();
+        let stasis_recording_audio_configure_device_v1 = lib
+            .symbol_address("stasis_recording_audio_configure_device_v1")
+            .ok();
+        let stasis_recording_audio_set_device_state_v1 = lib
+            .symbol_address("stasis_recording_audio_set_device_state_v1")
+            .ok();
+        let stasis_recording_audio_advance_v1 =
+            lib.symbol_address("stasis_recording_audio_advance_v1").ok();
+        let stasis_recording_audio_get_health_v1 = lib
+            .symbol_address("stasis_recording_audio_get_health_v1")
+            .ok();
         let stasis_test_get_render_submission_state = lib
             .symbol_address("stasis_test_get_render_submission_state")
             .ok();
@@ -1598,6 +1679,10 @@ impl StasisGraphicsApi {
             stasis_set_recording_config,
             stasis_set_recording_audio_config,
             stasis_recording_audio_pull_f32_interleaved,
+            stasis_recording_audio_configure_device_v1,
+            stasis_recording_audio_set_device_state_v1,
+            stasis_recording_audio_advance_v1,
+            stasis_recording_audio_get_health_v1,
             stasis_test_get_render_submission_state,
             stasis_gfx_notify_file_changed,
             stasis_load_font,
@@ -1808,7 +1893,7 @@ impl StasisGraphicsApi {
                 "graphics runtime lacks offline recording audio pull support".to_string()
             })?;
         let frame_count = output.len() / 2;
-        if frame_count > i32::MAX as usize {
+        if frame_count > (i32::MAX / 2) as usize {
             return Err("recording audio pull exceeds runtime frame-count bound".to_string());
         }
         #[cfg(windows)]
@@ -1823,6 +1908,130 @@ impl StasisGraphicsApi {
             ));
         }
         Ok(accepted as usize)
+    }
+
+    /// Enables the additive, host-clocked recording-device simulation. Call
+    /// after offline recording audio is enabled and before guest startup.
+    pub fn configure_recording_audio_device_v1(
+        &self,
+        callback_hz: u32,
+        refuse_push_for_ms: u32,
+    ) -> Result<(), String> {
+        let symbol = self
+            .stasis_recording_audio_configure_device_v1
+            .ok_or_else(|| {
+                "graphics runtime lacks recording audio device simulation v1 support".to_string()
+            })?;
+        let config = RecordingAudioDeviceConfigV1Raw {
+            struct_size: std::mem::size_of::<RecordingAudioDeviceConfigV1Raw>() as u32,
+            version: 1,
+            callback_hz,
+            refuse_push_for_ms,
+        };
+        #[cfg(windows)]
+        let callback: extern "system" fn(*const RecordingAudioDeviceConfigV1Raw) -> i32 =
+            unsafe { std::mem::transmute(symbol) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(*const RecordingAudioDeviceConfigV1Raw) -> i32 =
+            unsafe { std::mem::transmute(symbol) };
+        if callback(&config) == 0 {
+            return Err(
+                "graphics runtime rejected recording audio device simulation v1 config".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Sets the virtual device state at the current simulated host time.
+    /// Pausing flushes queued PCM, matching Android device teardown behavior.
+    pub fn set_recording_audio_device_state_v1(
+        &self,
+        accepting_pushes: bool,
+        paused: bool,
+    ) -> Result<(), String> {
+        let symbol = self
+            .stasis_recording_audio_set_device_state_v1
+            .ok_or_else(|| {
+                "graphics runtime lacks recording audio device state v1 support".to_string()
+            })?;
+        #[cfg(windows)]
+        let callback: extern "system" fn(i32, i32) -> i32 = unsafe { std::mem::transmute(symbol) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(i32, i32) -> i32 = unsafe { std::mem::transmute(symbol) };
+        if callback(i32::from(accepting_pushes), i32::from(paused)) == 0 {
+            return Err("graphics runtime rejected recording audio device state v1".to_string());
+        }
+        Ok(())
+    }
+
+    /// Advances one virtual device callback and fills exactly the requested
+    /// interleaved stereo frame slice, including silence while paused.
+    pub fn advance_recording_audio_device_f32_interleaved(
+        &self,
+        output: &mut [f32],
+    ) -> Result<usize, String> {
+        if output.is_empty() || output.len() % 2 != 0 {
+            return Err("recording audio device output must contain stereo frames".to_string());
+        }
+        let frame_count = output.len() / 2;
+        if frame_count > i32::MAX as usize {
+            return Err(
+                "recording audio device advance exceeds runtime frame-count bound".to_string(),
+            );
+        }
+        let symbol = self.stasis_recording_audio_advance_v1.ok_or_else(|| {
+            "graphics runtime lacks recording audio device advance v1 support".to_string()
+        })?;
+        #[cfg(windows)]
+        let callback: extern "system" fn(*mut f32, i32) -> i32 =
+            unsafe { std::mem::transmute(symbol) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(*mut f32, i32) -> i32 = unsafe { std::mem::transmute(symbol) };
+        let advanced = callback(output.as_mut_ptr(), frame_count as i32);
+        if advanced < 0 || advanced as usize != frame_count {
+            return Err(format!(
+                "graphics runtime advanced {advanced} virtual recording audio frames, expected {frame_count}"
+            ));
+        }
+        Ok(advanced as usize)
+    }
+
+    /// Returns counters and signal measurements from the virtual device.
+    pub fn recording_audio_health_v1(&self) -> Result<RecordingAudioHealthV1, String> {
+        let symbol = self.stasis_recording_audio_get_health_v1.ok_or_else(|| {
+            "graphics runtime lacks recording audio health v1 support".to_string()
+        })?;
+        let mut raw = RecordingAudioHealthV1Raw {
+            struct_size: std::mem::size_of::<RecordingAudioHealthV1Raw>() as u32,
+            ..RecordingAudioHealthV1Raw::default()
+        };
+        #[cfg(windows)]
+        let callback: extern "system" fn(*mut RecordingAudioHealthV1Raw) -> i32 =
+            unsafe { std::mem::transmute(symbol) };
+        #[cfg(not(windows))]
+        let callback: extern "C" fn(*mut RecordingAudioHealthV1Raw) -> i32 =
+            unsafe { std::mem::transmute(symbol) };
+        if callback(&mut raw) == 0
+            || raw.version != 1
+            || raw.struct_size < std::mem::size_of::<RecordingAudioHealthV1Raw>() as u32
+        {
+            return Err("graphics runtime could not return recording audio health v1".to_string());
+        }
+        Ok(RecordingAudioHealthV1 {
+            push_attempts: raw.push_attempts,
+            requested_frames: raw.requested_frames,
+            accepted_frames: raw.accepted_frames,
+            refused_pushes: raw.refused_pushes,
+            refused_frames: raw.refused_frames,
+            callbacks: raw.callbacks,
+            output_frames: raw.output_frames,
+            underruns: raw.underruns,
+            first_sound_frame: raw.first_sound_frame,
+            longest_silent_run_after_sound: raw.longest_silent_run_after_sound,
+            trailing_silent_frames: raw.trailing_silent_frames,
+            peak: raw.peak,
+            rms: raw.rms,
+        })
     }
 
     pub fn set_asset_root(&self, path: &Path) -> Result<(), String> {

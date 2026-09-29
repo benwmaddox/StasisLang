@@ -4,14 +4,17 @@ use image::GenericImageView;
 use serde_json::json;
 use stasis::{
     run_play_in_process_with_input_script_window_title_profile_capture_and_project_configuration,
-    run_play_in_process_with_replay_and_project_configuration, PlayFrameCaptureConfig,
-    PlayReplayConfig,
+    run_play_in_process_with_replay_and_project_configuration, AudioDeviceProfileV1,
+    PlayFrameCaptureConfig, PlayReplayConfig,
 };
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const MAX_AUDIO_DEVICE_PROFILE_BYTES: u64 = 32 * 1024;
+const MAX_PROFILED_AUDIO_DEVICE_CALLBACKS: u64 = 10_000_000;
 
 const MAX_DIMENSION: u32 = 8192;
 const MAX_FPS: u32 = 240;
@@ -54,6 +57,9 @@ pub(super) struct RecordArgs {
     /// Save this run as a replay session while also capturing frames or MP4.
     #[arg(long, value_name = "PATH", conflicts_with = "replay")]
     pub(super) record_replay: Option<PathBuf>,
+    /// Simulate a deterministic audio device from a bounded versioned JSON profile.
+    #[arg(long, value_name = "PATH")]
+    pub(super) audio_device_profile: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +71,14 @@ enum OutputKind {
 
 pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<CommandResult, String> {
     let frame_count = validate_args(&args)?;
+    let audio_device_profile = args
+        .audio_device_profile
+        .as_deref()
+        .map(|path| load_audio_device_profile(workspace, path, Some(args.fps)))
+        .transpose()?;
+    if let Some(profile) = audio_device_profile.as_ref() {
+        validate_profiled_record_callback_work(frame_count, args.fps, profile)?;
+    }
     let output = absolute_path(&args.output)?;
     let parent = output
         .parent()
@@ -175,6 +189,11 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
         audio_output: matches!(kind, OutputKind::Mp4 | OutputKind::Mp3)
             .then(|| stage_root.join("audio.wav")),
         before_tick_function: args.before_tick.clone(),
+        audio_device_profile,
+        audio_health_output: args
+            .audio_device_profile
+            .as_ref()
+            .map(|_| stage_root.join("audio-health.json")),
     };
     let result = if let Some(replay) = replay {
         run_play_in_process_with_replay_and_project_configuration(
@@ -217,6 +236,23 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
             output.display()
         ));
     }
+    let audio_health = if args.audio_device_profile.is_some() {
+        let path = stage_root.join("audio-health.json");
+        let bytes = fs::read(&path).map_err(|error| {
+            cleanup_stage(&stage_root);
+            format!(
+                "recording audio health report is unavailable at {}: {error}",
+                path.display()
+            )
+        })?;
+        let report: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+            cleanup_stage(&stage_root);
+            format!("recording audio health report is invalid JSON: {error}")
+        })?;
+        Some(report)
+    } else {
+        None
+    };
 
     if let Some(frames_dir) = frames_dir.as_ref() {
         if let Err(error) = validate_frames(frames_dir, args.width, args.height, frame_count) {
@@ -295,25 +331,131 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
         OutputKind::Mp4 => "mp4",
         OutputKind::Mp3 => "mp3",
     };
-    Ok(CommandResult::success(
+    let mut data = json!({
+        "format": format,
+        "output": output,
+        "width": args.width,
+        "height": args.height,
+        "fps": args.fps,
+        "frames": frame_count,
+        "entry": entry,
+        "replay_recording": replay_record_output,
+    });
+    let mut human = format!(
+        "recorded {frame_count} frame(s) at {}x{} and {} fps to {}",
+        args.width,
+        args.height,
+        args.fps,
+        output.display()
+    );
+    if let Some(health) = audio_health {
+        let status = health
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let warnings = health
+            .get("warnings")
+            .and_then(serde_json::Value::as_array)
+            .map(|warnings| {
+                warnings
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .unwrap_or_default();
+        if status == "failed" || status == "warning" {
+            human.push_str(&format!("; audio health {status}"));
+            if !warnings.is_empty() {
+                human.push_str(&format!(": {warnings}"));
+            }
+        }
+        data["audio_health"] = health;
+    }
+    Ok(CommandResult::success(human, data))
+}
+
+pub(super) fn load_audio_device_profile(
+    workspace: &Workspace,
+    path: &Path,
+    expected_tick_hz: Option<u32>,
+) -> Result<AudioDeviceProfileV1, String> {
+    let path = resolve_workspace_path(workspace, path, "audio device profile")?;
+    let metadata = fs::metadata(&path).map_err(|error| {
         format!(
-            "recorded {frame_count} frame(s) at {}x{} and {} fps to {}",
-            args.width,
-            args.height,
-            args.fps,
-            output.display()
-        ),
-        json!({
-            "format": format,
-            "output": output,
-            "width": args.width,
-            "height": args.height,
-            "fps": args.fps,
-            "frames": frame_count,
-            "entry": entry,
-            "replay_recording": replay_record_output,
-        }),
-    ))
+            "failed to inspect audio device profile {}: {error}",
+            path.display()
+        )
+    })?;
+    if metadata.len() > MAX_AUDIO_DEVICE_PROFILE_BYTES {
+        return Err(format!(
+            "audio device profile {} exceeds the {} byte limit",
+            path.display(),
+            MAX_AUDIO_DEVICE_PROFILE_BYTES
+        ));
+    }
+    let bytes = fs::read(&path).map_err(|error| {
+        format!(
+            "failed to read audio device profile {}: {error}",
+            path.display()
+        )
+    })?;
+    let profile: AudioDeviceProfileV1 = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid audio device profile {}: {error}", path.display()))?;
+    profile
+        .validate()
+        .map_err(|error| format!("invalid audio device profile {}: {error}", path.display()))?;
+    if let Some(expected_tick_hz) = expected_tick_hz {
+        if profile.tick_hz != expected_tick_hz {
+            return Err(format!(
+                "audio device profile tick_hz {} must match --fps {}",
+                profile.tick_hz, expected_tick_hz
+            ));
+        }
+    }
+    Ok(profile)
+}
+
+fn validate_profiled_record_callback_work(
+    frame_count: u64,
+    tick_hz: u32,
+    profile: &AudioDeviceProfileV1,
+) -> Result<(), String> {
+    let base_time_us = frame_count
+        .checked_mul(1_000_000)
+        .ok_or_else(|| "audio device profile recording schedule overflow".to_string())?
+        / u64::from(tick_hz);
+    let reached_stall_ms = profile
+        .producer_stalls
+        .iter()
+        .filter(|stall| u64::from(stall.after_tick) <= frame_count)
+        .try_fold(0u64, |total, stall| {
+            total
+                .checked_add(u64::from(stall.duration_ms))
+                .ok_or_else(|| "audio device profile stall schedule overflow".to_string())
+        })?;
+    let virtual_time_us = base_time_us
+        .checked_add(
+            reached_stall_ms
+                .checked_mul(1000)
+                .ok_or_else(|| "audio device profile stall schedule overflow".to_string())?,
+        )
+        .ok_or_else(|| "audio device profile recording schedule overflow".to_string())?;
+    // The simulation emits callback k while floor(k * 1_000_000 / callback_hz)
+    // is at or before the final virtual timestamp. This is the exact count,
+    // including the extra time introduced by producer stalls.
+    let callback_count = virtual_time_us
+        .checked_add(1)
+        .and_then(|time| time.checked_mul(u64::from(profile.callback_hz)))
+        .and_then(|scaled| scaled.checked_sub(1))
+        .ok_or_else(|| "audio device profile callback schedule overflow".to_string())?
+        / 1_000_000;
+    if callback_count > MAX_PROFILED_AUDIO_DEVICE_CALLBACKS {
+        return Err(format!(
+            "profiled recording schedules {callback_count} audio device callbacks, exceeding the {MAX_PROFILED_AUDIO_DEVICE_CALLBACKS} callback limit; reduce frames/duration, callback_hz, or producer stalls"
+        ));
+    }
+    Ok(())
 }
 
 fn rollback_published_output(output: &Path, kind: OutputKind) -> Result<(), String> {
@@ -699,6 +841,7 @@ mod tests {
             before_tick: None,
             replay: None,
             record_replay: None,
+            audio_device_profile: None,
         }
     }
 
@@ -732,6 +875,43 @@ mod tests {
         assert_eq!(output_kind(Path::new("capture.MP4")), Ok(OutputKind::Mp4));
         assert_eq!(output_kind(Path::new("capture.mp3")), Ok(OutputKind::Mp3));
         assert!(output_kind(Path::new("capture.mov")).is_err());
+    }
+
+    #[test]
+    fn profiled_record_callback_budget_includes_reached_stalls() {
+        let profile = AudioDeviceProfileV1 {
+            schema_version: 1,
+            tick_hz: 60,
+            callback_hz: 1000,
+            refuse_push_for_ms: 0,
+            pause_windows: Vec::new(),
+            producer_stalls: vec![stasis::AudioDeviceProducerStallV1 {
+                after_tick: 599_999,
+                duration_ms: 17,
+            }],
+        };
+        assert!(validate_profiled_record_callback_work(599_999, 60, &profile).is_ok());
+
+        let over_budget = AudioDeviceProfileV1 {
+            producer_stalls: vec![stasis::AudioDeviceProducerStallV1 {
+                after_tick: 599_999,
+                duration_ms: 18,
+            }],
+            ..profile.clone()
+        };
+        let error = validate_profiled_record_callback_work(599_999, 60, &over_budget)
+            .expect_err("one extra millisecond exceeds the exact callback budget");
+        assert!(error.contains("audio device callbacks"));
+        assert!(error.contains("reduce frames/duration, callback_hz, or producer stalls"));
+
+        let unreachable_stall = AudioDeviceProfileV1 {
+            producer_stalls: vec![stasis::AudioDeviceProducerStallV1 {
+                after_tick: 600_000,
+                duration_ms: 600_000,
+            }],
+            ..profile
+        };
+        assert!(validate_profiled_record_callback_work(599_999, 60, &unreachable_stall).is_ok());
     }
 
     #[test]
