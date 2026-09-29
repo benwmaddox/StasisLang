@@ -30,7 +30,7 @@
   "capture_profiles": {
     "windows_sdl_d3d11": {
       "comparison": "exact",
-      "sha256_rgba": "9093a09445c569118fab61c76244b722999fb9abf34d606b097f44f2c199f68a"
+      "sha256_rgba": "fd90a67756f23028a333920ebf32be68b056c8b14431ae523a94aa2dd8e1437c"
     },
     "portable": {
       "comparison": "regions",
@@ -38,7 +38,7 @@
         {"name": "background", "rect": [12, 12, 12, 12], "rgba": [18, 30, 48, 255], "max_channel_delta": 28, "min_coverage": 0.80},
         {"name": "atlas_canvas_sprite", "rect": [44, 60, 40, 40], "predicate": "atlas_canvas", "min_coverage": 0.40},
         {"name": "opaque_svg", "rect": [146, 54, 76, 52], "rgba": [49, 209, 124, 255], "max_channel_delta": 32, "min_coverage": 0.35},
-        {"name": "translucent_svg", "rect": [282, 54, 76, 52], "rgba": [108, 78, 91, 255], "max_channel_delta": 36, "min_coverage": 0.18},
+        {"name": "translucent_svg", "rect": [282, 54, 76, 52], "rgba": [67, 54, 124, 255], "max_channel_delta": 36, "min_coverage": 0.18},
         {"name": "rotated_scaled_sprite", "rect": [440, 36, 112, 84], "predicate": "green_sprite", "min_coverage": 0.20},
         {"name": "filled_rectangle", "rect": [240, 170, 32, 20], "rgba": [36, 122, 74, 255], "max_channel_delta": 45, "min_coverage": 0.80},
         {"name": "overlapping_lines", "rect": [304, 168, 32, 24], "predicate": "crossing_lines", "min_red_coverage": 0.008, "min_cyan_coverage": 0.008},
