@@ -190,10 +190,9 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             "bootstrap-smoke-windows",
             "vscode-extension-e2e",
             "android-package-link",
-            "ios-package-link",
         )
         slow_gate = "if: ${{ inputs.run_slow_seams }}"
-        self.assertEqual(4, self.pr_workflow.count(slow_gate))
+        self.assertEqual(3, self.pr_workflow.count(slow_gate))
         for job in slow_jobs:
             match = re.search(
                 rf"(?ms)^  {re.escape(job)}:\n(?P<body>.*?)(?=^  [A-Za-z_][A-Za-z0-9_-]*:|\Z)",

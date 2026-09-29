@@ -177,11 +177,12 @@ bounds, and touch mapping on a signed device before claiming iOS orientation
 acceptance.
 
 Device arm64 is the v1 target; simulator and multi-architecture packaging are intentionally out
-of scope. Pull requests run `tools/ci/build_ios_package.sh` on macOS with code
-signing disabled; the driver builds `samples/mobile_storage_link` and verifies
+of scope. The manual `tools/ci/build_ios_package.sh` helper can be run on macOS
+with code signing disabled; it builds `samples/mobile_storage_link` and verifies
 the arm64 executable, embedded SDL frameworks, packaged assets and provenance,
-and absence of Stasis source. A signed device install still requires the
-developer's `DEVELOPMENT_TEAM` and provisioning profile.
+and absence of Stasis source. GitHub Actions no longer runs an iOS build lane. A
+signed device install still requires the developer's `DEVELOPMENT_TEAM` and
+provisioning profile.
 
 iOS uses the immutable app-bundle asset tree directly and has no Android-style
 extraction cache. The Android cache is therefore not part of the shared iOS
@@ -199,15 +200,15 @@ Official toolchain archives resolve network libraries relative to the installed
 executable from `mobile/network/<target>/libstasis_network.a` and the shared
 `mobile/network/include/stasis_network.h`; they do not depend on the source
 checkout used to build the compiler. Source-tree Cargo builds retain a
-development fallback. Release assembly must therefore publish the prebuilt
-Android arm64/x86_64 libraries and, on macOS archives, the iOS arm64 library
-under that layout before advertising network mobile packaging.
+development fallback. Nightly Linux and Windows release archives publish the
+prebuilt Android arm64/x86_64 libraries. They do not include iOS network archives;
+source-tree builds on macOS can build the iOS library with Xcode when packaging
+a network-enabled iOS app.
 
-Nightly archives now receive these support files from a fail-closed, pinned
-mobile-network build job (Android NDK 27.0.12077973/API 26 and the macOS
-iphoneos SDK) before archive provenance is generated. Downstream network
-packaging therefore does not need the Stasis source checkout or Cargo to build
-the network library.
+Nightly archives receive Android support files from a fail-closed, pinned
+mobile-network build job using Android NDK 27.0.12077973/API 26 before archive
+provenance is generated. Android packaging from an official toolchain therefore
+does not need the Stasis source checkout or Cargo to build the network library.
 
 The network shell requests `NSLocalNetworkUsageDescription` with a clear nearby
 friends explanation. v1 uses direct TCP/unicast and does not request Bonjour,

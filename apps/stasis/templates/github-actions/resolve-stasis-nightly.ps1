@@ -8,8 +8,7 @@ if (-not $Repository) { throw 'The official Stasis release repository is require
 
 $requiredAssets = @(
     'stasis-nightly-linux-x64.tar.gz',
-    'stasis-nightly-win-x64.zip',
-    'stasis-nightly-osx-arm64.tar.gz'
+    'stasis-nightly-win-x64.zip'
 )
 
 for ($page = 1; $page -le 10; $page++) {

@@ -294,7 +294,7 @@ The scheduled Friday and manually dispatched weekly workflow consumes only the c
 immutable Stasis pin. It compares that pin to the last published game release's
 `BUILD-MANIFEST.json` and compares game changes since that release, ignoring only the
 `vendor.stasis` portion of `stasis.json`; true no-ops skip all matrices. Actual releases run the
-full Linux, Windows, and macOS desktop matrix, archive the packages, and publish a prerelease with
+Linux and Windows desktop matrix, archive the packages, and publish a prerelease with
 an immutable build manifest and checksums. A quarterly pin PR is therefore the only path that
 advances the Stasis release used by this matrix.
 
@@ -399,8 +399,8 @@ restore release assets.
   `stasis_network` arm64 static library, and include the local-network privacy declaration;
   direct TCP/unicast does not require Bonjour discovery entitlements. Official archives resolve
   prebuilt network libraries from `mobile/network/<target>/` beside the installed executable;
-  nightly archives contain all Android arm64/x86_64 and iOS arm64 support libraries, while source
-  checkouts may build them from the workspace as a development fallback.
+  Linux and Windows nightly archives contain Android arm64/x86_64 support libraries. They do not
+  contain iOS network archives; source checkouts may build those from the workspace on macOS.
   `ios-simulator-arm64` requires `--development-build`, emits simulator-native
   AOT/network objects, selects the SDL simulator slice, and never qualifies a
   physical-device release.

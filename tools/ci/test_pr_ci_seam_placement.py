@@ -185,18 +185,17 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         for boundary_job in (
             "vscode-extension-e2e",
             "android-package-link",
-            "ios-package-link",
         ):
             with self.subTest(job=boundary_job):
                 self.assertRegex(self.workflow, rf"(?m)^  {boundary_job}:$")
+        self.assertNotIn("ios-package-link:", self.workflow)
+        self.assertNotIn("ios-generics-simulator:", self.workflow)
 
-    def test_generics_desktop_parity_runs_and_uploads_on_every_host(self):
+    def test_generics_desktop_parity_runs_and_uploads_on_linux_and_windows(self):
         for marker in (
             "os: ubuntu-latest",
             "os: windows-latest",
-            "os: macos-15",
             "expected_arch: x86_64",
-            "expected_arch: aarch64",
             "STASIS_EXPECTED_HOST_ARCH: ${{ matrix.expected_arch }}",
             "--test generics_collections_jit_aot_wasm",
             "--test generics_collections_aot_seam",
@@ -214,6 +213,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         ):
             with self.subTest(marker=marker):
                 self.assertIn(marker, self.generics)
+        self.assertNotIn("macos-", self.generics)
         self.assertNotIn("STASIS_REQUIRE_SIGNED_EXECUTION", self.generics)
         self.assertEqual(self.generics.count("-DSTASIS_BUILD_RUNNER=ON"), 2)
         self.assertEqual(

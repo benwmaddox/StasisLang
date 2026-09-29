@@ -15566,7 +15566,6 @@ mod tests {
             "True no-op",
             "ubuntu-latest",
             "windows-latest",
-            "macos-15",
             "stasis --json vendor status --workspace .",
             "stasis fmt --check",
             "run: stasis check",
@@ -15582,6 +15581,8 @@ mod tests {
                 "weekly workflow missing {expected}"
             );
         }
+        assert!(!weekly.contains("macos-"));
+        assert!(!weekly.contains("osx-arm64"));
         assert!(!weekly.contains("resolve-stasis-nightly.ps1"));
         for forbidden in ["package-mobile", "--target web", "signing"] {
             assert!(
