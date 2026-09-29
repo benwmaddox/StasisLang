@@ -20,7 +20,6 @@ jobs:
         os:
           - windows-latest
           - ubuntu-latest
-          - macos-14
     runs-on: ${{ matrix.os }}
     env:
       STASIS_RELEASE_ID: bootstrap-${{ github.sha }}
@@ -70,33 +69,20 @@ jobs:
           libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev
           libxi-dev libxss-dev libxtst-dev libxkbcommon-dev xvfb
 
-      - name: Install SDL development packages (macos)
-        if: runner.os == 'macOS'
-        run: brew install pkg-config
-
       - name: Build stasis_graphics runtime (unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          runner_build=OFF
-          build_targets=(stasis_graphics)
-          if [[ "${{ runner.os }}" == "macOS" ]]; then
-            runner_build=ON
-            build_targets+=(stasis_runner)
-          fi
           cmake -S runtime -B runtime/build_ci \
             -DCMAKE_BUILD_TYPE=Release \
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
             -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
-            -DSTASIS_BUILD_RUNNER="${runner_build}" \
+            -DSTASIS_BUILD_RUNNER=OFF \
             -DSTASIS_BUILD_SYS=OFF \
             -DSTASIS_RELEASE_ID="${STASIS_RELEASE_ID}" \
             -DSTASIS_BUILD_FINGERPRINT="${STASIS_BUILD_FINGERPRINT}"
-          cmake --build runtime/build_ci --config Release --target "${build_targets[@]}"
-          if [[ "${{ runner.os }}" == "macOS" ]]; then
-            test "$(plutil -extract NSHighResolutionCapable raw runtime/build_ci/bin/Release/stasis_runner.app/Contents/Info.plist)" = "true"
-          fi
+          cmake --build runtime/build_ci --config Release --target stasis_graphics
 
       - name: Build stasis_graphics runtime (windows)
         if: runner.os == 'Windows'
@@ -129,10 +115,7 @@ jobs:
           mkdir -p "${out}/bin"
           cp "target/release/stasis" "${out}/bin/"
           cp "target/release/libstasis_dynload.a" "${out}/bin/"
-          find runtime/build_ci/bin -maxdepth 2 -type f \( -name 'libstasis_graphics.so' -o -name 'libstasis_graphics.dylib' \) -exec cp {} "${out}/bin/" \;
-          if [[ "${{ runner.os }}" == "macOS" ]]; then
-            cp -R runtime/build_ci/bin/Release/stasis_runner.app "${out}/bin/"
-          fi
+          find runtime/build_ci/bin -maxdepth 2 -type f -name 'libstasis_graphics.so' -exec cp {} "${out}/bin/" \;
           cp README.md "${out}/"
           cp LICENSE "${out}/"
           cp -R src "${out}/"
@@ -298,9 +281,6 @@ jobs:
           ./bin/stasis --workspace cli-smoke test
           ./bin/stasis --workspace cli-smoke build --mode release
           smoke_executable="./cli-smoke/build/ci_smoke"
-          if [[ "${{ runner.os }}" == "macOS" ]]; then
-            smoke_executable="./cli-smoke/build/ci_smoke.app/Contents/MacOS/ci_smoke"
-          fi
           smoke_driver=(python3)
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             smoke_driver=(xvfb-run -a python3)
@@ -337,9 +317,6 @@ jobs:
           fi
           ./bin/stasis --workspace cli-smoke package --target desktop "${package_flag[@]}"
           package_executable="./cli-smoke/dist/ci_smoke-desktop/ci_smoke"
-          if [[ "${{ runner.os }}" == "macOS" ]]; then
-            package_executable="./cli-smoke/dist/ci_smoke-desktop/ci_smoke.app/Contents/MacOS/ci_smoke"
-          fi
           desktop_diagnostics="$("${smoke_driver[@]}" - "${package_executable}" <<'PY'
           import subprocess
           import sys

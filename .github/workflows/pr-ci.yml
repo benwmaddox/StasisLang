@@ -356,11 +356,6 @@ jobs:
             evidence: windows-x64
             runtime_library: stasis_graphics.dll
             expected_arch: x86_64
-          - name: macOS
-            os: macos-15
-            evidence: macos-arm64
-            runtime_library: libstasis_graphics.dylib
-            expected_arch: aarch64
     runs-on: ${{ matrix.os }}
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: "2"
@@ -391,10 +386,6 @@ jobs:
           sudo apt-get update && sudo apt-get install -y xvfb pkg-config libx11-dev
           libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev
           libxss-dev libxtst-dev libxkbcommon-dev libegl1 libgl1-mesa-dri
-
-      - name: Install macOS graphics dependencies
-        if: runner.os == 'macOS'
-        run: brew install pkg-config
 
       - name: Run generic JIT, Wasm, and diagnostic harness
         timeout-minutes: 15
@@ -453,11 +444,7 @@ jobs:
           runtime="$GITHUB_WORKSPACE/target/generics-desktop-runtime/bin/${{ matrix.runtime_library }}"
           test -f "$runtime"
           echo "STASIS_RUNTIME_LIBRARY_PATH=$runtime" >> "$GITHUB_ENV"
-          if [[ "${{ runner.os }}" == "macOS" ]]; then
-            runner="$GITHUB_WORKSPACE/target/generics-desktop-runtime/bin/Release/stasis_runner.app/Contents/MacOS/stasis_runner"
-          else
-            runner="$GITHUB_WORKSPACE/target/generics-desktop-runtime/bin/Release/stasis_runner"
-          fi
+          runner="$GITHUB_WORKSPACE/target/generics-desktop-runtime/bin/Release/stasis_runner"
           test -x "$runner"
           echo "STASIS_RUNTIME_RUNNER_PATH=$runner" >> "$GITHUB_ENV"
 
@@ -684,9 +671,6 @@ jobs:
           - name: Linux x64
             os: ubuntu-latest
             runtime_library: libstasis_graphics.so
-          - name: macOS arm64
-            os: macos-15
-            runtime_library: libstasis_graphics.dylib
     env:
       CMAKE_BUILD_PARALLEL_LEVEL: "2"
       STASIS_RELEASE_ID: ci-${{ github.sha }}
@@ -723,36 +707,20 @@ jobs:
           libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev
           libxss-dev libxtst-dev libxkbcommon-dev
 
-      - name: Install macOS graphics dependencies
-        if: runner.os == 'macOS'
-        run: brew install pkg-config
-
       - name: Build native graphics runtime
         shell: bash
         run: |
-          runner_build=OFF
-          build_targets=(stasis_graphics)
-          if [[ "${{ runner.os }}" == "macOS" ]]; then
-            runner_build=ON
-            build_targets+=(stasis_runner)
-          fi
           cmake -S runtime -B target/vscode-e2e-runtime \
             -DCMAKE_BUILD_TYPE=Release \
             -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
             -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
             -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
-            -DSTASIS_BUILD_RUNNER="${runner_build}" \
+            -DSTASIS_BUILD_RUNNER=OFF \
             -DSTASIS_BUILD_SYS=OFF \
             -DSTASIS_RELEASE_ID="$STASIS_RELEASE_ID" \
             -DSTASIS_BUILD_FINGERPRINT="$STASIS_BUILD_FINGERPRINT"
-          cmake --build target/vscode-e2e-runtime --config Release --target "${build_targets[@]}"
+          cmake --build target/vscode-e2e-runtime --config Release --target stasis_graphics
           test -f "$STASIS_RUNTIME_LIBRARY_PATH"
-          if [[ "${{ runner.os }}" == "macOS" ]]; then
-            runner="target/vscode-e2e-runtime/bin/Release/stasis_runner.app/Contents/MacOS/stasis_runner"
-            test -x "${runner}"
-            test "$(plutil -extract NSHighResolutionCapable raw target/vscode-e2e-runtime/bin/Release/stasis_runner.app/Contents/Info.plist)" = "true"
-            echo "STASIS_RUNTIME_RUNNER_PATH=${GITHUB_WORKSPACE}/${runner}" >> "$GITHUB_ENV"
-          fi
 
       - name: Build and probe Stasis runtime loading
         shell: bash
@@ -887,86 +855,3 @@ jobs:
           archive: true
           name: generics-android-native-link-evidence
           path: target/generics-android-native-link-evidence.json
-
-  ios-package-link:
-    if: ${{ inputs.run_slow_seams }}
-    runs-on: macos-15
-    timeout-minutes: 30
-    steps:
-      - name: Checkout Stasis
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-
-      - name: Package and link generated iOS game
-        env:
-          STASIS_IOS_BUILD_ROOT: ${{ github.workspace }}/target/ios-package-link
-        run: bash tools/ci/build_ios_package.sh
-
-      - name: Upload iOS package-link evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          archive: true
-          name: ios-package-link-evidence
-          if-no-files-found: warn
-          path: |
-            target/ios-package-link/evidence.txt
-            target/ios-package-link/xcode-version.txt
-            target/ios-package-link/xcodebuild.log
-            target/ios-package-link/linked-libraries.txt
-            target/ios-package-link/simulator-evidence.json
-            target/ios-package-link/simulator-evidence.txt
-            target/ios-package-link/simulator-xcodebuild.log
-            target/ios-package-link/simulator-launch.txt
-            target/ios-package-link/simulator.log
-            target/ios-package-link/simulator-*.json
-            target/ios-package-link/simulator-*.png
-
-  ios-generics-simulator:
-    if: ${{ github.event_name == 'pull_request' || inputs.run_slow_seams }}
-    runs-on: macos-15
-    timeout-minutes: 45
-    steps:
-      - name: Checkout Stasis
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-
-      - name: Test iOS generics device package and simulator execution
-        env:
-          STASIS_IOS_BUILD_ROOT: ${{ github.workspace }}/target/ios-generics
-          STASIS_IOS_SIMULATOR_ACCEPTANCE: generics
-        run: bash tools/ci/build_ios_package.sh samples/generics_collections dist/ios-ci
-
-      - name: Upload iOS generics evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          archive: true
-          name: ios-generics-evidence
-          if-no-files-found: warn
-          path: |
-            target/ios-generics/evidence.txt
-            target/ios-generics/xcode-version.txt
-            target/ios-generics/xcodebuild.log
-            target/ios-generics/linked-libraries.txt
-            target/ios-generics/device-symbols.txt
-            target/ios-generics/device-hashes.txt
-            target/ios-generics/device-platform.txt
-            target/ios-generics/simulator-evidence.json
-            target/ios-generics/simulator-evidence.txt
-            target/ios-generics/simulator-xcodebuild.log
-            target/ios-generics/simulator-launch.txt
-            target/ios-generics/simulator.log
-            target/ios-generics/simulator-linked-libraries.txt
-            target/ios-generics/simulator-symbols.txt
-            target/ios-generics/simulator-hashes.txt
-            target/ios-generics/simulator-platform.txt
-            target/ios-generics/simulator-result.json
-            target/ios-generics/simulator-frame.png
-            target/ios-generics/bounds-*.json
-            target/ios-generics/bounds-*-launch.txt
-            target/ios-generics/bounds-*-crash.*

@@ -83,20 +83,19 @@ policy automatically. Do not disable the firewall to diagnose pairing.
 ## Platform boundary and validation
 
 Network-enabled desktop packages use the shared monolith shell on Windows,
-Linux, and macOS. The release matrix builds Windows x86_64, Linux x86_64,
-and macOS arm64. Native library resolution also distinguishes macOS x86_64
-and Linux arm64; those architectures require a matching toolchain archive.
+Linux, and macOS. Hosted release and bootstrap workflows build Windows x86_64
+and Linux x86_64 archives. Native library resolution also distinguishes macOS
+x86_64, macOS arm64 and Linux arm64 for local or separately provisioned builds.
 Downstream Maddox and Friends application adoption is separate.
 
-Nightly and bootstrap toolchain archives include one target-native library:
+Current nightly and bootstrap toolchain archives include one target-native library:
 
 - `desktop/network/windows-x86_64/stasis_network.lib`
 - `desktop/network/linux-x86_64/libstasis_network.a`
-- `desktop/network/macos-arm64/libstasis_network.a`
 
-Unix bootstrap archives follow the runner's OS and architecture, using
-`linux-arm64` or `macos-x86_64` when built on those runners. Unsupported runner
-architectures fail assembly instead of publishing a mislabeled library.
+The desktop network target helper still recognizes macOS and additional Unix
+architectures for local builds. Those targets are not included in the hosted
+toolchain archives.
 
 Each archive includes `desktop/network/include/stasis_network.h`. Installed
 packaging resolves these relative to the compiler executable and checks the
@@ -152,14 +151,15 @@ available. The harness writes PNG, MP4 and JSON evidence under
 `target/network-browser-acceptance`. The MP4 records the asserted protocol
 stages; it is not a timing or animation benchmark. The focused
 `network-browser-acceptance.yml` workflow runs these gates plus package-content
-tests on Windows. Linux and macOS jobs run the native link/lifecycle probe
+tests on Windows. Its Linux job runs the native link/lifecycle probe
 (`bash tools/ci/test_desktop_network_link.sh`), package contract tests, and
 provenance tests. Nightly packaging additionally builds a network-enabled
 desktop package from the relocated release archive with source inputs detached.
 PR CI also runs `bash tools/ci/test_unix_desktop_network_package.sh` on Linux
-and macOS to build a native host package and audit its staged browser guest.
-Both platforms run the HTTP and process-exit listener probe; macOS also checks
-the app executable and local-network permission description.
+to build a native host package and audit its staged browser guest. The test
+runs the HTTP and process-exit listener probes. macOS product packaging and its
+local-network permission description remain supported and can be validated
+with a local build.
 
 The package provenance verifier also checks each guest bundle against its
 sidecar length and SHA-256, rejecting missing or substituted payloads. Linux

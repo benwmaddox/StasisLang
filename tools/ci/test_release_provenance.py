@@ -741,7 +741,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             self.assertIn("cp -R runtime/third_party", workflow)
             self.assertIn('Copy-Item "runtime/third_party"', workflow)
 
-    def test_release_workflows_select_platform_smoke_executable(self):
+    def test_release_workflows_use_linux_smoke_executable(self):
         for workflow_name in (
             ".github/workflows/nightly-release.yml",
             ".github/workflows/bootstrap-artifacts.yml",
@@ -755,12 +755,12 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 smoke_block,
                 workflow_name,
             )
-            self.assertIn(
+            self.assertNotIn(
                 'if [[ "${{ runner.os }}" == "macOS" ]]; then',
                 smoke_block,
                 workflow_name,
             )
-            self.assertIn(
+            self.assertNotIn(
                 'smoke_executable="./cli-smoke/build/ci_smoke.app/Contents/MacOS/ci_smoke"',
                 smoke_block,
                 workflow_name,
@@ -858,7 +858,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
         )
         self.assertIn("--expect-desktop-package", network_call)
 
-    def test_bootstrap_packaged_runner_uses_platform_path_and_bounded_smoke(self):
+    def test_bootstrap_packaged_runner_uses_linux_path_and_bounded_smoke(self):
         workflow = (ROOT / ".github/workflows/bootstrap-artifacts.yml").read_text(
             encoding="utf-8"
         )
@@ -866,7 +866,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             'package_executable="./cli-smoke/dist/ci_smoke-desktop/ci_smoke"',
             workflow,
         )
-        self.assertIn(
+        self.assertNotIn(
             'package_executable="./cli-smoke/dist/ci_smoke-desktop/'
             'ci_smoke.app/Contents/MacOS/ci_smoke"',
             workflow,

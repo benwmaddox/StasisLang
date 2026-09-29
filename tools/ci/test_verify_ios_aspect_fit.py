@@ -152,7 +152,7 @@ class VerifyIosAspectFitTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("byte-identical", result.stderr)
 
-    def test_slow_ci_owns_arm64_simulator_evidence(self) -> None:
+    def test_ios_helper_keeps_arm64_simulator_evidence_without_a_hosted_lane(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "pr-ci.yml").read_text(
             encoding="utf-8"
         )
@@ -167,9 +167,10 @@ class VerifyIosAspectFitTests(unittest.TestCase):
             / "StasisMobile.xcodeproj"
             / "project.pbxproj"
         ).read_text(encoding="utf-8")
-        self.assertIn("ios-package-link:", workflow)
-        self.assertIn("runs-on: macos-15", workflow)
-        self.assertIn("simulator-evidence.json", workflow)
+        self.assertNotIn("ios-package-link:", workflow)
+        self.assertNotIn("ios-generics-simulator:", workflow)
+        self.assertNotIn("runs-on: macos-", workflow)
+        self.assertIn("simulator-evidence.json", script)
         self.assertIn("ios-arm64_x86_64-simulator", script)
         self.assertNotIn("-sdk iphonesimulator -arch arm64", script)
         self.assertNotIn("-destination 'generic/platform=iOS Simulator'", script)

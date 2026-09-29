@@ -286,7 +286,7 @@ An explicit window-size request remains authoritative while the X11 window
 manager completes an asynchronous restore: Stasis applies the requested scaled
 backing even if SDL briefly continues to report the prior maximized state.
 
-On macOS, the release toolchain ships `stasis_runner.app`, and generated
+On macOS, local toolchain builds produce `stasis_runner.app`, and generated
 desktop packages preserve the same app-bundle contract with a game-specific
 `Info.plist`. Both enable `NSHighResolutionCapable`. Together with SDL's
 `SDL_WINDOW_ALLOW_HIGHDPI` window flag, an `800 x 600` logical window on a

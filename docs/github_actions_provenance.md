@@ -31,7 +31,8 @@ and in `tools/validate_repo.sh`.
 | dtolnay/rust-toolchain | stable | stable commit in manifest | Composite action, no Node runtime; stable toolchain and requested targets preserved. |
 
 Node 24 actions require runner 2.327.1 or newer. These workflows use GitHub-hosted
-Ubuntu, Windows and macOS runners. Explicit build/test Node selections move from
+Ubuntu and Windows runners; Android emulator acceptance also runs on Ubuntu.
+Explicit build/test Node selections move from
 22 to 24. VS Code esbuild `--target=node20` is an emitted-JavaScript compatibility
 target for the extension host, not a CI runtime; it remains unchanged.
 
@@ -82,13 +83,12 @@ target for the extension host, not a CI runtime; it remains unchanged.
   default environment (`dirname` and `python3` unavailable). Focused commands
   above ran directly. No compiler/runtime source changed.
 
-The worker must publish the changes before hosted validation can run. Run PR CI
-with slow seams and nightly on the published revision, covering Linux x64,
-Windows x64, macOS arm64, Android emulators and mobile support packaging. Confirm
+Run PR CI with slow seams and nightly on the published revision, covering Linux
+x64, Windows x64, Android emulators and Android mobile support packaging. Confirm
 artifact downloads, provenance checks and release gates, and compare warning
-annotations against the bounded exceptions above. Hosted lane success is **not
-claimed** by local source checks. No branch, commit, push or release was created
-by this implementation session.
+annotations against the bounded exceptions above. macOS and iOS CI lanes are
+disabled; their product paths and local validation tools remain available.
+Hosted lane success is **not claimed** by local source checks.
 
 Visual evidence: not applicable (workflow configuration only).
 

@@ -87,13 +87,17 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
                 self.assertIn("name: Build desktop network support (unix)", workflow)
                 if name == "bootstrap-artifacts.yml":
                     self.assertIn('tools/desktop_network_target.py "${RUNNER_OS}" "${RUNNER_ARCH}"', workflow)
+                    library_copy = (
+                        'cp "build/codex-cargo-target/' + target_directory
+                        + 'release/libstasis_network.a" "${out}/desktop/network/${network_target}/"'
+                    )
                 else:
-                    self.assertIn("network_target=linux-x86_64", workflow)
-                    self.assertIn("network_target=macos-arm64", workflow)
-                library_copy = (
-                    'cp "build/codex-cargo-target/' + target_directory
-                    + 'release/libstasis_network.a" "${out}/desktop/network/${network_target}/"'
-                )
+                    self.assertIn('mkdir -p "${out}/desktop/network/linux-x86_64"', workflow)
+                    self.assertNotIn("network_target=macos-arm64", workflow)
+                    library_copy = (
+                        'cp "build/codex-cargo-target/' + target_directory
+                        + 'release/libstasis_network.a" "${out}/desktop/network/linux-x86_64/"'
+                    )
                 header_copy = 'cp crates/stasis_network/include/stasis_network.h "${out}/desktop/network/include/"'
                 provenance = workflow.index("generate_release_provenance.py")
                 self.assertLess(workflow.index(library_copy), provenance)
@@ -112,7 +116,8 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
     def test_unix_ci_covers_native_link_lifecycle_and_packages(self):
         workflow = (ROOT / ".github/workflows/network-browser-acceptance.yml").read_text(encoding="utf-8")
         unix = workflow.split("  unix-desktop-package:", 1)[1].split("  windows-desktop-package:", 1)[0]
-        self.assertIn("os: [ubuntu-latest, macos-15]", unix)
+        self.assertIn("runs-on: ubuntu-latest", unix)
+        self.assertNotIn("macos-15", unix)
         self.assertIn("timeout-minutes: 15", unix)
         self.assertIn("libx11-dev", unix)
         self.assertIn("libxkbcommon-dev", unix)
@@ -140,67 +145,62 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             "needs: [detect, mobile_network_support]",
             self.workflow,
         )
-        self.assertIn("os: ubuntu-latest", self.workflow)
-        self.assertIn("os: macos-15", self.workflow)
+        self.assertIn("runs-on: ubuntu-latest", self.workflow)
+        self.assertNotIn("macos-15", self.workflow)
         self.assertIn('ndk;27.0.12077973', self.workflow)
         self.assertIn("aarch64-linux-android", self.workflow)
         self.assertIn("x86_64-linux-android", self.workflow)
-        self.assertIn("aarch64-apple-ios", self.workflow)
-        self.assertIn("aarch64-apple-ios-sim", self.workflow)
         self.assertIn('"platforms;android-26"', self.workflow)
         self.assertIn('api_target="${target}26"', self.workflow)
-        self.assertIn("xcrun --sdk iphoneos --find clang", self.workflow)
-        self.assertIn("xcrun --sdk iphonesimulator --find clang", self.workflow)
-        self.assertIn(
-            "cargo build -p stasis_network --target aarch64-apple-ios-sim --release",
-            self.workflow,
-        )
-        self.assertIn(
-            "target/aarch64-apple-ios-sim/release/libstasis_network.a network-artifact/ios-simulator-arm64/",
-            self.workflow,
-        )
-        self.assertIn(
-            "xcrun lipo target/aarch64-apple-ios/release/libstasis_network.a -verify_arch arm64",
-            self.workflow,
-        )
-        self.assertIn(
-            "xcrun lipo target/aarch64-apple-ios-sim/release/libstasis_network.a -verify_arch arm64",
-            self.workflow,
-        )
-        self.assertNotIn("xcrun lipo -verify_arch arm64", self.workflow)
-        self.assertIn(
-            "device and simulator network archives are unexpectedly identical",
-            self.workflow,
-        )
+        self.assertNotIn("xcrun", self.workflow)
+        self.assertNotIn("aarch64-apple-ios", self.workflow)
         self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", self.workflow)
-        self.assertIn("name: mobile-network-support-${{ matrix.kind }}", self.workflow)
+        self.assertIn("name: mobile-network-support-android", self.workflow)
+
+    def test_hosted_workflows_have_no_apple_runner_rows_or_jobs(self):
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            workflow = path.read_text(encoding="utf-8")
+            with self.subTest(workflow=path.name):
+                self.assertNotRegex(
+                    workflow,
+                    r"(?im)^\s*(?:runs-on|os):\s*[^\n]*\bmacos(?:-[\w]+)?\b",
+                )
+                self.assertNotRegex(workflow, r"(?im)^\s*kind:\s*ios\b")
+        for marker in ("ios-package-link:", "ios-generics-simulator:"):
+            self.assertNotIn(marker, (ROOT / ".github/workflows/pr-ci.yml").read_text(encoding="utf-8"))
+        for archive in ("stasis-nightly-linux-x64", "stasis-nightly-win-x64"):
+            self.assertIn(f"archive: {archive}", self.workflow)
+        self.assertIn("python3 tools/audit_release_bundle.py", self.workflow)
+        self.assertIn("python tools/audit_release_bundle.py", self.workflow)
+        self.assertIn("mobile/network/android-arm64/libstasis_network.a", required_files("linux"))
+        self.assertIn("mobile/network/android-x86_64/libstasis_network.a", required_files("windows"))
 
     def test_archive_layout_is_copied_before_provenance(self):
         for path in (
             "mobile/network/android-arm64/libstasis_network.a",
             "mobile/network/android-x86_64/libstasis_network.a",
-            "mobile/network/ios-arm64/libstasis_network.a",
-            "mobile/network/ios-simulator-arm64/libstasis_network.a",
             "mobile/network/include/stasis_network.h",
         ):
             self.assertIn(path, self.workflow)
         for platform in ("windows", "linux", "macos"):
-            self.assertIn(
-                "mobile/network/ios-simulator-arm64/libstasis_network.a",
-                required_files(platform),
-            )
+            self.assertIn("mobile/network/android-arm64/libstasis_network.a", required_files(platform))
+            self.assertIn("mobile/network/android-x86_64/libstasis_network.a", required_files(platform))
+            self.assertNotIn("mobile/network/ios-arm64/libstasis_network.a", required_files(platform))
+            self.assertNotIn("mobile/network/ios-simulator-arm64/libstasis_network.a", required_files(platform))
+        self.assertNotIn("mobile/network/ios-arm64/libstasis_network.a", self.workflow)
+        self.assertNotIn("mobile/network/ios-simulator-arm64/libstasis_network.a", self.workflow)
         self.assertIn('cp -R mobile/network "${out}/mobile/"', self.workflow)
         self.assertIn('Copy-Item mobile/network "$out/mobile/"', self.workflow)
         self.assertGreaterEqual(
             self.workflow.count("generate_release_provenance.py"), 2
         )
 
-    def test_relocated_network_smoke_is_present_for_android_and_ios(self):
+    def test_relocated_network_smoke_keeps_android_and_rejects_unavailable_ios_archive(self):
         self.assertIn('"capabilities"] = {"network": True}', self.workflow)
         self.assertIn('"web"] = {"entry": "src/main.stasis"}', self.workflow)
         self.assertIn("dist/network-android", self.workflow)
         self.assertIn("network_guest.bundle", self.workflow)
-        self.assertIn("ios/network/libstasis_network.a", self.workflow)
+        self.assertNotIn("ios/network/libstasis_network.a", self.workflow)
         self.assertIn("crates/stasis_network", self.workflow)
         self.assertIn("stasis-network-source-backup", self.workflow)
         self.assertIn("requires a macOS host with Xcode", self.workflow)

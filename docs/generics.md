@@ -146,7 +146,7 @@ canonical `src/main.stasis` entry and use the same renderer lifecycle.
 | Filesystem and editor transactions | `tests::notify_watch_service_reloads_imported_generic_source_through_real_jit_commit`; `live_workspace::tests::imported_generic_dirty_buffer_preview_apply_and_rejection_are_transactional` | A physical imported-file event and editor preview/apply both stage a real JIT candidate. Rejected editor candidates leave disk, code, and state unchanged. |
 | Packaged Web | `apps/stasis/tests/generics_collections_package.rs`; `tools/run_generics_collections_browser_acceptance.mjs` | The package selects `src/main.stasis`; Node observes the full workload result/digest and bounds traps; a real browser presents the authored frame without runtime errors. |
 | Android AOT link | The `android-package-link` slow CI lane and the generated `android` Gradle project | The generic arm64 package links `libmain.so`; its bundle and link map agree. The x86_64 development APK is the emulator lane and must present valid frames. |
-| Host coverage | `generics-cross-platform` CI matrix on Ubuntu, Windows, and macOS; Windows bootstrap additionally runs the native AOT seam | The shared JIT/Wasm/diagnostic contract passes on all three hosts. |
+| Host coverage | `generics-cross-platform` CI matrix on Ubuntu and Windows; Windows bootstrap additionally runs the native AOT seam | The shared JIT/Wasm/diagnostic contract passes on both hosted desktop targets. |
 
 Hot swap is a development-JIT transaction only. Native AOT, Web, Android, and
 iOS release packages remain immutable; parity for those packages means they
