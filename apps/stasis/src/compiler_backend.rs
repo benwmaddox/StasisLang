@@ -2076,7 +2076,10 @@ fn ensure_stasis_dynload_link_library() -> Result<PathBuf, String> {
 }
 
 #[cfg(windows)]
-fn stage_stasis_dynload_runtime(link_library: &Path, output: &Path) -> Result<(), String> {
+fn stage_stasis_dynload_runtime(
+    link_library: &Path,
+    output: &Path,
+) -> Result<Option<PathBuf>, String> {
     let file_name = link_library
         .file_name()
         .and_then(|name| name.to_str())
@@ -2100,12 +2103,16 @@ fn stage_stasis_dynload_runtime(link_library: &Path, output: &Path) -> Result<()
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(dll_name);
-    copy_file_creating_parent(&dll, &destination)
+    copy_file_creating_parent(&dll, &destination)?;
+    Ok(Some(destination))
 }
 
 #[cfg(not(windows))]
-fn stage_stasis_dynload_runtime(_link_library: &Path, _output: &Path) -> Result<(), String> {
-    Ok(())
+fn stage_stasis_dynload_runtime(
+    _link_library: &Path,
+    _output: &Path,
+) -> Result<Option<PathBuf>, String> {
+    Ok(None)
 }
 
 fn resolve_runtime_runner_path(repo_root: &Path) -> Option<PathBuf> {
@@ -5627,9 +5634,11 @@ fn package_engine_bundle_release(
             return Err(initial_error);
         }
     }
-    if let Some(link_library) = dynload_link_library.as_deref() {
-        stage_stasis_dynload_runtime(link_library, &linked_library_path)?;
-    }
+    let staged_dynload_runtime = if let Some(link_library) = dynload_link_library.as_deref() {
+        stage_stasis_dynload_runtime(link_library, &linked_library_path)?
+    } else {
+        None
+    };
 
     let (runner_src, graphics_src) = ensure_runtime_release_artifacts()?;
     eprintln!(
@@ -5721,6 +5730,9 @@ fn package_engine_bundle_release(
     sign_output_artifact_if_configured(packaged_output_exe)?;
     sign_output_artifact_if_configured(&linked_library_path)?;
     sign_output_artifact_if_configured(&graphics_dst)?;
+    if let Some(dynload_runtime) = staged_dynload_runtime.as_deref() {
+        sign_output_artifact_if_configured(dynload_runtime)?;
+    }
     if let Some(app_bundle) = runner_layout.app_bundle.as_deref() {
         sign_output_artifact_if_configured(app_bundle)?;
     }
@@ -10142,7 +10154,7 @@ fn run_self_host_aot_cli_with_backend_and_options(
         }
         link_objects_to_executable(&object_paths, output_exe, &entry_symbol, &link_config)?;
         if let Some(link_library) = dynload_link_library.as_deref() {
-            stage_stasis_dynload_runtime(link_library, output_exe)?;
+            let _ = stage_stasis_dynload_runtime(link_library, output_exe)?;
         }
         maybe_sign_output_executable(output_exe)?;
         let object_bundle_path =
