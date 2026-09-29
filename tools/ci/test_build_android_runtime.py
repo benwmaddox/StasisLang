@@ -88,7 +88,7 @@ class AndroidRuntimeBuildTests(unittest.TestCase):
         self.assertIn("android_prebuilt_acceptance:", workflow)
         self.assertIn("tools/build_android_runtime.py", workflow)
         self.assertIn("package-mobile (three variants)", workflow)
-        self.assertIn('apksigner verify --verbose "${apk}"', workflow)
+        self.assertIn('build-tools/35.0.0/apksigner" verify --verbose "${apk}"', workflow)
         self.assertIn('--required-asset "" "${apk}"', workflow)
         self.assertIn('"launcher_resources": "branding/android/res"', workflow)
         self.assertIn('mipmap-anydpi-v26/ic_launcher.xml', workflow)

@@ -5760,7 +5760,8 @@ fn uses_monolithic_desktop_package(
     target: &stasis_jit::AotTarget,
     desktop_network: Option<&DesktopNetworkLink>,
 ) -> bool {
-    matches!(target, stasis_jit::AotTarget::Native) && desktop_network.is_some()
+    // The reusable Windows runner does not yet consume packaged --replay.
+    matches!(target, stasis_jit::AotTarget::Native) && (cfg!(windows) || desktop_network.is_some())
 }
 
 #[cfg(test)]
@@ -5768,7 +5769,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ordinary_desktop_packages_use_runner_while_network_stays_monolithic() {
+    fn windows_packages_keep_replay_capable_monolithic_runtime() {
         let host = DesktopNetworkLink {
             library: PathBuf::from("network.lib"),
             include_dir: PathBuf::from("include"),
@@ -5779,10 +5780,10 @@ mod tests {
             ..host.clone()
         };
 
-        assert!(!uses_monolithic_desktop_package(
-            &stasis_jit::AotTarget::Native,
-            None,
-        ));
+        assert_eq!(
+            uses_monolithic_desktop_package(&stasis_jit::AotTarget::Native, None),
+            cfg!(windows),
+        );
         assert!(uses_monolithic_desktop_package(
             &stasis_jit::AotTarget::Native,
             Some(&host),

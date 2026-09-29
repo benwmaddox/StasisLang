@@ -20,7 +20,7 @@ SCHEMA = "stasis.seam_test.v1"
 MARKER = re.compile(r"Stasis seam: (\{[^\r\n]+\})")
 GENERICS_ACCEPTANCE_MARKER = re.compile(r"Stasis Android generics: (\{[^\r\n]+\})")
 ASSET_DIAGNOSTIC = re.compile(r"code=([^ ]+) path=(.*?) detail=(.+)")
-ANDROID_LOG_RECORD_PID = re.compile(r"^[VDIWEF]/\S+\s+\((\d+)\):")
+ANDROID_LOG_RECORD_PID = re.compile(r"^[VDIWEF]/\S+\s+\(\s*(\d+)\):")
 ANDROID_GENERICS_MAX_LOG_LINES = 2500
 ANDROID_GENERICS_MAX_LOG_BYTES = 1_000_000
 

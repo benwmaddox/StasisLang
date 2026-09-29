@@ -495,31 +495,29 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
     assert!(package_payload.is_dir());
     for relative in [
         "assets/manifest.json",
-        "stasis_dynload.dll",
-        "stasis_graphics.dll",
         "stasis.json",
         "stasis_provenance.json",
-        "windows_launch_smoke.dll",
-        "windows_launch_smoke.exe.launch",
     ] {
         assert!(
             package_payload.join(relative).exists(),
             "Windows package payload should contain {relative}"
         );
     }
-    let launch_manifest =
-        fs::read_to_string(package_payload.join("windows_launch_smoke.exe.launch"))
-            .expect("read packaged launch sidecar");
-    assert!(launch_manifest
-        .lines()
-        .any(|line| line == "dll=windows_launch_smoke.dll"));
-    assert!(launch_manifest
-        .lines()
-        .any(|line| line == "render_construction_lifecycle_version=1"));
+    for obsolete in [
+        "stasis_dynload.dll",
+        "stasis_graphics.dll",
+        "windows_launch_smoke.dll",
+        "windows_launch_smoke.exe.launch",
+    ] {
+        assert!(
+            !package_payload.join(obsolete).exists(),
+            "Windows production package should not contain {obsolete}"
+        );
+    }
     assert!(!package_root.join("stasis_graphics.dll").exists());
     let package_screenshot = parent.join("package.png");
     let mut package_command = Command::new(package_root.join("windows_launch_smoke.exe"));
-    package_command.current_dir(&parent);
+    package_command.current_dir(&package_root);
     configure_capture(&mut package_command, &package_screenshot, true);
     let package_run = launch(package_command, "packaged executable");
     let package_blocked = app_control_blocked(&package_run);

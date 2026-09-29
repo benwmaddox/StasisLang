@@ -108,10 +108,6 @@ and their audit sidecars share the package root with game assets on Unix
 bundle; its asset root resolves back to that package directory. Network-enabled packages do not need a separate Stasis runtime
 shared library.
 
-Windows network host and client packages deliberately continue through the monolithic CMake path.
-The reusable runner/game-DLL layout is currently limited to ordinary non-network Windows games;
-moving network packages to it requires a separately versioned and tested network DLL boundary.
-
 Linux and macOS use the same F1 join card and explicit copy action as Windows.
 The macOS app includes a local-network usage description.
 The displayed card excludes credentials; only the clipboard action receives the
