@@ -106,7 +106,17 @@ diagnostics report the release/development label, tag, commit, and renderer ABI.
 ## Android arm64
 
 Install JDK 17, Android SDK 35, NDK, CMake 3.22.1, Ninja, and Gradle 8.9. Keep
-local SDL3 and SDL3_image source checkouts and set:
+Official arm64 release packages use the authenticated prebuilt Android runtime
+shipped in the same Stasis release. The runtime kit contains SDL3 3.4.10,
+SDL3_image 3.4.4, ThorVG, and separate offline, network-host, and network-client
+Stasis runtime archives. `package-mobile` verifies the release/source identity,
+NDK 27.0.12077973, `arm64-v8a` ABI, API 26 floor, runtime/graphics ABI versions,
+source hashes, and every staged file before generating a project. CMake hashes
+the selected archives again and rejects an ABI, NDK, variant, or file mismatch;
+it never silently rebuilds a missing official runtime.
+
+Pass `--development-build` for the explicit source-build fallback. Development
+and x86_64 emulator packages require local SDL3 and SDL3_image source checkouts:
 
 ```text
 STASIS_SDL3_SOURCE=/absolute/path/to/SDL

@@ -123,8 +123,82 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  android_runtime_support:
+    needs: detect
+    if: needs.detect.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout pinned SDL3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: libsdl-org/SDL
+          ref: 8e37db5e797b6167f3a00d697d816a684bd259c7
+          path: target/android-runtime-source/SDL
+
+      - name: Checkout pinned SDL3_image
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: libsdl-org/SDL_image
+          ref: bec9134a26c7d0f31b36d6083c25296e04cabff5
+          path: target/android-runtime-source/SDL_image
+
+      - name: Install pinned Android runtime toolchain
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          packages: platform-tools
+
+      - name: Build immutable Android arm64 runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          started="$(date +%s)"
+          sdkmanager "platforms;android-26" "ndk;27.0.12077973" "cmake;3.22.1"
+          setup_finished="$(date +%s)"
+          android_sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+          cmake_root="${android_sdk}/cmake/3.22.1/bin"
+          fingerprint="$(python3 tools/compute_toolchain_fingerprint.py \
+            --source-commit "${GITHUB_SHA}" \
+            --release-id "${{ needs.detect.outputs.nightly_tag }}")"
+          python3 tools/build_android_runtime.py \
+            --runtime-source runtime \
+            --sdl3-source target/android-runtime-source/SDL \
+            --sdl3-image-source target/android-runtime-source/SDL_image \
+            --network-include crates/stasis_network/include \
+            --ndk-root "${android_sdk}/ndk/27.0.12077973" \
+            --cmake "${cmake_root}/cmake" \
+            --ninja "${cmake_root}/ninja" \
+            --release-id "${{ needs.detect.outputs.nightly_tag }}" \
+            --source-commit "${GITHUB_SHA}" \
+            --build-fingerprint "${fingerprint}" \
+            --out android-runtime-artifact/arm64-v8a
+          build_finished="$(date +%s)"
+          artifact_bytes="$(du -sb android-runtime-artifact/arm64-v8a | cut -f1)"
+          {
+            echo "### Android runtime cold phase timing"
+            echo ""
+            echo "| Phase | Seconds |"
+            echo "| --- | ---: |"
+            echo "| SDK/NDK/CMake install | $((setup_finished - started)) |"
+            echo "| Three runtime variants + common dependencies | $((build_finished - setup_finished)) |"
+            echo "| Total | $((build_finished - started)) |"
+            echo ""
+            echo "Uncompressed runtime kit bytes: ${artifact_bytes}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload immutable Android runtime
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: true
+          name: android-runtime-arm64
+          path: android-runtime-artifact
+          if-no-files-found: error
+          retention-days: 14
+
   build:
-    needs: [detect, mobile_network_support]
+    needs: [detect, mobile_network_support, android_runtime_support]
     if: needs.detect.outputs.should_release == 'true'
     strategy:
       fail-fast: false
@@ -159,6 +233,12 @@ jobs:
         with:
           name: mobile-network-support-android
           path: mobile/network
+
+      - name: Download immutable Android arm64 runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: android-runtime-arm64
+          path: mobile/android-runtime
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -252,6 +332,8 @@ jobs:
           cp -R samples "${out}/"
           mkdir -p "${out}/mobile"
           cp -R mobile/shells "${out}/mobile/"
+          test -f mobile/android-runtime/arm64-v8a/manifest.json
+          cp -R mobile/android-runtime "${out}/mobile/"
           test -f mobile/network/include/stasis_network.h
           test -f mobile/network/android-arm64/libstasis_network.a
           test -f mobile/network/android-x86_64/libstasis_network.a
@@ -313,6 +395,8 @@ jobs:
           Copy-Item samples "$out/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/mobile" | Out-Null
           Copy-Item mobile/shells "$out/mobile/" -Recurse -Force
+          if (-not (Test-Path "mobile/android-runtime/arm64-v8a/manifest.json")) { throw "prebuilt Android runtime manifest missing" }
+          Copy-Item mobile/android-runtime "$out/mobile/" -Recurse -Force
           @(
             "mobile/network/include/stasis_network.h",
             "mobile/network/android-arm64/libstasis_network.a",
@@ -728,6 +812,100 @@ jobs:
           path: dist/stasis-nightly-win-x64.zip
           if-no-files-found: error
 
+  android_prebuilt_acceptance:
+    needs: [detect, build]
+    if: needs.detect.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Start cold-job timing
+        shell: bash
+        run: echo "ANDROID_COLD_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+      - name: Restore matching nightly toolchain
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stasis-nightly-linux-x64
+          path: target/android-prebuilt-acceptance
+      - name: Record nightly restore timing
+        shell: bash
+        run: echo "ANDROID_RESTORE_FINISHED=$(date +%s)" >> "$GITHUB_ENV"
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+        with:
+          gradle-version: "8.9"
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          packages: platform-tools
+      - name: Build and audit prebuilt offline, host, and client APKs
+        shell: bash
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
+        run: |
+          set -euo pipefail
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+          setup_finished="$(date +%s)"
+          archive="$(find target/android-prebuilt-acceptance -name 'stasis-nightly-linux-x64.tar.gz' -print -quit)"
+          test -n "${archive}"
+          mkdir -p target/android-prebuilt-toolchain
+          tar -xf "${archive}" -C target/android-prebuilt-toolchain
+          toolchain="$(find target/android-prebuilt-toolchain -path '*/bin/stasis' -print -quit)"
+          test -x "${toolchain}"
+          sample="samples/mobile_storage_link"
+          package_started="$(date +%s)"
+          "${toolchain}" --workspace "${sample}" package-mobile --target android-arm64 --out dist/prebuilt-offline
+          python3 - "${sample}/stasis.json" host <<'PY'
+          import json, pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          value = json.loads(path.read_text())
+          value["capabilities"] = {"network": True}
+          value["web"] = {"entry": value["entry"]}
+          path.write_text(json.dumps(value, indent=2) + "\n")
+          PY
+          "${toolchain}" --workspace "${sample}" package-mobile --target android-arm64 --out dist/prebuilt-host
+          python3 - "${sample}/stasis.json" client <<'PY'
+          import json, pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          value = json.loads(path.read_text())
+          value["capabilities"] = {"network_client": True}
+          value.pop("web", None)
+          path.write_text(json.dumps(value, indent=2) + "\n")
+          PY
+          "${toolchain}" --workspace "${sample}" package-mobile --target android-arm64 --out dist/prebuilt-client
+          package_finished="$(date +%s)"
+          for variant in offline host client; do
+            root="${sample}/dist/prebuilt-${variant}"
+            grep -Fq 'set(STASIS_ANDROID_RUNTIME_MODE "prebuilt")' "${root}/android/app/src/main/cpp/CMakeLists.txt"
+            grep -Fq "set(STASIS_ANDROID_RUNTIME_VARIANT \"${variant}\")" "${root}/android/app/src/main/cpp/CMakeLists.txt"
+            gradle -p "${root}/android" :app:assembleDebug --no-daemon --max-workers=2 --console=plain
+            apk="${root}/android/app/build/outputs/apk/debug/app-debug.apk"
+            test -f "${apk}"
+            python3 tools/ci/check_android_release_package.py --abi arm64-v8a --required-asset "" "${apk}"
+            apksigner verify --verbose "${apk}"
+            python3 tools/verify_package_provenance.py \
+              --release-root "$(dirname "$(dirname "${toolchain}")")" \
+              --package-root "${root}" \
+              --expect-runtime-sources
+          done
+          build_finished="$(date +%s)"
+          artifact_bytes="$(du -cb ${sample}/dist/prebuilt-*/android/app/build/outputs/apk/debug/app-debug.apk | tail -n1 | cut -f1)"
+          {
+            echo "### Prebuilt Android cold acceptance timing"
+            echo ""
+            echo "| Phase | Seconds |"
+            echo "| --- | ---: |"
+            echo "| Nightly artifact restore | $((ANDROID_RESTORE_FINISHED - ANDROID_COLD_STARTED)) |"
+            echo "| Gradle + Android SDK/NDK setup | $((setup_finished - ANDROID_RESTORE_FINISHED)) |"
+            echo "| package-mobile (three variants) | $((package_finished - package_started)) |"
+            echo "| Gradle configure, CMake shell/AOT link, APK assembly, debug signing, audit | $((build_finished - package_finished)) |"
+            echo "| Complete cold acceptance | $((build_finished - ANDROID_COLD_STARTED)) |"
+            echo ""
+            echo "Three debug APK bytes: ${artifact_bytes}"
+            echo ""
+            echo "This public acceptance reports hosted phase evidence; it does not claim the private consumer job is under 60 seconds."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   vscode_extension:
     needs: [detect, build, windows_signing]
     if: needs.detect.outputs.should_release == 'true'
@@ -838,8 +1016,8 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [detect, build, windows_signing, vscode_extension, integration_seams, android_device_seams]
-    if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.windows_signing.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' }}
+    needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams]
+    if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.windows_signing.result == 'success' && needs.android_prebuilt_acceptance.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       actions: read

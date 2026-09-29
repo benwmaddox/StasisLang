@@ -185,6 +185,35 @@ def main() -> int:
     }
     if not mobile_shell_sources:
         parser.error("release mobile shell templates are missing")
+    android_runtime_root = root / "mobile" / "android-runtime" / "arm64-v8a"
+    android_runtime_manifest_path = android_runtime_root / "manifest.json"
+    if not android_runtime_manifest_path.is_file():
+        parser.error(
+            f"release prebuilt Android runtime manifest is missing: {android_runtime_manifest_path}"
+        )
+    try:
+        android_runtime_manifest = json.loads(
+            android_runtime_manifest_path.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as error:
+        parser.error(f"release prebuilt Android runtime manifest is invalid: {error}")
+    if (
+        android_runtime_manifest.get("schema") != "stasis.android_runtime.v1"
+        or android_runtime_manifest.get("release_id") != args.release_tag
+        or android_runtime_manifest.get("source_commit") != args.source_commit
+        or android_runtime_manifest.get("abi") != "arm64-v8a"
+        or android_runtime_manifest.get("ndk_version") != "27.0.12077973"
+    ):
+        parser.error(
+            "release prebuilt Android runtime identity differs from release provenance"
+        )
+    android_runtime_artifacts = {
+        path.relative_to(root).as_posix(): sha256(path)
+        for path in sorted(android_runtime_root.rglob("*"))
+        if path.is_file()
+    }
+    if len(android_runtime_artifacts) < 8:
+        parser.error("release prebuilt Android runtime artifact set is incomplete")
     try:
         desktop_network_artifacts = desktop_network_artifact_hashes(root)
     except ValueError as error:
@@ -226,6 +255,7 @@ def main() -> int:
         },
         "runtime_sources": runtime_sources,
         "mobile_shell_sources": mobile_shell_sources,
+        "android_runtime_artifacts": android_runtime_artifacts,
         "desktop_network_artifacts": desktop_network_artifacts,
         "command_buffer": {
             "name": COMMAND_BUFFER_NAME,

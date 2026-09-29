@@ -413,6 +413,25 @@ def verify_mobile_shells(
             if not destination.is_file() or destination.read_bytes() != expected:
                 parser.error(f"packaged mobile shell does not match release transform: {destination}")
 
+    android_runtime = receipt.get("android_runtime")
+    if isinstance(android_runtime, dict) and android_runtime.get("mode") == "prebuilt":
+        if target != "android-arm64" or android_runtime.get("variant") not in (
+            "offline", "host", "client"
+        ):
+            parser.error("packaged prebuilt Android runtime target or variant is invalid")
+        release_runtime = release_root / "mobile" / "android-runtime" / "arm64-v8a"
+        packaged_runtime = package_root / "android" / "runtime"
+        for source in sorted(release_runtime.rglob("*")):
+            if not source.is_file():
+                continue
+            relative = source.relative_to(release_runtime)
+            expected_paths.add(("android", f"runtime/{relative.as_posix()}"))
+            destination = packaged_runtime / relative
+            if not destination.is_file() or destination.read_bytes() != source.read_bytes():
+                parser.error(
+                    f"packaged prebuilt Android runtime differs from release artifact: {destination}"
+                )
+
     expected_paths.add(("common", "stasis_package_provenance.h"))
     if target in ("ios-arm64", "ios-simulator-arm64"):
         expected_paths.add(("ios", "StasisMobile.xcconfig"))
@@ -534,7 +553,19 @@ def main() -> int:
         parser.error("packaged provenance does not exactly match the release manifest")
     verify_asset_package_identities(parser, args.package_root)
     verify_network_guest_bundles(parser, args.package_root)
-    runtime_sources = release["runtime_sources"] if args.expect_runtime_sources else {}
+    mobile_receipt_path = args.package_root / "stasis_mobile_package.json"
+    prebuilt_mobile_runtime = False
+    if mobile_receipt_path.is_file():
+        mobile_receipt = json.loads(mobile_receipt_path.read_text(encoding="utf-8"))
+        prebuilt_mobile_runtime = (
+            isinstance(mobile_receipt.get("android_runtime"), dict)
+            and mobile_receipt["android_runtime"].get("mode") == "prebuilt"
+        )
+    runtime_sources = (
+        release["runtime_sources"]
+        if args.expect_runtime_sources and not prebuilt_mobile_runtime
+        else {}
+    )
     for relative, expected in runtime_sources.items():
         relative_path = pathlib.PurePosixPath(relative)
         if relative_path.is_absolute() or ".." in relative_path.parts:

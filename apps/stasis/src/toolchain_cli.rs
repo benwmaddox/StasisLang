@@ -8418,7 +8418,6 @@ fn assemble_mobile_shell(
     web_guest_bundle: Option<&Path>,
 ) -> Result<(), String> {
     let mobile_assets = bundled_mobile_assets_dir()?;
-    let runtime = bundled_mobile_runtime_dir()?;
     let platform = match target {
         PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => "android",
         PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => "ios",
@@ -8430,7 +8429,36 @@ fn assemble_mobile_shell(
     let platform_destination = staging_root.join(platform);
     copy_required_dir(&mobile_assets.join("common"), &common_destination)?;
     copy_required_dir(&mobile_assets.join(platform), &platform_destination)?;
-    copy_mobile_runtime(&runtime, &staging_root.join("runtime"))?;
+    let development_build = provenance["development_build"].as_bool() == Some(true);
+    let prebuilt_android_runtime =
+        matches!(target, PackageTarget::AndroidArm64) && !development_build;
+    let android_runtime_variant = if workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network)
+    {
+        "host"
+    } else if workspace
+        .manifest
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.network_client)
+    {
+        "client"
+    } else {
+        "offline"
+    };
+    let android_runtime_manifest = if prebuilt_android_runtime {
+        let runtime = bundled_android_runtime_dir()?;
+        let manifest = validate_android_runtime_kit(&runtime, provenance, android_runtime_variant)?;
+        copy_required_dir(&runtime, &staging_root.join("android/runtime"))?;
+        Some(manifest)
+    } else {
+        let runtime = bundled_mobile_runtime_dir()?;
+        copy_mobile_runtime(&runtime, &staging_root.join("runtime"))?;
+        None
+    };
     write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), provenance)?;
     write_mobile_provenance_header(&common_destination, provenance)?;
 
@@ -8544,6 +8572,15 @@ fn assemble_mobile_shell(
         ),
         ("@STASIS_ANDROID_VERSION_NAME@", android_version_name),
         ("@STASIS_ANDROID_ABI@", target.android_abi().unwrap_or("")),
+        (
+            "@STASIS_ANDROID_RUNTIME_MODE@",
+            if prebuilt_android_runtime {
+                "prebuilt"
+            } else {
+                "source"
+            },
+        ),
+        ("@STASIS_ANDROID_RUNTIME_VARIANT@", android_runtime_variant),
         (
             "@STASIS_NETWORK_ENABLED@",
             if network_enabled { "1" } else { "0" },
@@ -8672,6 +8709,16 @@ fn assemble_mobile_shell(
             "network_library": network_library,
             "network_header": network_header,
             "network_guest_bundle": network_guest_bundle,
+            "android_runtime": if target.is_android() {
+                Some(json!({
+                    "mode": if prebuilt_android_runtime { "prebuilt" } else { "source" },
+                    "variant": android_runtime_variant,
+                    "manifest": android_runtime_manifest.as_ref().map(|_| "android/runtime/manifest.json"),
+                    "identity": android_runtime_manifest,
+                }))
+            } else {
+                None
+            },
         }))
         .map_err(|error| format!("failed to encode mobile package manifest: {error}"))?
             + "\n",
@@ -8712,6 +8759,123 @@ fn copy_mobile_runtime(source: &Path, destination: &Path) -> Result<(), String> 
         copy_required_dir(&source.join(name), &destination.join(name))?;
     }
     Ok(())
+}
+
+fn validate_android_runtime_kit(
+    root: &Path,
+    provenance: &Value,
+    variant: &str,
+) -> Result<Value, String> {
+    let manifest_path = root.join("manifest.json");
+    let manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).map_err(|error| {
+        format!(
+            "failed to read prebuilt Android runtime manifest {}: {error}",
+            manifest_path.display()
+        )
+    })?)
+    .map_err(|error| format!("failed to parse prebuilt Android runtime manifest: {error}"))?;
+    let expected_release = provenance["release_tag"]
+        .as_str()
+        .ok_or_else(|| "official package provenance is missing its release tag".to_string())?;
+    let expected_commit = provenance["source_commit"]
+        .as_str()
+        .ok_or_else(|| "official package provenance is missing its source commit".to_string())?;
+    if manifest["schema"] != "stasis.android_runtime.v1"
+        || manifest["release_id"] != expected_release
+        || manifest["source_commit"] != expected_commit
+        || manifest["target"] != "android-arm64"
+        || manifest["abi"] != "arm64-v8a"
+        || manifest["android_api"] != 26
+        || manifest["ndk_version"] != "27.0.12077973"
+        || manifest["cmake_version"] != "3.22.1"
+        || manifest["generator"] != "Ninja"
+        || manifest["cxx_runtime"] != "c++_static"
+        || manifest["runtime_abi_version"] != 2
+        || manifest["graphics_abi_version"] != 4
+        || manifest["dependencies"]["sdl3"] != "3.4.10"
+        || manifest["dependencies"]["sdl3_image"] != "3.4.4"
+        || manifest["compile_contract"]["build_type"] != "Release"
+        || manifest["compile_contract"]["position_independent_code"] != true
+        || manifest["compile_contract"]["runtime_variants"] != json!(["offline", "host", "client"])
+        || manifest["compile_contract"]["system_libraries"]
+            != json!([
+                "m",
+                "dl",
+                "OpenSLES",
+                "log",
+                "android",
+                "GLESv1_CM",
+                "GLESv2"
+            ])
+    {
+        return Err(
+            "prebuilt Android runtime identity differs from the selected release, ABI, NDK, or pinned dependencies"
+                .to_string(),
+        );
+    }
+    let build_fingerprint = manifest["build_fingerprint"]
+        .as_str()
+        .filter(|value| stasis_dynload::is_verified_build_fingerprint(value))
+        .ok_or_else(|| "prebuilt Android runtime has an invalid build fingerprint".to_string())?;
+    let sources = manifest["source_hashes"]
+        .as_object()
+        .filter(|sources| {
+            ["stasis_runtime", "sdl3", "sdl3_image"].iter().all(|name| {
+                sources
+                    .get(*name)
+                    .and_then(Value::as_str)
+                    .is_some_and(|digest| {
+                        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+            })
+        })
+        .ok_or_else(|| "prebuilt Android runtime source hashes are malformed".to_string())?;
+    let runtime_library = manifest["runtime_variants"][variant]
+        .as_str()
+        .ok_or_else(|| format!("prebuilt Android runtime is missing the {variant} variant"))?;
+    let expected_files = manifest["files"]
+        .as_object()
+        .filter(|files| !files.is_empty())
+        .ok_or_else(|| "prebuilt Android runtime file manifest is missing".to_string())?;
+    let actual_files = content_hashes(root, "android-runtime")?;
+    if actual_files.len() != expected_files.len() + 1 {
+        return Err("prebuilt Android runtime file set differs from its manifest".to_string());
+    }
+    for (relative, expected) in expected_files {
+        let selected = provenance_relative_path(root, relative)?;
+        let expected = expected.as_str().ok_or_else(|| {
+            format!("prebuilt Android runtime has an invalid hash for {relative}")
+        })?;
+        let actual = sha256_file(&selected)?;
+        if actual != expected {
+            return Err(format!(
+                "prebuilt Android runtime hash mismatch for {relative}: expected {expected}, found {actual}"
+            ));
+        }
+    }
+    if !expected_files.contains_key(runtime_library) {
+        return Err(format!(
+            "prebuilt Android runtime variant {variant} is not authenticated by its file manifest"
+        ));
+    }
+    Ok(json!({
+        "schema": "stasis.android_runtime.v1",
+        "release_id": expected_release,
+        "source_commit": expected_commit,
+        "build_fingerprint": build_fingerprint,
+        "abi": "arm64-v8a",
+        "android_api": 26,
+        "ndk_version": "27.0.12077973",
+        "cmake_version": "3.22.1",
+        "generator": "Ninja",
+        "cxx_runtime": "c++_static",
+        "runtime_abi_version": 2,
+        "graphics_abi_version": 4,
+        "variant": variant,
+        "runtime_library": runtime_library,
+        "source_hashes": sources,
+        "compile_contract": manifest["compile_contract"].clone(),
+    }))
 }
 
 fn write_json_file(path: &Path, value: &Value) -> Result<(), String> {
@@ -8968,6 +9132,21 @@ fn verify_release_provenance(path: &Path) -> Result<Value, String> {
     if &actual_shells != expected_shells {
         return Err(
             "release mobile shell source hashes do not match the installed templates".to_string(),
+        );
+    }
+    let expected_android_runtime = value["android_runtime_artifacts"]
+        .as_object()
+        .filter(|artifacts| !artifacts.is_empty())
+        .ok_or_else(|| {
+            "release provenance is missing prebuilt Android runtime artifacts".to_string()
+        })?;
+    let android_runtime_root = root.join("mobile/android-runtime/arm64-v8a");
+    let actual_android_runtime =
+        content_hashes(&android_runtime_root, "mobile/android-runtime/arm64-v8a")?;
+    if &actual_android_runtime != expected_android_runtime {
+        return Err(
+            "release prebuilt Android runtime hashes do not match the installed artifact"
+                .to_string(),
         );
     }
     verify_desktop_network_artifact_hashes(&value, root)?;
@@ -10461,6 +10640,13 @@ fn bundled_mobile_assets_dir() -> Result<PathBuf, String> {
 
 fn bundled_mobile_runtime_dir() -> Result<PathBuf, String> {
     bundled_toolchain_directory("runtime", "mobile runtime sources")
+}
+
+fn bundled_android_runtime_dir() -> Result<PathBuf, String> {
+    bundled_toolchain_directory(
+        "mobile/android-runtime/arm64-v8a",
+        "prebuilt Android arm64 runtime",
+    )
 }
 
 fn bundled_toolchain_directory(relative: &str, label: &str) -> Result<PathBuf, String> {
@@ -13868,6 +14054,16 @@ mod tests {
             .expect("write shell fixture");
         let mobile_shell_sources = content_hashes(&root.join("mobile/shells"), "mobile/shells")
             .expect("hash shell fixture");
+        let android_runtime = root.join("mobile/android-runtime/arm64-v8a");
+        fs::create_dir_all(&android_runtime).expect("create Android runtime fixture");
+        fs::write(
+            android_runtime.join("manifest.json"),
+            b"fixture Android runtime\n",
+        )
+        .expect("write Android runtime fixture");
+        let android_runtime_artifacts =
+            content_hashes(&android_runtime, "mobile/android-runtime/arm64-v8a")
+                .expect("hash Android runtime fixture");
         let manifest = json!({
             "schema": "stasis.release_provenance.v1",
             "release_tag": "nightly-20260719-131",
@@ -13880,6 +14076,7 @@ mod tests {
             },
             "runtime_sources": runtime_sources,
             "mobile_shell_sources": mobile_shell_sources,
+            "android_runtime_artifacts": android_runtime_artifacts,
             "desktop_network_artifacts": {},
             "command_buffer": {"name": "gfx_cmd", "version": GFX_CMD_VERSION},
             "backends": ["sdl3"],
@@ -14092,6 +14289,64 @@ mod tests {
                 .is_some_and(|value| value.is_ascii_alphabetic()));
             assert!(component.chars().all(|value| value.is_ascii_alphanumeric()));
         }
+    }
+
+    #[test]
+    fn android_prebuilt_runtime_authenticates_variant_and_rejects_drift() {
+        let root = temp_dir("android_prebuilt_runtime_authentication");
+        fs::create_dir_all(root.join("lib")).expect("create runtime lib directory");
+        let runtime = root.join("lib/libstasis_mobile_runtime_host.a");
+        fs::write(&runtime, b"host runtime fixture").expect("write runtime fixture");
+        let runtime_hash = sha256_file(&runtime).expect("hash runtime fixture");
+        let manifest = json!({
+            "schema": "stasis.android_runtime.v1",
+            "release_id": "nightly-20260929-747",
+            "source_commit": "0123456789012345678901234567890123456789",
+            "build_fingerprint": "8da401635ed8c6fa0da18e1389ac874c6aeef63f26fab72309852eea0ad49187",
+            "target": "android-arm64",
+            "abi": "arm64-v8a",
+            "android_api": 26,
+            "ndk_version": "27.0.12077973",
+            "cmake_version": "3.22.1",
+            "generator": "Ninja",
+            "cxx_runtime": "c++_static",
+            "runtime_abi_version": 2,
+            "graphics_abi_version": 4,
+            "dependencies": {"sdl3": "3.4.10", "sdl3_image": "3.4.4"},
+            "compile_contract": {
+                "build_type": "Release",
+                "position_independent_code": true,
+                "runtime_variants": ["offline", "host", "client"],
+                "system_libraries": ["m", "dl", "OpenSLES", "log", "android", "GLESv1_CM", "GLESv2"],
+            },
+            "source_hashes": {
+                "stasis_runtime": "11".repeat(32),
+                "sdl3": "22".repeat(32),
+                "sdl3_image": "33".repeat(32),
+            },
+            "runtime_variants": {"host": "lib/libstasis_mobile_runtime_host.a"},
+            "files": {"lib/libstasis_mobile_runtime_host.a": runtime_hash},
+        });
+        write_json_file(&root.join("manifest.json"), &manifest).expect("write runtime manifest");
+        let provenance = json!({
+            "release_tag": "nightly-20260929-747",
+            "source_commit": "0123456789012345678901234567890123456789",
+        });
+        let identity = validate_android_runtime_kit(&root, &provenance, "host")
+            .expect("authenticate host runtime");
+        assert_eq!(identity["variant"], "host");
+        assert_eq!(identity["runtime_abi_version"], 2);
+
+        fs::write(&runtime, b"substituted runtime fixture").expect("substitute runtime fixture");
+        let error = validate_android_runtime_kit(&root, &provenance, "host")
+            .expect_err("reject substituted runtime");
+        assert!(error.contains("hash mismatch"));
+        fs::write(&runtime, b"host runtime fixture").expect("restore runtime fixture");
+
+        let error = validate_android_runtime_kit(&root, &provenance, "client")
+            .expect_err("reject absent client variant");
+        assert!(error.contains("missing the client variant"));
+        remove_temp(&root);
     }
 
     #[test]
