@@ -120,10 +120,6 @@ jobs:
             asset: stasis-nightly-win-x64.zip
             platform: win-x64
             archive: stasis-game-win-x64.zip
-          - os: macos-15
-            asset: stasis-nightly-osx-arm64.tar.gz
-            platform: osx-arm64
-            archive: stasis-game-osx-arm64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

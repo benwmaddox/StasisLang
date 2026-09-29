@@ -41,8 +41,6 @@ PINNED = {
         "STASIS_GRAPHICS_BUNDLE_SDL=ON",
         "libx11-dev",
         "libxrandr-dev",
-        "tools/ci/build_ios_package.sh",
-        "ios-package-link-evidence",
     ),
     "tools/ci/build_ios_package.sh": (
         "SDL3-3.4.10.dmg",

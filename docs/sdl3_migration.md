@@ -37,6 +37,10 @@ PNG decoder is first moved into the graphics runtime.
 
 ## Validation matrix
 
+The table records the platform validation contract. Hosted workflows currently
+run on Windows, Linux and Android; macOS and iOS checks remain local/manual
+because Apple runner lanes are disabled.
+
 | Target | Build/package evidence | Runtime acceptance |
 | --- | --- | --- |
 | Windows x64 | pinned CMake build, signed executable/DLL checks, provenance audit | clear, line, sprite, cached text, resize/density, audio, hot reload, present capture |
@@ -45,10 +49,10 @@ PNG decoder is first moved into the graphics runtime.
 | Android arm64 | exact release source checkouts, Gradle/NDK package audit | API-35 emulator/device render, touch, audio, background/foreground restoration |
 | iOS arm64/simulator | generated Xcode shell with matching XCFrameworks | simulator/device render, touch, audio, background/foreground restoration |
 
-Portable pull-request checks enforce source/API contracts, native runtime
-compilation, package contents, and render parity. Release publication must also
-capture the platform-specific runtime evidence above; a missing target remains
-a release blocker rather than silently selecting SDL2.
+Portable pull-request checks enforce source/API contracts, Windows/Linux native
+runtime compilation, Android package contents, and render parity. Keep the
+listed macOS and iOS build/runtime checks when validating those supported
+platform paths locally; disabling hosted lanes does not remove product support.
 
 ## Repinning and rollback
 

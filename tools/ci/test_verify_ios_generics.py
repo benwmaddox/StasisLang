@@ -250,7 +250,7 @@ class IosGenericsVerifierTest(unittest.TestCase):
             self.evidence()
 
 
-class IosGenericsWorkflowContractTest(unittest.TestCase):
+class IosGenericsManualToolContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.repo = Path(__file__).resolve().parents[2]
@@ -291,12 +291,11 @@ class IosGenericsWorkflowContractTest(unittest.TestCase):
         )
         self.assertIn("len(linked_aot_functions) < 16", self.script)
 
-    def test_hosted_simulator_lane_runs_on_pull_requests(self) -> None:
-        self.assertIn("ios-generics-simulator:", self.workflow)
-        self.assertIn(
-            "if: ${{ github.event_name == 'pull_request' || inputs.run_slow_seams }}",
-            self.workflow,
-        )
+    def test_generics_helper_remains_available_without_a_hosted_ios_lane(self) -> None:
+        self.assertNotIn("ios-generics-simulator:", self.workflow)
+        self.assertNotIn("ios-package-link:", self.workflow)
+        self.assertNotIn("runs-on: macos-", self.workflow)
+        self.assertTrue((self.repo / "tools/ci/build_ios_package.sh").is_file())
 
 
 if __name__ == "__main__":

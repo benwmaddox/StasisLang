@@ -1114,6 +1114,18 @@ fn new_always_generates_github_actions() {
         .expect("read generated PR workflow");
     assert!(pr.contains("stasis --json vendor status --workspace ."));
     assert!(pr.contains("$status.result.current -ne $true"));
+    let weekly = fs::read_to_string(project.join(".github/workflows/stasis-weekly.yml"))
+        .expect("read generated weekly workflow");
+    assert!(weekly.contains("asset: stasis-nightly-linux-x64.tar.gz"));
+    assert!(weekly.contains("asset: stasis-nightly-win-x64.zip"));
+    assert!(!weekly.contains("macos-"));
+    assert!(!weekly.contains("osx-arm64"));
+    assert!(!weekly.contains("ios-arm64"));
+    let resolver = fs::read_to_string(project.join("tools/resolve-stasis-nightly.ps1"))
+        .expect("read generated nightly resolver");
+    assert!(resolver.contains("stasis-nightly-linux-x64.tar.gz"));
+    assert!(resolver.contains("stasis-nightly-win-x64.zip"));
+    assert!(!resolver.contains("osx-arm64"));
     let restore = fs::read_to_string(project.join("tools/restore-stasis-release.ps1"))
         .expect("read generated restore helper");
     assert!(restore.contains("StartsWith($prefix, $pathComparison)"));
