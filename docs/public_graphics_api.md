@@ -23,7 +23,7 @@ is:
 | Owner / package shape | Lifecycle 1 | Lifecycle 0 or absent |
 | --- | --- | --- |
 | Non-monolithic generated bridge | Calls `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Calls the authored render entry directly; no construction helpers are added. |
-| Windows monolithic generated bindings | Generated AOT binding calls reset -> authored render -> finish exactly once. | Calls the authored render entry directly. |
+| Windows network monolithic generated bindings | Generated AOT binding calls reset -> authored render -> finish exactly once. | Calls the authored render entry directly. |
 | Android generated AOT bindings | Shared mobile AOT entry calls `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls the authored render entry directly. |
 | iOS generated AOT bindings | Shared mobile AOT entry calls `gfx_cmd_construction_reset()` -> authored `render()` -> `gfx_cmd_construction_finish(result)` exactly once. | Generated mobile entry calls the authored render entry directly. |
 | `stasis_runner` | May parse and verify state/launch sidecar metadata, then invokes the already-exported render entry; it never wraps render or adds another reset/finish. | Rejects an exported render entry as obsolete; tick-only and render-less packages remain direct/manual. |
