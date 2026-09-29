@@ -912,15 +912,15 @@ jobs:
             root="${sample}/dist/prebuilt-${variant}"
             grep -Fq 'set(STASIS_ANDROID_RUNTIME_MODE "prebuilt")' "${root}/android/app/src/main/cpp/CMakeLists.txt"
             grep -Fq "set(STASIS_ANDROID_RUNTIME_VARIANT \"${variant}\")" "${root}/android/app/src/main/cpp/CMakeLists.txt"
+            python3 tools/verify_package_provenance.py \
+              --release-root "$(dirname "$(dirname "${toolchain}")")" \
+              --package-root "${root}" \
+              --expect-runtime-sources
             gradle -p "${root}/android" :app:assembleDebug --no-daemon --max-workers=2 --console=plain
             apk="${root}/android/app/build/outputs/apk/debug/app-debug.apk"
             test -f "${apk}"
             python3 tools/ci/check_android_release_package.py --abi arm64-v8a --required-asset "" "${apk}"
             "${ANDROID_SDK_ROOT:-${ANDROID_HOME}}/build-tools/35.0.0/apksigner" verify --verbose "${apk}"
-            python3 tools/verify_package_provenance.py \
-              --release-root "$(dirname "$(dirname "${toolchain}")")" \
-              --package-root "${root}" \
-              --expect-runtime-sources
           done
           build_finished="$(date +%s)"
           artifact_bytes="$(du -cb ${sample}/dist/prebuilt-*/android/app/build/outputs/apk/debug/app-debug.apk | tail -n1 | cut -f1)"

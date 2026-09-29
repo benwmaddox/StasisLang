@@ -877,6 +877,18 @@ class ReleaseProvenanceTests(unittest.TestCase):
         )
         self.assertIn("--expect-desktop-package", network_call)
 
+    def test_android_prebuilt_source_provenance_precedes_gradle_output(self):
+        workflow = (ROOT / ".github/workflows/nightly-release.yml").read_text(
+            encoding="utf-8"
+        )
+        start = workflow.index("for variant in offline host client; do")
+        end = workflow.index("\n          done", start)
+        block = workflow[start:end]
+        self.assertLess(
+            block.index("python3 tools/verify_package_provenance.py"),
+            block.index('gradle -p "${root}/android" :app:assembleDebug'),
+        )
+
     def test_bootstrap_packaged_runner_uses_linux_path_and_bounded_smoke(self):
         workflow = (ROOT / ".github/workflows/bootstrap-artifacts.yml").read_text(
             encoding="utf-8"
