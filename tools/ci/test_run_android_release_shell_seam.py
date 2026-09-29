@@ -84,7 +84,7 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             '{"schema":"stasis.seam_test.v1","test_id":"ANDROID-GENERICS",'
             '"event":"initialized","frame":0}\n'
             "I/Stasis  (4100): Stasis Android generics bounds probe index=-1\n"
-            "F/libc    (4100): Fatal signal 4 (SIGILL), code 2, in tid 4101 (SDLThread), "
+            "F/libc    ( 4100): Fatal signal 4 (SIGILL), code 2, in tid 4101 (SDLThread), "
             "pid 4100 (SDLActivity)\n"
         )
         result = seam.validate_android_generics_bounds_trap(

@@ -509,13 +509,10 @@ jobs:
             Set-Content -Path "cli-smoke/assets/manifest.json" -Encoding ASCII -Value '{"schema":"stasis-assets","version":1,"assets":[]}'
             python (Join-Path $checkoutRoot "tools/ci/add_smoke_android_launcher.py") cli-smoke
             .\stasis.exe --workspace cli-smoke package --target desktop
-            if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe")) { throw "game package runner missing" }
+            if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe")) { throw "game package executable missing" }
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis.json")) { throw "game package manifest missing" }
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis_provenance.json")) { throw "game package provenance missing" }
-            if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/ci_smoke.dll")) { throw "game package library missing" }
-            if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/ci_smoke.exe.launch")) { throw "game package launch sidecar missing" }
-            if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis_graphics.dll")) { throw "game package graphics runtime missing" }
-            if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis_dynload.dll")) { throw "game package dynamic loader missing" }
+            if (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/ci_smoke.dll") { throw "obsolete game package library present; monolithic Windows package must not contain app/ci_smoke.dll" }
             .\stasis.exe --workspace cli-smoke package-mobile --target android-arm64 --out dist/android
             .\stasis.exe --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios
             Move-Item $repoNetworkSource $repoNetworkBackup -Force
@@ -919,7 +916,7 @@ jobs:
             apk="${root}/android/app/build/outputs/apk/debug/app-debug.apk"
             test -f "${apk}"
             python3 tools/ci/check_android_release_package.py --abi arm64-v8a --required-asset "" "${apk}"
-            apksigner verify --verbose "${apk}"
+            "${ANDROID_SDK_ROOT:-${ANDROID_HOME}}/build-tools/35.0.0/apksigner" verify --verbose "${apk}"
             python3 tools/verify_package_provenance.py \
               --release-root "$(dirname "$(dirname "${toolchain}")")" \
               --package-root "${root}" \
