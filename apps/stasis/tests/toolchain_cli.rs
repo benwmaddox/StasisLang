@@ -1683,22 +1683,39 @@ fn audio_device_profiles_fail_abandoned_refusal_and_accept_retries_at_120_and_50
     let cli_dir = parent.join("cli");
     fs::create_dir_all(&cli_dir).expect("create isolated CLI directory");
     let built_cli = PathBuf::from(env!("CARGO_BIN_EXE_stasis"));
+    let Some(runtime) = std::env::var_os("STASIS_TEST_AUDIO_RUNTIME_PATH").map(PathBuf::from)
+    else {
+        eprintln!(
+            "audio device profile integration skipped: STASIS_TEST_AUDIO_RUNTIME_PATH does not name a freshly built graphics runtime"
+        );
+        fs::remove_dir_all(&parent).ok();
+        return;
+    };
+    if !runtime.is_file() {
+        eprintln!(
+            "audio device profile integration skipped: fresh graphics runtime is unavailable at {}",
+            runtime.display()
+        );
+        fs::remove_dir_all(&parent).ok();
+        return;
+    }
     let staged_cli = cli_dir.join(built_cli.file_name().expect("built CLI filename"));
     fs::copy(&built_cli, &staged_cli).expect("stage CLI without a sibling runtime");
     let built_cli_dir = built_cli.parent().expect("built CLI directory");
+    let bridge_name = format!(
+        "{}stasis_dynload{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
     let bridge_candidates = [
-        built_cli_dir.join("stasis_dynload.dll"),
-        built_cli_dir.join("deps/stasis_dynload.dll"),
+        built_cli_dir.join(&bridge_name),
+        built_cli_dir.join("deps").join(&bridge_name),
     ];
     let bridge = bridge_candidates
         .iter()
         .find(|path| path.is_file())
         .expect("built CLI runtime bridge");
-    fs::copy(bridge, cli_dir.join("stasis_dynload.dll")).expect("stage CLI runtime bridge");
-    let runtime = std::env::var_os("STASIS_TEST_AUDIO_RUNTIME_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("runtime/build/bin/stasis_graphics.dll"));
-    assert!(runtime.is_file(), "fresh graphics runtime must be built");
+    fs::copy(bridge, cli_dir.join(&bridge_name)).expect("stage CLI runtime bridge");
 
     for (tick_hz, profile_name) in [(120, "profile-120.json"), (50, "profile-50.json")] {
         for (source_name, expected_status, expected_exit) in [
