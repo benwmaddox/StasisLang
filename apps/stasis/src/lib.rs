@@ -6978,8 +6978,9 @@ function render(): void {{ {draws} return; }}
             );
         }
         assert!(
-            STASIS_RUNTIME_CMAKE.contains("configure_stasis_target(stasis_mobile_runtime ON)"),
-            "mobile target should be static and exclude the SDL desktop main shim"
+            STASIS_RUNTIME_CMAKE.contains("${target} STATIC")
+                && STASIS_RUNTIME_CMAKE.contains("configure_stasis_target(${target} ON)"),
+            "mobile targets should be static and exclude the SDL desktop main shim"
         );
         assert!(
             graphics_source.contains("stasis_storage_load_i32")

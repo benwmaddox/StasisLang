@@ -342,6 +342,25 @@ def verify_mobile_shells(
     package_id = receipt.get("package_id") or mobile_package_id(receipt["name"])
     network_enabled = receipt.get("network") is True
     network_client_enabled = receipt.get("network_client") is True
+    android_runtime = receipt.get("android_runtime")
+    runtime_mode = (
+        android_runtime.get("mode")
+        if isinstance(android_runtime, dict)
+        else "source"
+    )
+    runtime_variant = (
+        android_runtime.get("variant")
+        if isinstance(android_runtime, dict)
+        else (
+            "host" if network_enabled
+            else "client" if network_client_enabled
+            else "offline"
+        )
+    )
+    if runtime_mode not in ("source", "prebuilt") or runtime_variant not in (
+        "offline", "host", "client"
+    ):
+        parser.error("mobile package Android runtime mode or variant is invalid")
     launcher_resources = receipt.get("android_launcher_resources")
     if launcher_resources is not None and (
         not isinstance(launcher_resources, str) or not launcher_resources
@@ -366,6 +385,8 @@ def verify_mobile_shells(
         ),
         "@STASIS_ANDROID_VERSION_NAME@": receipt.get("android_version_name") or "1.0",
         "@STASIS_ANDROID_ABI@": "arm64-v8a" if target == "android-arm64" else "",
+        "@STASIS_ANDROID_RUNTIME_MODE@": runtime_mode,
+        "@STASIS_ANDROID_RUNTIME_VARIANT@": runtime_variant,
         "@STASIS_NETWORK_ENABLED@": "1" if network_enabled else "0",
         "@STASIS_NETWORK_CLIENT_ENABLED@": "1" if network_client_enabled else "0",
         "@STASIS_NETWORK_CLIENT_PERMISSION@": (
@@ -412,6 +433,24 @@ def verify_mobile_shells(
             destination = package_root / source_group / relative
             if not destination.is_file() or destination.read_bytes() != expected:
                 parser.error(f"packaged mobile shell does not match release transform: {destination}")
+
+    if isinstance(android_runtime, dict) and android_runtime.get("mode") == "prebuilt":
+        if target != "android-arm64" or android_runtime.get("variant") not in (
+            "offline", "host", "client"
+        ):
+            parser.error("packaged prebuilt Android runtime target or variant is invalid")
+        release_runtime = release_root / "mobile" / "android-runtime" / "arm64-v8a"
+        packaged_runtime = package_root / "android" / "runtime"
+        for source in sorted(release_runtime.rglob("*")):
+            if not source.is_file():
+                continue
+            relative = source.relative_to(release_runtime)
+            expected_paths.add(("android", f"runtime/{relative.as_posix()}"))
+            destination = packaged_runtime / relative
+            if not destination.is_file() or destination.read_bytes() != source.read_bytes():
+                parser.error(
+                    f"packaged prebuilt Android runtime differs from release artifact: {destination}"
+                )
 
     expected_paths.add(("common", "stasis_package_provenance.h"))
     if target in ("ios-arm64", "ios-simulator-arm64"):
@@ -534,7 +573,19 @@ def main() -> int:
         parser.error("packaged provenance does not exactly match the release manifest")
     verify_asset_package_identities(parser, args.package_root)
     verify_network_guest_bundles(parser, args.package_root)
-    runtime_sources = release["runtime_sources"] if args.expect_runtime_sources else {}
+    mobile_receipt_path = args.package_root / "stasis_mobile_package.json"
+    prebuilt_mobile_runtime = False
+    if mobile_receipt_path.is_file():
+        mobile_receipt = json.loads(mobile_receipt_path.read_text(encoding="utf-8"))
+        prebuilt_mobile_runtime = (
+            isinstance(mobile_receipt.get("android_runtime"), dict)
+            and mobile_receipt["android_runtime"].get("mode") == "prebuilt"
+        )
+    runtime_sources = (
+        release["runtime_sources"]
+        if args.expect_runtime_sources and not prebuilt_mobile_runtime
+        else {}
+    )
     for relative, expected in runtime_sources.items():
         relative_path = pathlib.PurePosixPath(relative)
         if relative_path.is_absolute() or ".." in relative_path.parts:

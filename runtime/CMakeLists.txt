@@ -49,6 +49,19 @@ option(
     "Build the shared SDL renderer mobile runtime core"
     ${STASIS_MOBILE_PLATFORM}
 )
+set(
+    STASIS_MOBILE_RUNTIME_NETWORK_MODE ""
+    CACHE STRING "Mobile runtime network mode: empty, host, or client"
+)
+set(
+    STASIS_MOBILE_RUNTIME_NETWORK_INCLUDE_DIR ""
+    CACHE PATH "Directory containing stasis_network.h for a network mobile runtime"
+)
+option(
+    STASIS_BUILD_MOBILE_RUNTIME_VARIANTS
+    "Build offline, host, and client mobile runtime archives in one build"
+    OFF
+)
 option(STASIS_MOBILE_RUNTIME_BUILD_TESTS "Build mobile runtime lifecycle tests" OFF)
 option(STASIS_SVG_BUILD_TESTS "Build the ThorVG SVG bridge smoke and evaluation tests" OFF)
 option(STASIS_GRAPHICS_BUILD_TESTS "Build native renderer contract tests" OFF)
@@ -264,25 +277,54 @@ if(STASIS_GRAPHICS_BUILD_TESTS AND TARGET stasis_graphics_static)
 endif()
 
 if(STASIS_BUILD_MOBILE_RUNTIME)
-    add_library(
-        stasis_mobile_runtime STATIC
-        stasis_mobile_runtime.c
-        stasis_mobile_aot_runtime.c
-        stasis_replay_consumer.c
-        cJSON.c
-    )
-    configure_stasis_target(stasis_mobile_runtime ON)
-    set_property(TARGET stasis_mobile_runtime PROPERTY C_STANDARD 11)
-    set_property(TARGET stasis_mobile_runtime PROPERTY C_STANDARD_REQUIRED ON)
-    if(MSVC)
-        target_compile_options(stasis_mobile_runtime PRIVATE /experimental:c11atomics)
+    function(add_stasis_mobile_runtime target mode)
+        add_library(
+            ${target} STATIC
+            stasis_mobile_runtime.c
+            stasis_mobile_aot_runtime.c
+            stasis_replay_consumer.c
+            cJSON.c
+        )
+        configure_stasis_target(${target} ON)
+        set_property(TARGET ${target} PROPERTY C_STANDARD 11)
+        set_property(TARGET ${target} PROPERTY C_STANDARD_REQUIRED ON)
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /experimental:c11atomics)
+        endif()
+        target_include_directories(${target} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+        set_target_properties(${target} PROPERTIES
+            POSITION_INDEPENDENT_CODE ON
+            ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/mobile"
+        )
+        if(mode)
+            target_include_directories(
+                ${target} PRIVATE "${STASIS_MOBILE_RUNTIME_NETWORK_INCLUDE_DIR}")
+            if(mode STREQUAL "host")
+                target_compile_definitions(${target} PRIVATE STASIS_NETWORK_ENABLED=1)
+            elseif(mode STREQUAL "client")
+                target_compile_definitions(${target} PRIVATE STASIS_NETWORK_CLIENT_ENABLED=1)
+            else()
+                message(FATAL_ERROR "mobile runtime mode must be empty, host, or client")
+            endif()
+        endif()
+    endfunction()
+
+    if(STASIS_BUILD_MOBILE_RUNTIME_VARIANTS OR STASIS_MOBILE_RUNTIME_NETWORK_MODE)
+        if(NOT EXISTS "${STASIS_MOBILE_RUNTIME_NETWORK_INCLUDE_DIR}/stasis_network.h")
+            message(FATAL_ERROR
+                "STASIS_MOBILE_RUNTIME_NETWORK_INCLUDE_DIR must contain stasis_network.h")
+        endif()
     endif()
-    target_include_directories(stasis_mobile_runtime PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-    set_target_properties(stasis_mobile_runtime PROPERTIES
-        POSITION_INDEPENDENT_CODE ON
-        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/mobile"
-    )
-    install(TARGETS stasis_mobile_runtime ARCHIVE DESTINATION lib)
+
+    if(STASIS_BUILD_MOBILE_RUNTIME_VARIANTS)
+        add_stasis_mobile_runtime(stasis_mobile_runtime_offline "")
+        add_stasis_mobile_runtime(stasis_mobile_runtime_host "host")
+        add_stasis_mobile_runtime(stasis_mobile_runtime_client "client")
+    else()
+        add_stasis_mobile_runtime(
+            stasis_mobile_runtime "${STASIS_MOBILE_RUNTIME_NETWORK_MODE}")
+        install(TARGETS stasis_mobile_runtime ARCHIVE DESTINATION lib)
+    endif()
     install(
         FILES stasis_asset_path.h stasis_mobile_runtime.h stasis_mobile_aot_runtime.h
               stasis_replay_consumer.h

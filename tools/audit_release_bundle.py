@@ -33,8 +33,21 @@ ARCHIVE_REQUIRED_FILES = (
     "mobile/network/include/stasis_network.h",
     "mobile/network/android-arm64/libstasis_network.a",
     "mobile/network/android-x86_64/libstasis_network.a",
+    "mobile/android-runtime/arm64-v8a/manifest.json",
+    "mobile/android-runtime/arm64-v8a/lib/libSDL3.a",
+    "mobile/android-runtime/arm64-v8a/lib/libSDL3_image.a",
+    "mobile/android-runtime/arm64-v8a/lib/libstasis_thorvg.a",
+    "mobile/android-runtime/arm64-v8a/lib/libstasis_mobile_runtime_offline.a",
+    "mobile/android-runtime/arm64-v8a/lib/libstasis_mobile_runtime_host.a",
+    "mobile/android-runtime/arm64-v8a/lib/libstasis_mobile_runtime_client.a",
 )
-REQUIRED_DIRECTORIES = ("docs/knowledge", "mobile/shells") + tuple(
+REQUIRED_DIRECTORIES = (
+    "docs/knowledge",
+    "mobile/shells",
+    "mobile/android-runtime/arm64-v8a/include",
+    "mobile/android-runtime/arm64-v8a/java",
+    "mobile/android-runtime/arm64-v8a/licenses",
+) + tuple(
     f"runtime/{directory}" for directory in RUNTIME_DIRS
 )
 PLATFORM_REQUIRED_FILES = {

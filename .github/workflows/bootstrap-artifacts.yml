@@ -13,7 +13,59 @@ permissions:
   contents: read
 
 jobs:
+  build-android-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout pinned SDL3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: libsdl-org/SDL
+          ref: 8e37db5e797b6167f3a00d697d816a684bd259c7
+          path: target/android-runtime-source/SDL
+      - name: Checkout pinned SDL3_image
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: libsdl-org/SDL_image
+          ref: bec9134a26c7d0f31b36d6083c25296e04cabff5
+          path: target/android-runtime-source/SDL_image
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          packages: platform-tools
+      - name: Build immutable Android arm64 runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platforms;android-26" "ndk;27.0.12077973" "cmake;3.22.1"
+          release_id="${{ github.event.release.tag_name }}"
+          if [[ -z "${release_id}" ]]; then release_id="development-bootstrap-${{ github.run_id }}"; fi
+          fingerprint="$(python3 tools/compute_toolchain_fingerprint.py --source-commit "${GITHUB_SHA}" --release-id "${release_id}")"
+          android_sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+          python3 tools/build_android_runtime.py \
+            --runtime-source runtime \
+            --sdl3-source target/android-runtime-source/SDL \
+            --sdl3-image-source target/android-runtime-source/SDL_image \
+            --network-include crates/stasis_network/include \
+            --ndk-root "${android_sdk}/ndk/27.0.12077973" \
+            --cmake "${android_sdk}/cmake/3.22.1/bin/cmake" \
+            --ninja "${android_sdk}/cmake/3.22.1/bin/ninja" \
+            --release-id "${release_id}" \
+            --source-commit "${GITHUB_SHA}" \
+            --build-fingerprint "${fingerprint}" \
+            --out android-runtime-artifact/arm64-v8a
+      - name: Upload immutable Android runtime
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: true
+          name: bootstrap-android-runtime-arm64
+          path: android-runtime-artifact
+          if-no-files-found: error
+
   build-rust-stasis:
+    needs: build-android-runtime
     strategy:
       fail-fast: false
       matrix:
@@ -33,6 +85,12 @@ jobs:
         run: |
           $fingerprint = (python tools/compute_toolchain_fingerprint.py --source-commit $env:STASIS_SOURCE_COMMIT --release-id $env:STASIS_RELEASE_ID).Trim()
           "STASIS_BUILD_FINGERPRINT=$fingerprint" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Download immutable Android arm64 runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bootstrap-android-runtime-arm64
+          path: mobile/android-runtime
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -122,6 +180,7 @@ jobs:
           cp -R samples "${out}/"
           mkdir -p "${out}/mobile"
           cp -R mobile/shells "${out}/mobile/"
+          cp -R mobile/android-runtime "${out}/mobile/"
           network_target="$(python3 tools/desktop_network_target.py "${RUNNER_OS}" "${RUNNER_ARCH}")"
           mkdir -p "${out}/desktop/network/${network_target}" "${out}/desktop/network/include"
           cp "build/codex-cargo-target/release/libstasis_network.a" "${out}/desktop/network/${network_target}/"
@@ -180,6 +239,7 @@ jobs:
           Copy-Item samples "$out/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/mobile" | Out-Null
           Copy-Item mobile/shells "$out/mobile/" -Recurse -Force
+          Copy-Item mobile/android-runtime "$out/mobile/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/desktop/network/windows-x86_64", "$out/desktop/network/include" | Out-Null
           Copy-Item "build/codex-cargo-target/release/stasis_network.lib" "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
           Copy-Item crates/stasis_network/include/stasis_network.h "$out/desktop/network/include/" -ErrorAction Stop

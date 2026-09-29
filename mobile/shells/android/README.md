@@ -1,8 +1,16 @@
 # Android package
 
-Install JDK 17, Android SDK 35, NDK, CMake 3.22.1, Ninja, and Gradle 8.9.
-Set `ANDROID_HOME`, `STASIS_SDL3_SOURCE`, and `STASIS_SDL3_IMAGE_SOURCE` to
-local SDL3 and SDL3_image source checkouts, then run:
+Install JDK 17, Android SDK 35, NDK 27.0.12077973, CMake 3.22.1, Ninja, and
+Gradle 8.9. Official `android-arm64` packages contain a verified prebuilt
+runtime under `android/runtime`; Gradle/CMake compile only the generated AOT
+objects and the small game shell. The manifest binds release/source identity,
+ABI, API floor, NDK, runtime ABIs, source hashes, compile contract, and every
+runtime file hash. Missing or mismatched artifacts fail deterministically.
+
+Packages created with `--development-build` retain the source-build fallback.
+For those packages, set `ANDROID_HOME`, `STASIS_SDL3_SOURCE`, and
+`STASIS_SDL3_IMAGE_SOURCE` to local SDL3 and SDL3_image source checkouts. Then
+run:
 
 ```text
 gradle :app:assembleDebug

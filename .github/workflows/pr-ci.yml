@@ -111,6 +111,7 @@ jobs:
           python -m unittest tools.ci.test_windows_signing_policy
           python -m unittest tools.ci.test_windows_signing_provision
           python -m unittest tools.ci.test_nightly_network_support
+          python -m unittest tools.ci.test_build_android_runtime
           python -m unittest tools.ci.test_nightly_freshness tools.ci.test_removed_ai_surface
           python -m unittest tools.ci.test_pr_ci_seam_placement
 

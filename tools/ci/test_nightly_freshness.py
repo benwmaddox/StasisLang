@@ -40,14 +40,18 @@ class NightlyFreshnessContractTests(unittest.TestCase):
         self.assertEqual(1, self.release.count("./bin/stasis live --help"))
 
     def test_expensive_seams_wait_for_release_detection(self):
-        for job in ("integration_seams", "android_device_seams"):
+        for job in (
+            "integration_seams",
+            "android_device_seams",
+            "android_runtime_support",
+        ):
             with self.subTest(job=job):
                 self.assertRegex(
                     self.release,
                     rf"(?ms)^  {job}:\n    needs: detect\n    if: needs\.detect\.outputs\.should_release == 'true'",
                 )
         self.assertIn(
-            "if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.windows_signing.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' }}",
+            "if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.windows_signing.result == 'success' && needs.android_prebuilt_acceptance.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' }}",
             self.release,
         )
 
