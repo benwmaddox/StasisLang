@@ -574,6 +574,7 @@ struct DesktopNetworkLink {
 pub enum DesktopNetworkMode {
     Host,
     Client,
+    Dual,
 }
 
 impl DesktopNetworkMode {
@@ -581,6 +582,7 @@ impl DesktopNetworkMode {
         match self {
             Self::Host => "host",
             Self::Client => "client",
+            Self::Dual => "dual",
         }
     }
 }
@@ -6096,7 +6098,7 @@ mod tests {
         assert!(base.iter().any(|arg| arg == "-DCMAKE_BUILD_TYPE=Release"));
 
         let network = DesktopNetworkLink {
-            library: PathBuf::from("network/stasis_network.lib"),
+            library: PathBuf::from("network/stasis_network.dll.lib"),
             include_dir: PathBuf::from("network/include"),
             mode: DesktopNetworkMode::Host,
         };
@@ -6111,7 +6113,7 @@ mod tests {
         );
         assert!(configured
             .iter()
-            .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_LIBRARY=network/stasis_network.lib"));
+            .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_LIBRARY=network/stasis_network.dll.lib"));
         assert!(configured
             .iter()
             .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_INCLUDE_DIR=network/include"));
@@ -6120,7 +6122,7 @@ mod tests {
             .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_MODE=host"));
 
         let client = DesktopNetworkLink {
-            library: PathBuf::from("network/stasis_network.lib"),
+            library: PathBuf::from("network/stasis_network.dll.lib"),
             include_dir: PathBuf::from("network/include"),
             mode: DesktopNetworkMode::Client,
         };

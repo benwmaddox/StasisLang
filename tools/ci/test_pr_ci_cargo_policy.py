@@ -44,7 +44,7 @@ class PrCiCargoPolicyTests(unittest.TestCase):
         self.assertIn("$metadata.target_directory", native)
         nightly = (ROOT / ".github/workflows/nightly-release.yml").read_text(encoding="utf-8")
         self.assertNotIn("--target-dir", nightly)
-        self.assertIn("build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.lib", nightly)
+        self.assertIn("build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.dll", nightly)
 
     def test_pr_ci_routes_all_cargo_through_cache(self):
         source = (ROOT / ".github/workflows/pr-ci.yml").read_text(encoding="utf-8")

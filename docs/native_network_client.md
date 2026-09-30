@@ -1,5 +1,10 @@
 # Native guest transport
 
+Manifest v3 projects explicitly select `stasis.network` with the `client` feature while retaining
+`capabilities.network_client` as its permission grant. The legacy v1/v2 declaration below remains
+compatible and mutually exclusive with legacy host selection. See
+[Target-aware included libraries](included_libraries.md) for migration and dual-role configuration.
+
 Windows and Android production packages can join an existing native host with:
 
 ```json
@@ -86,7 +91,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/ci/test_windows_deskto
 python tools/ci/test_android_network_client.py --serial emulator-5554 --ndk C:/Android/Sdk/ndk/27.0.12077973
 ```
 
-The Windows and Android probes build a fresh static library, link the same C
+The Windows and Android probes build a fresh shared library, link the same C
 client ABI fixture, and assert join, guest command, isolated seat snapshots,
 checkpoint retention, and background/resume identity against a real host.
 The Android probe runs on-device and records a credential-free result under

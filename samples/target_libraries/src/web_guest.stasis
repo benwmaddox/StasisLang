@@ -1,0 +1,14 @@
+function main(): i32 {
+    if (!project_library_stasis_network_feature_host()) {
+        return 1;
+    }
+    return 0;
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function render(): i32 {
+    return 0;
+}

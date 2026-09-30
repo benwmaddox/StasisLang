@@ -42,6 +42,15 @@ case "$(uname -s)" in
     ;;
   Darwin)
     test -x "$package/network_smoke.app/Contents/MacOS/network_smoke"
+    dylib="$package/network_smoke.app/Contents/Frameworks/libstasis_network.dylib"
+    test -f "$dylib"
+    otool -L "$package/network_smoke.app/Contents/MacOS/network_smoke" | grep -q 'libstasis_network.dylib'
+    # Nested code is signed before its enclosing app. Production publication may replace
+    # the ad-hoc identity and notarize only after the same inner-to-outer order succeeds.
+    codesign --force --sign - "$dylib"
+    codesign --force --sign - "$package/network_smoke.app"
+    codesign --verify --strict "$dylib"
+    codesign --verify --strict "$package/network_smoke.app"
     /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' \
       "$package/network_smoke.app/Contents/Info.plist"
     python3 tools/ci/test_linux_desktop_network_package.py \

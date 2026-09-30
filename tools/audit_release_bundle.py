@@ -31,8 +31,8 @@ ARCHIVE_REQUIRED_FILES = (
     "docs/sdl3_migration.md",
     "src/stdlib/stdlib.stasis",
     "mobile/network/include/stasis_network.h",
-    "mobile/network/android-arm64/libstasis_network.a",
-    "mobile/network/android-x86_64/libstasis_network.a",
+    "mobile/network/android-arm64/libstasis_network.so",
+    "mobile/network/android-x86_64/libstasis_network.so",
     "mobile/android-runtime/arm64-v8a/manifest.json",
     "mobile/android-runtime/arm64-v8a/lib/libSDL3.a",
     "mobile/android-runtime/arm64-v8a/lib/libSDL3_image.a",
@@ -64,7 +64,8 @@ PLATFORM_REQUIRED_FILES = {
         "THIRD_PARTY_NOTICES.md",
         "tools/windows/stasis-signing.ps1",
         "tools/diagnose_desktop_network.ps1",
-        "desktop/network/windows-x86_64/stasis_network.lib",
+        "desktop/network/windows-x86_64/stasis_network.dll",
+        "desktop/network/windows-x86_64/stasis_network.dll.lib",
         "desktop/network/include/stasis_network.h",
     ),
     "linux": (
@@ -72,12 +73,15 @@ PLATFORM_REQUIRED_FILES = {
         "bin/libstasis_dynload.a",
         "bin/libstasis_graphics.so",
         "bin/stasis_runner",
+        "desktop/network/linux-x86_64/libstasis_network.so",
+        "desktop/network/include/stasis_network.h",
     ),
     "macos": (
         "bin/stasis",
         "bin/libstasis_dynload.a",
         "bin/libstasis_graphics.dylib",
         "bin/stasis_runner.app/Contents/MacOS/stasis_runner",
+        "desktop/network/include/stasis_network.h",
     ),
 }
 RETAINED_LARGE_FILE_RATIONALE = {

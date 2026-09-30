@@ -328,6 +328,8 @@ pub struct ProjectConfiguration {
     pub settings: BTreeMap<String, ProjectSettingValue>,
     pub digest: [u8; 32],
     pub generated_api_enabled: bool,
+    pub libraries: BTreeMap<String, Vec<String>>,
+    pub libraries_digest: [u8; 32],
 }
 
 #[derive(Debug, Clone)]

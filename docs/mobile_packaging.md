@@ -190,8 +190,9 @@ Device arm64 is the v1 target; simulator and multi-architecture packaging are in
 of scope. The manual `tools/ci/build_ios_package.sh` helper can be run on macOS
 with code signing disabled; it builds `samples/mobile_storage_link` and verifies
 the arm64 executable, embedded SDL frameworks, packaged assets and provenance,
-and absence of Stasis source. GitHub Actions no longer runs an iOS build lane. A
-signed device install still requires the developer's `DEVELOPMENT_TEAM` and
+and absence of Stasis source. The network acceptance workflow builds both iOS
+device and arm64-simulator network archives on macOS, but does not produce a
+signed app. A signed device install still requires the developer's `DEVELOPMENT_TEAM` and
 provisioning profile.
 
 iOS uses the immutable app-bundle asset tree directly and has no Android-style
@@ -207,7 +208,8 @@ generated package metadata uses iOS paths and defines `STASIS_NETWORK_ENABLED=1`
 non-network packages contain none of those references.
 
 Official toolchain archives resolve network libraries relative to the installed
-executable from `mobile/network/<target>/libstasis_network.a` and the shared
+executable from `mobile/network/<target>/libstasis_network.so` on Android (iOS keeps its
+platform-required static archive) and the shared
 `mobile/network/include/stasis_network.h`; they do not depend on the source
 checkout used to build the compiler. Source-tree Cargo builds retain a
 development fallback. Nightly Linux and Windows release archives publish the

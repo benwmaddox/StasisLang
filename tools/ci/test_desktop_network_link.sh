@@ -6,14 +6,15 @@ target_dir="$(python3 tools/cargo_cache.py run -- cargo metadata --no-deps --for
 probe_dir=target/desktop-network-link
 mkdir -p "$probe_dir"
 case "$(uname -s)" in
-  Linux) libraries=(-ldl -lpthread -lm) ;;
-  Darwin) libraries=(-framework Security -framework CoreFoundation -lresolv) ;;
+  Linux) runtime=libstasis_network.so; libraries=(-Wl,-rpath,'$ORIGIN' -ldl -lpthread -lm) ;;
+  Darwin) runtime=libstasis_network.dylib; libraries=(-Wl,-rpath,@loader_path -framework Security -framework CoreFoundation -lresolv) ;;
   *) echo "unsupported native desktop link target" >&2; exit 1 ;;
 esac
 for name in stasis_network_link_test stasis_network_client_link_test; do
   cc -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror \
     -I crates/stasis_network/include "runtime/tests/${name}.c" \
-    "$target_dir/release/libstasis_network.a" "${libraries[@]}" -o "$probe_dir/$name"
+    -L "$target_dir/release" -lstasis_network "${libraries[@]}" -o "$probe_dir/$name"
+  cp "$target_dir/release/$runtime" "$probe_dir/$runtime"
   python3 - "$probe_dir/$name" <<'PYTHON'
 import subprocess
 import sys

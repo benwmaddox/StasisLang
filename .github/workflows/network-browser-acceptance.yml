@@ -111,6 +111,39 @@ jobs:
           archive: true
           path: target/desktop-network-package.*/result.json
 
+  apple-network-artifacts:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - name: Test macOS dylib link and host/client lifecycle
+        timeout-minutes: 15
+        run: bash tools/ci/test_desktop_network_link.sh
+      - name: Build iOS device and simulator static ABI artifacts
+        timeout-minutes: 15
+        run: |
+          python3 tools/cargo_cache.py run -- cargo build -p stasis_network --release --target aarch64-apple-ios
+          python3 tools/cargo_cache.py run -- cargo build -p stasis_network --release --target aarch64-apple-ios-sim
+          test -f build/codex-cargo-target/aarch64-apple-ios/release/libstasis_network.a
+          test -f build/codex-cargo-target/aarch64-apple-ios-sim/release/libstasis_network.a
+      - name: Test Apple package adapters and nested signing order
+        timeout-minutes: 15
+        run: |
+          python3 tools/cargo_cache.py run -- cargo test -p stasis --lib macos_packaged_runner
+          python3 tools/cargo_cache.py run -- cargo test -p stasis --bin stasis mobile_shells_are_platform_projects_over_one_shared_runtime
+          bash tools/ci/test_unix_desktop_network_package.sh
+      - name: Upload macOS package evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-network-package-macos
+          if-no-files-found: error
+          archive: true
+          path: target/desktop-network-package.*/result.json
+
   windows-desktop-package:
     runs-on: windows-latest
     timeout-minutes: 15

@@ -45,6 +45,6 @@ int main(void) {
     CHECK(stasis_network_host_copy_join_card(host, join_card, 1, &join_card_length) == -2);
     stasis_network_host_stop(host);
 
-    puts("stasis_network native static-link contract passed");
+    puts("stasis_network native shared-library ABI contract passed");
     return 0;
 }

@@ -58,14 +58,32 @@ RUNTIME_FILES = (
     "stb_truetype.h",
 )
 RUNTIME_DIRS = ("third_party/thorvg",)
-DESKTOP_NETWORK_LIBRARIES = (
-    "desktop/network/windows-x86_64/stasis_network.lib",
-    "desktop/network/linux-x86_64/libstasis_network.a",
-    "desktop/network/linux-arm64/libstasis_network.a",
-    "desktop/network/macos-arm64/libstasis_network.a",
-    "desktop/network/macos-x86_64/libstasis_network.a",
+DESKTOP_NETWORK_ARTIFACT_SETS = (
+    frozenset(
+        {
+            "desktop/network/windows-x86_64/stasis_network.dll",
+            "desktop/network/windows-x86_64/stasis_network.dll.lib",
+        }
+    ),
+    frozenset({"desktop/network/linux-x86_64/libstasis_network.so"}),
+    frozenset({"desktop/network/linux-arm64/libstasis_network.so"}),
+    frozenset({"desktop/network/macos-arm64/libstasis_network.dylib"}),
+    frozenset({"desktop/network/macos-x86_64/libstasis_network.dylib"}),
 )
 DESKTOP_NETWORK_HEADER = "desktop/network/include/stasis_network.h"
+MOBILE_NETWORK_REQUIRED = frozenset(
+    {
+        "mobile/network/include/stasis_network.h",
+        "mobile/network/android-arm64/libstasis_network.so",
+        "mobile/network/android-x86_64/libstasis_network.so",
+    }
+)
+MOBILE_NETWORK_OPTIONAL = frozenset(
+    {
+        "mobile/network/ios-arm64/libstasis_network.a",
+        "mobile/network/ios-simulator-arm64/libstasis_network.a",
+    }
+)
 
 
 def sha256(path: pathlib.Path) -> str:
@@ -85,11 +103,34 @@ def desktop_network_artifact_hashes(root: pathlib.Path) -> dict[str, str]:
         for path in directory.rglob("*")
         if path.is_file()
     }
-    libraries = present.intersection(DESKTOP_NETWORK_LIBRARIES)
-    if len(libraries) != 1 or present != libraries | {DESKTOP_NETWORK_HEADER}:
+    artifact_sets = [
+        artifacts
+        for artifacts in DESKTOP_NETWORK_ARTIFACT_SETS
+        if present == artifacts | {DESKTOP_NETWORK_HEADER}
+    ]
+    if len(artifact_sets) != 1:
         raise ValueError(
             "desktop network release artifacts are incomplete or unsupported: "
-            "expected exactly one target-native library and the ABI header"
+            "expected exactly one target-native shared-library set and the ABI header"
+        )
+    return {name: sha256(root / name) for name in sorted(present)}
+
+
+def mobile_network_artifact_hashes(root: pathlib.Path) -> dict[str, str]:
+    directory = root / "mobile/network"
+    if not directory.exists():
+        return {}
+    present = {
+        path.relative_to(root).as_posix()
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+    if not MOBILE_NETWORK_REQUIRED.issubset(present) or not present.issubset(
+        MOBILE_NETWORK_REQUIRED | MOBILE_NETWORK_OPTIONAL
+    ):
+        raise ValueError(
+            "mobile network release artifacts are incomplete or unsupported: "
+            "expected the ABI header, both Android shared libraries, and only supported iOS archives"
         )
     return {name: sha256(root / name) for name in sorted(present)}
 
@@ -216,6 +257,7 @@ def main() -> int:
         parser.error("release prebuilt Android runtime artifact set is incomplete")
     try:
         desktop_network_artifacts = desktop_network_artifact_hashes(root)
+        mobile_network_artifacts = mobile_network_artifact_hashes(root)
     except ValueError as error:
         parser.error(str(error))
 
@@ -257,6 +299,7 @@ def main() -> int:
         "mobile_shell_sources": mobile_shell_sources,
         "android_runtime_artifacts": android_runtime_artifacts,
         "desktop_network_artifacts": desktop_network_artifacts,
+        "mobile_network_artifacts": mobile_network_artifacts,
         "command_buffer": {
             "name": COMMAND_BUFFER_NAME,
             "version": command_buffer_version,

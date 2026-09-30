@@ -74,7 +74,7 @@ impl CanonicalTarget {
         }
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(super) fn parse(value: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|target| target.as_str() == value)
@@ -433,6 +433,8 @@ pub(super) fn resolve(
         settings: values,
         digest,
         generated_api_enabled,
+        libraries: BTreeMap::new(),
+        libraries_digest: [0; 32],
     };
     let generated_source = if generated_api_enabled {
         generated_source(&configuration)
@@ -518,6 +520,8 @@ pub(crate) fn provenance_summary(configuration: &ProjectConfiguration) -> Value 
         "target": configuration.target,
         "settings_sha256": hex_digest(configuration.digest),
         "settings": settings,
+        "library_set_sha256": hex_digest(configuration.libraries_digest),
+        "libraries": configuration.libraries,
     })
 }
 

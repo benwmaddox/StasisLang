@@ -8,11 +8,13 @@ import tempfile
 import unittest
 
 from tools.generate_release_provenance import (
-    DESKTOP_NETWORK_LIBRARIES,
+    DESKTOP_NETWORK_ARTIFACT_SETS,
     DESKTOP_NETWORK_HEADER,
+    MOBILE_NETWORK_REQUIRED,
     RUNTIME_DIRS,
     RUNTIME_FILES,
     desktop_network_artifact_hashes,
+    mobile_network_artifact_hashes,
     render_contract_version,
 )
 from tools.verify_package_provenance import (
@@ -21,6 +23,7 @@ from tools.verify_package_provenance import (
     verify_asset_package_identities,
     verify_mobile_shells,
     verify_network_guest_bundles,
+    verify_included_library_artifacts,
 )
 
 
@@ -310,6 +313,17 @@ class ReleaseProvenanceTests(unittest.TestCase):
                         }[mode],
                     },
                 }
+                if mode != "offline":
+                    receipt["network_artifact"] = {
+                        "id": "stasis.network",
+                        "path": "android/app/src/main/cpp/network/libstasis_network.so",
+                        "kind": "elf-shared-object",
+                        "load_policy": "normal-platform-dependency",
+                        "sha256": hashlib.sha256(b"library").hexdigest(),
+                        "size_bytes": len(b"library"),
+                        "source": "prebuilt-release",
+                        "build_duration_ms": 0,
+                    }
                 (package / "stasis_mobile_package.json").write_text(
                     json.dumps(receipt), encoding="utf-8"
                 )
@@ -375,7 +389,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 if mode != "offline":
                     network = package / "android/app/src/main/cpp/network"
                     (network / "include").mkdir(parents=True)
-                    (network / "libstasis_network.a").write_bytes(b"library")
+                    (network / "libstasis_network.so").write_bytes(b"library")
                     (network / "include/stasis_network.h").write_bytes(b"header")
                 (package / "common/stasis_package_provenance.h").write_bytes(
                     b"#ifndef STASIS_PACKAGE_PROVENANCE_H\n#define STASIS_PACKAGE_PROVENANCE_H\n"
@@ -435,20 +449,26 @@ class ReleaseProvenanceTests(unittest.TestCase):
             root = pathlib.Path(temporary)
             self.assertEqual({}, desktop_network_artifact_hashes(root))
 
-            library = root / DESKTOP_NETWORK_LIBRARIES[0]
+            native_set = DESKTOP_NETWORK_ARTIFACT_SETS[0]
+            library = root / next(iter(native_set))
             header = root / DESKTOP_NETWORK_HEADER
             library.parent.mkdir(parents=True)
             library.write_bytes(b"network library")
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 desktop_network_artifact_hashes(root)
 
+            for artifact in native_set:
+                path = root / artifact
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"network library")
             header.parent.mkdir(parents=True)
             header.write_bytes(b"network header")
             self.assertEqual(
                 {
-                    DESKTOP_NETWORK_LIBRARIES[0]: hashlib.sha256(
-                        b"network library"
-                    ).hexdigest(),
+                    **{
+                        artifact: hashlib.sha256(b"network library").hexdigest()
+                        for artifact in native_set
+                    },
                     DESKTOP_NETWORK_HEADER: hashlib.sha256(
                         b"network header"
                     ).hexdigest(),
@@ -456,33 +476,82 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 desktop_network_artifact_hashes(root),
             )
 
-    def test_desktop_network_native_archives_require_exactly_one_target(self):
-        for library in DESKTOP_NETWORK_LIBRARIES:
-            with self.subTest(library=library), tempfile.TemporaryDirectory() as temporary:
+    def test_desktop_network_shared_artifacts_require_exactly_one_target(self):
+        for artifact_set in DESKTOP_NETWORK_ARTIFACT_SETS:
+            with self.subTest(artifacts=artifact_set), tempfile.TemporaryDirectory() as temporary:
                 root = pathlib.Path(temporary)
                 header = root / DESKTOP_NETWORK_HEADER
                 header.parent.mkdir(parents=True)
                 header.write_bytes(b"header")
                 with self.assertRaisesRegex(ValueError, "incomplete"):
                     desktop_network_artifact_hashes(root)
-                native = root / library
-                native.parent.mkdir(parents=True)
-                native.write_bytes(b"native")
+                for artifact in artifact_set:
+                    native = root / artifact
+                    native.parent.mkdir(parents=True, exist_ok=True)
+                    native.write_bytes(b"native")
                 self.assertEqual(
-                    {library: hashlib.sha256(b"native").hexdigest(),
+                    {**{artifact: hashlib.sha256(b"native").hexdigest()
+                        for artifact in artifact_set},
                      DESKTOP_NETWORK_HEADER: hashlib.sha256(b"header").hexdigest()},
                     desktop_network_artifact_hashes(root),
                 )
-                other = next(name for name in DESKTOP_NETWORK_LIBRARIES if name != library)
+                other = next(iter(next(
+                    candidate for candidate in DESKTOP_NETWORK_ARTIFACT_SETS
+                    if candidate != artifact_set
+                )))
                 other_path = root / other
                 other_path.parent.mkdir(parents=True, exist_ok=True)
                 other_path.write_bytes(b"wrong target")
                 with self.assertRaisesRegex(ValueError, "exactly one"):
                     desktop_network_artifact_hashes(root)
                 other_path.unlink()
-                (native.parent / "unexpected.a").write_bytes(b"untracked payload")
+                (native.parent / "unexpected.bin").write_bytes(b"untracked payload")
                 with self.assertRaisesRegex(ValueError, "unsupported"):
                     desktop_network_artifact_hashes(root)
+
+    def test_mobile_network_shared_artifacts_are_hashed_and_exact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            for relative in MOBILE_NETWORK_REQUIRED:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(relative.encode("utf-8"))
+            expected = {
+                relative: hashlib.sha256(relative.encode("utf-8")).hexdigest()
+                for relative in MOBILE_NETWORK_REQUIRED
+            }
+            self.assertEqual(expected, mobile_network_artifact_hashes(root))
+            unexpected = root / "mobile/network/android-arm64/untracked.a"
+            unexpected.write_bytes(b"untracked")
+            with self.assertRaisesRegex(ValueError, "unsupported"):
+                mobile_network_artifact_hashes(root)
+
+    def test_desktop_included_library_receipt_rejects_tampering(self):
+        class Parser:
+            @staticmethod
+            def error(message):
+                raise ValueError(message)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            package = pathlib.Path(temporary) / "package"
+            package.mkdir()
+            library = package / "libstasis_network.so"
+            library.write_bytes(b"shared library")
+            receipt = {
+                "stasis.network": {
+                    "path": "libstasis_network.so",
+                    "kind": "elf-shared-object",
+                    "load_policy": "normal-platform-dependency",
+                    "sha256": hashlib.sha256(b"shared library").hexdigest(),
+                    "size_bytes": len(b"shared library"),
+                    "source": "prebuilt-release",
+                    "build_duration_ms": 0,
+                }
+            }
+            verify_included_library_artifacts(Parser(), receipt, package)
+            library.write_bytes(b"substituted")
+            with self.assertRaisesRegex(ValueError, "size does not match|hash does not match"):
+                verify_included_library_artifacts(Parser(), receipt, package)
 
     def test_network_guest_bundle_identity_rejects_corruption_and_missing_pairs(self):
         class Parser:
@@ -1075,6 +1144,16 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 "android_version_code": "7",
                 "android_version_name": "2.1.0",
                 "network_client": True,
+                "network_artifact": {
+                    "id": "stasis.network",
+                    "path": "android/app/src/main/cpp/network/libstasis_network.so",
+                    "kind": "elf-shared-object",
+                    "load_policy": "normal-platform-dependency",
+                    "sha256": hashlib.sha256(b"library").hexdigest(),
+                    "size_bytes": len(b"library"),
+                    "source": "prebuilt-release",
+                    "build_duration_ms": 0,
+                },
                 "project_configuration": self.project_configuration(
                     "android-arm64"
                 ),
@@ -1091,7 +1170,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             )
             network = package / "android/app/src/main/cpp/network"
             (network / "include").mkdir(parents=True)
-            (network / "libstasis_network.a").write_bytes(b"library")
+            (network / "libstasis_network.so").write_bytes(b"library")
             (network / "include/stasis_network.h").write_bytes(b"header")
             self.assertEqual(subprocess.run(command, check=False).returncode, 0)
             network_client_receipt["network_client"] = False
@@ -1102,7 +1181,10 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 command, check=False, capture_output=True, text=True
             )
             self.assertNotEqual(client_mismatch.returncode, 0)
-            self.assertIn("release transform", client_mismatch.stderr)
+            self.assertIn(
+                "offline mobile package unexpectedly contains a network artifact receipt",
+                client_mismatch.stderr,
+            )
             (package / "stasis_mobile_package.json").write_text(
                 json.dumps(network_client_receipt | {"network_client": True}),
                 encoding="utf-8",

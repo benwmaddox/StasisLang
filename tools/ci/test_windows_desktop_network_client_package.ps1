@@ -33,7 +33,7 @@ try {
         Invoke-Cargo @("build", "-p", "stasis")
         $metadataJson = & python (Join-Path $repoRoot "tools/cargo_cache.py") run -- cargo metadata --no-deps --format-version 1
         if ($LASTEXITCODE -ne 0) { throw "Cargo target metadata query failed" }
-        $cargoTarget = ($metadataJson | ConvertFrom-Json).target_directory
+        $cargoTarget = (($metadataJson | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1) | ConvertFrom-Json).target_directory
         $Toolchain = Join-Path $cargoTarget "debug/stasis.exe"
     } else {
         $Toolchain = (Resolve-Path -LiteralPath $Toolchain).Path
@@ -68,20 +68,23 @@ try {
     if ($InstalledToolchain) {
         $toolchainRoot = Split-Path $Toolchain -Parent
         $include = Join-Path $toolchainRoot "desktop/network/include"
-        $library = Join-Path $toolchainRoot "desktop/network/windows-x86_64/stasis_network.lib"
+        $library = Join-Path $toolchainRoot "desktop/network/windows-x86_64/stasis_network.dll.lib"
+        $runtime = Join-Path $toolchainRoot "desktop/network/windows-x86_64/stasis_network.dll"
     } else {
         $include = Join-Path $repoRoot "crates/stasis_network/include"
-        $library = Join-Path $cargoTarget "release/stasis_network.lib"
+        $library = Join-Path $cargoTarget "release/stasis_network.dll.lib"
+        $runtime = Join-Path $cargoTarget "release/stasis_network.dll"
     }
     $hostObject = Join-Path $scratch "packaged_network_client_host.obj"
     $hostExecutable = Join-Path $scratch "packaged_network_client_host.exe"
-    foreach ($required in @($vcvars, $hostSource, $library)) {
+    foreach ($required in @($vcvars, $hostSource, $library, $runtime)) {
         if (!(Test-Path -LiteralPath $required)) { throw "required package test input is missing" }
     }
     $compile = 'call "{0}" >nul && cl /nologo /W4 /WX /MT /I"{1}" "{2}" /Fo:"{3}" /Fe:"{4}" "{5}" ws2_32.lib iphlpapi.lib bcrypt.lib userenv.lib ntdll.lib' -f `
         $vcvars, $include, $hostSource, $hostObject, $hostExecutable, $library
     & cmd.exe /d /c $compile
     if ($LASTEXITCODE -ne 0) { throw "packaged network client host failed to compile" }
+    Copy-Item -LiteralPath $runtime -Destination (Join-Path $scratch "stasis_network.dll") -Force
 
     Copy-Item -LiteralPath (Join-Path $repoRoot "tests/fixtures/windows_network_client_package") `
         -Destination $project -Recurse

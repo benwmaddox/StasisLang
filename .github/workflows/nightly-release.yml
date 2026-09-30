@@ -108,11 +108,11 @@ jobs:
               "CC_${target}=${clang}" \
               "CXX_${target}=${clang}" \
               "CFLAGS_${target}=--target=${api_target}" \
-              RUSTFLAGS="-C link-arg=--target=${api_target}" \
+              RUSTFLAGS="-C link-arg=--target=${api_target} -C link-arg=-Wl,-z,max-page-size=16384" \
               cargo build -p stasis_network --target "${target}" --release
           done
-          cp target/aarch64-linux-android/release/libstasis_network.a network-artifact/android-arm64/
-          cp target/x86_64-linux-android/release/libstasis_network.a network-artifact/android-x86_64/
+          cp target/aarch64-linux-android/release/libstasis_network.so network-artifact/android-arm64/
+          cp target/x86_64-linux-android/release/libstasis_network.so network-artifact/android-x86_64/
 
       - name: Upload immutable mobile network support
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -335,11 +335,11 @@ jobs:
           test -f mobile/android-runtime/arm64-v8a/manifest.json
           cp -R mobile/android-runtime "${out}/mobile/"
           test -f mobile/network/include/stasis_network.h
-          test -f mobile/network/android-arm64/libstasis_network.a
-          test -f mobile/network/android-x86_64/libstasis_network.a
+          test -f mobile/network/android-arm64/libstasis_network.so
+          test -f mobile/network/android-x86_64/libstasis_network.so
           cp -R mobile/network "${out}/mobile/"
           mkdir -p "${out}/desktop/network/linux-x86_64" "${out}/desktop/network/include"
-          cp "build/codex-cargo-target/${{ matrix.rust_target }}/release/libstasis_network.a" "${out}/desktop/network/linux-x86_64/"
+          cp "build/codex-cargo-target/${{ matrix.rust_target }}/release/libstasis_network.so" "${out}/desktop/network/linux-x86_64/"
           cp crates/stasis_network/include/stasis_network.h "${out}/desktop/network/include/"
           mkdir -p "${out}/runtime"
           cp runtime/CMakeLists.txt runtime/MINIMP3-LICENSE.txt runtime/minimp3.h runtime/minimp3_ex.h runtime/cJSON.c runtime/cJSON.h runtime/stasis_svg.cpp runtime/stasis_svg.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_performance_metrics.h runtime/stasis_package_provenance_reader.h runtime/stasis_audio_assets.c runtime/stasis_audio_assets.h runtime/stasis_recording_audio.h runtime/stasis_graphics.c runtime/stasis_mixed_quad_planner.h runtime/stasis_sprite_atlas_policy.h runtime/stasis_image_writer.c runtime/stasis_image_writer.h runtime/stasis_runner.manifest runtime/stasis_runner_macos.plist.in runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stasis_replay_consumer.c runtime/stasis_replay_consumer.h runtime/stasis_network_join_card.h runtime/stasis_platform_storage.c runtime/stasis_platform_storage.h runtime/stasis_platform_services.c runtime/stasis_platform_services.h runtime/stb_truetype.h "${out}/runtime/"
@@ -399,14 +399,14 @@ jobs:
           Copy-Item mobile/android-runtime "$out/mobile/" -Recurse -Force
           @(
             "mobile/network/include/stasis_network.h",
-            "mobile/network/android-arm64/libstasis_network.a",
-            "mobile/network/android-x86_64/libstasis_network.a"
+            "mobile/network/android-arm64/libstasis_network.so",
+            "mobile/network/android-x86_64/libstasis_network.so"
           ) | ForEach-Object {
             if (-not (Test-Path $_)) { throw "mobile network support missing: $_" }
           }
           Copy-Item mobile/network "$out/mobile/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/desktop/network/windows-x86_64", "$out/desktop/network/include" | Out-Null
-          Copy-Item "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.lib" "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
+          Copy-Item -Path "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.dll", "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.dll.lib" -Destination "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
           Copy-Item crates/stasis_network/include/stasis_network.h "$out/desktop/network/include/" -ErrorAction Stop
           Copy-Item "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis-network-supervise.exe" "$out/" -ErrorAction Stop
           Copy-Item tools/diagnose_desktop_network.ps1 "$out/tools/" -ErrorAction Stop
@@ -525,7 +525,7 @@ jobs:
             .\stasis.exe --workspace cli-smoke package-mobile --target android-arm64 --out dist/network-android
             $networkReceipt = Get-Content "cli-smoke/dist/network-android/stasis_mobile_package.json" -Raw | ConvertFrom-Json
             if (-not $networkReceipt.network) { throw "network Android receipt did not enable network" }
-            if (-not (Test-Path "cli-smoke/dist/network-android/android/app/src/main/cpp/network/libstasis_network.a")) { throw "bundled Android network library missing" }
+            if (-not (Test-Path "cli-smoke/dist/network-android/android/app/src/main/cpp/network/libstasis_network.so")) { throw "bundled Android network shared library missing" }
             if (-not (Test-Path "cli-smoke/dist/network-android/android/app/src/main/cpp/network/include/stasis_network.h")) { throw "bundled Android network header missing" }
             if (-not (Test-Path "cli-smoke/dist/network-android/android/app/src/main/assets/stasis_game/network_guest.bundle")) { throw "Android guest bundle missing" }
             $networkIosError = .\stasis.exe --workspace cli-smoke package-mobile --target ios-arm64 --out dist/network-ios 2>&1
@@ -634,7 +634,7 @@ jobs:
             python3 "${repo_root}/tools/ci/test_linux_desktop_network_package.py" --executable cli-smoke/dist/network-desktop/ci_smoke --result cli-smoke/network-desktop-result.json
           fi
           ./bin/stasis --workspace cli-smoke package-mobile --target android-arm64 --out dist/network-android
-          test -f cli-smoke/dist/network-android/android/app/src/main/cpp/network/libstasis_network.a
+          test -f cli-smoke/dist/network-android/android/app/src/main/cpp/network/libstasis_network.so
           test -f cli-smoke/dist/network-android/android/app/src/main/cpp/network/include/stasis_network.h
           test -f cli-smoke/dist/network-android/android/app/src/main/assets/stasis_game/network_guest.bundle
           set +e

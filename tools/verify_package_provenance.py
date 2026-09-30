@@ -286,6 +286,50 @@ def validate_desktop_package_receipt(
         )
 
 
+def verify_included_library_artifacts(
+    parser: argparse.ArgumentParser,
+    value: object,
+    package_root: pathlib.Path,
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict) or set(value) != {"stasis.network"}:
+        parser.error("included library artifact receipt is malformed")
+    artifact = value["stasis.network"]
+    required = {
+        "path", "kind", "load_policy", "sha256", "size_bytes", "source",
+        "build_duration_ms",
+    }
+    if not isinstance(artifact, dict) or set(artifact) != required:
+        parser.error("stasis.network artifact receipt is malformed")
+    relative = artifact["path"]
+    if not isinstance(relative, str) or not relative:
+        parser.error("stasis.network artifact path is invalid")
+    allowed_root = package_root.parent.resolve()
+    candidate = (package_root / relative).resolve()
+    if candidate != allowed_root and allowed_root not in candidate.parents:
+        parser.error("stasis.network artifact path escapes the desktop package")
+    if not candidate.is_file():
+        parser.error(f"stasis.network artifact is missing: {relative}")
+    if artifact["load_policy"] != "normal-platform-dependency":
+        parser.error("stasis.network artifact has an invalid load policy")
+    if artifact["kind"] not in {
+        "pe-shared-library", "elf-shared-object", "mach-o-dynamic-library"
+    }:
+        parser.error("stasis.network artifact has an invalid platform kind")
+    if artifact["source"] not in {"prebuilt-release", "source-build"}:
+        parser.error("stasis.network artifact has an invalid source")
+    if type(artifact["build_duration_ms"]) is not int or artifact["build_duration_ms"] < 0:
+        parser.error("stasis.network build duration is invalid")
+    if type(artifact["size_bytes"]) is not int or artifact["size_bytes"] != candidate.stat().st_size:
+        parser.error("stasis.network artifact size does not match the package")
+    digest = artifact["sha256"]
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        parser.error("stasis.network artifact hash is invalid")
+    if sha256(candidate) != digest:
+        parser.error("stasis.network artifact hash does not match the package")
+
+
 def verify_mobile_shells(
     parser: argparse.ArgumentParser,
     release_root: pathlib.Path,
@@ -312,6 +356,39 @@ def verify_mobile_shells(
         "android-arm64", "android-x86_64", "ios-arm64", "ios-simulator-arm64"
     ):
         parser.error(f"unsupported mobile package target: {target!r}")
+    network_selected = bool(receipt.get("network") or receipt.get("network_client"))
+    artifact = receipt.get("network_artifact")
+    if network_selected:
+        if not isinstance(artifact, dict):
+            parser.error("network-enabled mobile package is missing its artifact receipt")
+        expected_artifact_fields = {
+            "id", "path", "kind", "load_policy", "sha256", "size_bytes",
+            "source", "build_duration_ms",
+        }
+        if set(artifact) != expected_artifact_fields or artifact.get("id") != "stasis.network":
+            parser.error("mobile stasis.network artifact receipt is malformed")
+        artifact_path = artifact.get("path")
+        if not isinstance(artifact_path, str) or not artifact_path:
+            parser.error("mobile stasis.network artifact path is invalid")
+        resolved_artifact = (package_root / artifact_path).resolve()
+        package_resolved = package_root.resolve()
+        if package_resolved not in resolved_artifact.parents or not resolved_artifact.is_file():
+            parser.error("mobile stasis.network artifact is missing or outside the package")
+        if artifact.get("size_bytes") != resolved_artifact.stat().st_size:
+            parser.error("mobile stasis.network artifact size does not match the package")
+        if artifact.get("sha256") != sha256(resolved_artifact):
+            parser.error("mobile stasis.network artifact hash does not match the package")
+        if artifact.get("source") not in {"prebuilt-release", "source-build"}:
+            parser.error("mobile stasis.network artifact source is invalid")
+        duration = artifact.get("build_duration_ms")
+        if type(duration) is not int or duration < 0:
+            parser.error("mobile stasis.network build duration is invalid")
+        expected_kind = "elf-shared-object" if target.startswith("android-") else "apple-static-archive"
+        expected_policy = "normal-platform-dependency" if target.startswith("android-") else "static-link"
+        if artifact.get("kind") != expected_kind or artifact.get("load_policy") != expected_policy:
+            parser.error("mobile stasis.network artifact kind or load policy is invalid")
+    elif artifact is not None:
+        parser.error("offline mobile package unexpectedly contains a network artifact receipt")
     receipt_configuration = receipt.get("project_configuration")
     if receipt_schema == "stasis.mobile_package.v2" and receipt_configuration is None:
         parser.error("mobile package v2 is missing project configuration")
@@ -476,7 +553,7 @@ def verify_mobile_shells(
         else:
             expected_paths.update(
                 {
-                    ("android", "app/src/main/cpp/network/libstasis_network.a"),
+                    ("android", "app/src/main/cpp/network/libstasis_network.so"),
                     ("android", "app/src/main/cpp/network/include/stasis_network.h"),
                 }
             )
@@ -547,6 +624,7 @@ def main() -> int:
         "desktop_package", desktop_package_missing
     )
     project_configuration_value = packaged_release.pop("project_configuration", None)
+    included_library_artifacts = packaged_release.pop("included_library_artifacts", None)
     project_configuration = (
         validate_project_configuration(parser, project_configuration_value)
         if project_configuration_value is not None
@@ -563,12 +641,17 @@ def main() -> int:
         validate_desktop_package_receipt(
             parser, desktop_package, args.package_root
         )
+        verify_included_library_artifacts(
+            parser, included_library_artifacts, args.package_root
+        )
         if project_configuration is not None and not project_configuration["target"].startswith(
             ("windows-", "linux-", "macos-")
         ):
             parser.error("desktop package has a non-desktop project configuration target")
     elif desktop_package is not desktop_package_missing:
         parser.error("packaged provenance unexpectedly contains desktop package receipt")
+    elif included_library_artifacts is not None:
+        parser.error("non-desktop package unexpectedly contains desktop included-library artifacts")
     if release != packaged_release:
         parser.error("packaged provenance does not exactly match the release manifest")
     verify_asset_package_identities(parser, args.package_root)

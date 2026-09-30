@@ -12684,6 +12684,8 @@ function main(): i32 { batch.update(0); return 0; }
             settings: BTreeMap::new(),
             digest: [7; 32],
             generated_api_enabled: true,
+            libraries: BTreeMap::new(),
+            libraries_digest: [0; 32],
         };
         let generated_path = crate::frontend::module_graph::GENERATED_PROJECT_SETTINGS_PATH;
         let mut active = JitProcess::new();
