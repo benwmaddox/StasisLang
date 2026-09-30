@@ -42,9 +42,8 @@ Build and install a debug-signed APK for device testing with:
 `android.launcher_resources` in the game's `stasis.json` names its own Android
 `res` tree with five legacy density icons, adaptive icon XML, and foreground
 art. Production packaging fails when the setting or required files are absent;
-there is no generic fallback artwork. The bundled Pong Workshop sample currently
-has no authored launcher art, so the script's default project is suitable only
-for an explicit `-DevelopmentBuild -Install` smoke run until Pong art is added.
+there is no generic fallback artwork. The bundled Pong Workshop sample has
+authored launcher art and can use the production packaging path.
 Pass `-StasisPath` for an installed official CLI; without it, the script builds
 the CLI locally. Production AAB validation needs official bundletool through
 `-BundletoolPath` or `BUNDLETOOL_PATH`. The script checks compiled icon resources,

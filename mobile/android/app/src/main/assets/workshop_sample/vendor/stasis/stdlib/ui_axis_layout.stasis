@@ -1,0 +1,33 @@
+// Immediate one-axis placement for scalar UI geometry.
+
+enum UiHorizontal {
+    Left,
+    Center,
+    Right,
+}
+
+enum UiVertical {
+    Top,
+    Center,
+    Bottom,
+}
+
+function @inline ui_place_x(parent_x: f32, parent_width: f32, child_width: f32, horizontal: UiHorizontal): f32 {
+    if (horizontal == UiHorizontal.Center) {
+        return parent_x +(parent_width - child_width) * 0.5;
+    }
+    if (horizontal == UiHorizontal.Right) {
+        return parent_x + parent_width - child_width;
+    }
+    return parent_x;
+}
+
+function @inline ui_place_y(parent_y: f32, parent_height: f32, child_height: f32, vertical: UiVertical): f32 {
+    if (vertical == UiVertical.Center) {
+        return parent_y +(parent_height - child_height) * 0.5;
+    }
+    if (vertical == UiVertical.Bottom) {
+        return parent_y + parent_height - child_height;
+    }
+    return parent_y;
+}

@@ -1,0 +1,64 @@
+const BRICK_CAPACITY: i32 = 2;
+
+struct Brick {
+    active: bool;
+    left: i32;
+    right: i32;
+    top: i32;
+    bottom: i32;
+}
+
+struct BreakoutState {
+    ball_x: i32;
+    ball_y: i32;
+    ball_dx: i32;
+    ball_dy: i32;
+}
+
+global breakout: BreakoutState;
+global bricks: Brick[2];
+
+function reset_breakout(): void {
+    breakout.ball_x = 0;
+    breakout.ball_y = 0;
+    breakout.ball_dx = 0;
+    breakout.ball_dy = 1;
+    for (let brick_id: i32 = 0; brick_id < BRICK_CAPACITY; brick_id += 1) {
+        bricks[brick_id].active = false;
+    }
+}
+
+function first_brick_at(x: i32, y: i32): i32 {
+    for (let brick_id: i32 = 0; brick_id < BRICK_CAPACITY; brick_id += 1) {
+        if (
+            bricks[brick_id].active
+            && x >= bricks[brick_id].left
+            && x <= bricks[brick_id].right
+            && y >= bricks[brick_id].top
+            && y <= bricks[brick_id].bottom
+        ) {
+            return brick_id;
+        }
+    }
+    return -1;
+}
+
+function main(): i32 {
+    reset_breakout();
+    return 0;
+}
+
+function tick(): i32 {
+    breakout.ball_x += breakout.ball_dx;
+    breakout.ball_y += breakout.ball_dy;
+    let hit_id: i32 = first_brick_at(breakout.ball_x, breakout.ball_y);
+    if (hit_id >= 0) {
+        bricks[hit_id].active = false;
+        breakout.ball_dy = -breakout.ball_dy;
+    }
+    return 0;
+}
+
+function render(): i32 {
+    return 0;
+}

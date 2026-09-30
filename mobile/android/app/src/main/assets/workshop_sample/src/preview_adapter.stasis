@@ -1,4 +1,4 @@
-import "/vendor/stasis/src/stdlib/graphics.stasis";
+import "/vendor/stasis/stdlib/graphics.stasis";
 
 global host_i32: i32[768];
 global host_f32: f32[64];
