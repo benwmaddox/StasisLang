@@ -85,9 +85,16 @@ Source checkouts may build authenticated release inputs while developing. Publis
 consume the release catalog/provenance copy so game packages do not rebuild the shared library.
 Current Linux and Windows x86_64 toolchains publish their matching desktop library plus Android
 arm64/x86_64 libraries. Windows arm64 and Linux arm64 selections fail closed because no matching
-archive is published. macOS x86_64/arm64 and iOS device/simulator entries are source-checkout-only
-and are authenticated by their hosted build/acceptance lane; they are not described as released
-toolchain artifacts until the archive workflows actually publish them.
+archive is published. macOS x86_64/arm64 and iOS device/simulator entries are source-checkout-only.
+Their catalog entry embeds a release identity plus deterministic digests of the complete
+`stasis_network` source set and workspace Cargo inputs. Packaging re-hashes those inputs before the
+build, so a modified checkout fails before producing or signing an artifact. Hosted acceptance then
+checks the resulting target artifact; it is not the source identity anchor.
+
+Manifest v1/v2 compatibility does not opt into this delivery model. Legacy network capabilities
+retain the prior static/monolithic link, filenames, package layout, and receipt schema. They do not
+gain `libraries`, `library_set_sha256`, `included_libraries`, or per-library artifact receipt fields.
+Only a manifest-v3 `libraries` selection uses the optional shared artifact contract.
 
 ## Catalog authoring and release
 
@@ -95,8 +102,9 @@ The catalog is Stasis-owned and compiled into the toolchain. Each entry fixes lo
 features, owned modules/headers, target artifacts and kinds, stable ABI, minimum OS/SDK/NDK and
 toolchain identity, dependencies/conflicts, required capabilities, load policy, and license notice.
 Its canonical JSON digest authenticates selection metadata. Source/header/notices carry direct
-SHA-256 values; native artifact authentication points at its exact
-`stasis_release_provenance.json` key. Release builders must hash inputs before signing, preserve
+SHA-256 values. Published native artifacts point at their exact
+`stasis_release_provenance.json` key; source-only Apple targets carry the catalog release,
+source-set digest, and toolchain-input digest. Release builders must hash inputs before signing, preserve
 nested-signing order, and publish the catalog and artifacts atomically.
 
 Auditors reject missing, extra, stale, wrong-target, wrong-ABI, modified, or unlicensed files. Errors

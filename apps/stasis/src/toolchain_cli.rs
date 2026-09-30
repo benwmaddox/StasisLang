@@ -1157,6 +1157,10 @@ struct AndroidProjectManifest {
 }
 
 impl ProjectManifest {
+    fn uses_included_libraries(&self) -> bool {
+        self.manifest_version >= 3 && self.libraries.is_some()
+    }
+
     fn new(name: String) -> Self {
         Self {
             manifest_version: MANIFEST_VERSION,
@@ -1360,6 +1364,10 @@ impl ProjectManifest {
     }
 
     fn network_roles_for(&self, target: CanonicalTarget) -> Result<(bool, bool), String> {
+        if !self.uses_included_libraries() {
+            let capabilities = self.capabilities.as_ref().cloned().unwrap_or_default();
+            return Ok((capabilities.network, capabilities.network_client));
+        }
         let resolved = included_libraries::resolve(
             self.manifest_version,
             self.libraries.as_ref(),
@@ -1461,20 +1469,22 @@ impl Workspace {
             target,
             self.manifest.manifest_version >= 2,
         )?;
-        let libraries = included_libraries::resolve(
-            self.manifest.manifest_version,
-            self.manifest.libraries.as_ref(),
-            self.manifest.capabilities.as_ref(),
-            target,
-        )?;
-        included_libraries::apply_to_configuration(
-            &mut resolved_settings.configuration,
-            &libraries,
-        );
-        if resolved_settings.configuration.generated_api_enabled {
-            resolved_settings
-                .generated_source
-                .push_str(&included_libraries::generated_source(&libraries));
+        if self.manifest.uses_included_libraries() {
+            let libraries = included_libraries::resolve(
+                self.manifest.manifest_version,
+                self.manifest.libraries.as_ref(),
+                self.manifest.capabilities.as_ref(),
+                target,
+            )?;
+            included_libraries::apply_to_configuration(
+                &mut resolved_settings.configuration,
+                &libraries,
+            );
+            if resolved_settings.configuration.generated_api_enabled {
+                resolved_settings
+                    .generated_source
+                    .push_str(&included_libraries::generated_source(&libraries));
+            }
         }
         self.resolved_settings = Some(resolved_settings);
         Ok(self)
@@ -1488,16 +1498,16 @@ impl Workspace {
             features.is_some_and(|features| features.iter().any(|feature| feature == "host")),
             features.is_some_and(|features| features.iter().any(|feature| feature == "client")),
         );
-        if roles != (false, false) || self.manifest.manifest_version >= 3 {
+        if self.manifest.uses_included_libraries() {
             return Ok(roles);
         }
-        let target = CanonicalTarget::parse(&configuration.target).ok_or_else(|| {
-            format!(
-                "project configuration has unknown target '{}'",
-                configuration.target
-            )
-        })?;
-        self.manifest.network_roles_for(target)
+        let capabilities = self
+            .manifest
+            .capabilities
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+        Ok((capabilities.network, capabilities.network_client))
     }
 
     fn project_configuration(&self) -> Result<&ProjectConfiguration, String> {
@@ -2473,21 +2483,23 @@ pub(super) fn load_project_configuration(
         target,
         manifest.manifest_version >= 2,
     )?;
-    let libraries = included_libraries::resolve(
-        manifest.manifest_version,
-        manifest.libraries.as_ref(),
-        manifest.capabilities.as_ref(),
-        target,
-    )?;
-    included_libraries::apply_to_configuration(&mut resolved.configuration, &libraries);
-    resolved.included_libraries = Some(
-        serde_json::to_value(&libraries)
-            .map_err(|error| format!("failed to serialize library provenance: {error}"))?,
-    );
-    if resolved.configuration.generated_api_enabled {
-        resolved
-            .generated_source
-            .push_str(&included_libraries::generated_source(&libraries));
+    if manifest.uses_included_libraries() {
+        let libraries = included_libraries::resolve(
+            manifest.manifest_version,
+            manifest.libraries.as_ref(),
+            manifest.capabilities.as_ref(),
+            target,
+        )?;
+        included_libraries::apply_to_configuration(&mut resolved.configuration, &libraries);
+        resolved.included_libraries = Some(
+            serde_json::to_value(&libraries)
+                .map_err(|error| format!("failed to serialize library provenance: {error}"))?,
+        );
+        if resolved.configuration.generated_api_enabled {
+            resolved
+                .generated_source
+                .push_str(&included_libraries::generated_source(&libraries));
+        }
     }
     Ok(resolved)
 }
@@ -2504,14 +2516,7 @@ pub(super) fn load_release_font_subsetting(
 pub(super) fn resolve_manifestless_project_configuration(
     target: CanonicalTarget,
 ) -> Result<ResolvedProjectSettings, String> {
-    let mut resolved = project_settings::resolve(None, target, false)?;
-    let libraries = included_libraries::resolve(1, None, None, target)?;
-    included_libraries::apply_to_configuration(&mut resolved.configuration, &libraries);
-    resolved.included_libraries = Some(
-        serde_json::to_value(&libraries)
-            .map_err(|error| format!("failed to serialize library provenance: {error}"))?,
-    );
-    Ok(resolved)
+    project_settings::resolve(None, target, false)
 }
 
 fn validate_generated_settings_path(
@@ -3563,7 +3568,9 @@ fn project_compilation_configuration(
 
 fn project_configuration_provenance(workspace: &Workspace) -> Result<Value, String> {
     let configuration = workspace.project_configuration()?;
-    let mut summary = project_settings::provenance_summary(configuration);
+    if !workspace.manifest.uses_included_libraries() {
+        return Ok(project_settings::provenance_summary(configuration));
+    }
     let target = CanonicalTarget::parse(&configuration.target).ok_or_else(|| {
         format!(
             "project configuration has unknown target '{}'",
@@ -3576,9 +3583,12 @@ fn project_configuration_provenance(workspace: &Workspace) -> Result<Value, Stri
         workspace.manifest.capabilities.as_ref(),
         target,
     )?;
-    summary["included_libraries"] = serde_json::to_value(libraries)
+    let included = serde_json::to_value(libraries)
         .map_err(|error| format!("failed to serialize library provenance: {error}"))?;
-    Ok(summary)
+    Ok(project_settings::provenance_summary_with_libraries(
+        configuration,
+        &included,
+    ))
 }
 
 fn validate_snapshot_project_configuration(
@@ -3634,6 +3644,9 @@ fn validate_included_library_imports(
     workspace: &Workspace,
     files: &[WorkshopSourceFile],
 ) -> Result<(), String> {
+    if !workspace.manifest.uses_included_libraries() {
+        return Ok(());
+    }
     let (_, client_enabled) = workspace.network_roles()?;
     if client_enabled {
         return Ok(());
@@ -5408,6 +5421,7 @@ fn build_desktop_network_library(
         "installed toolchain is missing its prebuilt desktop/network library; reinstall the complete release archive"
             .to_string()
     })?;
+    included_libraries::authenticate_source_workspace(&source_root, CanonicalTarget::host())?;
     let target_dir = staging_root.join(".network-rust-target");
     let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
     let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
@@ -5471,6 +5485,89 @@ fn build_desktop_network_library(
         link_library,
         runtime_library: Some(runtime_library),
         header: include_dir.join("stasis_network.h"),
+        source: "source-build",
+        build_duration_ms: build_started
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX),
+    })
+}
+
+fn build_legacy_desktop_network_library(
+    staging_root: &Path,
+) -> Result<NativeNetworkArtifacts, String> {
+    let executable = env::current_exe()
+        .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
+    let target_name = network_support_target(PackageTarget::Desktop)
+        .ok_or_else(|| "network static library is unavailable for this target".to_string())?;
+    let executable_dir = executable.parent().unwrap_or(Path::new("."));
+    for support_root in [
+        executable_dir.join("desktop/network"),
+        executable_dir.join("../desktop/network"),
+    ] {
+        let library_name = if cfg!(windows) {
+            "stasis_network.lib"
+        } else {
+            "libstasis_network.a"
+        };
+        let library = support_root.join(target_name).join(library_name);
+        let header = support_root.join("include/stasis_network.h");
+        if library.is_file() && header.is_file() {
+            return Ok(NativeNetworkArtifacts {
+                link_library: library,
+                runtime_library: None,
+                header,
+                source: "prebuilt-release",
+                build_duration_ms: 0,
+            });
+        }
+    }
+    let source_root = source_network_workspace().ok_or_else(|| {
+        "installed toolchain is missing its legacy static desktop/network library; reinstall the complete release archive"
+            .to_string()
+    })?;
+    included_libraries::authenticate_source_workspace(&source_root, CanonicalTarget::host())?;
+    let build_started = Instant::now();
+    let target_dir = staging_root.join(".network-rust-target");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
+    if cfg!(windows) {
+        if !rustflags.is_empty() {
+            rustflags.push(' ');
+        }
+        rustflags.push_str("-C target-feature=+crt-static");
+    }
+    let output = Command::new(cargo)
+        .current_dir(&source_root)
+        .args(["build", "-p", "stasis_network", "--release", "--target-dir"])
+        .arg(&target_dir)
+        .env("RUSTFLAGS", rustflags)
+        .output()
+        .map_err(|error| format!("failed to build legacy stasis_network for desktop: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "legacy desktop stasis_network build failed with exit code {}: stdout={} stderr={}",
+            output.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let library = target_dir.join("release").join(if cfg!(windows) {
+        "stasis_network.lib"
+    } else {
+        "libstasis_network.a"
+    });
+    if !library.is_file() {
+        return Err(format!(
+            "legacy desktop stasis_network build did not produce {}",
+            library.display()
+        ));
+    }
+    Ok(NativeNetworkArtifacts {
+        link_library: library,
+        runtime_library: None,
+        header: source_root.join("crates/stasis_network/include/stasis_network.h"),
         source: "source-build",
         build_duration_ms: build_started
             .elapsed()
@@ -5711,10 +5808,11 @@ fn package_workspace(
                     development_build,
                 )?;
             }
-            Some(build_desktop_network_library(
-                &package_assembly_root,
-                development_build,
-            )?)
+            Some(if snapshot_workspace.manifest.uses_included_libraries() {
+                build_desktop_network_library(&package_assembly_root, development_build)?
+            } else {
+                build_legacy_desktop_network_library(&package_assembly_root)?
+            })
         } else {
             None
         };
@@ -5767,6 +5865,8 @@ fn package_workspace(
                 sign_output_artifact_if_configured(&staged_runtime)?;
             }
             let artifacts = network_build.as_ref().expect("network build exists");
+            let catalog_artifact = included_libraries::catalog_artifact(CanonicalTarget::host())
+                .expect("selected desktop target has a catalog artifact");
             let package_relative_runtime = staged_runtime
                 .strip_prefix(&package_assembly_root)
                 .map_err(|_| {
@@ -5792,6 +5892,9 @@ fn package_workspace(
                         .len(),
                     "source": artifacts.source,
                     "build_duration_ms": artifacts.build_duration_ms,
+                    "catalog_release": catalog_artifact.catalog_release,
+                    "source_set_sha256": catalog_artifact.source_set_sha256,
+                    "toolchain_sha256": catalog_artifact.toolchain_sha256,
                 }
             });
         }
@@ -7936,7 +8039,11 @@ fn package_mobile_workspace(
             None
         };
         let network_artifacts = if network_enabled || network_client_enabled {
-            Some(stage_mobile_network_library(&staging_root, target)?)
+            Some(if workspace.manifest.uses_included_libraries() {
+                stage_mobile_network_library(&staging_root, target)?
+            } else {
+                stage_legacy_mobile_network_library(&staging_root, target)?
+            })
         } else {
             None
         };
@@ -8087,6 +8194,7 @@ fn stage_network_artifacts(
     target: PackageTarget,
     artifacts: &NativeNetworkArtifacts,
     header: &Path,
+    shared_android: bool,
 ) -> Result<NativeNetworkArtifacts, String> {
     let header_destination = match target {
         PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
@@ -8103,7 +8211,11 @@ fn stage_network_artifacts(
         .map_err(|error| format!("failed to create network staging: {error}"))?;
     let library_destination = match target {
         PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
-            header_destination.join("libstasis_network_v1.so")
+            header_destination.join(if shared_android {
+                "libstasis_network_v1.so"
+            } else {
+                "libstasis_network.a"
+            })
         }
         PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
             header_destination.join("libstasis_network.a")
@@ -8145,12 +8257,13 @@ fn stage_android_network_library(
         target,
     )? {
         let header = artifacts.header.clone();
-        return stage_network_artifacts(staging_root, target, &artifacts, &header);
+        return stage_network_artifacts(staging_root, target, &artifacts, &header, true);
     }
     let source_root = source_network_workspace().ok_or_else(|| {
         "installed toolchain is missing prebuilt mobile/network network libraries; reinstall the complete release archive"
             .to_string()
     })?;
+    included_libraries::authenticate_source_workspace(&source_root, target.canonical())?;
     let build_started = Instant::now();
     let (rust_target, api_level) = match target {
         PackageTarget::AndroidArm64 => ("aarch64-linux-android", "aarch64-linux-android26"),
@@ -8222,7 +8335,7 @@ fn stage_android_network_library(
             .unwrap_or(u64::MAX),
     };
     let header = artifacts.header.clone();
-    stage_network_artifacts(staging_root, target, &artifacts, &header)
+    stage_network_artifacts(staging_root, target, &artifacts, &header, true)
 }
 
 fn stage_ios_network_library(
@@ -8241,12 +8354,13 @@ fn stage_ios_network_library(
         target,
     )? {
         let header = artifacts.header.clone();
-        return stage_network_artifacts(staging_root, target, &artifacts, &header);
+        return stage_network_artifacts(staging_root, target, &artifacts, &header, true);
     }
     let source_root = source_network_workspace().ok_or_else(|| {
         "installed toolchain is missing prebuilt mobile/network network libraries; reinstall the complete release archive"
             .to_string()
     })?;
+    included_libraries::authenticate_source_workspace(&source_root, target.canonical())?;
     let build_started = Instant::now();
     let simulator = matches!(target, PackageTarget::IosSimulatorArm64);
     let rust_target = if simulator {
@@ -8332,7 +8446,113 @@ fn stage_ios_network_library(
             .unwrap_or(u64::MAX),
     };
     let header = artifacts.header.clone();
-    stage_network_artifacts(staging_root, target, &artifacts, &header)
+    stage_network_artifacts(staging_root, target, &artifacts, &header, true)
+}
+
+fn stage_legacy_mobile_network_library(
+    staging_root: &Path,
+    target: PackageTarget,
+) -> Result<NativeNetworkArtifacts, String> {
+    if matches!(
+        target,
+        PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64
+    ) {
+        return stage_ios_network_library(staging_root, target);
+    }
+    let executable = env::current_exe()
+        .map_err(|error| format!("failed to locate stasis executable: {error}"))?;
+    let target_name = network_support_target(target)
+        .ok_or_else(|| "network static library is unavailable for this target".to_string())?;
+    let executable_dir = executable.parent().unwrap_or(Path::new("."));
+    for support_root in [
+        executable_dir.join("mobile/network"),
+        executable_dir.join("../mobile/network"),
+    ] {
+        let library = support_root.join(target_name).join("libstasis_network.a");
+        let header = support_root.join("include/stasis_network.h");
+        if library.is_file() && header.is_file() {
+            let artifacts = NativeNetworkArtifacts {
+                link_library: library,
+                runtime_library: None,
+                header: header.clone(),
+                source: "prebuilt-release",
+                build_duration_ms: 0,
+            };
+            return stage_network_artifacts(staging_root, target, &artifacts, &header, false);
+        }
+    }
+    let source_root = source_network_workspace().ok_or_else(|| {
+        "installed toolchain is missing its legacy static mobile/network library; reinstall the complete release archive"
+            .to_string()
+    })?;
+    included_libraries::authenticate_source_workspace(&source_root, target.canonical())?;
+    let build_started = Instant::now();
+    let (rust_target, api_level) = match target {
+        PackageTarget::AndroidArm64 => ("aarch64-linux-android", "aarch64-linux-android26"),
+        PackageTarget::AndroidX86_64 => ("x86_64-linux-android", "x86_64-linux-android26"),
+        _ => return Err("network static library requires an Android target".to_string()),
+    };
+    let clang = android_ndk_clang("clang").ok_or_else(|| {
+        "network-enabled Android packaging requires an installed Android NDK clang".to_string()
+    })?;
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let linker_key = format!(
+        "CARGO_TARGET_{}_LINKER",
+        rust_target.replace('-', "_").to_ascii_uppercase()
+    );
+    let mut rustflags = env::var("RUSTFLAGS").unwrap_or_default();
+    if !rustflags.is_empty() {
+        rustflags.push(' ');
+    }
+    rustflags.push_str(&format!("-C link-arg=--target={api_level}"));
+    let output = Command::new(cargo)
+        .current_dir(&source_root)
+        .args([
+            "build",
+            "-p",
+            "stasis_network",
+            "--target",
+            rust_target,
+            "--release",
+        ])
+        .env(&linker_key, &clang)
+        .env(format!("CC_{rust_target}"), &clang)
+        .env(format!("CXX_{rust_target}"), &clang)
+        .env(
+            format!("CFLAGS_{rust_target}"),
+            format!("--target={api_level}"),
+        )
+        .env("RUSTFLAGS", rustflags)
+        .output()
+        .map_err(|error| format!("failed to build legacy stasis_network for Android: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "legacy Android stasis_network build failed with exit code {}: stdout={} stderr={}",
+            output.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let library = source_root.join(format!("target/{rust_target}/release/libstasis_network.a"));
+    let header = source_root.join("crates/stasis_network/include/stasis_network.h");
+    if !library.is_file() {
+        return Err(format!(
+            "legacy Android stasis_network build did not produce {}",
+            library.display()
+        ));
+    }
+    let artifacts = NativeNetworkArtifacts {
+        link_library: library,
+        runtime_library: None,
+        header: header.clone(),
+        source: "source-build",
+        build_duration_ms: build_started
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX),
+    };
+    stage_network_artifacts(staging_root, target, &artifacts, &header, false)
 }
 
 fn android_ndk_clang(executable: &str) -> Option<PathBuf> {
@@ -9018,7 +9238,11 @@ fn assemble_mobile_shell(
     let network_library = if native_network_enabled {
         Some(match target {
             PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
-                "android/app/src/main/cpp/network/libstasis_network_v1.so"
+                if workspace.manifest.uses_included_libraries() {
+                    "android/app/src/main/cpp/network/libstasis_network_v1.so"
+                } else {
+                    "android/app/src/main/cpp/network/libstasis_network.a"
+                }
             }
             PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
                 "ios/network/libstasis_network.a"
@@ -9054,9 +9278,15 @@ fn assemble_mobile_shell(
     } else {
         None
     };
-    let network_artifact = network_library
+    let network_artifact = workspace
+        .manifest
+        .uses_included_libraries()
+        .then_some(network_library)
+        .flatten()
         .map(|relative| -> Result<Value, String> {
             let path = staging_root.join(relative);
+            let catalog_artifact = included_libraries::catalog_artifact(target.canonical())
+                .expect("selected mobile target has a catalog artifact");
             Ok(json!({
                 "id": "stasis.network",
                 "path": relative,
@@ -9072,52 +9302,58 @@ fn assemble_mobile_shell(
                 "build_duration_ms": network_artifacts
                     .expect("native network artifacts accompany the staged library")
                     .build_duration_ms,
+                "catalog_release": catalog_artifact.catalog_release,
+                "source_set_sha256": catalog_artifact.source_set_sha256,
+                "toolchain_sha256": catalog_artifact.toolchain_sha256,
             }))
         })
         .transpose()?;
+    let mut package_receipt = json!({
+        "schema": "stasis.mobile_package.v2",
+        "target": target.as_str(),
+        "name": workspace.manifest.name,
+        "app_name": app_name,
+        "package_id": package_id,
+        "android_orientation": android_orientation,
+        "android_version_code": android_version_code,
+        "android_version_name": android_version_name,
+        "aot_manifest": "aot/mobile_aot_bundle_manifest.json",
+        "provenance": PACKAGE_PROVENANCE_NAME,
+        "project_configuration": provenance["project_configuration"],
+        "development_build": provenance["development_build"],
+        "android_launcher_resources": android_launcher_resources,
+        "assets": match target {
+            PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
+                "android/app/src/main/assets/stasis_game"
+            }
+            PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
+                "ios/StasisMobile/stasis_game"
+            }
+            PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
+        },
+        "network": network_enabled,
+        "network_client": network_client_enabled,
+        "network_library": network_library,
+        "network_header": network_header,
+        "network_guest_bundle": network_guest_bundle,
+        "android_runtime": if target.is_android() {
+            Some(json!({
+                "mode": if prebuilt_android_runtime { "prebuilt" } else { "source" },
+                "variant": android_runtime_variant,
+                "manifest": android_runtime_manifest.as_ref().map(|_| "android/runtime/manifest.json"),
+                "identity": android_runtime_manifest,
+            }))
+        } else {
+            None
+        },
+    });
+    if workspace.manifest.uses_included_libraries() {
+        package_receipt["network_artifact"] = network_artifact.unwrap_or(Value::Null);
+    }
     fs::write(
         staging_root.join("stasis_mobile_package.json"),
-        serde_json::to_string_pretty(&json!({
-            "schema": "stasis.mobile_package.v2",
-            "target": target.as_str(),
-            "name": workspace.manifest.name,
-            "app_name": app_name,
-            "package_id": package_id,
-            "android_orientation": android_orientation,
-            "android_version_code": android_version_code,
-            "android_version_name": android_version_name,
-            "aot_manifest": "aot/mobile_aot_bundle_manifest.json",
-            "provenance": PACKAGE_PROVENANCE_NAME,
-            "project_configuration": provenance["project_configuration"],
-            "development_build": provenance["development_build"],
-            "android_launcher_resources": android_launcher_resources,
-            "assets": match target {
-                PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
-                    "android/app/src/main/assets/stasis_game"
-                }
-                PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
-                    "ios/StasisMobile/stasis_game"
-                }
-                PackageTarget::Desktop | PackageTarget::Web => unreachable!(),
-            },
-            "network": network_enabled,
-            "network_client": network_client_enabled,
-            "network_library": network_library,
-            "network_header": network_header,
-            "network_guest_bundle": network_guest_bundle,
-            "network_artifact": network_artifact,
-            "android_runtime": if target.is_android() {
-                Some(json!({
-                    "mode": if prebuilt_android_runtime { "prebuilt" } else { "source" },
-                    "variant": android_runtime_variant,
-                    "manifest": android_runtime_manifest.as_ref().map(|_| "android/runtime/manifest.json"),
-                    "identity": android_runtime_manifest,
-                }))
-            } else {
-                None
-            },
-        }))
-        .map_err(|error| format!("failed to encode mobile package manifest: {error}"))?
+        serde_json::to_string_pretty(&package_receipt)
+            .map_err(|error| format!("failed to encode mobile package manifest: {error}"))?
             + "\n",
     )
     .map_err(|error| format!("failed to write mobile package manifest: {error}"))?;
@@ -11556,6 +11792,56 @@ mod tests {
             parse_project_manifest(with_release).unwrap_err(),
             "release configuration requires manifest_version 2"
         );
+    }
+
+    #[test]
+    fn legacy_project_configuration_and_receipt_schema_remain_exact() {
+        for manifest_version in [1, 2] {
+            let mut manifest = ProjectManifest::new(format!("legacy_v{manifest_version}"));
+            manifest.manifest_version = manifest_version;
+            manifest.capabilities = Some(ProjectCapabilities {
+                network: true,
+                ..ProjectCapabilities::default()
+            });
+            let workspace = Workspace {
+                root: PathBuf::new(),
+                manifest,
+                resolved_settings: None,
+            }
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve legacy project");
+            let settings = workspace.resolved_settings.as_ref().unwrap();
+            assert!(settings.configuration.libraries.is_empty());
+            assert_eq!(settings.configuration.libraries_digest, [0; 32]);
+            assert!(settings.included_libraries.is_none());
+            assert!(!settings.generated_source.contains("project_library_"));
+            let provenance = project_configuration_provenance(&workspace)
+                .expect("serialize legacy project configuration");
+            assert_eq!(
+                provenance
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([
+                    "settings".to_string(),
+                    "settings_sha256".to_string(),
+                    "target".to_string(),
+                ])
+            );
+            assert_eq!(
+                serde_json::to_vec(&provenance).unwrap(),
+                serde_json::to_vec(&project_settings::provenance_summary(
+                    &settings.configuration
+                ))
+                .unwrap()
+            );
+        }
+        let manifestless = resolve_manifestless_project_configuration(CanonicalTarget::host())
+            .expect("resolve manifestless project");
+        assert!(manifestless.included_libraries.is_none());
+        assert!(manifestless.configuration.libraries.is_empty());
     }
 
     #[test]
@@ -15593,12 +15879,18 @@ mod tests {
             b"{\"schema\":\"stasis.network_guest_bundle.v1\"}\n",
         )
         .expect("write network guest metadata fixture");
+        let mut ios_network_provenance = provenance.clone();
+        ios_network_provenance["project_configuration"] = project_settings::provenance_summary(
+            &project_settings::resolve(None, CanonicalTarget::IosArm64, true)
+                .expect("resolve legacy iOS settings")
+                .configuration,
+        );
         assemble_mobile_shell(
             &network_workspace,
             PackageTarget::IosArm64,
             &aot,
             &ios_network,
-            &provenance,
+            &ios_network_provenance,
             Some(&guest_bundle),
             Some(&mobile_network_artifact_fixture()),
         )
@@ -15630,11 +15922,20 @@ mod tests {
             network_receipt["network_guest_bundle"],
             "ios/StasisMobile/stasis_game/network_guest.bundle"
         );
+        assert!(network_receipt.get("network_artifact").is_none());
         assert_eq!(
-            network_receipt["network_artifact"]["source"],
-            "source-build"
+            network_receipt["project_configuration"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "settings".to_string(),
+                "settings_sha256".to_string(),
+                "target".to_string(),
+            ])
         );
-        assert_eq!(network_receipt["network_artifact"]["build_duration_ms"], 17);
         let network_asset_root = ios_network.join("ios/StasisMobile/stasis_game");
         assert!(network_asset_root.join("network_guest.bundle").is_file());
         assert!(network_asset_root
@@ -15682,8 +15983,8 @@ mod tests {
         fs::create_dir_all(android_network.join("android/app/src/main/cpp/network/include"))
             .expect("create Android network staging fixture");
         fs::write(
-            android_network.join("android/app/src/main/cpp/network/libstasis_network_v1.so"),
-            b"fixture Android shared library",
+            android_network.join("android/app/src/main/cpp/network/libstasis_network.a"),
+            b"fixture Android static library",
         )
         .expect("write Android network library fixture");
         fs::write(
@@ -15691,12 +15992,18 @@ mod tests {
             b"/* fixture Android network header */\n",
         )
         .expect("write Android network header fixture");
+        let mut android_network_provenance = provenance.clone();
+        android_network_provenance["project_configuration"] = project_settings::provenance_summary(
+            &project_settings::resolve(None, CanonicalTarget::AndroidArm64, true)
+                .expect("resolve legacy Android settings")
+                .configuration,
+        );
         assemble_mobile_shell(
             &network_workspace,
             PackageTarget::AndroidArm64,
             &aot,
             &android_network,
-            &provenance,
+            &android_network_provenance,
             Some(&guest_bundle),
             Some(&mobile_network_artifact_fixture()),
         )
@@ -15705,8 +16012,8 @@ mod tests {
             fs::read_to_string(android_network.join("android/app/src/main/cpp/CMakeLists.txt"))
                 .expect("read network Android CMake");
         assert!(android_network_cmake.contains("STASIS_NETWORK_ENABLED 1"));
-        assert!(android_network_cmake.contains("add_library(stasis_network SHARED IMPORTED)"));
-        assert!(android_network_cmake.contains("network/libstasis_network_v1.so"));
+        assert!(android_network_cmake.contains("set(STASIS_NETWORK_LIBRARY_KIND STATIC)"));
+        assert!(android_network_cmake.contains("network/libstasis_network.a"));
         let android_network_manifest =
             fs::read_to_string(android_network.join("android/app/src/main/AndroidManifest.xml"))
                 .expect("read network Android manifest");
@@ -15719,7 +16026,7 @@ mod tests {
         .expect("parse network Android package receipt");
         assert_eq!(
             android_network_receipt["network_library"],
-            "android/app/src/main/cpp/network/libstasis_network_v1.so"
+            "android/app/src/main/cpp/network/libstasis_network.a"
         );
         assert_eq!(
             android_network_receipt["network_header"],
@@ -15729,14 +16036,7 @@ mod tests {
             android_network_receipt["network_guest_bundle"],
             "android/app/src/main/assets/stasis_game/network_guest.bundle"
         );
-        assert_eq!(
-            android_network_receipt["network_artifact"]["source"],
-            "source-build"
-        );
-        assert_eq!(
-            android_network_receipt["network_artifact"]["build_duration_ms"],
-            17
-        );
+        assert!(android_network_receipt.get("network_artifact").is_none());
         assert!(android_network
             .join("android/app/src/main/assets/stasis_game/network_guest.bundle")
             .is_file());
@@ -15751,8 +16051,8 @@ mod tests {
         fs::create_dir_all(android_client.join("android/app/src/main/cpp/network/include"))
             .expect("create Android client network staging fixture");
         fs::write(
-            android_client.join("android/app/src/main/cpp/network/libstasis_network_v1.so"),
-            b"fixture Android client shared library",
+            android_client.join("android/app/src/main/cpp/network/libstasis_network.a"),
+            b"fixture Android client static library",
         )
         .expect("write Android client network library fixture");
         fs::write(
@@ -15765,7 +16065,7 @@ mod tests {
             PackageTarget::AndroidArm64,
             &aot,
             &android_client,
-            &provenance,
+            &android_network_provenance,
             None,
             Some(&mobile_network_artifact_fixture()),
         )
@@ -15810,13 +16110,14 @@ mod tests {
         assert_eq!(client_receipt["network_client"], true);
         assert_eq!(
             client_receipt["network_library"],
-            "android/app/src/main/cpp/network/libstasis_network_v1.so"
+            "android/app/src/main/cpp/network/libstasis_network.a"
         );
         assert_eq!(
             client_receipt["network_header"],
             "android/app/src/main/cpp/network/include/stasis_network.h"
         );
         assert!(client_receipt["network_guest_bundle"].is_null());
+        assert!(client_receipt.get("network_artifact").is_none());
         assert!(!android_client
             .join("android/app/src/main/assets/stasis_game/network_guest.bundle")
             .exists());

@@ -277,15 +277,22 @@ def validate_included_libraries(
         validate_authenticated_input(parser, library["license"], "license")
         artifact = library["artifact"]
         if not isinstance(artifact, dict) or set(artifact) != {
-            "path", "kind", "authentication"
+            "path", "kind", "authentication", "catalog_release",
+            "source_set_sha256", "toolchain_sha256",
         }:
             parser.error("included-library artifact is malformed")
         validate_receipt_path(parser, artifact["path"], "included-library artifact")
         if any(
             not isinstance(artifact[field], str) or not artifact[field]
-            for field in ("kind", "authentication")
+            for field in ("kind", "authentication", "catalog_release")
         ):
             parser.error("included-library artifact identity is invalid")
+        validate_receipt_sha256(
+            parser, artifact["source_set_sha256"], "included-library source set"
+        )
+        validate_receipt_sha256(
+            parser, artifact["toolchain_sha256"], "included-library toolchain"
+        )
         dependencies = library["dependencies"]
         reasons = library["reasons"]
         if (
@@ -450,6 +457,7 @@ def verify_included_library_artifacts(
     parser: argparse.ArgumentParser,
     value: object,
     package_root: pathlib.Path,
+    project_configuration: dict | None,
 ) -> None:
     if value is None:
         return
@@ -458,7 +466,8 @@ def verify_included_library_artifacts(
     artifact = value["stasis.network"]
     required = {
         "path", "kind", "load_policy", "sha256", "size_bytes", "source",
-        "build_duration_ms",
+        "build_duration_ms", "catalog_release", "source_set_sha256",
+        "toolchain_sha256",
     }
     if not isinstance(artifact, dict) or set(artifact) != required:
         parser.error("stasis.network artifact receipt is malformed")
@@ -488,6 +497,20 @@ def verify_included_library_artifacts(
         parser.error("stasis.network artifact hash is invalid")
     if sha256(candidate) != digest:
         parser.error("stasis.network artifact hash does not match the package")
+    expected = None
+    if project_configuration is not None:
+        libraries = project_configuration.get("included_libraries", {}).get("libraries", [])
+        selected = next(
+            (library for library in libraries if library.get("id") == "stasis.network"),
+            None,
+        )
+        if selected is not None:
+            expected = selected.get("artifact")
+    if expected is None or any(
+        artifact[field] != expected.get(field)
+        for field in ("catalog_release", "source_set_sha256", "toolchain_sha256")
+    ):
+        parser.error("stasis.network artifact authentication differs from catalog closure")
 
 
 def verify_mobile_shells(
@@ -518,12 +541,17 @@ def verify_mobile_shells(
         parser.error(f"unsupported mobile package target: {target!r}")
     network_selected = bool(receipt.get("network") or receipt.get("network_client"))
     artifact = receipt.get("network_artifact")
-    if network_selected:
+    explicit_libraries = (
+        isinstance(project_configuration, dict)
+        and "included_libraries" in project_configuration
+    )
+    if network_selected and explicit_libraries:
         if not isinstance(artifact, dict):
             parser.error("network-enabled mobile package is missing its artifact receipt")
         expected_artifact_fields = {
             "id", "path", "kind", "load_policy", "sha256", "size_bytes",
-            "source", "build_duration_ms",
+            "source", "build_duration_ms", "catalog_release",
+            "source_set_sha256", "toolchain_sha256",
         }
         if set(artifact) != expected_artifact_fields or artifact.get("id") != "stasis.network":
             parser.error("mobile stasis.network artifact receipt is malformed")
@@ -547,6 +575,19 @@ def verify_mobile_shells(
         expected_policy = "normal-platform-dependency" if target.startswith("android-") else "static-link"
         if artifact.get("kind") != expected_kind or artifact.get("load_policy") != expected_policy:
             parser.error("mobile stasis.network artifact kind or load policy is invalid")
+        libraries = project_configuration["included_libraries"]["libraries"]
+        selected = next(
+            (library for library in libraries if library.get("id") == "stasis.network"),
+            None,
+        )
+        expected_authentication = selected.get("artifact") if selected else None
+        if expected_authentication is None or any(
+            artifact.get(field) != expected_authentication.get(field)
+            for field in ("catalog_release", "source_set_sha256", "toolchain_sha256")
+        ):
+            parser.error("mobile stasis.network authentication differs from catalog closure")
+    elif network_selected and "network_artifact" in receipt:
+        parser.error("legacy mobile package unexpectedly contains a library artifact receipt")
     elif artifact is not None:
         parser.error("offline mobile package unexpectedly contains a network artifact receipt")
     receipt_configuration = receipt.get("project_configuration")
@@ -713,7 +754,12 @@ def verify_mobile_shells(
         else:
             expected_paths.update(
                 {
-                    ("android", "app/src/main/cpp/network/libstasis_network_v1.so"),
+                    (
+                        "android",
+                        "app/src/main/cpp/network/libstasis_network_v1.so"
+                        if explicit_libraries
+                        else "app/src/main/cpp/network/libstasis_network.a",
+                    ),
                     ("android", "app/src/main/cpp/network/include/stasis_network.h"),
                 }
             )
@@ -802,7 +848,7 @@ def main() -> int:
             parser, desktop_package, args.package_root
         )
         verify_included_library_artifacts(
-            parser, included_library_artifacts, args.package_root
+            parser, included_library_artifacts, args.package_root, project_configuration
         )
         if project_configuration is not None and not project_configuration["target"].startswith(
             ("windows-", "linux-", "macos-")

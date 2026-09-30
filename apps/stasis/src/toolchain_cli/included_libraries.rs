@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const CATALOG_SCHEMA: &str = "stasis.library_catalog.v1";
 pub(super) const NETWORK_LIBRARY_ID: &str = "stasis.network";
+pub(super) const NETWORK_CATALOG_RELEASE: &str = "stasis.network@1.0.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +71,9 @@ pub(super) struct CatalogArtifact {
     pub(super) path: String,
     pub(super) kind: String,
     pub(super) authentication: String,
+    pub(super) catalog_release: String,
+    pub(super) source_set_sha256: String,
+    pub(super) toolchain_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -344,12 +348,12 @@ fn artifact_for(target: CanonicalTarget) -> Option<CatalogArtifact> {
         CanonicalTarget::MacosX86_64 => (
             "desktop/network/macos-x86_64/libstasis_network.dylib",
             "mach-o-dylib",
-            "source-checkout-build; validated by network-browser-acceptance.yml",
+            "catalog-release-source-set",
         ),
         CanonicalTarget::MacosArm64 => (
             "desktop/network/macos-arm64/libstasis_network.dylib",
             "mach-o-dylib",
-            "source-checkout-build; validated by network-browser-acceptance.yml",
+            "catalog-release-source-set",
         ),
         CanonicalTarget::AndroidArm64 => (
             "mobile/network/android-arm64/libstasis_network_v1.so",
@@ -364,19 +368,26 @@ fn artifact_for(target: CanonicalTarget) -> Option<CatalogArtifact> {
         CanonicalTarget::IosArm64 => (
             "mobile/network/ios-arm64/libstasis_network.a",
             "apple-static-archive",
-            "source-checkout-build; validated by network-browser-acceptance.yml",
+            "catalog-release-source-set",
         ),
         CanonicalTarget::IosSimulatorArm64 => (
             "mobile/network/ios-simulator-arm64/libstasis_network.a",
             "apple-static-archive",
-            "source-checkout-build; validated by network-browser-acceptance.yml",
+            "catalog-release-source-set",
         ),
     };
     Some(CatalogArtifact {
         path: path.to_string(),
         kind: kind.to_string(),
         authentication: authentication.to_string(),
+        catalog_release: NETWORK_CATALOG_RELEASE.to_string(),
+        source_set_sha256: source_set_digest(),
+        toolchain_sha256: toolchain_digest(),
     })
+}
+
+pub(super) fn catalog_artifact(target: CanonicalTarget) -> Option<CatalogArtifact> {
+    artifact_for(target)
 }
 
 pub(super) fn has_authenticated_artifact(target: CanonicalTarget) -> bool {
@@ -401,6 +412,116 @@ fn authenticated_source(path: &str, bytes: &[u8]) -> AuthenticatedInput {
         path: path.to_string(),
         sha256: hex(Sha256::digest(bytes).into()),
     }
+}
+
+const NETWORK_SOURCE_INPUTS: &[(&str, &[u8])] = &[
+    (
+        "crates/stasis_network/Cargo.toml",
+        include_bytes!("../../../../crates/stasis_network/Cargo.toml"),
+    ),
+    (
+        "crates/stasis_network/include/stasis_network.h",
+        include_bytes!("../../../../crates/stasis_network/include/stasis_network.h"),
+    ),
+    (
+        "crates/stasis_network/src/client.rs",
+        include_bytes!("../../../../crates/stasis_network/src/client.rs"),
+    ),
+    (
+        "crates/stasis_network/src/lan.rs",
+        include_bytes!("../../../../crates/stasis_network/src/lan.rs"),
+    ),
+    (
+        "crates/stasis_network/src/lib.rs",
+        include_bytes!("../../../../crates/stasis_network/src/lib.rs"),
+    ),
+    (
+        "crates/stasis_network/src/realtime.rs",
+        include_bytes!("../../../../crates/stasis_network/src/realtime.rs"),
+    ),
+    (
+        "crates/stasis_network/src/supervision.rs",
+        include_bytes!("../../../../crates/stasis_network/src/supervision.rs"),
+    ),
+];
+
+const NETWORK_TOOLCHAIN_INPUTS: &[(&str, &[u8])] = &[
+    ("Cargo.toml", include_bytes!("../../../../Cargo.toml")),
+    ("Cargo.lock", include_bytes!("../../../../Cargo.lock")),
+];
+
+fn named_input_digest<'a>(inputs: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"stasis.authenticated_source_set.v1\0");
+    for (path, bytes) in inputs {
+        digest.update((path.len() as u64).to_le_bytes());
+        digest.update(path.as_bytes());
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    hex(digest.finalize().into())
+}
+
+fn source_set_digest() -> String {
+    named_input_digest(NETWORK_SOURCE_INPUTS.iter().copied())
+}
+
+fn toolchain_digest() -> String {
+    named_input_digest(NETWORK_TOOLCHAIN_INPUTS.iter().copied())
+}
+
+pub(super) fn authenticate_source_workspace(
+    root: &std::path::Path,
+    target: CanonicalTarget,
+) -> Result<CatalogArtifact, String> {
+    let artifact = artifact_for(target).ok_or_else(|| {
+        format!(
+            "library {NETWORK_LIBRARY_ID} has no authenticated artifact for {}",
+            target.as_str()
+        )
+    })?;
+    let read_inputs = |inputs: &[(&str, &[u8])]| -> Result<Vec<(String, Vec<u8>)>, String> {
+        inputs
+            .iter()
+            .map(|(relative, _)| {
+                std::fs::read(root.join(relative))
+                    .map(|bytes| ((*relative).to_string(), bytes))
+                    .map_err(|error| {
+                        format!(
+                            "failed to authenticate {NETWORK_LIBRARY_ID} source {}: {error}",
+                            root.join(relative).display()
+                        )
+                    })
+            })
+            .collect()
+    };
+    let sources = read_inputs(NETWORK_SOURCE_INPUTS)?;
+    let source_digest = named_input_digest(
+        sources
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice())),
+    );
+    if source_digest != artifact.source_set_sha256 {
+        return Err(format!(
+            "{NETWORK_LIBRARY_ID} source set differs from authenticated catalog release {} for {}",
+            artifact.catalog_release,
+            target.as_str()
+        ));
+    }
+    let toolchain = read_inputs(NETWORK_TOOLCHAIN_INPUTS)?;
+    let actual_toolchain = named_input_digest(
+        toolchain
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice())),
+    );
+    if actual_toolchain != artifact.toolchain_sha256 {
+        return Err(format!(
+            "{NETWORK_LIBRARY_ID} toolchain inputs differ from authenticated catalog release {} for {}",
+            artifact.catalog_release,
+            target.as_str()
+        ));
+    }
+    Ok(artifact)
 }
 
 fn catalog_entry(id: &str) -> Option<&'static CatalogEntry> {
@@ -717,9 +838,11 @@ mod tests {
             CanonicalTarget::IosArm64,
             CanonicalTarget::IosSimulatorArm64,
         ] {
-            let artifact = artifact_for(target).expect("source-checkout target artifact");
-            assert!(artifact.authentication.starts_with("source-checkout-build"));
-            assert!(!artifact.authentication.contains("provenance.json#"));
+            let artifact = artifact_for(target).expect("catalog-authenticated target artifact");
+            assert_eq!(artifact.authentication, "catalog-release-source-set");
+            assert_eq!(artifact.catalog_release, NETWORK_CATALOG_RELEASE);
+            assert_eq!(artifact.source_set_sha256.len(), 64);
+            assert_eq!(artifact.toolchain_sha256.len(), 64);
         }
         for target in [CanonicalTarget::WindowsArm64, CanonicalTarget::LinuxArm64] {
             assert!(artifact_for(target).is_none());
@@ -738,5 +861,37 @@ mod tests {
                 .authentication,
             "stasis_provenance.json#project_configuration.included_libraries"
         );
+    }
+
+    #[test]
+    fn source_build_authentication_rejects_modified_network_sources() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis-network-source-auth-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for (path, bytes) in NETWORK_SOURCE_INPUTS
+            .iter()
+            .chain(NETWORK_TOOLCHAIN_INPUTS.iter())
+        {
+            let destination = root.join(path);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::write(destination, bytes).unwrap();
+        }
+        let artifact = authenticate_source_workspace(&root, CanonicalTarget::MacosArm64)
+            .expect("exact catalog source set authenticates");
+        assert_eq!(artifact.catalog_release, NETWORK_CATALOG_RELEASE);
+        std::fs::write(
+            root.join("crates/stasis_network/src/lib.rs"),
+            b"// modified after catalog publication\n",
+        )
+        .unwrap();
+        let error = authenticate_source_workspace(&root, CanonicalTarget::IosArm64)
+            .expect_err("modified source must fail before artifact build");
+        assert!(error.contains("source set differs from authenticated catalog release"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

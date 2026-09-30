@@ -63,9 +63,13 @@ DESKTOP_NETWORK_ARTIFACT_SETS = (
         {
             "desktop/network/windows-x86_64/stasis_network.dll",
             "desktop/network/windows-x86_64/stasis_network.dll.lib",
+            "desktop/network/windows-x86_64/stasis_network.lib",
         }
     ),
-    frozenset({"desktop/network/linux-x86_64/libstasis_network.so"}),
+    frozenset({
+        "desktop/network/linux-x86_64/libstasis_network.so",
+        "desktop/network/linux-x86_64/libstasis_network.a",
+    }),
     frozenset({"desktop/network/linux-arm64/libstasis_network.so"}),
     frozenset({"desktop/network/macos-arm64/libstasis_network.dylib"}),
     frozenset({"desktop/network/macos-x86_64/libstasis_network.dylib"}),
@@ -76,6 +80,8 @@ MOBILE_NETWORK_REQUIRED = frozenset(
         "mobile/network/include/stasis_network.h",
         "mobile/network/android-arm64/libstasis_network_v1.so",
         "mobile/network/android-x86_64/libstasis_network_v1.so",
+        "mobile/network/android-arm64/libstasis_network.a",
+        "mobile/network/android-x86_64/libstasis_network.a",
     }
 )
 MOBILE_NETWORK_OPTIONAL = frozenset(

@@ -522,9 +522,19 @@ pub(crate) fn provenance_summary(configuration: &ProjectConfiguration) -> Value 
         "target": configuration.target,
         "settings_sha256": hex_digest(configuration.digest),
         "settings": settings,
-        "library_set_sha256": hex_digest(configuration.libraries_digest),
-        "libraries": configuration.libraries,
     })
+}
+
+pub(crate) fn provenance_summary_with_libraries(
+    configuration: &ProjectConfiguration,
+    included_libraries: &Value,
+) -> Value {
+    let mut value = provenance_summary(configuration);
+    value["library_set_sha256"] = Value::String(hex_digest(configuration.libraries_digest));
+    value["libraries"] =
+        serde_json::to_value(&configuration.libraries).expect("project library summary serializes");
+    value["included_libraries"] = included_libraries.clone();
+    value
 }
 
 pub(super) fn hex_digest(digest: [u8; 32]) -> String {

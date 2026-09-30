@@ -32,6 +32,9 @@ VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 
 class ReleaseProvenanceTests(unittest.TestCase):
+    SOURCE_SET_SHA256 = hashlib.sha256(b"source set").hexdigest()
+    TOOLCHAIN_SHA256 = hashlib.sha256(b"toolchain").hexdigest()
+
     @staticmethod
     def project_configuration(target="windows-x86_64", features=()):
         features = sorted(features)
@@ -66,6 +69,9 @@ class ReleaseProvenanceTests(unittest.TestCase):
                     "authentication": (
                         "stasis_release_provenance.json#mobile_network_artifacts"
                     ),
+                    "catalog_release": "stasis.network@1.0.0",
+                    "source_set_sha256": ReleaseProvenanceTests.SOURCE_SET_SHA256,
+                    "toolchain_sha256": ReleaseProvenanceTests.TOOLCHAIN_SHA256,
                 },
                 "dependencies": [],
                 "abi": "stasis.network.c.v1",
@@ -380,7 +386,8 @@ class ReleaseProvenanceTests(unittest.TestCase):
                     "network_client": mode == "network_client",
                     "android_launcher_resources": "branding/android/res",
                     "project_configuration": self.project_configuration(
-                        "android-arm64"
+                        "android-arm64",
+                        ("host",) if mode == "network" else (("client",) if mode == "network_client" else ()),
                     ),
                     "android_runtime": {
                         "mode": "source",
@@ -401,6 +408,9 @@ class ReleaseProvenanceTests(unittest.TestCase):
                         "size_bytes": len(b"library"),
                         "source": "prebuilt-release",
                         "build_duration_ms": 0,
+                        "catalog_release": "stasis.network@1.0.0",
+                        "source_set_sha256": self.SOURCE_SET_SHA256,
+                        "toolchain_sha256": self.TOOLCHAIN_SHA256,
                     }
                 (package / "stasis_mobile_package.json").write_text(
                     json.dumps(receipt), encoding="utf-8"
@@ -484,7 +494,10 @@ class ReleaseProvenanceTests(unittest.TestCase):
                         for path in (source, activity_source, runtime_source, atlas_source)
                     },
                 }
-                project_configuration = self.project_configuration("android-arm64")
+                project_configuration = self.project_configuration(
+                    "android-arm64",
+                    ("host",) if mode == "network" else (("client",) if mode == "network_client" else ()),
+                )
                 verify_mobile_shells(
                     Parser(), release, package, manifest, project_configuration
                 )
@@ -500,7 +513,10 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 (package / "stasis_mobile_package.json").write_text(
                     json.dumps(receipt), encoding="utf-8"
                 )
-                with self.assertRaisesRegex(ValueError, "target differs from receipt target"):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "target differs from receipt target|authentication differs from catalog closure",
+                ):
                     verify_mobile_shells(
                         Parser(),
                         release,
@@ -624,12 +640,20 @@ class ReleaseProvenanceTests(unittest.TestCase):
                     "size_bytes": len(b"shared library"),
                     "source": "prebuilt-release",
                     "build_duration_ms": 0,
+                    "catalog_release": "stasis.network@1.0.0",
+                    "source_set_sha256": self.SOURCE_SET_SHA256,
+                    "toolchain_sha256": self.TOOLCHAIN_SHA256,
                 }
             }
-            verify_included_library_artifacts(Parser(), receipt, package)
+            configuration = self.project_configuration("linux-x86_64", ("host",))
+            verify_included_library_artifacts(Parser(), receipt, package, configuration)
+            receipt["stasis.network"]["source_set_sha256"] = "0" * 64
+            with self.assertRaisesRegex(ValueError, "authentication differs"):
+                verify_included_library_artifacts(Parser(), receipt, package, configuration)
+            receipt["stasis.network"]["source_set_sha256"] = self.SOURCE_SET_SHA256
             library.write_bytes(b"substituted")
             with self.assertRaisesRegex(ValueError, "size does not match|hash does not match"):
-                verify_included_library_artifacts(Parser(), receipt, package)
+                verify_included_library_artifacts(Parser(), receipt, package, configuration)
 
     def test_network_guest_bundle_identity_rejects_corruption_and_missing_pairs(self):
         class Parser:
@@ -1186,9 +1210,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
                         "android_orientation": "sensorPortrait",
                         "android_version_code": "7",
                         "android_version_name": "2.1.0",
-                        "project_configuration": self.project_configuration(
-                            "android-arm64"
-                        ),
+                        "project_configuration": self.project_configuration("android-arm64"),
                     }
                 ),
                 encoding="utf-8",
@@ -1231,13 +1253,23 @@ class ReleaseProvenanceTests(unittest.TestCase):
                     "size_bytes": len(b"library"),
                     "source": "prebuilt-release",
                     "build_duration_ms": 0,
+                    "catalog_release": "stasis.network@1.0.0",
+                    "source_set_sha256": self.SOURCE_SET_SHA256,
+                    "toolchain_sha256": self.TOOLCHAIN_SHA256,
                 },
                 "project_configuration": self.project_configuration(
-                    "android-arm64"
+                    "android-arm64", ("client",)
                 ),
             }
             (package / "stasis_mobile_package.json").write_text(
                 json.dumps(network_client_receipt), encoding="utf-8"
+            )
+            (package / "stasis_provenance.json").write_text(
+                json.dumps(
+                    manifest
+                    | {"project_configuration": network_client_receipt["project_configuration"]}
+                ),
+                encoding="utf-8",
             )
             (package / "android/main.c").write_bytes(
                 b"Demo App com.example.demo com_example_demo sensorPortrait 7 2.1.0\n"
@@ -1337,6 +1369,26 @@ class ReleaseProvenanceTests(unittest.TestCase):
                         )
                     }
                 ),
+            )
+            (package / "stasis_mobile_package.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "stasis.mobile_package.v2",
+                        "target": "android-arm64",
+                        "name": "demo",
+                        "app_name": "Demo App",
+                        "package_id": "com.example.demo",
+                        "android_orientation": "sensorPortrait",
+                        "android_version_code": "7",
+                        "android_version_name": "2.1.0",
+                        "project_configuration": self.project_configuration("android-arm64"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (package / "android/main.c").write_bytes(
+                b"Demo App com.example.demo com_example_demo sensorPortrait 7 2.1.0\n"
+                b"arm64-v8a 0 0\n\n\n"
             )
             (release / "mobile/shells/android/main.c").write_bytes(b"substituted shell\n")
             shell_failed = subprocess.run(command, check=False, capture_output=True, text=True)

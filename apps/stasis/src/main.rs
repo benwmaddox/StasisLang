@@ -2076,11 +2076,15 @@ fn write_mobile_aot_engine_bundle(
     } else {
         None
     };
-    let mut project_configuration =
-        toolchain_cli::project_settings::provenance_summary(&project_settings.configuration);
-    if let Some(included_libraries) = project_settings.included_libraries.as_ref() {
-        project_configuration["included_libraries"] = included_libraries.clone();
-    }
+    let project_configuration =
+        if let Some(included_libraries) = project_settings.included_libraries.as_ref() {
+            toolchain_cli::project_settings::provenance_summary_with_libraries(
+                &project_settings.configuration,
+                included_libraries,
+            )
+        } else {
+            toolchain_cli::project_settings::provenance_summary(&project_settings.configuration)
+        };
     let package_manifest = write_mobile_aot_package_manifest(
         target,
         &bundle.manifest_path,

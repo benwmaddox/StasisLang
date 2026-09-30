@@ -155,6 +155,10 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             "network-artifact/android-arm64/libstasis_network_v1.so",
             self.workflow,
         )
+        self.assertIn(
+            "network-artifact/android-arm64/libstasis_network.a",
+            self.workflow,
+        )
         self.assertIn("--network-enabled --readelf", self.workflow)
         self.assertNotIn("xcrun", self.workflow)
         self.assertNotIn("aarch64-apple-ios", self.workflow)
@@ -223,6 +227,18 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
         self.assertIn("network_guest.bundle", self.workflow)
         self.assertNotIn("ios/network/libstasis_network.a", self.workflow)
         self.assertIn("crates/stasis_network", self.workflow)
+
+    def test_android_acceptance_upgrades_fixture_before_explicit_libraries(self):
+        job = self.workflow.split("  android_prebuilt_acceptance:", 1)[1].split(
+            "  vscode_extension:", 1
+        )[0]
+        self.assertEqual(2, job.count('value["manifest_version"] = 3'))
+        host_version = job.index('value["manifest_version"] = 3')
+        host_library = job.index('"stasis.network": {"features": ["host"]}')
+        client_version = job.index('value["manifest_version"] = 3', host_version + 1)
+        client_library = job.index('"stasis.network": {"features": ["client"]}')
+        self.assertLess(host_version, host_library)
+        self.assertLess(client_version, client_library)
         self.assertIn("stasis-network-source-backup", self.workflow)
         self.assertIn("requires a macOS host with Xcode", self.workflow)
         self.assertIn("verify_package_provenance.py", self.workflow)
