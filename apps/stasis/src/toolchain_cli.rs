@@ -238,6 +238,7 @@ const KNOWLEDGE_FILES: &[&str] = &[
     "examples/src/snake_turn.stasis",
     "examples/src/loading_screen.stasis",
     "examples/src/display_spaces.stasis",
+    "examples/src/feature_reference.stasis",
     "examples/assets/hero.svg",
     "examples/assets/music.wav",
     "examples/stasis.json",
@@ -248,6 +249,7 @@ const KNOWLEDGE_FILES: &[&str] = &[
     "examples/tests/snake_turn.test.stasis",
     "examples/tests/loading_screen.test.stasis",
     "examples/tests/display_spaces.test.stasis",
+    "examples/tests/feature_reference.test.stasis",
     "geometry-and-collision.md",
     "display-and-coordinate-spaces.md",
     "loading-screens.md",
@@ -258,6 +260,13 @@ const KNOWLEDGE_FILES: &[&str] = &[
     "media/loading-screen/gameplay.png",
     "media/loading-screen/error.png",
     "semantic-edit-and-validation.md",
+    "language-quick-reference.md",
+    "graphics-and-assets.md",
+    "project-and-cli.md",
+    "bounded-collections.md",
+    "storage-and-host-services.md",
+    "record-and-replay.md",
+    "benchmarking.md",
 ];
 const DEFAULT_PROJECT_SOURCE: &str = r#"import "/vendor/stasis/stdlib/stdlib.stasis";
 import "/vendor/stasis/stdlib/graphics.stasis";

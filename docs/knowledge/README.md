@@ -28,6 +28,13 @@ Each page solves one system problem for one style of game.
 
 ## Focused references
 
+- [Language quick reference](language-quick-reference.md)
+- [Graphics and asset ownership](graphics-and-assets.md)
+- [Project and CLI lifecycle](project-and-cli.md)
+- [Bounded collections and generics](bounded-collections.md)
+- [Storage and host services](storage-and-host-services.md)
+- [Record, replay, and captures](record-and-replay.md)
+- [Benchmarking Stasis projects](benchmarking.md)
 - [Focused behavioral tests](testing.md)
 - [Geometry and collision](geometry-and-collision.md)
 - [Display and coordinate spaces](display-and-coordinate-spaces.md)
