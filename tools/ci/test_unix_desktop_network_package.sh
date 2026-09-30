@@ -75,13 +75,24 @@ case "$(uname -s)" in
 from pathlib import Path
 import sys
 order = Path(sys.argv[1]).read_text().splitlines()
-executable = str(Path(sys.argv[2]))
-expected = [str(Path(sys.argv[3])), str(Path(sys.argv[4]))]
-if executable not in order[:-1]:
+executable_suffix = Path(*Path(sys.argv[2]).parts[-4:])
+dylib_suffix = Path(*Path(sys.argv[3]).parts[-4:])
+app_suffix = Path(Path(sys.argv[4]).name)
+
+def has_suffix(value, suffix):
+    path_parts = Path(value).parts
+    suffix_parts = suffix.parts
+    return path_parts[-len(suffix_parts):] == suffix_parts
+
+if not any(has_suffix(path, executable_suffix) for path in order[:-1]):
     raise SystemExit(f"production signer did not sign the Mach-O executable: {order}")
 if any(Path(path).suffix == ".h" for path in order):
     raise SystemExit(f"production signer received a generated header: {order}")
-if order[-2:] != expected:
+if (
+    len(order) < 2
+    or not has_suffix(order[-2], dylib_suffix)
+    or not has_suffix(order[-1], app_suffix)
+):
     raise SystemExit(f"production nested signing order differs: {order}")
 PYTHON
     /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' \
