@@ -59,8 +59,9 @@ case "$(uname -s)" in
     header="$package/network_smoke.host_exports.h"
     test -f "$dylib"
     test -f "$header"
-    if find "$app" -type f -name '*.h' | grep -q .; then
-      echo "generated headers must not be staged inside the signed app bundle" >&2
+    unexpected_macos_artifact="$(find "$app/Contents/MacOS" -type f ! -path "$executable" -print -quit)"
+    if [[ -n "$unexpected_macos_artifact" ]]; then
+      echo "non-Mach-O developer artifact was staged beside the executable: $unexpected_macos_artifact" >&2
       exit 1
     fi
     otool -L "$executable" | grep -q 'libstasis_network.dylib'

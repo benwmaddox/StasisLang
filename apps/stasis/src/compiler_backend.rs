@@ -5374,6 +5374,10 @@ fn published_host_exports_header_path(
     if !macos_bundle {
         return Ok(output_exe.with_extension("host_exports.h"));
     }
+    Ok(macos_app_bundle_for_packaged_executable(output_exe)?.with_extension("host_exports.h"))
+}
+
+fn macos_app_bundle_for_packaged_executable(output_exe: &Path) -> Result<PathBuf, String> {
     let macos_dir = output_exe
         .parent()
         .filter(|path| path.file_name().is_some_and(|name| name == "MacOS"))
@@ -5386,7 +5390,7 @@ fn published_host_exports_header_path(
         .parent()
         .filter(|path| path.extension().is_some_and(|extension| extension == "app"))
         .ok_or_else(|| format!("invalid macOS app bundle for {}", output_exe.display()))?;
-    Ok(app_bundle.with_extension("host_exports.h"))
+    Ok(app_bundle.to_path_buf())
 }
 
 fn xml_text(value: &str) -> String {
@@ -6436,6 +6440,10 @@ mod tests {
             published_host_exports_header_path(&layout.executable, true)
                 .expect("macOS host export header"),
             PathBuf::from("dist/ChessTD.host_exports.h")
+        );
+        assert_eq!(
+            default_aot_cli_summary_sidecar_path_for_layout(&layout.executable, true),
+            PathBuf::from("dist/ChessTD.summary.json")
         );
         assert_eq!(
             published_host_exports_header_path(Path::new("dist/ChessTD.exe"), false)
@@ -10401,6 +10409,18 @@ fn resolve_aot_cli_summary_sidecar_path(
 ) -> PathBuf {
     if let Some(path) = configured_summary_path {
         return path.to_path_buf();
+    }
+    default_aot_cli_summary_sidecar_path_for_layout(output_exe, cfg!(target_os = "macos"))
+}
+
+fn default_aot_cli_summary_sidecar_path_for_layout(
+    output_exe: &Path,
+    macos_bundle: bool,
+) -> PathBuf {
+    if macos_bundle {
+        if let Ok(app_bundle) = macos_app_bundle_for_packaged_executable(output_exe) {
+            return app_bundle.with_extension("summary.json");
+        }
     }
     let file_name = output_exe
         .file_name()
