@@ -18,6 +18,19 @@ Use `PresentationList` for reusable sprite/rectangle input, `LineBatch` for
 lines, or `SpriteRunWriter` for streaming sprites. Finalize or cancel a writer
 in the same frame. Keep simulation rules in `tick()`.
 
+In the display example, `button_rect` is resolved during `tick()` and
+`button_presentation` is a persistent `PresentationList`. Rebuild its draw
+input each frame, then replay it into the host's construction:
+
+```stasis
+function render(): i32 {
+    button_presentation.reset_presentation();
+    button_presentation.append_solid_rect(button_rect.x, button_rect.y, button_rect.w, button_rect.h, 0.2, 0.5, 0.9, 1.0);
+    button_presentation.replay();
+    return 0;
+}
+```
+
 ## Resources
 
 - Request assets after a loading frame, poll ready/failed states, and release

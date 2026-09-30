@@ -8,6 +8,16 @@ own `T[N]`; functions bind `T` and `N` through their first struct parameter.
 [example](examples/src/feature_reference.stasis) and
 [capacity test](examples/tests/feature_reference.test.stasis).
 
+With the `ScoreBuffer<T, N>` declaration in the
+[language reference](language-quick-reference.md), this helper infers both
+parameters. `scores.capacity()` returns `4`:
+
+```stasis
+function capacity(self: ScoreBuffer<T, N>): i32 {
+    return N;
+}
+```
+
 Compiler-owned families are `pool`, `stable_pool`, `queue`, `ring_buffer`,
 `map`, `set`, `priority_queue`, `grid`, and `bitset`. Current direct payloads
 are scalar lanes, with integer map/set keys. Check the selected toolchain

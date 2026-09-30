@@ -20,6 +20,17 @@ The [example](examples/src/feature_reference.stasis) and
 Generic parameters belong to structs; functions infer them from their first
 struct parameter. See [bounded collections](bounded-collections.md).
 
+This owns four integer slots; `count` tracks how many are in use:
+
+```stasis
+struct ScoreBuffer<T: type, N: i32> {
+    count: i32;
+    values: T[N];
+}
+
+global scores: ScoreBuffer<i32, 4>;
+```
+
 ## Expressions and calls
 
 Use infix arithmetic, comparison, and assignment. `&&` and `||` short-circuit.

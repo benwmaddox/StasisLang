@@ -20,6 +20,87 @@ host presents that render before the next tick. `HostFrame` has no physical
 presentation acknowledgement; custom hosts must enforce that ordering.
 Ticks without a render never open the gate.
 
+## Wire it into a game
+
+`LoadingGate`, `prepare_loading`, and the other helpers below are defined in
+the [example source](examples/src/loading_screen.stasis), not built-in APIs.
+Copy that implementation into your project and replace its asset paths and
+gameplay drawing. Initialize the gate with the number of required assets;
+keep requests out of `main()` and `render()`:
+
+```stasis
+function main(): i32 {
+    init_window(640, 360, "Loading example");
+    loading_tick = 0;
+    level_number = 1;
+    gate.prepare_loading(2);
+    return 0;
+}
+
+function tick(): i32 {
+    loading_tick += 1;
+    if (gate.begin_loading_batch(loading_tick)) {
+        start_content_batch();
+    }
+    if (gate.phase == LoadingPhase.Loading) {
+        poll_content_batch();
+    }
+    return 0;
+}
+```
+
+The guard admits the batch once, after a render on an earlier tick:
+
+```stasis
+function begin_loading_batch(self: LoadingGate, tick_number: i32): bool {
+    if (self.phase != LoadingPhase.AwaitingFrame || !self.frame_submitted || tick_number <= self.submitted_tick) {
+        return false;
+    }
+    self.phase = LoadingPhase.Loading;
+    return true;
+}
+```
+
+The admitted batch uses the asset APIs directly:
+
+```stasis
+function start_content_batch(): void {
+    hero.load_image("assets/hero.svg", 64, 64);
+    music.load_audio("assets/music.wav");
+}
+```
+
+`poll_content_batch()` checks each asset's `ready()` and `failed()` state,
+updates settled counts, and enforces a timeout. Its `settle_loading()` helper
+selects `Gameplay` only when both assets succeed, or `Error` when a required
+asset fails. Add gameplay updates under the `Gameplay` phase in `tick()`.
+
+Draw an IO-free loading state, then record submission at the end of `render()`:
+
+```stasis
+function render(): i32 {
+    clear(0.04, 0.06, 0.1, 1.0);
+    if (gate.phase == LoadingPhase.Gameplay) {
+        draw_sprite(hero.sprite_ref, 288.0, 148.0, 64.0, 64.0, 0, 255);
+    } else {
+        // IO-free status: blue = waiting/loading, red = error.
+        let red: f32 = 0.1;
+        if (gate.phase == LoadingPhase.Error) {
+            red = 1.0;
+        }
+        fill_rect(120.0, 140.0, 400.0, 12.0, red, 0.3, 0.6, 1.0);
+        // One segment per settled operation, including failures.
+        let segment_x: f32 = 120.0;
+        for (let i: i32 = 0; i < gate.loaded + gate.failed; i += 1) {
+            fill_rect(segment_x, 170.0, 192.0, 20.0, red, 0.7, 0.6, 1.0);
+            segment_x += 200.0;
+        }
+    }
+    gate.loading_frame_submitted(loading_tick);
+    return 0;
+}
+```
+
 ## Bounded work and progress
 
 Start a small batch together when its measured cost is acceptable. For large
@@ -49,9 +130,11 @@ small assets finish quickly. Stills: [loading](media/loading-screen/loading.png)
 [progress](media/loading-screen/progress.png), [gameplay](media/loading-screen/gameplay.png),
 and [error](media/loading-screen/error.png).
 
-Capture your integration, including a failed asset run:
+From the project root, play the copied example or capture it. Repeat the
+capture with an invalid asset path to check the error state:
 
 ```text
+stasis play build/knowledge-examples/src/loading_screen.stasis
 stasis --workspace build/knowledge-examples record src/loading_screen.stasis --output loading.mp4 --width 640 --height 360 --fps 60 --frames 60
 ```
 
