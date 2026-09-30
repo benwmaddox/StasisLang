@@ -3,10 +3,10 @@
 use image::RgbaImage;
 use serde_json::json;
 use stasis_dynload::{
-    Library, StasisGraphicsApi, STASIS_RENDER_F32_COUNT, STASIS_RENDER_I32_COUNT,
-    STASIS_RENDER_MAGIC, STASIS_RENDER_MAX_SPRITES, STASIS_RENDER_ORDER_BASE,
-    STASIS_RENDER_RECT_REVERSE_BASE_F32, STASIS_RENDER_TEXT_BASE_I32, STASIS_RENDER_U8_COUNT,
-    STASIS_RENDER_VERSION,
+    Library, StasisGraphicsApi, StasisPerformanceMetricsV1, STASIS_PERF_UNAVAILABLE,
+    STASIS_RENDER_F32_COUNT, STASIS_RENDER_I32_COUNT, STASIS_RENDER_MAGIC,
+    STASIS_RENDER_MAX_SPRITES, STASIS_RENDER_ORDER_BASE, STASIS_RENDER_RECT_REVERSE_BASE_F32,
+    STASIS_RENDER_TEXT_BASE_I32, STASIS_RENDER_U8_COUNT, STASIS_RENDER_VERSION,
 };
 use std::ffi::CString;
 use std::fs;
@@ -17,11 +17,23 @@ const ORDER_RECT: i32 = 4 * 16_384;
 
 type ScheduleScreenshot = extern "system" fn(*const std::ffi::c_char) -> i32;
 type GetSubmissionState = extern "system" fn(*mut i32, i32) -> i32;
+type SetMetricsEnabled = extern "system" fn(i32);
+type MetricsEnabled = extern "system" fn() -> i32;
+type SetGuestMetrics = extern "system" fn(u64, u64);
+type GetLatestMetrics = extern "system" fn(*mut StasisPerformanceMetricsV1, usize) -> i32;
+type PushInputEvent = extern "system" fn(i32, i32, f32, f32) -> i32;
+
+const SDL_SCANCODE_F3: i32 = 60;
 
 struct NativeRecoveryHarness {
     _library: Library,
     schedule_screenshot: ScheduleScreenshot,
     get_submission_state: GetSubmissionState,
+    set_metrics_enabled: SetMetricsEnabled,
+    metrics_enabled: MetricsEnabled,
+    set_guest_metrics: SetGuestMetrics,
+    get_latest_metrics: GetLatestMetrics,
+    push_input_event: PushInputEvent,
 }
 
 impl NativeRecoveryHarness {
@@ -41,10 +53,50 @@ impl NativeRecoveryHarness {
                     .expect("resolve gated submission state"),
             )
         };
+        let set_metrics_enabled = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_host_set_performance_metrics_enabled")
+                    .expect("resolve native performance-metrics request toggle"),
+            )
+        };
+        let metrics_enabled = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_host_performance_metrics_enabled")
+                    .expect("resolve combined performance-metrics state"),
+            )
+        };
+        let set_guest_metrics = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_host_set_performance_metrics")
+                    .expect("resolve guest timing handoff"),
+            )
+        };
+        let get_latest_metrics = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_host_get_latest_performance_metrics_v1")
+                    .expect("resolve v1 performance-metrics snapshot"),
+            )
+        };
+        let push_input_event = unsafe {
+            std::mem::transmute(
+                library
+                    .symbol_address("stasis_test_push_input_event")
+                    .expect("resolve gated native input event seam"),
+            )
+        };
         Self {
             _library: library,
             schedule_screenshot,
             get_submission_state,
+            set_metrics_enabled,
+            metrics_enabled,
+            set_guest_metrics,
+            get_latest_metrics,
+            push_input_event,
         }
     }
 
@@ -57,6 +109,26 @@ impl NativeRecoveryHarness {
     fn screenshot(&self, path: &Path) {
         let path = CString::new(path.to_string_lossy().as_bytes()).expect("screenshot CString");
         assert_eq!((self.schedule_screenshot)(path.as_ptr()), 1);
+    }
+
+    fn metrics(&self) -> StasisPerformanceMetricsV1 {
+        let mut metrics = std::mem::MaybeUninit::<StasisPerformanceMetricsV1>::zeroed();
+        assert_eq!(
+            (self.get_latest_metrics)(
+                metrics.as_mut_ptr(),
+                std::mem::size_of::<StasisPerformanceMetricsV1>(),
+            ),
+            1
+        );
+        unsafe { metrics.assume_init() }
+    }
+
+    fn push_f3(&self, down: bool) {
+        assert_eq!(
+            (self.push_input_event)(if down { 1 } else { 2 }, SDL_SCANCODE_F3, 0.0, 0.0,),
+            1,
+            "native F3 event must be accepted by the gated test seam"
+        );
     }
 }
 
@@ -178,6 +250,83 @@ fn malformed_frames_are_rejected_without_poisoning_the_next_valid_frame() {
         "recovered frame must contain its red center region"
     );
 
+    (native.set_metrics_enabled)(1);
+    (native.set_guest_metrics)(111, 222);
+    let (mut seeded_i32, seeded_f32, seeded_u8) = valid_frame();
+    gfx.gfx_submit_u8(&mut seeded_i32, &seeded_f32, &seeded_u8)
+        .expect("submit seeded metrics frame");
+    let seeded_metrics = native.metrics();
+    assert_eq!(seeded_metrics.tick_us, 111);
+    assert_eq!(seeded_metrics.guest_render_us, 222);
+
+    (native.set_metrics_enabled)(0);
+    (native.set_guest_metrics)(999, 888);
+    (native.set_metrics_enabled)(1);
+    let rearmed_metrics = native.metrics();
+    assert_eq!(rearmed_metrics.frame_work_us, STASIS_PERF_UNAVAILABLE);
+    let (mut stale_i32, stale_f32, stale_u8) = valid_frame();
+    gfx.gfx_submit_u8(&mut stale_i32, &stale_f32, &stale_u8)
+        .expect("submit without a current guest timing handoff");
+    let stale_metrics = native.metrics();
+    assert_eq!(
+        stale_metrics.tick_us, 111,
+        "late re-arm exposes prior tick data"
+    );
+    assert_eq!(
+        stale_metrics.guest_render_us, 222,
+        "late re-arm exposes prior guest-render data"
+    );
+
+    (native.set_metrics_enabled)(0);
+    (native.set_guest_metrics)(777, 666);
+    (native.set_metrics_enabled)(1);
+    let current_rearm_metrics = native.metrics();
+    assert_eq!(current_rearm_metrics.frame_work_us, STASIS_PERF_UNAVAILABLE);
+    (native.set_guest_metrics)(333, 444);
+    let (mut current_i32, current_f32, current_u8) = valid_frame();
+    gfx.gfx_submit_u8(&mut current_i32, &current_f32, &current_u8)
+        .expect("submit current metrics frame after re-arm");
+    let current_metrics = native.metrics();
+    assert_eq!(current_metrics.tick_us, 333);
+    assert_eq!(current_metrics.guest_render_us, 444);
+
+    let mut host_i32 = vec![0; 768];
+    let mut host_f32 = vec![0.0; 64];
+    native.push_f3(true);
+    gfx.host_get_frame(&mut host_i32, &mut host_f32)
+        .expect("turn performance HUD on");
+    let (mut hud_on_i32, hud_on_f32, hud_on_u8) = valid_frame();
+    gfx.gfx_submit_u8(&mut hud_on_i32, &hud_on_f32, &hud_on_u8)
+        .expect("complete the HUD-on input frame");
+    assert_eq!(
+        (native.metrics_enabled)(),
+        1,
+        "visible HUD keeps metrics active"
+    );
+    (native.set_metrics_enabled)(0);
+    assert_eq!(
+        (native.metrics_enabled)(),
+        1,
+        "clearing the profile request leaves the HUD's independent request active"
+    );
+    (native.set_metrics_enabled)(1);
+    native.push_f3(false);
+    gfx.host_get_frame(&mut host_i32, &mut host_f32)
+        .expect("release F3 key");
+    let (mut hud_keyup_i32, hud_keyup_f32, hud_keyup_u8) = valid_frame();
+    gfx.gfx_submit_u8(&mut hud_keyup_i32, &hud_keyup_f32, &hud_keyup_u8)
+        .expect("complete the F3 key-up input frame");
+    native.push_f3(true);
+    gfx.host_get_frame(&mut host_i32, &mut host_f32)
+        .expect("turn performance HUD off while profile guard is active");
+    assert_eq!((native.metrics_enabled)(), 0);
+    (native.set_metrics_enabled)(0);
+    assert_eq!(
+        (native.metrics_enabled)(),
+        0,
+        "clearing the profile request after HUD-off must stop hidden collection"
+    );
+
     let evidence = json!({
         "schema": "stasis.seam_test.v1",
         "test_id": "IT-009",
@@ -186,6 +335,18 @@ fn malformed_frames_are_rejected_without_poisoning_the_next_valid_frame() {
         "initial_valid": initial,
         "rejections": rejection_evidence,
         "final_valid": final_state,
+        "performance_metrics": {
+            "seeded_tick_us": seeded_metrics.tick_us,
+            "seeded_guest_render_us": seeded_metrics.guest_render_us,
+            "late_rearm_stale_tick_us": stale_metrics.tick_us,
+            "late_rearm_stale_guest_render_us": stale_metrics.guest_render_us,
+            "current_tick_us": current_metrics.tick_us,
+            "current_guest_render_us": current_metrics.guest_render_us,
+            "rearm_reset_frame_work_unavailable": rearmed_metrics.frame_work_us == STASIS_PERF_UNAVAILABLE
+                && current_rearm_metrics.frame_work_us == STASIS_PERF_UNAVAILABLE,
+            "hud_on_keeps_collection_after_profile_clear": true,
+            "hud_off_profile_clear_stops_hidden_collection": true
+        },
         "oracle": {"recovered_red_pixels": recovered_red_pixels, "screenshot": screenshot}
     });
     let evidence_path = evidence_root().join("it-009-render-recovery.json");

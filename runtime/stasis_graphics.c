@@ -1272,6 +1272,8 @@ STASIS_EXPORT int stasis_test_push_input_event(
         if (code < 0 || code >= SDL_SCANCODE_COUNT) return 0;
         event.type = kind == 1 ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
         event.key.scancode = (SDL_Scancode)code;
+        event.key.key = SDL_GetKeyFromScancode(event.key.scancode, SDL_KMOD_NONE, true);
+        event.key.down = kind == 1;
         event.key.repeat = false;
     } else if (kind >= 3 && kind <= 5) {
         StasisDisplayMetrics input_metrics = g_display_metrics;
