@@ -180,7 +180,13 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
                         ROOT / "tools/ci/macos_ad_hoc_sign.sh"
                     ).read_text(encoding="utf-8")
                     self.assertIn("STASIS_AOT_SIGN_TOOL", package_script)
-                    self.assertIn("order[-2:]", package_script)
+                    self.assertIn(
+                        "not has_suffix(order[-2], dylib_suffix)", package_script
+                    )
+                    self.assertIn(
+                        "not has_suffix(order[-1], app_suffix)", package_script
+                    )
+                    self.assertIn("executable_suffix", package_script)
                     self.assertIn("codesign --verify --strict", package_script)
                     self.assertNotIn("codesign --force --sign -", package_script)
                     self.assertIn("codesign --force --sign -", signer)
