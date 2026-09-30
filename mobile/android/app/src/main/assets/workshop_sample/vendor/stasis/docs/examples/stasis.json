@@ -1,0 +1,7 @@
+{
+  "manifest_version": 1,
+  "name": "Knowledge Library Examples",
+  "entry": "src/game_patterns.stasis",
+  "tests": "tests",
+  "output": "build"
+}
