@@ -20,6 +20,8 @@ MAX_PACKAGE_BYTES = 150 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_MANIFEST_ASSETS = 4096
 REQUIRED_NATIVE_LIBRARIES = {"libmain.so"}
+# Explicitly selected, authenticated non-monolithic native libraries are added below;
+# every other native library remains forbidden by the exact-set audit.
 NETWORK_LIBRARY = "libstasis_network_v1.so"
 ANDROID_PAGE_SIZE = 16 * 1024
 FORBIDDEN_SUFFIXES = {
