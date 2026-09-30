@@ -722,8 +722,237 @@ impl Drop for PlayCaptureEnvironment {
     }
 }
 
+const PLAY_PROFILE_FRAME_LIMIT: usize = 1200;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlayProfileMode {
+    CorrelatedHostFrames,
+    GuestTicks,
+    Unsupported,
+}
+
+impl PlayProfileMode {
+    fn name(self) -> &'static str {
+        match self {
+            Self::CorrelatedHostFrames => "metrics_published_submissions",
+            Self::GuestTicks => "guest_ticks",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    fn function_sample_basis(self) -> &'static str {
+        match self {
+            Self::CorrelatedHostFrames => "metrics_published_submissions",
+            Self::GuestTicks => "committed_guest_ticks",
+            Self::Unsupported => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CollectedPlayProfileSample {
+    candidate_id: u64,
+    tick_index: u64,
+    guest_tick_us: Option<u64>,
+    guest_render_us: Option<u64>,
+    host_metrics: Option<stasis_dynload::StasisPerformanceMetricsV1>,
+    function_samples: Vec<stasis_dynload::JitProfileSample>,
+}
+
+#[derive(Debug)]
+struct PlayProfileCollector {
+    warmup_ticks: u64,
+    mode: Option<PlayProfileMode>,
+    unavailable_reason: Option<String>,
+    last_metrics_rejection: Option<String>,
+    collection_stopped: bool,
+    samples: Vec<CollectedPlayProfileSample>,
+    next_candidate_id: u64,
+    candidate_count: u64,
+    rejected_metrics_count: u64,
+    window_start_tick: Option<u64>,
+    window_end_tick: Option<u64>,
+    cap_reached: bool,
+    truncated_by_cap: bool,
+    code_swap_resets: u64,
+}
+
+impl PlayProfileCollector {
+    fn new(warmup_ticks: u64) -> Self {
+        Self {
+            warmup_ticks,
+            mode: None,
+            unavailable_reason: None,
+            last_metrics_rejection: None,
+            collection_stopped: false,
+            samples: Vec::new(),
+            next_candidate_id: 1,
+            candidate_count: 0,
+            rejected_metrics_count: 0,
+            window_start_tick: None,
+            window_end_tick: None,
+            cap_reached: false,
+            truncated_by_cap: false,
+            code_swap_resets: 0,
+        }
+    }
+
+    fn warmup_complete(&self, completed_ticks: u64) -> bool {
+        self.mode.is_none() && completed_ticks >= self.warmup_ticks
+    }
+
+    fn start(&mut self, mode: PlayProfileMode, unavailable_reason: Option<String>) {
+        self.mode = Some(mode);
+        self.unavailable_reason = unavailable_reason;
+    }
+
+    fn accepts_guest_samples(&self) -> bool {
+        matches!(
+            self.mode,
+            Some(PlayProfileMode::CorrelatedHostFrames | PlayProfileMode::GuestTicks)
+        ) && !self.collection_stopped
+            && self.samples.len() < PLAY_PROFILE_FRAME_LIMIT
+    }
+
+    fn begin_candidate(&mut self) -> Option<u64> {
+        if !self.accepts_guest_samples() {
+            return None;
+        }
+        let candidate_id = self.next_candidate_id;
+        self.next_candidate_id = self.next_candidate_id.saturating_add(1);
+        self.candidate_count = self.candidate_count.saturating_add(1);
+        Some(candidate_id)
+    }
+
+    fn reject_metrics(&mut self, reason: impl Into<String>) {
+        self.rejected_metrics_count = self.rejected_metrics_count.saturating_add(1);
+        self.last_metrics_rejection = Some(reason.into());
+    }
+
+    fn stop_collection(&mut self, reason: impl Into<String>) {
+        self.collection_stopped = true;
+        self.unavailable_reason = Some(reason.into());
+    }
+
+    fn commit_sample(
+        &mut self,
+        candidate_id: u64,
+        tick_index: u64,
+        guest_tick_us: Option<u64>,
+        guest_render_us: Option<u64>,
+        host_metrics: Option<stasis_dynload::StasisPerformanceMetricsV1>,
+        function_samples: Vec<stasis_dynload::JitProfileSample>,
+    ) {
+        debug_assert!(self.accepts_guest_samples());
+        if self.samples.is_empty() {
+            self.window_start_tick = Some(tick_index);
+        }
+        self.window_end_tick = Some(tick_index);
+        self.samples.push(CollectedPlayProfileSample {
+            candidate_id,
+            tick_index,
+            guest_tick_us,
+            guest_render_us,
+            host_metrics,
+            function_samples,
+        });
+        if self.samples.len() == PLAY_PROFILE_FRAME_LIMIT {
+            self.cap_reached = true;
+        }
+    }
+
+    fn mark_post_cap_submission(&mut self) {
+        if self.cap_reached {
+            self.truncated_by_cap = true;
+        }
+    }
+
+    fn reset_after_code_swap(&mut self) {
+        self.samples.clear();
+        self.window_start_tick = None;
+        self.window_end_tick = None;
+        self.candidate_count = 0;
+        self.rejected_metrics_count = 0;
+        self.last_metrics_rejection = None;
+        self.cap_reached = false;
+        self.truncated_by_cap = false;
+        self.code_swap_resets = self.code_swap_resets.saturating_add(1);
+    }
+
+    fn status(&self) -> &'static str {
+        if self.mode.is_none() {
+            "warmup_not_reached"
+        } else if self.mode == Some(PlayProfileMode::Unsupported) {
+            "unsupported"
+        } else if self.collection_stopped {
+            "stopped_unavailable"
+        } else if self.cap_reached {
+            "cap_reached"
+        } else if self.samples.is_empty() {
+            "no_accepted_samples"
+        } else {
+            "collected"
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
-struct PlayProfileRow {
+struct PlayProfileGuestTickRow {
+    tick_index: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frame_id: Option<u64>,
+    tick_us: Option<u64>,
+    guest_render_us: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct PlayProfileHostFrameRow {
+    frame_id: u64,
+    tick_index: u64,
+    metrics_publication: &'static str,
+    backend: String,
+    tick_us: Option<u64>,
+    guest_render_us: Option<u64>,
+    host_replay_us: Option<u64>,
+    render_prep_us: Option<u64>,
+    gpu_submit_us: Option<u64>,
+    gpu_execution_us: Option<u64>,
+    frame_work_us: Option<u64>,
+    present_wait_us: Option<u64>,
+    commands: Option<u64>,
+    lines: Option<u64>,
+    rectangles: Option<u64>,
+    sprites: Option<u64>,
+    text: Option<u64>,
+    instances: Option<u64>,
+    batches: Option<u64>,
+    draw_calls: Option<u64>,
+    texture_switches: Option<u64>,
+    uploaded_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProfilePhaseSummary {
+    available_sample_count: usize,
+    total_us: Option<u64>,
+    median_us: Option<u64>,
+    p95_us: Option<u64>,
+    max_us: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ProfileFunctionCostSummary {
+    sample_basis: &'static str,
+    available_sample_count: usize,
+    total_ns: Option<u64>,
+    median_ns: Option<u64>,
+    p95_ns: Option<u64>,
+    max_ns: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct PlayProfileFunctionRow {
+    root: &'static str,
     function_id: u32,
     function: String,
     source: String,
@@ -732,6 +961,354 @@ struct PlayProfileRow {
     exclusive_ns: u64,
     average_inclusive_ns: u64,
     max_inclusive_ns: u64,
+    inclusive_frame_cost: ProfileFunctionCostSummary,
+    exclusive_frame_cost: ProfileFunctionCostSummary,
+}
+
+fn profile_metric_value(value: u32) -> Option<u64> {
+    (value != stasis_dynload::STASIS_PERF_UNAVAILABLE).then(|| u64::from(value))
+}
+
+fn summarize_profile_values(
+    mut values: Vec<u64>,
+) -> (usize, Option<u64>, Option<u64>, Option<u64>, Option<u64>) {
+    if values.is_empty() {
+        return (0, None, None, None, None);
+    }
+    values.sort_unstable();
+    let count = values.len();
+    let median = if count % 2 == 0 {
+        let left = values[count / 2 - 1];
+        let right = values[count / 2];
+        Some(left / 2 + right / 2 + (left % 2 + right % 2) / 2)
+    } else {
+        Some(values[count / 2])
+    };
+    let p95_rank = count.saturating_mul(95).saturating_add(99) / 100;
+    let p95 = values[p95_rank.saturating_sub(1)];
+    let total = values.iter().copied().fold(0_u64, u64::saturating_add);
+    (
+        count,
+        Some(total),
+        median,
+        Some(p95),
+        values.last().copied(),
+    )
+}
+
+fn profile_phase_summary(values: Vec<Option<u64>>) -> ProfilePhaseSummary {
+    let (available_sample_count, total_us, median_us, p95_us, max_us) =
+        summarize_profile_values(values.into_iter().flatten().collect());
+    ProfilePhaseSummary {
+        available_sample_count,
+        total_us,
+        median_us,
+        p95_us,
+        max_us,
+    }
+}
+
+fn profile_function_cost_summary(
+    values: Vec<u64>,
+    sample_basis: &'static str,
+) -> ProfileFunctionCostSummary {
+    let (available_sample_count, total_ns, median_ns, p95_ns, max_ns) =
+        summarize_profile_values(values);
+    ProfileFunctionCostSummary {
+        sample_basis,
+        available_sample_count,
+        total_ns,
+        median_ns,
+        p95_ns,
+        max_ns,
+    }
+}
+
+fn profile_root_name(root: stasis_dynload::JitProfileRoot) -> &'static str {
+    match root {
+        stasis_dynload::JitProfileRoot::Tick => "tick",
+        stasis_dynload::JitProfileRoot::Render => "render",
+        stasis_dynload::JitProfileRoot::Unscoped => "unscoped",
+    }
+}
+
+fn profile_function_frame_costs(
+    frames: &[CollectedPlayProfileSample],
+    root: stasis_dynload::JitProfileRoot,
+    function_id: u32,
+    exclusive: bool,
+) -> Vec<u64> {
+    frames
+        .iter()
+        .map(|frame| {
+            frame
+                .function_samples
+                .iter()
+                .find(|sample| sample.root == root && sample.function_id == function_id)
+                .map(|sample| {
+                    if exclusive {
+                        sample.exclusive_ns
+                    } else {
+                        sample.inclusive_ns
+                    }
+                })
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+fn aggregate_committed_profile_samples(
+    frames: &[CollectedPlayProfileSample],
+) -> Vec<stasis_dynload::JitProfileSample> {
+    let mut aggregates: BTreeMap<
+        (stasis_dynload::JitProfileRoot, u32),
+        stasis_dynload::JitProfileSample,
+    > = BTreeMap::new();
+    for sample in frames.iter().flat_map(|frame| &frame.function_samples) {
+        if sample.root == stasis_dynload::JitProfileRoot::Unscoped {
+            continue;
+        }
+        let aggregate = aggregates
+            .entry((sample.root, sample.function_id))
+            .or_insert(stasis_dynload::JitProfileSample {
+                root: sample.root,
+                function_id: sample.function_id,
+                calls: 0,
+                inclusive_ns: 0,
+                exclusive_ns: 0,
+                max_inclusive_ns: 0,
+            });
+        aggregate.calls = aggregate.calls.saturating_add(sample.calls);
+        aggregate.inclusive_ns = aggregate.inclusive_ns.saturating_add(sample.inclusive_ns);
+        aggregate.exclusive_ns = aggregate.exclusive_ns.saturating_add(sample.exclusive_ns);
+        aggregate.max_inclusive_ns = aggregate.max_inclusive_ns.max(sample.max_inclusive_ns);
+    }
+    aggregates.into_values().collect()
+}
+
+fn play_profile_guest_tick_row(
+    sample: &CollectedPlayProfileSample,
+    mode: PlayProfileMode,
+) -> PlayProfileGuestTickRow {
+    let frame_id = (mode == PlayProfileMode::CorrelatedHostFrames).then_some(sample.candidate_id);
+    PlayProfileGuestTickRow {
+        tick_index: sample.tick_index,
+        frame_id,
+        tick_us: sample
+            .host_metrics
+            .and_then(|metrics| profile_metric_value(metrics.tick_us))
+            .or(sample.guest_tick_us),
+        guest_render_us: sample
+            .host_metrics
+            .and_then(|metrics| profile_metric_value(metrics.guest_render_us))
+            .or(sample.guest_render_us),
+    }
+}
+
+fn play_profile_host_frame_row(
+    sample: &CollectedPlayProfileSample,
+) -> Option<PlayProfileHostFrameRow> {
+    let metrics = sample.host_metrics?;
+    Some(PlayProfileHostFrameRow {
+        frame_id: sample.candidate_id,
+        tick_index: sample.tick_index,
+        metrics_publication: "published",
+        backend: metrics.backend_name(),
+        tick_us: profile_metric_value(metrics.tick_us),
+        guest_render_us: profile_metric_value(metrics.guest_render_us),
+        host_replay_us: profile_metric_value(metrics.host_replay_us),
+        render_prep_us: profile_metric_value(metrics.render_prep_us),
+        gpu_submit_us: profile_metric_value(metrics.gpu_submit_us),
+        gpu_execution_us: profile_metric_value(metrics.gpu_execution_us),
+        frame_work_us: profile_metric_value(metrics.frame_work_us),
+        present_wait_us: profile_metric_value(metrics.present_wait_us),
+        commands: profile_metric_value(metrics.commands),
+        lines: profile_metric_value(metrics.lines),
+        rectangles: profile_metric_value(metrics.rectangles),
+        sprites: profile_metric_value(metrics.sprites),
+        text: profile_metric_value(metrics.text),
+        instances: profile_metric_value(metrics.instances),
+        batches: profile_metric_value(metrics.batches),
+        draw_calls: profile_metric_value(metrics.draw_calls),
+        texture_switches: profile_metric_value(metrics.texture_switches),
+        uploaded_bytes: profile_metric_value(metrics.uploaded_bytes),
+    })
+}
+
+struct ProfileMetricsToggleGuard<'a> {
+    graphics: &'a stasis_dynload::StasisGraphicsApi,
+}
+
+impl<'a> ProfileMetricsToggleGuard<'a> {
+    fn enable(graphics: &'a stasis_dynload::StasisGraphicsApi) -> Result<Self, String> {
+        if !graphics.host_set_performance_metrics_enabled(true) {
+            return Err("runtime lacks the performance-metrics enable toggle".to_string());
+        }
+        match graphics.host_get_latest_performance_metrics_v1() {
+            Ok(Some(_)) => Ok(Self { graphics }),
+            Ok(None) => {
+                graphics.host_set_performance_metrics_enabled(false);
+                Err("runtime lacks the v1 performance-metrics snapshot getter".to_string())
+            }
+            Err(error) => {
+                graphics.host_set_performance_metrics_enabled(false);
+                Err(error)
+            }
+        }
+    }
+
+    fn rearm(&self) -> Result<(), String> {
+        if self.graphics.host_set_performance_metrics_enabled(true) {
+            Ok(())
+        } else {
+            Err("runtime performance-metrics enable toggle became unavailable".to_string())
+        }
+    }
+}
+
+impl Drop for ProfileMetricsToggleGuard<'_> {
+    fn drop(&mut self) {
+        // This guard owns the profiling request bit. The runtime's HUD flag is
+        // independent and continues collecting while the visible HUD is on.
+        self.graphics.host_set_performance_metrics_enabled(false);
+    }
+}
+
+fn play_profile_window_mode(
+    graphics: &stasis_dynload::StasisGraphicsApi,
+    host_window_initialized: bool,
+) -> (
+    PlayProfileMode,
+    Option<ProfileMetricsToggleGuard<'_>>,
+    Option<String>,
+) {
+    if !host_window_initialized {
+        return (PlayProfileMode::GuestTicks, None, None);
+    }
+    match ProfileMetricsToggleGuard::enable(graphics) {
+        Ok(guard) => (PlayProfileMode::CorrelatedHostFrames, Some(guard), None),
+        Err(reason) => (
+            PlayProfileMode::Unsupported,
+            None,
+            Some(format!("host metrics unavailable: {reason}")),
+        ),
+    }
+}
+
+fn validate_published_profile_metrics(
+    metrics: &stasis_dynload::StasisPerformanceMetricsV1,
+) -> Result<(), String> {
+    if metrics.frame_work_us == stasis_dynload::STASIS_PERF_UNAVAILABLE {
+        return Err(
+            "runtime did not publish a new frame-work sample after the metrics reset".to_string(),
+        );
+    }
+    if metrics.backend_name() == "SDL" {
+        let required_fields = [
+            ("tick_us", metrics.tick_us),
+            ("guest_render_us", metrics.guest_render_us),
+            ("host_replay_us", metrics.host_replay_us),
+            ("commands", metrics.commands),
+            ("lines", metrics.lines),
+            ("rectangles", metrics.rectangles),
+            ("sprites", metrics.sprites),
+            ("text", metrics.text),
+        ];
+        if let Some((name, _)) = required_fields
+            .iter()
+            .find(|(_, value)| *value == stasis_dynload::STASIS_PERF_UNAVAILABLE)
+        {
+            return Err(format!(
+                "new SDL metrics record has unavailable required field {name}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn build_play_profile_document(
+    config: &PlayProfileConfig,
+    collector: &PlayProfileCollector,
+    functions: Vec<PlayProfileFunctionRow>,
+) -> Value {
+    let mode = collector.mode.unwrap_or(PlayProfileMode::Unsupported);
+    let guest_ticks: Vec<_> = collector
+        .samples
+        .iter()
+        .map(|sample| play_profile_guest_tick_row(sample, mode))
+        .collect();
+    let host_frames: Vec<_> = collector
+        .samples
+        .iter()
+        .filter_map(play_profile_host_frame_row)
+        .collect();
+    let phase_values = |value: fn(&CollectedPlayProfileSample) -> Option<u64>| {
+        profile_phase_summary(collector.samples.iter().map(value).collect())
+    };
+    serde_json::json!({
+        "schema_version": 2,
+        "clock": "native_monotonic",
+        "units": {
+            "function_costs": "nanoseconds",
+            "runtime_phases": "microseconds",
+            "command_counts": "commands",
+        },
+        "warmup_ticks": config.warmup_ticks,
+        "profile_functions": config.functions,
+        "window": {
+            "status": collector.status(),
+            "basis": collector.mode.map(PlayProfileMode::name),
+            "sample_count": collector.samples.len(),
+            "guest_tick_count": guest_ticks.len(),
+            "host_frame_count": host_frames.len(),
+            "start_tick": collector.window_start_tick,
+            "end_tick": collector.window_end_tick,
+            "start_frame_id": collector.samples.first().and_then(|sample| {
+                (collector.mode == Some(PlayProfileMode::CorrelatedHostFrames))
+                    .then_some(sample.candidate_id)
+            }),
+            "end_frame_id": collector.samples.last().and_then(|sample| {
+                (collector.mode == Some(PlayProfileMode::CorrelatedHostFrames))
+                    .then_some(sample.candidate_id)
+            }),
+            "candidate_count": collector.candidate_count,
+            "rejected_metrics_count": collector.rejected_metrics_count,
+            "frame_limit": PLAY_PROFILE_FRAME_LIMIT,
+            "cap_reached": collector.cap_reached,
+            "truncated_by_cap": collector.truncated_by_cap,
+            "code_swap_resets": collector.code_swap_resets,
+            "unavailable_reason": collector.unavailable_reason,
+            "last_metrics_rejection": collector.last_metrics_rejection,
+        },
+        "frame_semantics": {
+            "host_rows": "native metrics-published submission attempts; publication does not certify successful presentation",
+            "guest_headless_rows": "completed guest tick/render pairs without native host frame identifiers",
+            "present_wait_in_frame_work": false,
+        },
+        "phases": {
+            "tick": phase_values(|sample| sample.host_metrics
+                .and_then(|metrics| profile_metric_value(metrics.tick_us))
+                .or(sample.guest_tick_us)),
+            "guest_render": phase_values(|sample| sample.host_metrics
+                .and_then(|metrics| profile_metric_value(metrics.guest_render_us))
+                .or(sample.guest_render_us)),
+            "host_replay": phase_values(|sample| sample.host_metrics
+                .and_then(|metrics| profile_metric_value(metrics.host_replay_us))),
+            "render_prep": phase_values(|sample| sample.host_metrics
+                .and_then(|metrics| profile_metric_value(metrics.render_prep_us))),
+            "gpu_submit": phase_values(|sample| sample.host_metrics
+                .and_then(|metrics| profile_metric_value(metrics.gpu_submit_us))),
+            "gpu_execution": phase_values(|sample| sample.host_metrics
+                .and_then(|metrics| profile_metric_value(metrics.gpu_execution_us))),
+            "frame_work": phase_values(|sample| sample.host_metrics
+                .and_then(|metrics| profile_metric_value(metrics.frame_work_us))),
+            "present_wait": phase_values(|sample| sample.host_metrics
+                .and_then(|metrics| profile_metric_value(metrics.present_wait_us))),
+        },
+        "guest_ticks": guest_ticks,
+        "host_frames": host_frames,
+        "functions": functions,
+    })
 }
 
 struct JitProfilerGuard;
@@ -742,7 +1319,11 @@ impl Drop for JitProfilerGuard {
     }
 }
 
-fn finish_play_profile(jit: &JitProcess, config: &PlayProfileConfig) -> Result<(), String> {
+fn finish_play_profile(
+    jit: &JitProcess,
+    config: &PlayProfileConfig,
+    collector: &PlayProfileCollector,
+) -> Result<(), String> {
     stasis_dynload::disable_jit_profiler();
     let snapshot = jit
         .program_snapshot()
@@ -757,11 +1338,17 @@ fn finish_play_profile(jit: &JitProcess, config: &PlayProfileConfig) -> Result<(
                 .map(|file| (function.id, (function.name.as_str(), file.path.as_str())))
         })
         .collect();
-    let mut rows: Vec<PlayProfileRow> = stasis_dynload::jit_profile_snapshot()
+    let aggregate_samples = aggregate_committed_profile_samples(&collector.samples);
+    let sample_basis = collector
+        .mode
+        .map(PlayProfileMode::function_sample_basis)
+        .unwrap_or("none");
+    let mut rows: Vec<PlayProfileFunctionRow> = aggregate_samples
         .into_iter()
         .filter_map(|sample| {
             let (name, source) = functions_by_id.get(&sample.function_id).copied()?;
-            Some(PlayProfileRow {
+            Some(PlayProfileFunctionRow {
+                root: profile_root_name(sample.root),
                 function_id: sample.function_id,
                 function: name.to_string(),
                 source: source.to_string(),
@@ -770,21 +1357,42 @@ fn finish_play_profile(jit: &JitProcess, config: &PlayProfileConfig) -> Result<(
                 exclusive_ns: sample.exclusive_ns,
                 average_inclusive_ns: sample.inclusive_ns / sample.calls.max(1),
                 max_inclusive_ns: sample.max_inclusive_ns,
+                inclusive_frame_cost: profile_function_cost_summary(
+                    profile_function_frame_costs(
+                        &collector.samples,
+                        sample.root,
+                        sample.function_id,
+                        false,
+                    ),
+                    sample_basis,
+                ),
+                exclusive_frame_cost: profile_function_cost_summary(
+                    profile_function_frame_costs(
+                        &collector.samples,
+                        sample.root,
+                        sample.function_id,
+                        true,
+                    ),
+                    sample_basis,
+                ),
             })
         })
         .collect();
     rows.sort_by(|left, right| {
-        right
-            .exclusive_ns
-            .cmp(&left.exclusive_ns)
+        left.root
+            .cmp(right.root)
+            .then_with(|| right.exclusive_ns.cmp(&left.exclusive_ns))
             .then_with(|| right.inclusive_ns.cmp(&left.inclusive_ns))
             .then_with(|| left.function.cmp(&right.function))
     });
 
-    println!("PROFILE|function|calls|inclusive_us|exclusive_us|avg_inclusive_ns|max_inclusive_ns");
+    println!(
+        "PROFILE|root|function|calls|inclusive_us|exclusive_us|avg_inclusive_ns|max_inclusive_ns"
+    );
     for row in &rows {
         println!(
-            "PROFILE|{}|{}|{}|{}|{}|{}",
+            "PROFILE|{}|{}|{}|{}|{}|{}|{}",
+            row.root,
             row.function,
             row.calls,
             row.inclusive_ns / 1_000,
@@ -809,13 +1417,7 @@ fn finish_play_profile(jit: &JitProcess, config: &PlayProfileConfig) -> Result<(
                 )
             })?;
         }
-        let document = serde_json::json!({
-            "schema_version": 1,
-            "clock": "native_monotonic",
-            "units": "nanoseconds",
-            "warmup_ticks": config.warmup_ticks,
-            "functions": rows,
-        });
+        let document = build_play_profile_document(config, collector, rows);
         fs::write(
             path,
             serde_json::to_vec_pretty(&document)
@@ -3298,7 +3900,7 @@ fn run_play_in_process_inner(
     let title = resolve_play_window_title(watch_file, configured_title);
     // Create a small default window up-front so runtime calls (fonts/sprites) succeed during guest main().
     // Guest `init_window(...)` requests will be applied immediately after main returns.
-    let _ = gfx.init_window(800, 600, &title)?;
+    let host_window_initialized = gfx.init_window(800, 600, &title)?;
     let (toast_font_file, toast_font_handle) = match EmbeddedToastFont::stage(&renderer_asset_root)
         .and_then(|font| {
             gfx.load_font(font.runtime_path(), 16)
@@ -3324,7 +3926,13 @@ fn run_play_in_process_inner(
         }
     }
     if let Some(profile) = profile.as_ref() {
-        jit.set_profile_functions(profile.functions.clone())?;
+        let mut profile_functions = profile.functions.clone();
+        for root in ["tick", "render"] {
+            if !profile_functions.iter().any(|name| name == root) {
+                profile_functions.push(root.to_string());
+            }
+        }
+        jit.set_profile_functions(profile_functions)?;
     }
     if capture.is_some() {
         jit.set_extern_profile(JitExternProfile::DeterministicOfflineWebNetwork)?;
@@ -3423,10 +4031,14 @@ fn run_play_in_process_inner(
         return Ok(());
     }
 
-    let _profiler_guard = profile.as_ref().map(|_| {
-        stasis_dynload::enable_jit_profiler();
-        JitProfilerGuard
-    });
+    let mut profile_collector = profile
+        .as_ref()
+        .map(|profile| PlayProfileCollector::new(profile.warmup_ticks));
+    let mut profiler_guard: Option<JitProfilerGuard> = None;
+    let mut metrics_request_guard: Option<ProfileMetricsToggleGuard<'_>> = None;
+    if profile.is_some() {
+        stasis_dynload::reset_jit_profile();
+    }
 
     stasis_dynload::begin_jit_host_entry_session(package.host_entry_targets(1)?)?;
     let mut tick_code_ptr = stasis_dynload::jit_host_tick_trampoline_ptr() as u64;
@@ -3441,6 +4053,20 @@ fn run_play_in_process_inner(
     let mut ticks_executed: u64 = 0;
     let mut frame_pacer = FramePacer::from_micros(tick_sleep_micros, Instant::now())?;
     loop {
+        if let Some(collector) = profile_collector.as_mut() {
+            if collector.warmup_complete(ticks_executed) {
+                let (mode, metrics_guard, unavailable_reason) =
+                    play_profile_window_mode(&gfx, host_window_initialized);
+                collector.start(mode, unavailable_reason);
+                metrics_request_guard = metrics_guard;
+                if mode == PlayProfileMode::Unsupported {
+                    stasis_dynload::reset_jit_profile();
+                } else {
+                    stasis_dynload::enable_jit_profiler();
+                    profiler_guard = Some(JitProfilerGuard);
+                }
+            }
+        }
         if let Some(simulation) = audio_device_simulation.as_mut() {
             simulation.advance_to_tick(ticks_executed)?;
         }
@@ -3521,8 +4147,11 @@ fn run_play_in_process_inner(
                                 debug_assert!(entrypoints.swap_receipt.is_some());
                                 tick_code_ptr = entrypoints.tick_code_ptr;
                                 render_code_ptr = entrypoints.render_code_ptr;
-                                if profile.is_some() {
+                                if profiler_guard.is_some() {
                                     stasis_dynload::reset_jit_profile();
+                                    if let Some(collector) = profile_collector.as_mut() {
+                                        collector.reset_after_code_swap();
+                                    }
                                     eprintln!(
                                         "PROFILE_RESET|reason=code_swap|revision={}",
                                         prepared.revision
@@ -3742,14 +4371,34 @@ fn run_play_in_process_inner(
         }
 
         let run_tick = live.as_ref().is_none_or(LiveWorkspace::should_run_tick);
+        let profile_candidate_id = profile_collector
+            .as_mut()
+            .and_then(PlayProfileCollector::begin_candidate);
+        let profile_mode = profile_collector
+            .as_ref()
+            .and_then(|collector| collector.mode);
+        let mut jit_profile_frame =
+            profile_candidate_id.map(stasis_dynload::JitProfileFrameGuard::enter);
         let measure_hud = gfx.host_performance_metrics_enabled()?;
         let mut tick_micros = 0;
+        let mut profile_tick_us = None;
         if run_tick {
-            let measure_tick = measure_hud || tick_budget.is_some();
+            let measure_tick =
+                measure_hud || tick_budget.is_some() || profile_candidate_id.is_some();
             let tick_started = measure_tick.then(Instant::now);
-            let tick_rc = stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?;
+            let tick_rc = if profile_candidate_id.is_some() {
+                let _tick_root = stasis_dynload::JitProfileRootGuard::enter(
+                    stasis_dynload::JitProfileRoot::Tick,
+                );
+                stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?
+            } else {
+                stasis_dynload::invoke_noarg_i32(tick_code_ptr as usize)?
+            };
             if let Some(tick_started) = tick_started {
                 tick_micros = tick_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+                if profile_candidate_id.is_some() {
+                    profile_tick_us = Some(tick_micros);
+                }
             }
             if let Some(budget) = tick_budget.as_mut() {
                 budget.record(tick_micros);
@@ -3766,11 +4415,17 @@ fn run_play_in_process_inner(
                 break;
             }
         }
-        let render_started = measure_hud.then(Instant::now);
-        let render_rc = stasis_dynload::invoke_noarg_i32(render_code_ptr as usize)?;
-        let render_micros = render_started
-            .map(|started| started.elapsed().as_micros().min(u64::MAX as u128) as u64)
-            .unwrap_or(0);
+        let render_started = (measure_hud || profile_candidate_id.is_some()).then(Instant::now);
+        let render_rc = if profile_candidate_id.is_some() {
+            let _render_root =
+                stasis_dynload::JitProfileRootGuard::enter(stasis_dynload::JitProfileRoot::Render);
+            stasis_dynload::invoke_noarg_i32(render_code_ptr as usize)?
+        } else {
+            stasis_dynload::invoke_noarg_i32(render_code_ptr as usize)?
+        };
+        let profile_render_us = render_started
+            .map(|started| started.elapsed().as_micros().min(u64::MAX as u128) as u64);
+        let render_micros = profile_render_us.unwrap_or(0);
         if render_rc != 0 {
             if replay_player.is_some() {
                 return Err(format!(
@@ -3789,7 +4444,18 @@ fn run_play_in_process_inner(
             player.verify_tick(next_tick, &jit)?;
         }
 
-        if measure_hud {
+        let metrics_rearm_result = if profile_candidate_id.is_some()
+            && run_tick
+            && profile_mode == Some(PlayProfileMode::CorrelatedHostFrames)
+        {
+            Some(match metrics_request_guard.as_ref() {
+                Some(guard) => guard.rearm(),
+                None => Err("host metrics request guard is unavailable".to_string()),
+            })
+        } else {
+            None
+        };
+        if measure_hud || profile_candidate_id.is_some() {
             gfx.host_set_performance_metrics(tick_micros, render_micros)?;
         }
         if let Some(capture) = capture.as_ref() {
@@ -3817,7 +4483,83 @@ fn run_play_in_process_inner(
             &mut gfx_cmd_u8,
             Instant::now(),
         );
+        let cap_reached_before_submission = profile_collector
+            .as_ref()
+            .is_some_and(|collector| collector.cap_reached);
         gfx.gfx_submit_u8(&mut gfx_cmd_i32, &gfx_cmd_f32, &gfx_cmd_u8)?;
+        if cap_reached_before_submission && run_tick {
+            if let Some(collector) = profile_collector.as_mut() {
+                collector.mark_post_cap_submission();
+            }
+        }
+        if let Some(candidate_id) = profile_candidate_id.filter(|_| run_tick) {
+            let metrics_result = match profile_mode {
+                Some(PlayProfileMode::GuestTicks) => Ok(None),
+                Some(PlayProfileMode::CorrelatedHostFrames) => match metrics_rearm_result {
+                    Some(Ok(())) => match gfx.host_get_latest_performance_metrics_v1() {
+                        Ok(Some(metrics)) => {
+                            validate_published_profile_metrics(&metrics).map(|()| Some(metrics))
+                        }
+                        Ok(None) => {
+                            Err("runtime lacks the v1 performance-metrics snapshot getter"
+                                .to_string())
+                        }
+                        Err(error) => Err(error),
+                    },
+                    Some(Err(error)) => Err(error),
+                    None => Err("host metrics were not re-armed before submission".to_string()),
+                },
+                Some(PlayProfileMode::Unsupported) | None => {
+                    Err("profile collection mode is unavailable".to_string())
+                }
+            };
+            match metrics_result {
+                Ok(host_metrics) => {
+                    let function_samples = jit_profile_frame
+                        .take()
+                        .map(|frame| {
+                            frame
+                                .commit()
+                                .into_iter()
+                                .filter(|sample| {
+                                    sample.root != stasis_dynload::JitProfileRoot::Unscoped
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if let Some(collector) = profile_collector.as_mut() {
+                        collector.commit_sample(
+                            candidate_id,
+                            next_tick,
+                            profile_tick_us,
+                            profile_render_us,
+                            host_metrics,
+                            function_samples,
+                        );
+                        if collector.cap_reached {
+                            drop(profiler_guard.take());
+                            drop(metrics_request_guard.take());
+                        }
+                    }
+                }
+                Err(error) => {
+                    if let Some(collector) = profile_collector.as_mut() {
+                        collector.reject_metrics(error.clone());
+                        if error.contains("enable toggle") || error.contains("guard is unavailable")
+                        {
+                            collector.stop_collection(error);
+                            drop(profiler_guard.take());
+                            drop(metrics_request_guard.take());
+                        } else if error.contains("lacks the v1 performance-metrics snapshot getter")
+                        {
+                            collector.stop_collection(error);
+                            drop(profiler_guard.take());
+                            drop(metrics_request_guard.take());
+                        }
+                    }
+                }
+            }
+        }
         if let (Some(capture), Some(audio)) = (capture.as_ref(), recording_audio.as_mut()) {
             if capture.audio_device_profile.is_none() {
                 let frame = ticks_executed.saturating_add(1);
@@ -3877,12 +4619,6 @@ fn run_play_in_process_inner(
                 break;
             }
         }
-        if profile
-            .as_ref()
-            .is_some_and(|profile| ticks_executed == profile.warmup_ticks)
-        {
-            stasis_dynload::reset_jit_profile();
-        }
     }
 
     if let Some(job) = watch_patch_job.take() {
@@ -3891,8 +4627,8 @@ fn run_play_in_process_inner(
     if let Some(budget) = tick_budget {
         println!("{}", budget.report());
     }
-    if let Some(profile) = profile.as_ref() {
-        finish_play_profile(&jit, profile)?;
+    if let (Some(profile), Some(collector)) = (profile.as_ref(), profile_collector.as_ref()) {
+        finish_play_profile(&jit, profile, collector)?;
     }
     if let (Some(capture), Some(simulation)) = (capture.as_ref(), audio_device_simulation.as_ref())
     {
@@ -5514,6 +6250,282 @@ mod tests {
 
     const WINDOW_REQUEST_MAILBOX_FIXTURE: &str =
         include_str!("../../../tests/stasis/seams/window_request_mailbox_probe.stasis");
+
+    fn valid_sdl_profile_metrics() -> stasis_dynload::StasisPerformanceMetricsV1 {
+        let mut backend = [0; 16];
+        backend[..3].copy_from_slice(b"SDL");
+        stasis_dynload::StasisPerformanceMetricsV1 {
+            version: stasis_dynload::STASIS_PERF_METRICS_VERSION_V1,
+            size: 96,
+            tick_us: 0,
+            guest_render_us: 2,
+            host_replay_us: 3,
+            render_prep_us: stasis_dynload::STASIS_PERF_UNAVAILABLE,
+            gpu_submit_us: stasis_dynload::STASIS_PERF_UNAVAILABLE,
+            gpu_execution_us: stasis_dynload::STASIS_PERF_UNAVAILABLE,
+            frame_work_us: 5,
+            present_wait_us: 0,
+            commands: 4,
+            lines: 1,
+            rectangles: 1,
+            sprites: 1,
+            text: 1,
+            instances: stasis_dynload::STASIS_PERF_UNAVAILABLE,
+            batches: stasis_dynload::STASIS_PERF_UNAVAILABLE,
+            draw_calls: stasis_dynload::STASIS_PERF_UNAVAILABLE,
+            texture_switches: stasis_dynload::STASIS_PERF_UNAVAILABLE,
+            uploaded_bytes: stasis_dynload::STASIS_PERF_UNAVAILABLE,
+            backend,
+        }
+    }
+
+    fn profile_test_function_sample(
+        root: stasis_dynload::JitProfileRoot,
+        function_id: u32,
+        inclusive_ns: u64,
+    ) -> stasis_dynload::JitProfileSample {
+        stasis_dynload::JitProfileSample {
+            root,
+            function_id,
+            calls: 1,
+            inclusive_ns,
+            exclusive_ns: inclusive_ns,
+            max_inclusive_ns: inclusive_ns,
+        }
+    }
+
+    #[test]
+    fn profile_window_starts_after_each_requested_warmup_boundary() {
+        assert!(PlayProfileCollector::new(0).warmup_complete(0));
+        let one_tick = PlayProfileCollector::new(1);
+        assert!(!one_tick.warmup_complete(0));
+        assert!(one_tick.warmup_complete(1));
+        let default_window = PlayProfileCollector::new(60);
+        assert!(!default_window.warmup_complete(59));
+        assert!(default_window.warmup_complete(60));
+    }
+
+    #[test]
+    fn profile_distributions_keep_zero_samples_and_null_unavailable_values() {
+        let summary = profile_phase_summary(vec![Some(0), Some(10), Some(20), None]);
+        assert_eq!(summary.available_sample_count, 3);
+        assert_eq!(summary.total_us, Some(30));
+        assert_eq!(summary.median_us, Some(10));
+        assert_eq!(summary.p95_us, Some(20));
+        assert_eq!(summary.max_us, Some(20));
+
+        let unavailable = profile_phase_summary(vec![None, None]);
+        assert_eq!(unavailable.available_sample_count, 0);
+        assert_eq!(unavailable.total_us, None);
+        assert_eq!(unavailable.median_us, None);
+        assert_eq!(unavailable.p95_us, None);
+        assert_eq!(unavailable.max_us, None);
+    }
+
+    #[test]
+    fn profile_frame_cost_distribution_includes_uninvoked_zero_cost_frames() {
+        let root = stasis_dynload::JitProfileRoot::Tick;
+        let samples = vec![
+            CollectedPlayProfileSample {
+                candidate_id: 1,
+                tick_index: 61,
+                guest_tick_us: Some(0),
+                guest_render_us: Some(1),
+                host_metrics: None,
+                function_samples: vec![profile_test_function_sample(root, 77, 9)],
+            },
+            CollectedPlayProfileSample {
+                candidate_id: 2,
+                tick_index: 62,
+                guest_tick_us: Some(0),
+                guest_render_us: Some(1),
+                host_metrics: None,
+                function_samples: Vec::new(),
+            },
+        ];
+        let costs = profile_function_frame_costs(&samples, root, 77, false);
+        assert_eq!(costs, vec![9, 0]);
+        let summary = profile_function_cost_summary(costs, "committed_guest_ticks");
+        assert_eq!(summary.available_sample_count, 2);
+        assert_eq!(summary.total_ns, Some(9));
+        assert_eq!(summary.max_ns, Some(9));
+    }
+
+    #[test]
+    fn profile_function_aggregates_come_only_from_committed_frame_vectors() {
+        let tick = stasis_dynload::JitProfileRoot::Tick;
+        let unscoped = stasis_dynload::JitProfileRoot::Unscoped;
+        let frames = vec![
+            CollectedPlayProfileSample {
+                candidate_id: 1,
+                tick_index: 61,
+                guest_tick_us: Some(1),
+                guest_render_us: Some(1),
+                host_metrics: None,
+                function_samples: vec![
+                    stasis_dynload::JitProfileSample {
+                        root: tick,
+                        function_id: 77,
+                        calls: 2,
+                        inclusive_ns: 10,
+                        exclusive_ns: 7,
+                        max_inclusive_ns: 6,
+                    },
+                    profile_test_function_sample(unscoped, 88, 900),
+                ],
+            },
+            CollectedPlayProfileSample {
+                candidate_id: 2,
+                tick_index: 62,
+                guest_tick_us: Some(1),
+                guest_render_us: Some(1),
+                host_metrics: None,
+                function_samples: vec![stasis_dynload::JitProfileSample {
+                    root: tick,
+                    function_id: 77,
+                    calls: 1,
+                    inclusive_ns: 4,
+                    exclusive_ns: 3,
+                    max_inclusive_ns: 4,
+                }],
+            },
+        ];
+
+        let aggregates = aggregate_committed_profile_samples(&frames);
+        assert_eq!(aggregates.len(), 1, "unscoped tooling calls are excluded");
+        assert_eq!(aggregates[0].root, tick);
+        assert_eq!(aggregates[0].function_id, 77);
+        assert_eq!(aggregates[0].calls, 3);
+        assert_eq!(aggregates[0].inclusive_ns, 14);
+        assert_eq!(aggregates[0].exclusive_ns, 10);
+        assert_eq!(aggregates[0].max_inclusive_ns, 6);
+        let frame_costs = profile_function_frame_costs(&frames, tick, 77, false);
+        assert_eq!(frame_costs.iter().sum::<u64>(), aggregates[0].inclusive_ns);
+    }
+
+    #[test]
+    fn profile_collector_keeps_frame_ids_aligned_and_headless_rows_id_free() {
+        let mut desktop = PlayProfileCollector::new(60);
+        desktop.start(PlayProfileMode::CorrelatedHostFrames, None);
+        let dropped = desktop
+            .begin_candidate()
+            .expect("candidate before rejected frame");
+        assert_eq!(dropped, 1);
+        desktop.reject_metrics("frame_work_us unavailable after reset");
+
+        let candidate = desktop
+            .begin_candidate()
+            .expect("candidate after rejection");
+        let metrics = valid_sdl_profile_metrics();
+        assert!(validate_published_profile_metrics(&metrics).is_ok());
+        desktop.commit_sample(
+            candidate,
+            62,
+            Some(0),
+            Some(2),
+            Some(metrics),
+            vec![profile_test_function_sample(
+                stasis_dynload::JitProfileRoot::Tick,
+                77,
+                4,
+            )],
+        );
+        let sample = desktop.samples.first().expect("committed metrics sample");
+        let guest = play_profile_guest_tick_row(sample, PlayProfileMode::CorrelatedHostFrames);
+        let host = play_profile_host_frame_row(sample).expect("published host frame");
+        assert_eq!(guest.frame_id, Some(candidate));
+        assert_eq!(host.frame_id, candidate);
+        assert_eq!(guest.tick_index, host.tick_index);
+        assert_eq!(host.commands, Some(4));
+        assert_eq!(host.present_wait_us, Some(0));
+        assert_eq!(host.gpu_submit_us, None);
+
+        let mut headless = PlayProfileCollector::new(0);
+        headless.start(PlayProfileMode::GuestTicks, None);
+        let tick_candidate = headless.begin_candidate().expect("headless tick candidate");
+        headless.commit_sample(
+            tick_candidate,
+            1,
+            Some(3),
+            Some(2),
+            None,
+            vec![profile_test_function_sample(
+                stasis_dynload::JitProfileRoot::Tick,
+                77,
+                5,
+            )],
+        );
+        let guest = play_profile_guest_tick_row(&headless.samples[0], PlayProfileMode::GuestTicks);
+        assert_eq!(guest.frame_id, None);
+        assert!(play_profile_host_frame_row(&headless.samples[0]).is_none());
+        assert!(serde_json::to_value(guest)
+            .expect("serialize guest-only tick")
+            .get("frame_id")
+            .is_none());
+    }
+
+    #[test]
+    fn profile_collector_stops_both_sample_sets_at_the_shared_cap() {
+        let mut collector = PlayProfileCollector::new(0);
+        collector.start(PlayProfileMode::GuestTicks, None);
+        for tick in 1..=PLAY_PROFILE_FRAME_LIMIT as u64 {
+            let candidate = collector.begin_candidate().expect("candidate under cap");
+            let function_samples = if tick == 1 {
+                vec![profile_test_function_sample(
+                    stasis_dynload::JitProfileRoot::Tick,
+                    77,
+                    7,
+                )]
+            } else {
+                Vec::new()
+            };
+            collector.commit_sample(candidate, tick, Some(1), Some(1), None, function_samples);
+        }
+        assert_eq!(collector.samples.len(), PLAY_PROFILE_FRAME_LIMIT);
+        assert!(collector.cap_reached);
+        assert!(collector.begin_candidate().is_none());
+        let frame_costs = profile_function_frame_costs(
+            &collector.samples,
+            stasis_dynload::JitProfileRoot::Tick,
+            77,
+            false,
+        );
+        assert_eq!(frame_costs.len(), PLAY_PROFILE_FRAME_LIMIT);
+        assert_eq!(frame_costs[0], 7);
+        assert!(frame_costs[1..].iter().all(|cost| *cost == 0));
+        collector.mark_post_cap_submission();
+        assert!(collector.truncated_by_cap);
+    }
+
+    #[test]
+    fn profile_schema_v2_serializes_host_unavailable_as_null() {
+        let config = PlayProfileConfig {
+            functions: vec!["shared_helper".to_string()],
+            warmup_ticks: 60,
+            output_path: None,
+        };
+        let mut collector = PlayProfileCollector::new(60);
+        collector.start(PlayProfileMode::GuestTicks, None);
+        let candidate = collector.begin_candidate().expect("headless candidate");
+        collector.commit_sample(candidate, 61, Some(0), Some(1), None, Vec::new());
+        let document = build_play_profile_document(&config, &collector, Vec::new());
+        assert_eq!(document["schema_version"], 2);
+        assert_eq!(document["window"]["basis"], "guest_ticks");
+        assert_eq!(document["phases"]["tick"]["available_sample_count"], 1);
+        assert_eq!(document["phases"]["tick"]["total_us"], 0);
+        assert_eq!(
+            document["phases"]["host_replay"]["available_sample_count"],
+            0
+        );
+        assert!(document["phases"]["host_replay"]["total_us"].is_null());
+        assert!(document["phases"]["gpu_submit"]["median_us"].is_null());
+        assert_eq!(document["host_frames"].as_array().unwrap().len(), 0);
+        assert!(document["guest_ticks"][0].get("frame_id").is_none());
+        assert_eq!(
+            document["frame_semantics"]["present_wait_in_frame_work"],
+            false
+        );
+    }
 
     #[test]
     fn recording_audio_sample_schedule_has_no_fractional_drift() {

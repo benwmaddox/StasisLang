@@ -1,0 +1,14 @@
+function shared_helper(value: i32): i32 {
+    return value + 1;
+}
+
+function tick(): i32 {
+    let first: i32 = shared_helper(1);
+    let second: i32 = shared_helper(2);
+    return first + second - 5;
+}
+
+function render(): i32 {
+    let rendered: i32 = shared_helper(9);
+    return rendered - 10;
+}

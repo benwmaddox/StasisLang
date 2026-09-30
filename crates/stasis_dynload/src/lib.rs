@@ -1,11 +1,13 @@
 #![cfg_attr(not(debug_assertions), deny(warnings))]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, CString};
 use std::io::Write;
+use std::marker::PhantomData;
 use std::path::Path;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -366,6 +368,7 @@ pub fn clear_recording_clock() {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JitProfileSample {
+    pub root: JitProfileRoot,
     pub function_id: u32,
     pub calls: u64,
     pub inclusive_ns: u64,
@@ -373,11 +376,55 @@ pub struct JitProfileSample {
     pub max_inclusive_ns: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum JitProfileRoot {
+    Tick,
+    Render,
+    Unscoped,
+}
+
+/// Restores the current thread's JIT profile root when dropped.
+///
+/// ```compile_fail
+/// fn require_send<T: Send>() {}
+/// require_send::<stasis_dynload::JitProfileRootGuard>();
+/// ```
+pub struct JitProfileRootGuard {
+    previous: JitProfileRoot,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl JitProfileRootGuard {
+    pub fn enter(root: JitProfileRoot) -> Self {
+        let previous = JIT_PROFILE_ROOT.with(|current| current.replace(root));
+        Self {
+            previous,
+            _not_send: PhantomData,
+        }
+    }
+}
+
+impl Drop for JitProfileRootGuard {
+    fn drop(&mut self) {
+        JIT_PROFILE_ROOT.with(|current| current.set(self.previous));
+    }
+}
+
 struct JitProfileFrame {
+    root: JitProfileRoot,
     function_id: u32,
     generation: u64,
+    profile_frame_id: Option<u64>,
     started: Instant,
     child_ns: u64,
+}
+
+#[derive(Default)]
+struct JitProfilePendingAggregate {
+    calls: u64,
+    inclusive_ns: u64,
+    exclusive_ns: u64,
+    max_inclusive_ns: u64,
 }
 
 #[derive(Default)]
@@ -392,19 +439,106 @@ struct JitProfileAggregate {
 struct JitProfileState {
     generation: u64,
     frames: Vec<JitProfileFrame>,
-    aggregate_cache: HashMap<u32, Arc<JitProfileAggregate>>,
+    aggregate_cache: HashMap<(JitProfileRoot, u32), Arc<JitProfileAggregate>>,
+    pending_frames: HashMap<u64, HashMap<(JitProfileRoot, u32), JitProfilePendingAggregate>>,
 }
 
 thread_local! {
     static JIT_PROFILE_STATE: RefCell<JitProfileState> = RefCell::new(JitProfileState::default());
+    static JIT_PROFILE_ROOT: Cell<JitProfileRoot> = const { Cell::new(JitProfileRoot::Unscoped) };
+    static JIT_PROFILE_CURRENT_FRAME: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// Stages one thread's JIT profile costs until this frame is committed or dropped.
+///
+/// ```compile_fail
+/// fn require_send<T: Send>() {}
+/// require_send::<stasis_dynload::JitProfileFrameGuard>();
+/// ```
+pub struct JitProfileFrameGuard {
+    frame_id: u64,
+    previous: Option<u64>,
+    committed: bool,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl JitProfileFrameGuard {
+    pub fn enter(frame_id: u64) -> Self {
+        let previous = JIT_PROFILE_CURRENT_FRAME.with(|current| current.replace(Some(frame_id)));
+        Self {
+            frame_id,
+            previous,
+            committed: false,
+            _not_send: PhantomData,
+        }
+    }
+
+    pub fn commit(mut self) -> Vec<JitProfileSample> {
+        if self.committed {
+            return Vec::new();
+        }
+        JIT_PROFILE_CURRENT_FRAME.with(|current| current.set(self.previous));
+        self.committed = true;
+        let pending = JIT_PROFILE_STATE.with(|state| {
+            state
+                .borrow_mut()
+                .pending_frames
+                .remove(&self.frame_id)
+                .unwrap_or_default()
+        });
+        let mut samples = Vec::with_capacity(pending.len());
+        if !pending.is_empty() {
+            let mut aggregates = jit_profile_aggregates()
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (key, staged) in pending {
+                samples.push(JitProfileSample {
+                    root: key.0,
+                    function_id: key.1,
+                    calls: staged.calls,
+                    inclusive_ns: staged.inclusive_ns,
+                    exclusive_ns: staged.exclusive_ns,
+                    max_inclusive_ns: staged.max_inclusive_ns,
+                });
+                let aggregate = aggregates
+                    .entry(key)
+                    .or_insert_with(|| Arc::new(JitProfileAggregate::default()));
+                aggregate.calls.fetch_add(staged.calls, Ordering::Relaxed);
+                aggregate
+                    .inclusive_ns
+                    .fetch_add(staged.inclusive_ns, Ordering::Relaxed);
+                aggregate
+                    .exclusive_ns
+                    .fetch_add(staged.exclusive_ns, Ordering::Relaxed);
+                aggregate
+                    .max_inclusive_ns
+                    .fetch_max(staged.max_inclusive_ns, Ordering::Relaxed);
+            }
+        }
+        samples.sort_by_key(|sample| (sample.root, sample.function_id));
+        samples
+    }
+}
+
+impl Drop for JitProfileFrameGuard {
+    fn drop(&mut self) {
+        JIT_PROFILE_CURRENT_FRAME.with(|current| current.set(self.previous));
+        if !self.committed {
+            JIT_PROFILE_STATE.with(|state| {
+                state.borrow_mut().pending_frames.remove(&self.frame_id);
+            });
+        }
+    }
 }
 
 fn elapsed_ns(started: Instant) -> u64 {
     started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
-fn jit_profile_aggregates() -> &'static RwLock<HashMap<u32, Arc<JitProfileAggregate>>> {
-    static AGGREGATES: OnceLock<RwLock<HashMap<u32, Arc<JitProfileAggregate>>>> = OnceLock::new();
+fn jit_profile_aggregates(
+) -> &'static RwLock<HashMap<(JitProfileRoot, u32), Arc<JitProfileAggregate>>> {
+    static AGGREGATES: OnceLock<RwLock<HashMap<(JitProfileRoot, u32), Arc<JitProfileAggregate>>>> =
+        OnceLock::new();
     AGGREGATES.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
@@ -413,6 +547,7 @@ fn sync_jit_profile_generation(state: &mut JitProfileState, generation: u64) {
         state.generation = generation;
         state.frames.clear();
         state.aggregate_cache.clear();
+        state.pending_frames.clear();
     }
 }
 
@@ -423,11 +558,20 @@ pub fn enable_jit_profiler() {
 
 pub fn disable_jit_profiler() {
     JIT_PROFILE_ENABLED.store(false, Ordering::Release);
-    JIT_PROFILE_STATE.with(|state| state.borrow_mut().frames.clear());
+    JIT_PROFILE_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.frames.clear();
+        state.pending_frames.clear();
+    });
 }
 
 pub fn reset_jit_profile() {
     JIT_PROFILE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    JIT_PROFILE_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        state.frames.clear();
+        state.pending_frames.clear();
+    });
     let aggregates = jit_profile_aggregates()
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -445,7 +589,8 @@ pub fn jit_profile_snapshot() -> Vec<JitProfileSample> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut samples: Vec<JitProfileSample> = aggregates
         .iter()
-        .map(|(function_id, aggregate)| JitProfileSample {
+        .map(|((root, function_id), aggregate)| JitProfileSample {
+            root: *root,
             function_id: *function_id,
             calls: aggregate.calls.load(Ordering::Relaxed),
             inclusive_ns: aggregate.inclusive_ns.load(Ordering::Relaxed),
@@ -454,8 +599,74 @@ pub fn jit_profile_snapshot() -> Vec<JitProfileSample> {
         })
         .filter(|sample| sample.calls > 0)
         .collect();
-    samples.sort_by_key(|sample| sample.function_id);
+    samples.sort_by_key(|sample| (sample.root, sample.function_id));
     samples
+}
+
+pub const STASIS_PERF_METRICS_VERSION_V1: u32 = 1;
+pub const STASIS_PERF_UNAVAILABLE: u32 = u32::MAX;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StasisPerformanceMetricsV1 {
+    pub version: u32,
+    pub size: u32,
+    pub tick_us: u32,
+    pub guest_render_us: u32,
+    pub host_replay_us: u32,
+    pub render_prep_us: u32,
+    pub gpu_submit_us: u32,
+    pub gpu_execution_us: u32,
+    pub frame_work_us: u32,
+    pub present_wait_us: u32,
+    pub commands: u32,
+    pub lines: u32,
+    pub rectangles: u32,
+    pub sprites: u32,
+    pub text: u32,
+    pub instances: u32,
+    pub batches: u32,
+    pub draw_calls: u32,
+    pub texture_switches: u32,
+    pub uploaded_bytes: u32,
+    pub backend: [u8; 16],
+}
+
+impl StasisPerformanceMetricsV1 {
+    fn unavailable() -> Self {
+        Self {
+            version: 0,
+            size: 0,
+            tick_us: STASIS_PERF_UNAVAILABLE,
+            guest_render_us: STASIS_PERF_UNAVAILABLE,
+            host_replay_us: STASIS_PERF_UNAVAILABLE,
+            render_prep_us: STASIS_PERF_UNAVAILABLE,
+            gpu_submit_us: STASIS_PERF_UNAVAILABLE,
+            gpu_execution_us: STASIS_PERF_UNAVAILABLE,
+            frame_work_us: STASIS_PERF_UNAVAILABLE,
+            present_wait_us: STASIS_PERF_UNAVAILABLE,
+            commands: STASIS_PERF_UNAVAILABLE,
+            lines: STASIS_PERF_UNAVAILABLE,
+            rectangles: STASIS_PERF_UNAVAILABLE,
+            sprites: STASIS_PERF_UNAVAILABLE,
+            text: STASIS_PERF_UNAVAILABLE,
+            instances: STASIS_PERF_UNAVAILABLE,
+            batches: STASIS_PERF_UNAVAILABLE,
+            draw_calls: STASIS_PERF_UNAVAILABLE,
+            texture_switches: STASIS_PERF_UNAVAILABLE,
+            uploaded_bytes: STASIS_PERF_UNAVAILABLE,
+            backend: [0; 16],
+        }
+    }
+
+    pub fn backend_name(&self) -> String {
+        let end = self
+            .backend
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(self.backend.len());
+        String::from_utf8_lossy(&self.backend[..end]).into_owned()
+    }
 }
 
 #[no_mangle]
@@ -469,8 +680,10 @@ pub extern "C" fn stasis_jit_profile_frame_enter(function_id: i32) {
         let mut state = state.borrow_mut();
         sync_jit_profile_generation(&mut state, generation);
         state.frames.push(JitProfileFrame {
+            root: JIT_PROFILE_ROOT.with(Cell::get),
             function_id: function_id as u32,
             generation,
+            profile_frame_id: JIT_PROFILE_CURRENT_FRAME.with(Cell::get),
             started,
             child_ns: 0,
         });
@@ -498,32 +711,44 @@ pub extern "C" fn stasis_jit_profile_frame_leave(function_id: i32) {
         if let Some(parent) = state.frames.last_mut() {
             parent.child_ns = parent.child_ns.saturating_add(inclusive_ns);
         }
-        let aggregate = if let Some(aggregate) = state.aggregate_cache.get(&frame.function_id) {
-            Arc::clone(aggregate)
+        let key = (frame.root, frame.function_id);
+        if let Some(frame_id) = frame.profile_frame_id {
+            let staged = state
+                .pending_frames
+                .entry(frame_id)
+                .or_default()
+                .entry(key)
+                .or_default();
+            staged.calls = staged.calls.saturating_add(1);
+            staged.inclusive_ns = staged.inclusive_ns.saturating_add(inclusive_ns);
+            staged.exclusive_ns = staged.exclusive_ns.saturating_add(exclusive_ns);
+            staged.max_inclusive_ns = staged.max_inclusive_ns.max(inclusive_ns);
         } else {
-            let mut aggregates = jit_profile_aggregates()
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let aggregate = Arc::clone(
-                aggregates
-                    .entry(frame.function_id)
-                    .or_insert_with(|| Arc::new(JitProfileAggregate::default())),
-            );
-            state
-                .aggregate_cache
-                .insert(frame.function_id, Arc::clone(&aggregate));
+            let aggregate = if let Some(aggregate) = state.aggregate_cache.get(&key) {
+                Arc::clone(aggregate)
+            } else {
+                let mut aggregates = jit_profile_aggregates()
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let aggregate = Arc::clone(
+                    aggregates
+                        .entry(key)
+                        .or_insert_with(|| Arc::new(JitProfileAggregate::default())),
+                );
+                state.aggregate_cache.insert(key, Arc::clone(&aggregate));
+                aggregate
+            };
+            aggregate.calls.fetch_add(1, Ordering::Relaxed);
             aggregate
-        };
-        aggregate.calls.fetch_add(1, Ordering::Relaxed);
-        aggregate
-            .inclusive_ns
-            .fetch_add(inclusive_ns, Ordering::Relaxed);
-        aggregate
-            .exclusive_ns
-            .fetch_add(exclusive_ns, Ordering::Relaxed);
-        aggregate
-            .max_inclusive_ns
-            .fetch_max(inclusive_ns, Ordering::Relaxed);
+                .inclusive_ns
+                .fetch_add(inclusive_ns, Ordering::Relaxed);
+            aggregate
+                .exclusive_ns
+                .fetch_add(exclusive_ns, Ordering::Relaxed);
+            aggregate
+                .max_inclusive_ns
+                .fetch_max(inclusive_ns, Ordering::Relaxed);
+        }
     });
 }
 
@@ -1544,6 +1769,8 @@ pub struct StasisGraphicsApi {
     stasis_host_bulk_apply_requests: usize,
     stasis_host_performance_metrics_enabled: usize,
     stasis_host_set_performance_metrics: usize,
+    stasis_host_set_performance_metrics_enabled: Option<usize>,
+    stasis_host_get_latest_performance_metrics_v1: Option<usize>,
     stasis_gfx_submit_u8: usize,
     stasis_gfx_set_sprite_atlas_page_size: Option<usize>,
     atlas_query_v1: Option<usize>,
@@ -1615,6 +1842,12 @@ impl StasisGraphicsApi {
             lib.symbol_address("stasis_host_set_performance_metrics")?;
         let stasis_host_performance_metrics_enabled =
             lib.symbol_address("stasis_host_performance_metrics_enabled")?;
+        let stasis_host_set_performance_metrics_enabled = lib
+            .symbol_address("stasis_host_set_performance_metrics_enabled")
+            .ok();
+        let stasis_host_get_latest_performance_metrics_v1 = lib
+            .symbol_address("stasis_host_get_latest_performance_metrics_v1")
+            .ok();
         let stasis_gfx_submit_u8 = lib.symbol_address("stasis_gfx_submit_u8")?;
         let stasis_gfx_set_sprite_atlas_page_size = lib
             .symbol_address("stasis_gfx_set_sprite_atlas_page_size")
@@ -1671,6 +1904,8 @@ impl StasisGraphicsApi {
             stasis_host_bulk_apply_requests,
             stasis_host_performance_metrics_enabled,
             stasis_host_set_performance_metrics,
+            stasis_host_set_performance_metrics_enabled,
+            stasis_host_get_latest_performance_metrics_v1,
             stasis_gfx_submit_u8,
             stasis_gfx_set_sprite_atlas_page_size,
             atlas_query_v1,
@@ -2190,6 +2425,67 @@ impl StasisGraphicsApi {
                 unsafe { std::mem::transmute(self.stasis_host_performance_metrics_enabled) };
             Ok(callback() != 0)
         }
+    }
+
+    pub fn host_set_performance_metrics_enabled(&self, enabled: bool) -> bool {
+        let Some(address) = self.stasis_host_set_performance_metrics_enabled else {
+            return false;
+        };
+        #[cfg(windows)]
+        {
+            let callback: extern "system" fn(i32) = unsafe { std::mem::transmute(address) };
+            callback(i32::from(enabled));
+        }
+        #[cfg(not(windows))]
+        {
+            let callback: extern "C" fn(i32) = unsafe { std::mem::transmute(address) };
+            callback(i32::from(enabled));
+        }
+        true
+    }
+
+    pub fn host_get_latest_performance_metrics_v1(
+        &self,
+    ) -> Result<Option<StasisPerformanceMetricsV1>, String> {
+        let Some(address) = self.stasis_host_get_latest_performance_metrics_v1 else {
+            return Ok(None);
+        };
+        let mut metrics = StasisPerformanceMetricsV1::unavailable();
+        #[cfg(windows)]
+        let status = {
+            let callback: extern "system" fn(*mut StasisPerformanceMetricsV1, usize) -> i32 =
+                unsafe { std::mem::transmute(address) };
+            callback(
+                &mut metrics,
+                std::mem::size_of::<StasisPerformanceMetricsV1>(),
+            )
+        };
+        #[cfg(not(windows))]
+        let status = {
+            let callback: extern "C" fn(*mut StasisPerformanceMetricsV1, usize) -> i32 =
+                unsafe { std::mem::transmute(address) };
+            callback(
+                &mut metrics,
+                std::mem::size_of::<StasisPerformanceMetricsV1>(),
+            )
+        };
+        if status == 0 {
+            return Err("runtime rejected the v1 performance metrics snapshot request".to_string());
+        }
+        let expected_size = std::mem::size_of::<StasisPerformanceMetricsV1>();
+        if metrics.version != STASIS_PERF_METRICS_VERSION_V1 {
+            return Err(format!(
+                "runtime returned performance metrics version {} (expected {})",
+                metrics.version, STASIS_PERF_METRICS_VERSION_V1
+            ));
+        }
+        if usize::try_from(metrics.size).unwrap_or(0) < expected_size {
+            return Err(format!(
+                "runtime returned performance metrics size {} (expected at least {expected_size})",
+                metrics.size
+            ));
+        }
+        Ok(Some(metrics))
     }
 
     pub fn gfx_submit_u8(
@@ -9813,6 +10109,165 @@ mod tests {
 
         reset_jit_profile();
         assert!(jit_profile_snapshot().is_empty());
+    }
+
+    #[test]
+    fn jit_profiler_keeps_tick_and_render_roots_separate_and_restores_scope() {
+        let _lock = test_lock();
+        enable_jit_profiler();
+        {
+            let frame = JitProfileFrameGuard::enter(1);
+            let _tick = JitProfileRootGuard::enter(JitProfileRoot::Tick);
+            for _ in 0..2 {
+                stasis_jit_profile_frame_enter(44);
+                std::hint::black_box(44);
+                stasis_jit_profile_frame_leave(44);
+            }
+            drop(_tick);
+            let frame_samples = frame.commit();
+            assert_eq!(frame_samples.len(), 1);
+            assert_eq!(frame_samples[0].root, JitProfileRoot::Tick);
+            assert_eq!(frame_samples[0].calls, 2);
+            assert!(frame_samples[0].inclusive_ns > 0);
+        }
+        assert_eq!(JIT_PROFILE_ROOT.with(Cell::get), JitProfileRoot::Unscoped);
+        {
+            let frame = JitProfileFrameGuard::enter(2);
+            let _render = JitProfileRootGuard::enter(JitProfileRoot::Render);
+            stasis_jit_profile_frame_enter(44);
+            std::hint::black_box(44);
+            stasis_jit_profile_frame_leave(44);
+            drop(_render);
+            let frame_samples = frame.commit();
+            assert_eq!(frame_samples.len(), 1);
+            assert_eq!(frame_samples[0].root, JitProfileRoot::Render);
+            assert_eq!(frame_samples[0].calls, 1);
+            assert!(frame_samples[0].inclusive_ns > 0);
+        }
+        disable_jit_profiler();
+
+        let samples = jit_profile_snapshot();
+        let tick = samples
+            .iter()
+            .find(|sample| sample.root == JitProfileRoot::Tick && sample.function_id == 44)
+            .expect("tick helper sample");
+        let render = samples
+            .iter()
+            .find(|sample| sample.root == JitProfileRoot::Render && sample.function_id == 44)
+            .expect("render helper sample");
+        assert_eq!(tick.calls, 2);
+        assert_eq!(render.calls, 1);
+        assert!(tick.inclusive_ns > 0);
+        assert!(render.inclusive_ns > 0);
+        reset_jit_profile();
+    }
+
+    #[test]
+    fn jit_profiler_discards_function_costs_for_uncommitted_frame() {
+        let _lock = test_lock();
+        enable_jit_profiler();
+        {
+            let _frame = JitProfileFrameGuard::enter(7);
+            let _root = JitProfileRootGuard::enter(JitProfileRoot::Tick);
+            stasis_jit_profile_frame_enter(55);
+            std::hint::black_box(55);
+            stasis_jit_profile_frame_leave(55);
+        }
+        assert!(jit_profile_snapshot().is_empty());
+
+        {
+            let frame = JitProfileFrameGuard::enter(8);
+            let _root = JitProfileRootGuard::enter(JitProfileRoot::Render);
+            stasis_jit_profile_frame_enter(55);
+            std::hint::black_box(55);
+            stasis_jit_profile_frame_leave(55);
+            let frame_samples = frame.commit();
+            assert_eq!(frame_samples.len(), 1);
+            assert_eq!(frame_samples[0].root, JitProfileRoot::Render);
+        }
+        disable_jit_profiler();
+        let samples = jit_profile_snapshot();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].root, JitProfileRoot::Render);
+        assert_eq!(samples[0].function_id, 55);
+        assert_eq!(samples[0].calls, 1);
+        assert!(samples[0].inclusive_ns > 0);
+        reset_jit_profile();
+    }
+
+    #[test]
+    fn committing_inner_profile_frame_restores_outer_frame_scope() {
+        let _lock = test_lock();
+        enable_jit_profiler();
+        let outer = JitProfileFrameGuard::enter(100);
+        let _root = JitProfileRootGuard::enter(JitProfileRoot::Tick);
+        let inner = JitProfileFrameGuard::enter(101);
+        stasis_jit_profile_frame_enter(60);
+        std::hint::black_box(60);
+        stasis_jit_profile_frame_leave(60);
+        let inner_samples = inner.commit();
+        assert_eq!(inner_samples.len(), 1);
+        assert_eq!(
+            JIT_PROFILE_CURRENT_FRAME.with(Cell::get),
+            Some(100),
+            "commit must restore the enclosing staged frame before returning"
+        );
+
+        stasis_jit_profile_frame_enter(61);
+        std::hint::black_box(61);
+        stasis_jit_profile_frame_leave(61);
+        let outer_samples = outer.commit();
+        assert_eq!(outer_samples.len(), 1);
+        assert_eq!(outer_samples[0].function_id, 61);
+        assert!(JIT_PROFILE_STATE.with(|state| state.borrow().pending_frames.is_empty()));
+        disable_jit_profiler();
+        let samples = jit_profile_snapshot();
+        assert_eq!(samples.len(), 2);
+        assert!(samples.iter().any(|sample| sample.function_id == 60));
+        assert!(samples.iter().any(|sample| sample.function_id == 61));
+        reset_jit_profile();
+    }
+
+    #[test]
+    fn performance_metrics_v1_rust_layout_matches_native_header_contract() {
+        use std::mem::{offset_of, size_of};
+
+        assert_eq!(STASIS_PERF_METRICS_VERSION_V1, 1);
+        assert_eq!(STASIS_PERF_UNAVAILABLE, u32::MAX);
+        assert_eq!(size_of::<StasisPerformanceMetricsV1>(), 96);
+        assert_eq!(
+            [
+                offset_of!(StasisPerformanceMetricsV1, version),
+                offset_of!(StasisPerformanceMetricsV1, size),
+                offset_of!(StasisPerformanceMetricsV1, tick_us),
+                offset_of!(StasisPerformanceMetricsV1, guest_render_us),
+                offset_of!(StasisPerformanceMetricsV1, host_replay_us),
+                offset_of!(StasisPerformanceMetricsV1, render_prep_us),
+                offset_of!(StasisPerformanceMetricsV1, gpu_submit_us),
+                offset_of!(StasisPerformanceMetricsV1, gpu_execution_us),
+                offset_of!(StasisPerformanceMetricsV1, frame_work_us),
+                offset_of!(StasisPerformanceMetricsV1, present_wait_us),
+                offset_of!(StasisPerformanceMetricsV1, commands),
+                offset_of!(StasisPerformanceMetricsV1, lines),
+                offset_of!(StasisPerformanceMetricsV1, rectangles),
+                offset_of!(StasisPerformanceMetricsV1, sprites),
+                offset_of!(StasisPerformanceMetricsV1, text),
+                offset_of!(StasisPerformanceMetricsV1, instances),
+                offset_of!(StasisPerformanceMetricsV1, batches),
+                offset_of!(StasisPerformanceMetricsV1, draw_calls),
+                offset_of!(StasisPerformanceMetricsV1, texture_switches),
+                offset_of!(StasisPerformanceMetricsV1, uploaded_bytes),
+                offset_of!(StasisPerformanceMetricsV1, backend),
+            ],
+            [0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80]
+        );
+        let header = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../runtime/stasis_performance_metrics.h"
+        ));
+        assert!(header.contains("#define STASIS_PERF_METRICS_VERSION 1u"));
+        assert!(header.contains("#define STASIS_PERF_UNAVAILABLE UINT32_MAX"));
+        assert!(header.contains("char backend[STASIS_PERF_BACKEND_MAX];"));
     }
 
     #[test]

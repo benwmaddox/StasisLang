@@ -38,3 +38,12 @@ performance timing and body-dataset telemetry continue to update while it is
 hidden. Release packages do not include the HUD. Desktop uses **F3**, Android
 keeps its three-finger toggle, and iOS uses the same three-finger gesture in the
 shared SDL event path.
+
+Desktop `stasis play --profile-output` exports the same v1 native phase snapshot
+for each metrics-published submission attempt. Those rows share a frame ID with
+the guest tick/render sample; publication records that the runtime finished a
+metrics sample, not that presentation succeeded. A failed `SDL_RenderPresent`
+can still publish a row, so consumers should read `frame_semantics` in the JSON
+report. `present_wait` remains separate from `frame_work`. The profiler resets
+and requests each sample independently of the visible HUD; toggling the HUD
+does not preserve hidden CLI profiling collection after its window ends.

@@ -11383,6 +11383,7 @@ function main(): i32 { return read(0); }
 
     #[test]
     fn selectively_profiled_jit_reports_only_named_functions() {
+        // JitProcess::new holds the shared test guard through this profiler's lifetime.
         let mut process = JitProcess::new();
         process
             .set_profile_functions(vec!["helper".to_string()])
@@ -11414,6 +11415,93 @@ function main(): i32 { return read(0); }
         assert_eq!(samples[0].function_id, helper_id);
         assert_eq!(samples[0].calls, 2);
         assert!(samples[0].inclusive_ns >= samples[0].exclusive_ns);
+        stasis_dynload::reset_jit_profile();
+    }
+
+    #[test]
+    fn selectively_profiled_jit_shared_helper_costs_are_separate_under_tick_and_render_roots() {
+        // JitProcess::new holds the shared test guard through this profiler's lifetime.
+        let mut process = JitProcess::new();
+        process
+            .set_profile_functions(vec![
+                "tick".to_string(),
+                "render".to_string(),
+                "shared_helper".to_string(),
+            ])
+            .expect("configure tick/render profiler roots and shared helper");
+        process.upsert_file(
+            "fixtures/tick_render_shared_helper.stasis",
+            include_str!(
+                "../../../../tests/fixtures/performance_profile/tick_render_shared_helper.stasis"
+            ),
+        );
+        process.compile().expect("compile shared-helper fixture");
+        let snapshot = process.program_snapshot().expect("program snapshot");
+        let functions = snapshot
+            .functions()
+            .iter()
+            .map(|function| (function.name.as_str(), function.id))
+            .collect::<BTreeMap<_, _>>();
+
+        stasis_dynload::enable_jit_profiler();
+        let frame = stasis_dynload::JitProfileFrameGuard::enter(1);
+        {
+            let _tick =
+                stasis_dynload::JitProfileRootGuard::enter(stasis_dynload::JitProfileRoot::Tick);
+            assert_eq!(
+                process
+                    .execute_i32_noarg_by_name("tick")
+                    .expect("guest tick"),
+                0
+            );
+        }
+        {
+            let _render =
+                stasis_dynload::JitProfileRootGuard::enter(stasis_dynload::JitProfileRoot::Render);
+            assert_eq!(
+                process
+                    .execute_i32_noarg_by_name("render")
+                    .expect("guest render"),
+                0
+            );
+        }
+        let frame_samples = frame.commit();
+        stasis_dynload::disable_jit_profiler();
+
+        let helper_id = functions["shared_helper"];
+        let tick_helper = frame_samples
+            .iter()
+            .find(|sample| {
+                sample.root == stasis_dynload::JitProfileRoot::Tick
+                    && sample.function_id == helper_id
+            })
+            .expect("tick shared-helper cost");
+        let render_helper = frame_samples
+            .iter()
+            .find(|sample| {
+                sample.root == stasis_dynload::JitProfileRoot::Render
+                    && sample.function_id == helper_id
+            })
+            .expect("render shared-helper cost");
+        assert_eq!(tick_helper.calls, 2);
+        assert_eq!(render_helper.calls, 1);
+        assert!(tick_helper.inclusive_ns > 0);
+        assert!(render_helper.inclusive_ns > 0);
+
+        let aggregate_samples = stasis_dynload::jit_profile_snapshot();
+        for (root, name, calls) in [
+            (stasis_dynload::JitProfileRoot::Tick, "tick", 1),
+            (stasis_dynload::JitProfileRoot::Render, "render", 1),
+            (stasis_dynload::JitProfileRoot::Tick, "shared_helper", 2),
+            (stasis_dynload::JitProfileRoot::Render, "shared_helper", 1),
+        ] {
+            let sample = aggregate_samples
+                .iter()
+                .find(|sample| sample.root == root && sample.function_id == functions[name])
+                .unwrap_or_else(|| panic!("missing {root:?} profile for {name}"));
+            assert_eq!(sample.calls, calls, "{root:?} {name} call count");
+            assert!(sample.inclusive_ns > 0, "{root:?} {name} timing");
+        }
         stasis_dynload::reset_jit_profile();
     }
 
