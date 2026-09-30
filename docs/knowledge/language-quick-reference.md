@@ -2,56 +2,36 @@
 
 <!-- tags: syntax, types, views, generics, effects, imports -->
 
-This is a project-local orientation to the supported Stasis surface, not a
-replacement for compiler diagnostics. Start with the [compiled example](examples/src/feature_reference.stasis)
-and its [test](examples/tests/feature_reference.test.stasis). The source and
-compiler shipped with this vendor snapshot define the exact available forms.
+The [example](examples/src/feature_reference.stasis) and
+[test](examples/tests/feature_reference.test.stasis) compile with this bundle.
 
-## Storage and types
+## Storage
 
-`i32`, `u8`, `u16`, `u32`, `f32`, `f64`, and `bool` are scalar types; `void` is a
-return type. `Type[N]`, `ascii[N]`, and `utf8[N]` own bounded storage. `Type[]`,
-`ascii[]`, and `utf8[]` are views of caller-owned storage. A fixed array's
-capacity does not imply a live element count: store and check that count
-explicitly. Struct fields cannot retain borrowed views. A named struct or an
-array of named structs cannot be returned by value; pass a destination to a
-function instead. `string` is a UTF-8 string view; use owned `utf8[N]` when
-state must retain bytes. Function-local primitive scalar arrays are
-zero-initialized each time their declaration executes.
+- Scalars: `i32`, `u8`, `u16`, `u32`, `f32`, `f64`, `bool`; return type: `void`.
+- `Type[N]`, `ascii[N]`, and `utf8[N]` own bounded storage. Track live array
+  occupancy with an explicit count.
+- `Type[]`, `ascii[]`, `utf8[]`, and `string` are caller-backed views. Struct
+  fields cannot retain views; use owned buffers for persistent text.
+- Pass a destination for named-struct results; named structs and arrays of
+  named structs cannot be returned by value.
+- Local primitive scalar arrays are zero-initialized when their declaration
+  executes. `global` owns persistent state; `let` is local; `const` is constant.
 
-The example owns its values in a global generic struct:
+Generic parameters belong to structs; functions infer them from their first
+struct parameter. See [bounded collections](bounded-collections.md).
 
-```stasis
-struct ScoreBuffer<T: type, N: i32> {
-    count: i32;
-    values: T[N];
-}
-```
+## Expressions and calls
 
-Type and value parameters are declared on the struct. A function may infer
-them from its first concrete struct parameter. There is no runtime type value,
-heap allocation, or function-owned `function f<T>` syntax. See
-[bounded collections](bounded-collections.md) before choosing a container.
+Use infix arithmetic, comparison, and assignment. `&&` and `||` short-circuit.
+Receiver calls such as `buffer.capacity()` and `capacity(buffer)` select the
+same function when resolution agrees. Use `if`/`else`, complete three-part
+`for` loops, supported `foreach` sources, `continue`, and `return`.
 
-## Expressions, calls, and control flow
+`to_*` conversions return values; `from_*` conversions mutate the destination.
+Unsigned arithmetic wraps. For strict cross-target deterministic math, use
+fixed-point intrinsics; ordinary floats have no cross-architecture bit guarantee.
 
-Arithmetic, comparisons, and assignment use infix operators. `&&` and `||`
-short-circuit. Calls may be written as `buffer.capacity()` or
-`capacity(buffer)` when the receiver resolves to the same function. `let`
-introduces a local, `global` owns persistent simulation state, and `const`
-names a compile-time value. Use `if`/`else`, complete three-part `for` loops,
-`foreach` where the source type supports it, `continue`, and `return`.
-
-Imports resolve from the current module or from a project-root path such as
-`/vendor/stasis/stdlib/graphics.stasis`. Use the latter for public vendor APIs.
-Put tests in `.test.stasis` files. The [testing guide](testing.md) shows
-parameterless test declarations and narrow `@effects(...)` contracts.
-
-Conversions are explicit. `to_*` helpers return values; `from_*` helpers mutate
-the destination. Unsigned arithmetic wraps within its width. Ordinary floating
-point arithmetic is not promised bit-identical across architectures; use the
-fixed-point intrinsics when strict cross-target replay math is required.
-
-Run `stasis fmt --check`, `stasis check`, and `stasis test` on the project after
-changing source. `check` catches unsupported combinations rather than silently
-providing a substitute implementation.
+Import project-local modules relatively and public vendor APIs with paths such
+as `/vendor/stasis/stdlib/graphics.stasis`. Keep tests in `.test.stasis` files;
+see [testing](testing.md) for results and `@effects(...)`. Validate source with
+`stasis fmt --check`, `stasis check`, and `stasis test`.
