@@ -53,27 +53,40 @@ case "$(uname -s)" in
     ;;
   Darwin)
     test -x "$package/network_smoke.app/Contents/MacOS/network_smoke"
+    executable="$package/network_smoke.app/Contents/MacOS/network_smoke"
     dylib="$package/network_smoke.app/Contents/Frameworks/libstasis_network.dylib"
     app="$package/network_smoke.app"
+    header="$package/network_smoke.host_exports.h"
     test -f "$dylib"
-    otool -L "$package/network_smoke.app/Contents/MacOS/network_smoke" | grep -q 'libstasis_network.dylib'
+    test -f "$header"
+    if find "$app" -type f -name '*.h' | grep -q .; then
+      echo "generated headers must not be staged inside the signed app bundle" >&2
+      exit 1
+    fi
+    otool -L "$executable" | grep -q 'libstasis_network.dylib'
     otool -D "$dylib" | grep -Fxq '@rpath/libstasis_network.dylib'
-    otool -l "$package/network_smoke.app/Contents/MacOS/network_smoke" |
+    otool -l "$executable" |
       grep -A2 LC_RPATH | grep -Fq '@executable_path/../Frameworks'
+    codesign --verify --strict "$executable"
     codesign --verify --strict "$dylib"
     codesign --verify --strict "$app"
-    python3 - "$STASIS_SIGN_ORDER_LOG" "$dylib" "$app" <<'PYTHON'
+    python3 - "$STASIS_SIGN_ORDER_LOG" "$executable" "$dylib" "$app" <<'PYTHON'
 from pathlib import Path
 import sys
 order = Path(sys.argv[1]).read_text().splitlines()
-expected = [str(Path(sys.argv[2])), str(Path(sys.argv[3]))]
+executable = str(Path(sys.argv[2]))
+expected = [str(Path(sys.argv[3])), str(Path(sys.argv[4]))]
+if executable not in order[:-1]:
+    raise SystemExit(f"production signer did not sign the Mach-O executable: {order}")
+if any(Path(path).suffix == ".h" for path in order):
+    raise SystemExit(f"production signer received a generated header: {order}")
 if order[-2:] != expected:
     raise SystemExit(f"production nested signing order differs: {order}")
 PYTHON
     /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' \
       "$package/network_smoke.app/Contents/Info.plist"
     python3 tools/ci/test_linux_desktop_network_package.py \
-      --executable "$package/network_smoke.app/Contents/MacOS/network_smoke" \
+      --executable "$executable" \
       --result "$workspace/result.json"
     ;;
   *) echo "unsupported native desktop package target" >&2; exit 1 ;;

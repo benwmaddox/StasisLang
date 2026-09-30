@@ -5146,7 +5146,7 @@ fn package_engine_bundle_monolithic_desktop(
     )?;
     std::fs::copy(
         aot_root.join("stasis_host_exports.h"),
-        output_exe.with_extension("host_exports.h"),
+        published_host_exports_header_path(output_exe, cfg!(target_os = "macos"))?,
     )
     .map_err(|error| format!("failed to publish host export header: {error}"))?;
     let replay_identity_header = aot_root.join("published_replay_identity.h");
@@ -5365,6 +5365,28 @@ fn packaged_runner_layout(
         info_plist: Some(contents.join("Info.plist")),
         app_bundle: Some(bundle),
     })
+}
+
+fn published_host_exports_header_path(
+    output_exe: &Path,
+    macos_bundle: bool,
+) -> Result<PathBuf, String> {
+    if !macos_bundle {
+        return Ok(output_exe.with_extension("host_exports.h"));
+    }
+    let macos_dir = output_exe
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "MacOS"))
+        .ok_or_else(|| format!("invalid macOS executable path {}", output_exe.display()))?;
+    let contents = macos_dir
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "Contents"))
+        .ok_or_else(|| format!("invalid macOS executable path {}", output_exe.display()))?;
+    let app_bundle = contents
+        .parent()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "app"))
+        .ok_or_else(|| format!("invalid macOS app bundle for {}", output_exe.display()))?;
+    Ok(app_bundle.with_extension("host_exports.h"))
 }
 
 fn xml_text(value: &str) -> String {
@@ -6409,6 +6431,16 @@ mod tests {
         assert_eq!(
             layout.executable,
             PathBuf::from("dist/ChessTD.app/Contents/MacOS/ChessTD")
+        );
+        assert_eq!(
+            published_host_exports_header_path(&layout.executable, true)
+                .expect("macOS host export header"),
+            PathBuf::from("dist/ChessTD.host_exports.h")
+        );
+        assert_eq!(
+            published_host_exports_header_path(Path::new("dist/ChessTD.exe"), false)
+                .expect("flat host export header"),
+            PathBuf::from("dist/ChessTD.host_exports.h")
         );
     }
 

@@ -15073,10 +15073,12 @@ mod tests {
             .expect("create desktop network library directory");
         fs::create_dir_all(header.parent().expect("header parent"))
             .expect("create desktop network include directory");
-        fs::write(&library, b"official desktop network library")
-            .expect("write desktop network library");
-        fs::write(&runtime_library, b"official desktop network runtime")
-            .expect("write desktop network runtime");
+        let official_library = b"official desktop network library";
+        fs::write(&library, official_library).expect("write desktop network library");
+        if runtime_library != library {
+            fs::write(&runtime_library, b"official desktop network runtime")
+                .expect("write desktop network runtime");
+        }
         fs::write(&header, b"official desktop network header")
             .expect("write desktop network header");
         let error = authenticate_bundled_desktop_network_artifacts_with_provenance(
@@ -15186,8 +15188,7 @@ mod tests {
         let error = verify_release_provenance(&manifest_path)
             .expect_err("reject substituted desktop network library");
         assert!(error.contains("desktop network artifact hash mismatch"));
-        fs::write(&library, b"official desktop network library")
-            .expect("restore desktop network library");
+        fs::write(&library, official_library).expect("restore desktop network library");
 
         let mut unrecorded_manifest = network_manifest.clone();
         unrecorded_manifest["desktop_network_artifacts"]
