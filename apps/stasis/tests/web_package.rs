@@ -851,6 +851,9 @@ fn network_web_package_embeds_retained_nested_assets_only() {
     )
     .expect("parse fixture project manifest");
     project["capabilities"] = serde_json::json!({"network": true});
+    project["libraries"] = serde_json::json!({
+        "selections": {"stasis.network": {"features": ["host"]}}
+    });
     project["web"] = serde_json::json!({
         "entry": "main.stasis",
         "loading_font": "/assets/fonts/loading.ttf"

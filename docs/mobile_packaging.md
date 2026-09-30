@@ -128,6 +128,11 @@ From the generated `android/` directory run `gradle :app:assembleDebug` or
 shared runtime, links the generated AOT objects, and packages
 `assets/stasis_game`. No vcpkg installation is used.
 
+Manifest-v3 explicit `stasis.network` selections stage the versioned
+`libstasis_network_v1.so` as a normal Android dependency. Manifest-v1/v2 network capabilities keep
+the legacy `libstasis_network.a` static link and the exact pre-v3 package receipt schema; upgrading
+delivery format requires upgrading the manifest and adding an explicit library selection.
+
 The SDL shell preserves the logical dimensions requested by the game while
 rendering into the device's native drawable surface. Original SVG files remain
 in the packaged assets and are rasterized locally for the ratio between the
@@ -190,8 +195,9 @@ Device arm64 is the v1 target; simulator and multi-architecture packaging are in
 of scope. The manual `tools/ci/build_ios_package.sh` helper can be run on macOS
 with code signing disabled; it builds `samples/mobile_storage_link` and verifies
 the arm64 executable, embedded SDL frameworks, packaged assets and provenance,
-and absence of Stasis source. GitHub Actions no longer runs an iOS build lane. A
-signed device install still requires the developer's `DEVELOPMENT_TEAM` and
+and absence of Stasis source. The network acceptance workflow builds both iOS
+device and arm64-simulator network archives on macOS, but does not produce a
+signed app. A signed device install still requires the developer's `DEVELOPMENT_TEAM` and
 provisioning profile.
 
 iOS uses the immutable app-bundle asset tree directly and has no Android-style
@@ -207,7 +213,8 @@ generated package metadata uses iOS paths and defines `STASIS_NETWORK_ENABLED=1`
 non-network packages contain none of those references.
 
 Official toolchain archives resolve network libraries relative to the installed
-executable from `mobile/network/<target>/libstasis_network.a` and the shared
+executable from `mobile/network/<target>/libstasis_network_v1.so` on Android (iOS keeps its
+platform-required static archive) and the shared
 `mobile/network/include/stasis_network.h`; they do not depend on the source
 checkout used to build the compiler. Source-tree Cargo builds retain a
 development fallback. Nightly Linux and Windows release archives publish the
@@ -219,6 +226,10 @@ Nightly archives receive Android support files from a fail-closed, pinned
 mobile-network build job using Android NDK 27.0.12077973/API 26 before archive
 provenance is generated. Android packaging from an official toolchain therefore
 does not need the Stasis source checkout or Cargo to build the network library.
+The Android object has SONAME `libstasis_network_v1.so`. Release APK auditing requires
+the object only when host or client networking is enabled, forbids it offline, proves
+the ELF machine matches the sole packaged ABI, verifies every `PT_LOAD` segment for
+16 KiB alignment, and verifies the stored APK entry begins at a 16 KiB boundary.
 
 The network shell requests `NSLocalNetworkUsageDescription` with a clear nearby
 friends explanation. v1 uses direct TCP/unicast and does not request Bonjour,

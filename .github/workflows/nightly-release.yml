@@ -108,11 +108,13 @@ jobs:
               "CC_${target}=${clang}" \
               "CXX_${target}=${clang}" \
               "CFLAGS_${target}=--target=${api_target}" \
-              RUSTFLAGS="-C link-arg=--target=${api_target}" \
+              RUSTFLAGS="-C link-arg=--target=${api_target} -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-soname,libstasis_network_v1.so" \
               cargo build -p stasis_network --target "${target}" --release
           done
-          cp target/aarch64-linux-android/release/libstasis_network.a network-artifact/android-arm64/
-          cp target/x86_64-linux-android/release/libstasis_network.a network-artifact/android-x86_64/
+          cp target/aarch64-linux-android/release/libstasis_network.so network-artifact/android-arm64/libstasis_network_v1.so
+          cp target/x86_64-linux-android/release/libstasis_network.so network-artifact/android-x86_64/libstasis_network_v1.so
+          cp target/aarch64-linux-android/release/libstasis_network.a network-artifact/android-arm64/libstasis_network.a
+          cp target/x86_64-linux-android/release/libstasis_network.a network-artifact/android-x86_64/libstasis_network.a
 
       - name: Upload immutable mobile network support
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -335,10 +337,13 @@ jobs:
           test -f mobile/android-runtime/arm64-v8a/manifest.json
           cp -R mobile/android-runtime "${out}/mobile/"
           test -f mobile/network/include/stasis_network.h
+          test -f mobile/network/android-arm64/libstasis_network_v1.so
+          test -f mobile/network/android-x86_64/libstasis_network_v1.so
           test -f mobile/network/android-arm64/libstasis_network.a
           test -f mobile/network/android-x86_64/libstasis_network.a
           cp -R mobile/network "${out}/mobile/"
           mkdir -p "${out}/desktop/network/linux-x86_64" "${out}/desktop/network/include"
+          cp "build/codex-cargo-target/${{ matrix.rust_target }}/release/libstasis_network.so" "${out}/desktop/network/linux-x86_64/"
           cp "build/codex-cargo-target/${{ matrix.rust_target }}/release/libstasis_network.a" "${out}/desktop/network/linux-x86_64/"
           cp crates/stasis_network/include/stasis_network.h "${out}/desktop/network/include/"
           mkdir -p "${out}/runtime"
@@ -399,6 +404,8 @@ jobs:
           Copy-Item mobile/android-runtime "$out/mobile/" -Recurse -Force
           @(
             "mobile/network/include/stasis_network.h",
+            "mobile/network/android-arm64/libstasis_network_v1.so",
+            "mobile/network/android-x86_64/libstasis_network_v1.so",
             "mobile/network/android-arm64/libstasis_network.a",
             "mobile/network/android-x86_64/libstasis_network.a"
           ) | ForEach-Object {
@@ -406,7 +413,8 @@ jobs:
           }
           Copy-Item mobile/network "$out/mobile/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/desktop/network/windows-x86_64", "$out/desktop/network/include" | Out-Null
-          Copy-Item "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.lib" "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
+          Copy-Item -Path "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.dll", "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.dll.lib" -Destination "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
+          Copy-Item -Path "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.lib" -Destination "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
           Copy-Item crates/stasis_network/include/stasis_network.h "$out/desktop/network/include/" -ErrorAction Stop
           Copy-Item "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis-network-supervise.exe" "$out/" -ErrorAction Stop
           Copy-Item tools/diagnose_desktop_network.ps1 "$out/tools/" -ErrorAction Stop
@@ -520,12 +528,13 @@ jobs:
             if (-not (Test-Path "cli-smoke/dist/ios/ios/StasisMobile.xcodeproj/project.pbxproj")) { throw "iOS mobile shell missing" }
             $networkManifest = Get-Content "cli-smoke/stasis.json" -Raw | ConvertFrom-Json
             $networkManifest | Add-Member -Force -MemberType NoteProperty -Name capabilities -Value ([pscustomobject]@{ network = $true })
+            $networkManifest | Add-Member -Force -MemberType NoteProperty -Name libraries -Value ([pscustomobject]@{ selections = [pscustomobject]@{ 'stasis.network' = [pscustomobject]@{ features = @('host') } } })
             $networkManifest | Add-Member -Force -MemberType NoteProperty -Name web -Value ([pscustomobject]@{ entry = "src/main.stasis" })
             $networkManifest | ConvertTo-Json -Depth 8 | Set-Content "cli-smoke/stasis.json"
             .\stasis.exe --workspace cli-smoke package-mobile --target android-arm64 --out dist/network-android
             $networkReceipt = Get-Content "cli-smoke/dist/network-android/stasis_mobile_package.json" -Raw | ConvertFrom-Json
             if (-not $networkReceipt.network) { throw "network Android receipt did not enable network" }
-            if (-not (Test-Path "cli-smoke/dist/network-android/android/app/src/main/cpp/network/libstasis_network.a")) { throw "bundled Android network library missing" }
+            if (-not (Test-Path "cli-smoke/dist/network-android/android/app/src/main/cpp/network/libstasis_network_v1.so")) { throw "bundled Android network shared library missing" }
             if (-not (Test-Path "cli-smoke/dist/network-android/android/app/src/main/cpp/network/include/stasis_network.h")) { throw "bundled Android network header missing" }
             if (-not (Test-Path "cli-smoke/dist/network-android/android/app/src/main/assets/stasis_game/network_guest.bundle")) { throw "Android guest bundle missing" }
             $networkIosError = .\stasis.exe --workspace cli-smoke package-mobile --target ios-arm64 --out dist/network-ios 2>&1
@@ -623,6 +632,9 @@ jobs:
           path = Path("cli-smoke/stasis.json")
           manifest = json.loads(path.read_text())
           manifest["capabilities"] = {"network": True}
+          manifest["libraries"] = {
+              "selections": {"stasis.network": {"features": ["host"]}}
+          }
           manifest["web"] = {"entry": "src/main.stasis"}
           path.write_text(json.dumps(manifest, indent=2) + "\n")
           PY
@@ -634,7 +646,7 @@ jobs:
             python3 "${repo_root}/tools/ci/test_linux_desktop_network_package.py" --executable cli-smoke/dist/network-desktop/ci_smoke --result cli-smoke/network-desktop-result.json
           fi
           ./bin/stasis --workspace cli-smoke package-mobile --target android-arm64 --out dist/network-android
-          test -f cli-smoke/dist/network-android/android/app/src/main/cpp/network/libstasis_network.a
+          test -f cli-smoke/dist/network-android/android/app/src/main/cpp/network/libstasis_network_v1.so
           test -f cli-smoke/dist/network-android/android/app/src/main/cpp/network/include/stasis_network.h
           test -f cli-smoke/dist/network-android/android/app/src/main/assets/stasis_game/network_guest.bundle
           set +e
@@ -893,7 +905,11 @@ jobs:
           import json, pathlib, sys
           path = pathlib.Path(sys.argv[1])
           value = json.loads(path.read_text())
+          value["manifest_version"] = 3
           value["capabilities"] = {"network": True}
+          value["libraries"] = {
+              "selections": {"stasis.network": {"features": ["host"]}}
+          }
           value["web"] = {"entry": value["entry"]}
           path.write_text(json.dumps(value, indent=2) + "\n")
           PY
@@ -902,12 +918,18 @@ jobs:
           import json, pathlib, sys
           path = pathlib.Path(sys.argv[1])
           value = json.loads(path.read_text())
+          value["manifest_version"] = 3
           value["capabilities"] = {"network_client": True}
+          value["libraries"] = {
+              "selections": {"stasis.network": {"features": ["client"]}}
+          }
           value.pop("web", None)
           path.write_text(json.dumps(value, indent=2) + "\n")
           PY
           "${toolchain}" --workspace "${sample}" package-mobile --target android-arm64 --out dist/prebuilt-client
           package_finished="$(date +%s)"
+          readelf="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          test -x "${readelf}"
           for variant in offline host client; do
             root="${sample}/dist/prebuilt-${variant}"
             grep -Fq 'set(STASIS_ANDROID_RUNTIME_MODE "prebuilt")' "${root}/android/app/src/main/cpp/CMakeLists.txt"
@@ -919,7 +941,11 @@ jobs:
             gradle -p "${root}/android" :app:assembleDebug --no-daemon --max-workers=2 --console=plain
             apk="${root}/android/app/build/outputs/apk/debug/app-debug.apk"
             test -f "${apk}"
-            python3 tools/ci/check_android_release_package.py --abi arm64-v8a --required-asset "" "${apk}"
+            network_audit=()
+            if [[ "${variant}" != "offline" ]]; then
+              network_audit=(--network-enabled --readelf "${readelf}")
+            fi
+            python3 tools/ci/check_android_release_package.py --abi arm64-v8a --required-asset "" "${network_audit[@]}" "${apk}"
             "${ANDROID_SDK_ROOT:-${ANDROID_HOME}}/build-tools/35.0.0/apksigner" verify --verbose "${apk}"
           done
           build_finished="$(date +%s)"

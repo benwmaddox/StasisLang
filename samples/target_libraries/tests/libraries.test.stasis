@@ -1,0 +1,3 @@
+test `host target resolves dual role`(): bool {
+    return project_library_stasis_network_available() && project_library_stasis_network_feature_host() && project_library_stasis_network_feature_client();
+}

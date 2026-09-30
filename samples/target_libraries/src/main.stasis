@@ -1,0 +1,20 @@
+function main(): i32 {
+    if (!project_library_stasis_network_available()) {
+        return 1;
+    }
+    if (!project_library_stasis_network_feature_host()) {
+        return 2;
+    }
+    if (!project_library_stasis_network_feature_client()) {
+        return 3;
+    }
+    return 0;
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function render(): i32 {
+    return 0;
+}

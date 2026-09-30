@@ -41,14 +41,19 @@ def main():
     cargo_target = ROOT / "target" / "android-network-client"
     env["CARGO_TARGET_DIR"] = str(cargo_target)
     env["CARGO_TARGET_" + target.upper().replace("-", "_") + "_LINKER"] = str(compiler)
+    env["RUSTFLAGS"] = (
+        "-C link-arg=-Wl,-z,max-page-size=16384 "
+        "-C link-arg=-Wl,-soname,libstasis_network_v1.so"
+    )
     run([sys.executable, "tools/cargo_cache.py", "run", "--", "cargo", "build",
          "-p", "stasis_network", "--release", "--target", target], env=env)
     executable = cargo_target / "native_client_probe"
-    library = cargo_target / target / "release" / "libstasis_network.a"
+    library = cargo_target / target / "release" / "libstasis_network.so"
     run([clang, "--target=" + target + "26", "--sysroot=" + str(toolchain / "sysroot"),
          "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Wextra", "-Werror",
          "-I", ROOT / "crates/stasis_network/include",
-         ROOT / "runtime/tests/stasis_network_client_link_test.c", library,
+         ROOT / "runtime/tests/stasis_network_client_link_test.c",
+         "-L", library.parent, "-lstasis_network", "-Wl,-rpath,$ORIGIN",
          "-ldl", "-llog", "-lm", "-o", executable], env=env)
     bridge = cargo_target / "native_client_bridge_probe"
     run([clang, "--target=" + target + "26", "--sysroot=" + str(toolchain / "sysroot"),
@@ -57,16 +62,23 @@ def main():
          ROOT / "runtime/tests/stasis_mobile_aot_runtime_test.c",
          ROOT / "runtime/stasis_mobile_aot_runtime.c",
          ROOT / "runtime/stasis_platform_services.c", "-lm", "-o", bridge], env=env)
-    remote = "/data/local/tmp/stasis_native_client_probe"
+    remote_dir = "/data/local/tmp/stasis_native_client_probe"
     evidence = "Android ABI: " + abi + "\n"
     try:
+        run(adb + ["shell", "mkdir", "-p", remote_dir], timeout=30)
+        run(adb + ["push", library, remote_dir + "/libstasis_network_v1.so"], timeout=30)
         for probe, expected in (
             (executable, "background resume passed"),
             (bridge, "stasis_mobile_aot_runtime_test: ok"),
         ):
+            remote = remote_dir + "/" + probe.name
             run(adb + ["push", probe, remote], timeout=30)
             run(adb + ["shell", "chmod", "700", remote], timeout=30)
-            result = run(adb + ["shell", remote], capture=True, timeout=90)
+            result = run(
+                adb + ["shell", "env", "LD_LIBRARY_PATH=" + remote_dir, remote],
+                capture=True,
+                timeout=90,
+            )
             print(result.stdout, end="")
             if expected not in result.stdout:
                 raise SystemExit("Android native client probe did not report acceptance")
@@ -74,7 +86,7 @@ def main():
         (cargo_target / "result.txt").write_text(
             evidence, encoding="utf-8")
     finally:
-        subprocess.run(adb + ["shell", "rm", "-f", remote], check=False, timeout=30)
+        subprocess.run(adb + ["shell", "rm", "-rf", remote_dir], check=False, timeout=30)
 
 
 if __name__ == "__main__":

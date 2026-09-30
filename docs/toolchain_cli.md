@@ -75,7 +75,7 @@ game window.
 
 ```json
 {
-  "manifest_version": 2,
+  "manifest_version": 3,
   "name": "brick_game",
   "entry": "src/main.stasis",
   "tests": "tests",
@@ -97,8 +97,11 @@ game window.
 }
 ```
 
-Manifest v1 remains readable for compatibility. Manifest v2 is strict: unknown fields and duplicate
-JSON keys (including nested duplicates) are errors. v2 may declare a versioned `settings` object:
+Manifest v1 remains readable for compatibility. Manifest v2 and v3 are strict: unknown fields and
+duplicate JSON keys (including nested duplicates) are errors. v2 may declare a versioned `settings`
+object. v3 additionally supports target-aware authenticated `libraries`; see
+[`included_libraries.md`](included_libraries.md) for the schema, networking migration, target matrix,
+catalog/release rules, inspection, provenance, and troubleshooting.
 
 ```json
 "settings": {
@@ -391,12 +394,17 @@ restore release assets.
   for DLLs, then verifies Authenticode and signer identity. See [Windows test signing](windows-app-control.md). The explicit sign/verify operations require a Windows host; `STASIS_AOT_SIGN_TOOL`
   remains supported as a one-argument external hook for existing cross-platform build flows.
 - `package --target desktop`: create a standalone directory with the AOT executable, manifest,
-  assets, graphics runtime when present, and verified release provenance. Windows packages keep
-  the game-named executable as the only root file and place all support files under `app/`.
+  assets, graphics runtime when present, and verified release provenance. Offline Windows packages
+  keep the game-named executable as the only root file and place support files under `app/`;
+  network-enabled packages additionally keep `stasis_network.dll` beside the executable so the OS
+  loader resolves it normally.
 - `package-mobile --target android-arm64|ios-arm64|ios-simulator-arm64 [--entry PATH]`: atomically assemble the
   shared AOT output, SDL-only runtime, bundled assets, verified provenance, and thin Gradle or
   Xcode app shell. Network-enabled iOS packages require macOS/Xcode, stage and link the
-  `stasis_network` arm64 static library, and include the local-network privacy declaration;
+  `stasis_network` arm64 static library, and include the local-network privacy declaration.
+  Android packages stage the ABI-specific `libstasis_network_v1.so` as an imported shared dependency
+  with the matching SONAME and 16 KiB ELF/APK alignment;
+  offline packages omit it entirely.
   direct TCP/unicast does not require Bonjour discovery entitlements. Official archives resolve
   prebuilt network libraries from `mobile/network/<target>/` beside the installed executable;
   Linux and Windows nightly archives contain Android arm64/x86_64 support libraries. They do not
@@ -416,6 +424,9 @@ restore release assets.
   `--capacity` compares several proposed pool sizes without changing source or runtime state.
   JSON output includes the complete deterministic report; human output emphasizes totals,
   largest pools, projections, and warnings.
+- `inspect libraries --target CANONICAL-TARGET --json`: resolve the manifest-v3 included-library
+  closure without packaging and report selections, features/capabilities, authenticated artifacts,
+  licenses, exclusions/reasons, and deterministic catalog/library-set digests.
 - `version` and `env`: report installation, cache, and workspace locations.
 - `vendor status`: compare the manifest, checked-in vendor tree, and selected executable.
 - `vendor update`: transactionally restore `vendor/stasis` from the selected executable and update

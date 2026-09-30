@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stasislang.org/schema/included-libraries-v1.json",
+  "title": "Stasis manifest-v3 included libraries",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "selections": { "$ref": "#/$defs/selections" },
+    "targets": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "web",
+          "windows-x86_64",
+          "windows-arm64",
+          "linux-x86_64",
+          "linux-arm64",
+          "macos-x86_64",
+          "macos-arm64",
+          "android-arm64",
+          "android-x86_64",
+          "ios-arm64",
+          "ios-simulator-arm64"
+        ]
+      },
+      "additionalProperties": { "$ref": "#/$defs/selections" }
+    }
+  },
+  "$defs": {
+    "selections": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stasis.network": { "$ref": "#/$defs/networkRequest" }
+      }
+    },
+    "networkRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "anyOf": [
+        { "required": ["features"] },
+        {
+          "properties": { "enabled": { "const": false } },
+          "required": ["enabled"]
+        }
+      ],
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "features": {
+          "type": "array",
+          "items": { "enum": ["host", "client"] },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    }
+  }
+}

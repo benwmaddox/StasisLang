@@ -1,5 +1,10 @@
 # Desktop LAN host packages
 
+Manifest v3 projects select the `stasis.network` included library and retain the corresponding
+capability as a permission grant. Manifest v1/v2 declarations below remain compatible during the
+migration window. See [Target-aware included libraries](included_libraries.md) for dual-role syntax,
+inspection, platform artifact mapping, signing/provenance rules, and migration guidance.
+
 For optional Windows and Android native guests, see
 [Native guest transport](native_network_client.md).
 
@@ -21,8 +26,9 @@ the authoritative native application. Run `stasis package --target desktop`
 from the project, or add `--development-build` for a source-built toolchain.
 The guest is compiled through the existing web packaging pipeline. Its Wasm,
 JavaScript, HTML and reachable assets are encoded into `network_guest.bundle`
-and staged with the native assets. The desktop monolith links the target-native Rust
-`stasis_network` static library and uses the existing bounded native mailbox ABI.
+and staged with the native assets. A manifest-v3 explicit library selection links the
+target-native reusable Rust `stasis_network` shared library. A manifest-v1/v2 capability keeps the
+legacy static monolithic link and unchanged package/receipt layout. Both use the same bounded native mailbox ABI.
 Non-network packages do not start a listener or stage a guest bundle.
 
 The native runtime starts the host after graphics initialization and AOT runtime
@@ -86,12 +92,19 @@ Network-enabled desktop packages use the shared monolith shell on Windows,
 Linux, and macOS. Hosted release and bootstrap workflows build Windows x86_64
 and Linux x86_64 archives. Native library resolution also distinguishes macOS
 x86_64, macOS arm64 and Linux arm64 for local or separately provisioned builds.
+The compiled catalog fails closed for Windows arm64 and Linux arm64 because hosted
+archives do not currently publish those target artifacts. macOS entries are explicitly
+source-checkout builds validated by the macOS acceptance lane, not release-provenance
+claims.
 Downstream Maddox and Friends application adoption is separate.
 
-Current nightly and bootstrap toolchain archives include one target-native library:
+Current nightly and bootstrap toolchain archives include one target-native shared-library set plus
+the prior static archive for manifest-v1/v2 compatibility:
 
-- `desktop/network/windows-x86_64/stasis_network.lib`
-- `desktop/network/linux-x86_64/libstasis_network.a`
+- `desktop/network/windows-x86_64/stasis_network.dll` and its
+  `stasis_network.dll.lib` import library, plus `stasis_network.lib`
+- `desktop/network/linux-x86_64/libstasis_network.so`, plus `libstasis_network.a`
+- bootstrap archives on macOS use `libstasis_network.dylib` for the runner architecture
 
 The desktop network target helper still recognizes macOS and additional Unix
 architectures for local builds. Those targets are not included in the hosted
@@ -101,12 +114,18 @@ Each archive includes `desktop/network/include/stasis_network.h`. Installed
 packaging resolves these relative to the compiler executable and checks the
 exact native pair and its recorded provenance hashes before linking. A library
 for another architecture, a missing header, or a substituted payload fails
-packaging. Source checkouts build a fresh release static library in package
-staging; only Windows uses the static CRT build flag. Browser guest bundles
+packaging. Source checkouts build a fresh release shared library in package
+staging; only Windows uses the static CRT build flag for dependencies. Browser guest bundles
 and their audit sidecars share the package root with game assets on Unix
 (under `app/` on Windows). On macOS the executable lives inside its `.app`
-bundle; its asset root resolves back to that package directory. Network-enabled packages do not need a separate Stasis runtime
-shared library.
+bundle; its asset root resolves back to that package directory. The network library is a normal
+package-local dependency: beside the executable on Windows/Linux and under the app loader path on
+macOS. Offline packages omit it completely.
+macOS uses `@rpath/libstasis_network.dylib` with
+`@executable_path/../Frameworks`; production packaging signs the staged dylib before
+signing the enclosing `.app`. The acceptance lane configures the production signer hook,
+checks this recorded inner-to-outer order, and verifies the emitted signatures without
+repairing them after packaging.
 
 Linux and macOS use the same F1 join card and explicit copy action as Windows.
 The macOS app includes a local-network usage description.
@@ -157,9 +176,9 @@ provenance tests. Nightly packaging additionally builds a network-enabled
 desktop package from the relocated release archive with source inputs detached.
 PR CI also runs `bash tools/ci/test_unix_desktop_network_package.sh` on Linux
 to build a native host package and audit its staged browser guest. The test
-runs the HTTP and process-exit listener probes. macOS product packaging and its
-local-network permission description remain supported and can be validated
-with a local build.
+runs the HTTP and process-exit listener probes. The network acceptance workflow's
+macOS lane builds the dylib and both iOS static archives, exercises nested
+dylib-before-app signing, and runs the same package lifecycle probe.
 
 The package provenance verifier also checks each guest bundle against its
 sidecar length and SHA-256, rejecting missing or substituted payloads. Linux

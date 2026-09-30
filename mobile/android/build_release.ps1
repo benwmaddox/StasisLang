@@ -8,7 +8,8 @@ param(
     [string]$GradlePath = "",
     [string]$Sdl3Source = "",
     [string]$Sdl3ImageSource = "",
-    [string]$BundletoolPath = ""
+    [string]$BundletoolPath = "",
+    [string]$ReadelfPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -104,8 +105,66 @@ $package = if ($Install) {
 } else {
     Join-Path $androidRoot "app/build/outputs/bundle/release/app-release.aab"
 }
-python (Join-Path $repoRoot "tools/ci/check_android_release_package.py") `
-    $package --abi arm64-v8a --required-asset $RequiredAsset
+$auditArguments = @($package, "--abi", "arm64-v8a", "--required-asset", $RequiredAsset)
+$networkLibrary = Join-Path $androidRoot "app/src/main/cpp/network/libstasis_network_v1.so"
+if (Test-Path -LiteralPath $networkLibrary -PathType Leaf) {
+    $auditArguments += "--network-enabled"
+
+    $resolvedReadelf = ""
+    if ($ReadelfPath) {
+        $resolvedReadelf = [IO.Path]::GetFullPath($ReadelfPath)
+        if (-not (Test-Path -LiteralPath $resolvedReadelf -PathType Leaf)) {
+            throw "llvm-readelf was not found at -ReadelfPath: $resolvedReadelf"
+        }
+    } else {
+        foreach ($commandName in @("llvm-readelf.exe", "llvm-readelf")) {
+            $command = Get-Command $commandName -ErrorAction SilentlyContinue
+            if ($command) {
+                $resolvedReadelf = $command.Source
+                break
+            }
+        }
+    }
+
+    if (-not $resolvedReadelf) {
+        $ndkVersion = "27.0.12077973"
+        $appGradle = Join-Path $androidRoot "app/build.gradle"
+        if (Test-Path -LiteralPath $appGradle -PathType Leaf) {
+            $ndkMatch = [regex]::Match(
+                [IO.File]::ReadAllText($appGradle),
+                'ndkVersion\s+[''"](?<version>[^''"]+)[''"]'
+            )
+            if ($ndkMatch.Success) { $ndkVersion = $ndkMatch.Groups["version"].Value }
+        }
+
+        $ndkRoots = [Collections.Generic.List[string]]::new()
+        foreach ($ndkRoot in @($env:ANDROID_NDK_ROOT, $env:ANDROID_NDK_HOME)) {
+            if ($ndkRoot) { $ndkRoots.Add([IO.Path]::GetFullPath($ndkRoot)) }
+        }
+        foreach ($sdkRoot in @($env:ANDROID_SDK_ROOT, $env:ANDROID_HOME)) {
+            if ($sdkRoot) {
+                $ndkRoots.Add([IO.Path]::GetFullPath((Join-Path $sdkRoot "ndk/$ndkVersion")))
+            }
+        }
+        foreach ($ndkRoot in $ndkRoots) {
+            foreach ($hostTag in @("windows-x86_64", "linux-x86_64", "darwin-x86_64")) {
+                $executableName = if ($hostTag -eq "windows-x86_64") { "llvm-readelf.exe" } else { "llvm-readelf" }
+                $candidate = Join-Path $ndkRoot "toolchains/llvm/prebuilt/$hostTag/bin/$executableName"
+                if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                    $resolvedReadelf = [IO.Path]::GetFullPath($candidate)
+                    break
+                }
+            }
+            if ($resolvedReadelf) { break }
+        }
+    }
+
+    if (-not $resolvedReadelf) {
+        throw "Network-enabled Android validation requires llvm-readelf; pass -ReadelfPath or configure ANDROID_NDK_ROOT, ANDROID_NDK_HOME, ANDROID_SDK_ROOT, or ANDROID_HOME"
+    }
+    $auditArguments += @("--readelf", $resolvedReadelf)
+}
+python (Join-Path $repoRoot "tools/ci/check_android_release_package.py") @auditArguments
 if ($LASTEXITCODE -ne 0) {
     throw "Android release package validation failed with exit code $LASTEXITCODE"
 }

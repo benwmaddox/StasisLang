@@ -574,6 +574,7 @@ struct DesktopNetworkLink {
 pub enum DesktopNetworkMode {
     Host,
     Client,
+    Dual,
 }
 
 impl DesktopNetworkMode {
@@ -581,6 +582,7 @@ impl DesktopNetworkMode {
         match self {
             Self::Host => "host",
             Self::Client => "client",
+            Self::Dual => "dual",
         }
     }
 }
@@ -5144,7 +5146,7 @@ fn package_engine_bundle_monolithic_desktop(
     )?;
     std::fs::copy(
         aot_root.join("stasis_host_exports.h"),
-        output_exe.with_extension("host_exports.h"),
+        published_host_exports_header_path(output_exe, cfg!(target_os = "macos"))?,
     )
     .map_err(|error| format!("failed to publish host export header: {error}"))?;
     let replay_identity_header = aot_root.join("published_replay_identity.h");
@@ -5288,7 +5290,7 @@ fn package_engine_bundle_monolithic_desktop(
         )?;
     }
     sign_output_artifact_if_configured(output_exe)?;
-    if cfg!(target_os = "macos") {
+    if cfg!(target_os = "macos") && desktop_network.is_none() {
         if let Some(app_bundle) = output_exe
             .parent()
             .and_then(Path::parent)
@@ -5363,6 +5365,32 @@ fn packaged_runner_layout(
         info_plist: Some(contents.join("Info.plist")),
         app_bundle: Some(bundle),
     })
+}
+
+fn published_host_exports_header_path(
+    output_exe: &Path,
+    macos_bundle: bool,
+) -> Result<PathBuf, String> {
+    if !macos_bundle {
+        return Ok(output_exe.with_extension("host_exports.h"));
+    }
+    Ok(macos_app_bundle_for_packaged_executable(output_exe)?.with_extension("host_exports.h"))
+}
+
+fn macos_app_bundle_for_packaged_executable(output_exe: &Path) -> Result<PathBuf, String> {
+    let macos_dir = output_exe
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "MacOS"))
+        .ok_or_else(|| format!("invalid macOS executable path {}", output_exe.display()))?;
+    let contents = macos_dir
+        .parent()
+        .filter(|path| path.file_name().is_some_and(|name| name == "Contents"))
+        .ok_or_else(|| format!("invalid macOS executable path {}", output_exe.display()))?;
+    let app_bundle = contents
+        .parent()
+        .filter(|path| path.extension().is_some_and(|extension| extension == "app"))
+        .ok_or_else(|| format!("invalid macOS app bundle for {}", output_exe.display()))?;
+    Ok(app_bundle.to_path_buf())
 }
 
 fn xml_text(value: &str) -> String {
@@ -6096,7 +6124,7 @@ mod tests {
         assert!(base.iter().any(|arg| arg == "-DCMAKE_BUILD_TYPE=Release"));
 
         let network = DesktopNetworkLink {
-            library: PathBuf::from("network/stasis_network.lib"),
+            library: PathBuf::from("network/stasis_network.dll.lib"),
             include_dir: PathBuf::from("network/include"),
             mode: DesktopNetworkMode::Host,
         };
@@ -6111,7 +6139,7 @@ mod tests {
         );
         assert!(configured
             .iter()
-            .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_LIBRARY=network/stasis_network.lib"));
+            .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_LIBRARY=network/stasis_network.dll.lib"));
         assert!(configured
             .iter()
             .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_INCLUDE_DIR=network/include"));
@@ -6120,7 +6148,7 @@ mod tests {
             .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_MODE=host"));
 
         let client = DesktopNetworkLink {
-            library: PathBuf::from("network/stasis_network.lib"),
+            library: PathBuf::from("network/stasis_network.dll.lib"),
             include_dir: PathBuf::from("network/include"),
             mode: DesktopNetworkMode::Client,
         };
@@ -6407,6 +6435,20 @@ mod tests {
         assert_eq!(
             layout.executable,
             PathBuf::from("dist/ChessTD.app/Contents/MacOS/ChessTD")
+        );
+        assert_eq!(
+            published_host_exports_header_path(&layout.executable, true)
+                .expect("macOS host export header"),
+            PathBuf::from("dist/ChessTD.host_exports.h")
+        );
+        assert_eq!(
+            default_aot_cli_summary_sidecar_path_for_layout(&layout.executable, true),
+            PathBuf::from("dist/ChessTD.summary.json")
+        );
+        assert_eq!(
+            published_host_exports_header_path(Path::new("dist/ChessTD.exe"), false)
+                .expect("flat host export header"),
+            PathBuf::from("dist/ChessTD.host_exports.h")
         );
     }
 
@@ -10367,6 +10409,18 @@ fn resolve_aot_cli_summary_sidecar_path(
 ) -> PathBuf {
     if let Some(path) = configured_summary_path {
         return path.to_path_buf();
+    }
+    default_aot_cli_summary_sidecar_path_for_layout(output_exe, cfg!(target_os = "macos"))
+}
+
+fn default_aot_cli_summary_sidecar_path_for_layout(
+    output_exe: &Path,
+    macos_bundle: bool,
+) -> PathBuf {
+    if macos_bundle {
+        if let Ok(app_bundle) = macos_app_bundle_for_packaged_executable(output_exe) {
+            return app_bundle.with_extension("summary.json");
+        }
     }
     let file_name = output_exe
         .file_name()

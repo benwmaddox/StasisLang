@@ -11,7 +11,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "stasis_network release build failed" }
     $metadataJson = & python (Join-Path $repoRoot "tools/cargo_cache.py") run -- cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) { throw "Cargo target metadata query failed" }
-    $metadata = $metadataJson | ConvertFrom-Json
+    $metadata = ($metadataJson | Where-Object { $_ -match '^\s*\{' } | Select-Object -Last 1) | ConvertFrom-Json
     if (-not $metadata.target_directory) { throw "Cargo target directory is missing" }
     New-Item -ItemType Directory -Force -Path $probeDir | Out-Null
 
@@ -26,9 +26,10 @@ try {
     $vcvars = Join-Path $installation "VC/Auxiliary/Build/vcvars64.bat"
     $source = Join-Path $repoRoot "runtime/tests/stasis_network_link_test.c"
     $include = Join-Path $repoRoot "crates/stasis_network/include"
-    $library = Join-Path $metadata.target_directory "release/stasis_network.lib"
+    $library = Join-Path $metadata.target_directory "release/stasis_network.dll.lib"
+    $runtime = Join-Path $metadata.target_directory "release/stasis_network.dll"
     $executable = Join-Path $probeDir "stasis_network_link_test.exe"
-    foreach ($required in @($vcvars, $source, $library)) {
+    foreach ($required in @($vcvars, $source, $library, $runtime)) {
         if (-not (Test-Path -LiteralPath $required)) { throw "required link input missing: $required" }
     }
 
@@ -37,6 +38,7 @@ try {
         $vcvars, $include, $source, $object, $executable, $library
     & cmd.exe /d /c $compile
     if ($LASTEXITCODE -ne 0) { throw "native stasis_network link probe failed to compile" }
+    Copy-Item -LiteralPath $runtime -Destination (Join-Path $probeDir "stasis_network.dll") -Force
     & $executable
     if ($LASTEXITCODE -ne 0) { throw "native stasis_network link probe failed" }
 

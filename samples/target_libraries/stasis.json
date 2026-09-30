@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "target_libraries",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "capabilities": {
+    "network": true,
+    "network_client": true
+  },
+  "web": {
+    "entry": "src/web_guest.stasis"
+  },
+  "libraries": {
+    "selections": {
+      "stasis.network": {
+        "features": ["host", "client"]
+      }
+    },
+    "targets": {
+      "web": {
+        "stasis.network": {
+          "features": ["host"]
+        }
+      },
+      "android-x86_64": {
+        "stasis.network": {
+          "enabled": false
+        }
+      }
+    }
+  }
+}

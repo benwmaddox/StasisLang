@@ -89,7 +89,12 @@ class AndroidRuntimeBuildTests(unittest.TestCase):
         self.assertIn("tools/build_android_runtime.py", workflow)
         self.assertIn("package-mobile (three variants)", workflow)
         self.assertIn('build-tools/35.0.0/apksigner" verify --verbose "${apk}"', workflow)
-        self.assertIn('--required-asset "" "${apk}"', workflow)
+        self.assertIn(
+            'network_audit=(--network-enabled --readelf "${readelf}")', workflow
+        )
+        self.assertIn(
+            '--required-asset "" "${network_audit[@]}" "${apk}"', workflow
+        )
         self.assertIn('"launcher_resources": "branding/android/res"', workflow)
         self.assertIn('mipmap-anydpi-v26/ic_launcher.xml', workflow)
         self.assertIn("does not claim the private consumer job is under 60 seconds", workflow)

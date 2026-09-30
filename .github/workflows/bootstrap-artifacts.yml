@@ -183,7 +183,11 @@ jobs:
           cp -R mobile/android-runtime "${out}/mobile/"
           network_target="$(python3 tools/desktop_network_target.py "${RUNNER_OS}" "${RUNNER_ARCH}")"
           mkdir -p "${out}/desktop/network/${network_target}" "${out}/desktop/network/include"
-          cp "build/codex-cargo-target/release/libstasis_network.a" "${out}/desktop/network/${network_target}/"
+          if [ "${RUNNER_OS}" = "macOS" ]; then
+            cp "build/codex-cargo-target/release/libstasis_network.dylib" "${out}/desktop/network/${network_target}/"
+          else
+            cp "build/codex-cargo-target/release/libstasis_network.so" "${out}/desktop/network/${network_target}/"
+          fi
           cp crates/stasis_network/include/stasis_network.h "${out}/desktop/network/include/"
           mkdir -p "${out}/runtime"
           cp runtime/CMakeLists.txt runtime/MINIMP3-LICENSE.txt runtime/minimp3.h runtime/minimp3_ex.h runtime/cJSON.c runtime/cJSON.h runtime/stasis_svg.cpp runtime/stasis_svg.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_performance_metrics.h runtime/stasis_package_provenance_reader.h runtime/stasis_audio_assets.c runtime/stasis_audio_assets.h runtime/stasis_recording_audio.h runtime/stasis_graphics.c runtime/stasis_mixed_quad_planner.h runtime/stasis_sprite_atlas_policy.h runtime/stasis_image_writer.c runtime/stasis_image_writer.h runtime/stasis_runner.manifest runtime/stasis_runner_macos.plist.in runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stasis_replay_consumer.c runtime/stasis_replay_consumer.h runtime/stasis_network_join_card.h runtime/stasis_platform_storage.c runtime/stasis_platform_storage.h runtime/stasis_platform_services.c runtime/stasis_platform_services.h runtime/stb_truetype.h "${out}/runtime/"
@@ -241,7 +245,7 @@ jobs:
           Copy-Item mobile/shells "$out/mobile/" -Recurse -Force
           Copy-Item mobile/android-runtime "$out/mobile/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/desktop/network/windows-x86_64", "$out/desktop/network/include" | Out-Null
-          Copy-Item "build/codex-cargo-target/release/stasis_network.lib" "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
+          Copy-Item -Path "build/codex-cargo-target/release/stasis_network.dll", "build/codex-cargo-target/release/stasis_network.dll.lib" -Destination "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
           Copy-Item crates/stasis_network/include/stasis_network.h "$out/desktop/network/include/" -ErrorAction Stop
           Copy-Item "build/codex-cargo-target/release/stasis-network-supervise.exe" "$out/" -ErrorAction Stop
           Copy-Item tools/diagnose_desktop_network.ps1 "$out/tools/" -ErrorAction Stop
