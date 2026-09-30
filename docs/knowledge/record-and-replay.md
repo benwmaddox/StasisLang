@@ -17,9 +17,18 @@ The first command records a play session. The second executes normal ticks and
 rendering while verifying state checkpoints. The third captures its normal
 rendered frames; `--frames` must equal the replay's tick count. `--fps`
 sets media timestamps and does not change the number of simulation ticks.
-For a still image, record one frame to an extensionless output directory and
-inspect its `frame-000001.png`. Inspect the actual capture when judging visible
-behavior. MP4 encoding requires FFmpeg on `PATH`.
+For a single screenshot, save directly to `.png`:
+
+```text
+stasis record --output artifacts/screenshot.png --width 1280 --height 720 --fps 60 --frames 120
+```
+
+This runs 120 ticks and renders, then saves the final frame as one PNG file.
+Use `--frames 1` for the first post-`main()` tick/render, or pass a replay and
+its complete tick count to capture the replay's final state. An extensionless
+output path saves every frame as a numbered PNG sequence instead. PNG output
+needs no FFmpeg; MP4 encoding requires it on `PATH`. Existing output paths
+are preserved. Inspect the actual capture when judging visible behavior.
 
 Replay begins after `main()` and requires exact source, layout, toolchain,
 runtime, and prepared-asset identity. A source or vendor change can make an

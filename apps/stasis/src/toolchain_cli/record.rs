@@ -25,7 +25,7 @@ pub(super) struct RecordArgs {
     /// Override the manifest entry with a project-relative .stasis file.
     #[arg(value_name = "ENTRY")]
     pub(super) entry: Option<PathBuf>,
-    /// Output directory for PNG frames, or an .mp4/.mp3 file for encoding.
+    /// PNG frame directory, a .png final-frame screenshot, or an .mp4/.mp3 file.
     #[arg(long, value_name = "PATH")]
     pub(super) output: PathBuf,
     #[arg(long, value_name = "PIXELS")]
@@ -65,6 +65,7 @@ pub(super) struct RecordArgs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputKind {
     PngSequence,
+    Png,
     Mp4,
     Mp3,
 }
@@ -285,6 +286,19 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
         ))
     } else {
         match kind {
+            OutputKind::Png => stasis_dynload::atomic_rename_no_replace(
+                &frames_dir
+                    .as_ref()
+                    .expect("PNG frame staging")
+                    .join(format!("frame-{frame_count:06}.png")),
+                &output,
+            )
+            .map_err(|error| {
+                format!(
+                    "recording publish failed for PNG screenshot {}: {error}",
+                    output.display()
+                )
+            }),
             OutputKind::PngSequence => stasis_dynload::atomic_rename_no_replace(
                 frames_dir.as_ref().expect("PNG frame staging"),
                 &output,
@@ -327,6 +341,7 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
     cleanup_stage(&stage_root);
 
     let format = match kind {
+        OutputKind::Png => "png",
         OutputKind::PngSequence => "png-sequence",
         OutputKind::Mp4 => "mp4",
         OutputKind::Mp3 => "mp3",
@@ -348,6 +363,14 @@ pub(super) fn execute(workspace: &Workspace, args: RecordArgs) -> Result<Command
         args.fps,
         output.display()
     );
+    if kind == OutputKind::Png {
+        human = format!(
+            "captured final frame {frame_count} at {}x{} to {}",
+            args.width,
+            args.height,
+            output.display()
+        );
+    }
     if let Some(health) = audio_health {
         let status = health
             .get("status")
@@ -461,7 +484,7 @@ fn validate_profiled_record_callback_work(
 fn rollback_published_output(output: &Path, kind: OutputKind) -> Result<(), String> {
     let result = match kind {
         OutputKind::PngSequence => fs::remove_dir_all(output),
-        OutputKind::Mp4 | OutputKind::Mp3 => fs::remove_file(output),
+        OutputKind::Png | OutputKind::Mp4 | OutputKind::Mp3 => fs::remove_file(output),
     };
     result.map_err(|error| format!("could not remove {}: {error}", output.display()))
 }
@@ -506,10 +529,11 @@ pub(super) fn validate_args(args: &RecordArgs) -> Result<u64, String> {
 fn output_kind(path: &Path) -> Result<OutputKind, String> {
     match path.extension().and_then(|value| value.to_str()) {
         None => Ok(OutputKind::PngSequence),
+        Some(extension) if extension.eq_ignore_ascii_case("png") => Ok(OutputKind::Png),
         Some(extension) if extension.eq_ignore_ascii_case("mp4") => Ok(OutputKind::Mp4),
         Some(extension) if extension.eq_ignore_ascii_case("mp3") => Ok(OutputKind::Mp3),
         Some(extension) => Err(format!(
-            "unsupported recording output extension .{extension} for {}; use an extensionless PNG directory, .mp4, or .mp3",
+            "unsupported recording output extension .{extension} for {}; use an extensionless PNG directory, .png, .mp4, or .mp3",
             path.display()
         )),
     }
@@ -873,6 +897,7 @@ mod tests {
             Ok(OutputKind::PngSequence)
         );
         assert_eq!(output_kind(Path::new("capture.MP4")), Ok(OutputKind::Mp4));
+        assert_eq!(output_kind(Path::new("capture.PNG")), Ok(OutputKind::Png));
         assert_eq!(output_kind(Path::new("capture.mp3")), Ok(OutputKind::Mp3));
         assert!(output_kind(Path::new("capture.mov")).is_err());
     }
@@ -931,6 +956,10 @@ mod tests {
         assert!(!frames.exists());
 
         fs::create_dir_all(&root).expect("recreate test root");
+        let png = root.join("screenshot.png");
+        fs::write(&png, b"png").expect("write published screenshot");
+        rollback_published_output(&png, OutputKind::Png).expect("rollback PNG screenshot");
+        assert!(!png.exists());
         let mp4 = root.join("recording.mp4");
         fs::write(&mp4, b"mp4").expect("write published MP4");
         rollback_published_output(&mp4, OutputKind::Mp4).expect("rollback MP4 output");
