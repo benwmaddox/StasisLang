@@ -6,6 +6,14 @@ python3 tools/cargo_cache.py run -- cargo build -p stasis --bin stasis
 target_dir="$(python3 tools/cargo_cache.py run -- cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 cli="$target_dir/debug/stasis"
 workspace="$(mktemp -d "$PWD/target/desktop-network-package.XXXXXX")"
+case "$(uname -s)" in
+  Darwin)
+    export STASIS_AOT_SIGN_TOOL="$PWD/tools/ci/macos_ad_hoc_sign.sh"
+    export STASIS_REQUIRE_SIGNED_EXECUTION=1
+    export STASIS_SIGN_ORDER_LOG="$workspace/sign-order.log"
+    : > "$STASIS_SIGN_ORDER_LOG"
+    ;;
+esac
 "$cli" new network_smoke --dir "$workspace/project"
 python3 - "$workspace/project" <<'PYTHON'
 import json
@@ -17,6 +25,9 @@ if not manifest.exists():
     raise SystemExit("generated project manifest missing")
 data = json.loads(manifest.read_text())
 data["capabilities"] = {"network": True}
+data["libraries"] = {
+    "selections": {"stasis.network": {"features": ["host"]}}
+}
 data["web"] = {"entry": "src/main.stasis"}
 manifest.write_text(json.dumps(data) + "\n")
 (root / "src/main.stasis").write_text(
@@ -43,14 +54,22 @@ case "$(uname -s)" in
   Darwin)
     test -x "$package/network_smoke.app/Contents/MacOS/network_smoke"
     dylib="$package/network_smoke.app/Contents/Frameworks/libstasis_network.dylib"
+    app="$package/network_smoke.app"
     test -f "$dylib"
     otool -L "$package/network_smoke.app/Contents/MacOS/network_smoke" | grep -q 'libstasis_network.dylib'
-    # Nested code is signed before its enclosing app. Production publication may replace
-    # the ad-hoc identity and notarize only after the same inner-to-outer order succeeds.
-    codesign --force --sign - "$dylib"
-    codesign --force --sign - "$package/network_smoke.app"
+    otool -D "$dylib" | grep -Fxq '@rpath/libstasis_network.dylib'
+    otool -l "$package/network_smoke.app/Contents/MacOS/network_smoke" |
+      grep -A2 LC_RPATH | grep -Fq '@executable_path/../Frameworks'
     codesign --verify --strict "$dylib"
-    codesign --verify --strict "$package/network_smoke.app"
+    codesign --verify --strict "$app"
+    python3 - "$STASIS_SIGN_ORDER_LOG" "$dylib" "$app" <<'PYTHON'
+from pathlib import Path
+import sys
+order = Path(sys.argv[1]).read_text().splitlines()
+expected = [str(Path(sys.argv[2])), str(Path(sys.argv[3]))]
+if order[-2:] != expected:
+    raise SystemExit(f"production nested signing order differs: {order}")
+PYTHON
     /usr/libexec/PlistBuddy -c 'Print :NSLocalNetworkUsageDescription' \
       "$package/network_smoke.app/Contents/Info.plist"
     python3 tools/ci/test_linux_desktop_network_package.py \

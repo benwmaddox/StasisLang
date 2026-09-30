@@ -121,6 +121,7 @@ enum SettingKind {
 pub(crate) struct ResolvedProjectSettings {
     pub(crate) configuration: ProjectConfiguration,
     pub(crate) generated_source: String,
+    pub(crate) included_libraries: Option<Value>,
 }
 
 pub(super) fn parse_strict_json(bytes: &[u8]) -> Result<Value, String> {
@@ -444,6 +445,7 @@ pub(super) fn resolve(
     Ok(ResolvedProjectSettings {
         configuration,
         generated_source,
+        included_libraries: None,
     })
 }
 

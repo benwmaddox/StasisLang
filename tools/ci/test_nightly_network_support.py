@@ -150,6 +150,12 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
         self.assertIn("x86_64-linux-android", self.workflow)
         self.assertIn('"platforms;android-26"', self.workflow)
         self.assertIn('api_target="${target}26"', self.workflow)
+        self.assertIn("-Wl,-soname,libstasis_network_v1.so", self.workflow)
+        self.assertIn(
+            "network-artifact/android-arm64/libstasis_network_v1.so",
+            self.workflow,
+        )
+        self.assertIn("--network-enabled --readelf", self.workflow)
         self.assertNotIn("xcrun", self.workflow)
         self.assertNotIn("aarch64-apple-ios", self.workflow)
         self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", self.workflow)
@@ -163,9 +169,17 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
                     self.assertIn("apple-network-artifacts:", workflow)
                     self.assertIn("runs-on: macos-15", workflow)
                     self.assertIn("aarch64-apple-ios-sim", workflow)
-                    self.assertIn("codesign --force --sign -", (
+                    package_script = (
                         ROOT / "tools/ci/test_unix_desktop_network_package.sh"
-                    ).read_text(encoding="utf-8"))
+                    ).read_text(encoding="utf-8")
+                    signer = (
+                        ROOT / "tools/ci/macos_ad_hoc_sign.sh"
+                    ).read_text(encoding="utf-8")
+                    self.assertIn("STASIS_AOT_SIGN_TOOL", package_script)
+                    self.assertIn("order[-2:]", package_script)
+                    self.assertIn("codesign --verify --strict", package_script)
+                    self.assertNotIn("codesign --force --sign -", package_script)
+                    self.assertIn("codesign --force --sign -", signer)
                 else:
                     self.assertNotRegex(
                         workflow,
@@ -178,19 +192,19 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             self.assertIn(f"archive: {archive}", self.workflow)
         self.assertIn("python3 tools/audit_release_bundle.py", self.workflow)
         self.assertIn("python tools/audit_release_bundle.py", self.workflow)
-        self.assertIn("mobile/network/android-arm64/libstasis_network.so", required_files("linux"))
-        self.assertIn("mobile/network/android-x86_64/libstasis_network.so", required_files("windows"))
+        self.assertIn("mobile/network/android-arm64/libstasis_network_v1.so", required_files("linux"))
+        self.assertIn("mobile/network/android-x86_64/libstasis_network_v1.so", required_files("windows"))
 
     def test_archive_layout_is_copied_before_provenance(self):
         for path in (
-            "mobile/network/android-arm64/libstasis_network.so",
-            "mobile/network/android-x86_64/libstasis_network.so",
+            "mobile/network/android-arm64/libstasis_network_v1.so",
+            "mobile/network/android-x86_64/libstasis_network_v1.so",
             "mobile/network/include/stasis_network.h",
         ):
             self.assertIn(path, self.workflow)
         for platform in ("windows", "linux", "macos"):
-            self.assertIn("mobile/network/android-arm64/libstasis_network.so", required_files(platform))
-            self.assertIn("mobile/network/android-x86_64/libstasis_network.so", required_files(platform))
+            self.assertIn("mobile/network/android-arm64/libstasis_network_v1.so", required_files(platform))
+            self.assertIn("mobile/network/android-x86_64/libstasis_network_v1.so", required_files(platform))
             self.assertNotIn("mobile/network/ios-arm64/libstasis_network.a", required_files(platform))
             self.assertNotIn("mobile/network/ios-simulator-arm64/libstasis_network.a", required_files(platform))
         self.assertNotIn("mobile/network/ios-arm64/libstasis_network.a", self.workflow)
@@ -203,6 +217,7 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
 
     def test_relocated_network_smoke_keeps_android_and_rejects_unavailable_ios_archive(self):
         self.assertIn('"capabilities"] = {"network": True}', self.workflow)
+        self.assertIn('"stasis.network": {"features": ["host"]}', self.workflow)
         self.assertIn('"web"] = {"entry": "src/main.stasis"}', self.workflow)
         self.assertIn("dist/network-android", self.workflow)
         self.assertIn("network_guest.bundle", self.workflow)

@@ -108,8 +108,8 @@ const DESKTOP_NETWORK_ARTIFACTS: &[&str] = &[
 ];
 const MOBILE_NETWORK_REQUIRED_ARTIFACTS: &[&str] = &[
     "mobile/network/include/stasis_network.h",
-    "mobile/network/android-arm64/libstasis_network.so",
-    "mobile/network/android-x86_64/libstasis_network.so",
+    "mobile/network/android-arm64/libstasis_network_v1.so",
+    "mobile/network/android-x86_64/libstasis_network_v1.so",
 ];
 const MOBILE_NETWORK_OPTIONAL_ARTIFACTS: &[&str] = &[
     "mobile/network/ios-arm64/libstasis_network.a",
@@ -1189,6 +1189,18 @@ impl ProjectManifest {
         if self.manifest_version < 3 && self.libraries.is_some() {
             return Err("included libraries require manifest_version 3".to_string());
         }
+        if self.manifest_version == 3
+            && self.libraries.is_none()
+            && self
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.network || capabilities.network_client)
+        {
+            return Err(
+                "manifest_version 3 network capabilities require explicit included libraries"
+                    .to_string(),
+            );
+        }
         if self.manifest_version == 1 && self.release.is_some() {
             return Err("release configuration requires manifest_version 2".to_string());
         }
@@ -1201,12 +1213,20 @@ impl ProjectManifest {
         if let Some(libraries) = self.libraries.as_ref() {
             included_libraries::validate_manifest(libraries)?;
             for target in CanonicalTarget::ALL {
-                included_libraries::resolve(
+                let result = included_libraries::resolve(
                     self.manifest_version,
                     Some(libraries),
                     self.capabilities.as_ref(),
                     target,
-                )?;
+                );
+                if let Err(error) = result {
+                    if !included_libraries::has_authenticated_artifact(target)
+                        && error.contains("has no authenticated artifact")
+                    {
+                        continue;
+                    }
+                    return Err(error);
+                }
             }
         }
         if let Some(font_subsetting) = self
@@ -2460,6 +2480,10 @@ pub(super) fn load_project_configuration(
         target,
     )?;
     included_libraries::apply_to_configuration(&mut resolved.configuration, &libraries);
+    resolved.included_libraries = Some(
+        serde_json::to_value(&libraries)
+            .map_err(|error| format!("failed to serialize library provenance: {error}"))?,
+    );
     if resolved.configuration.generated_api_enabled {
         resolved
             .generated_source
@@ -2483,6 +2507,10 @@ pub(super) fn resolve_manifestless_project_configuration(
     let mut resolved = project_settings::resolve(None, target, false)?;
     let libraries = included_libraries::resolve(1, None, None, target)?;
     included_libraries::apply_to_configuration(&mut resolved.configuration, &libraries);
+    resolved.included_libraries = Some(
+        serde_json::to_value(&libraries)
+            .map_err(|error| format!("failed to serialize library provenance: {error}"))?,
+    );
     Ok(resolved)
 }
 
@@ -5388,6 +5416,11 @@ fn build_desktop_network_library(
             rustflags.push(' ');
         }
         rustflags.push_str("-C target-feature=+crt-static");
+    } else if cfg!(target_os = "macos") {
+        if !rustflags.is_empty() {
+            rustflags.push(' ');
+        }
+        rustflags.push_str("-C link-arg=-Wl,-install_name,@rpath/libstasis_network.dylib");
     }
     let output = Command::new(cargo)
         .current_dir(&source_root)
@@ -5730,6 +5763,9 @@ fn package_workspace(
                 })?;
             }
             copy_file(runtime_library, &staged_runtime)?;
+            if cfg!(target_os = "macos") {
+                sign_output_artifact_if_configured(&staged_runtime)?;
+            }
             let artifacts = network_build.as_ref().expect("network build exists");
             let package_relative_runtime = staged_runtime
                 .strip_prefix(&package_assembly_root)
@@ -5776,6 +5812,15 @@ fn package_workspace(
                     summary.display()
                 )
             })?;
+        }
+        if cfg!(target_os = "macos") && network_build.is_some() {
+            let linked_output = build_result
+                .data
+                .get("output")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| executable.clone());
+            sign_output_artifact_if_configured(&macos_app_bundle_for_executable(&linked_output)?)?;
         }
         let current_manifest_bytes =
             fs::read(source_snapshot_root.join(MANIFEST_NAME)).map_err(|error| {
@@ -5885,6 +5930,21 @@ fn desktop_network_runtime_destination(
     } else {
         Ok(executable_dir.join(runtime_file_name))
     }
+}
+
+fn macos_app_bundle_for_executable(linked_output: &Path) -> Result<PathBuf, String> {
+    linked_output
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .filter(|path| path.extension().is_some_and(|extension| extension == "app"))
+        .ok_or_else(|| {
+            format!(
+                "macOS packaged executable is not inside an app bundle: {}",
+                linked_output.display()
+            )
+        })
 }
 
 const WEB_INDEX_HTML: &str = include_str!("../../../runtime/web/index.html");
@@ -6370,6 +6430,14 @@ fn package_web_workspace(
         ));
     }
     let (network_library_host_enabled, _) = workspace.network_roles()?;
+    let web_entry = workspace
+        .manifest
+        .web
+        .as_ref()
+        .and_then(|web| (!web.entry.is_empty()).then_some(web.entry.as_str()))
+        .unwrap_or(workspace.manifest.entry.as_str());
+    let files = load_workshop_edit_workspace(&workspace.root, Path::new(web_entry))?;
+    validate_included_library_imports(workspace, &files)?;
     let staging_name = format!(
         ".{}.staging",
         package_root
@@ -6391,13 +6459,6 @@ fn package_web_workspace(
         .map_err(|error| format!("failed to create {}: {error}", staging_root.display()))?;
 
     let assembled = (|| -> Result<(bool, usize, usize, Value), String> {
-        let web_entry = workspace
-            .manifest
-            .web
-            .as_ref()
-            .and_then(|web| (!web.entry.is_empty()).then_some(web.entry.as_str()))
-            .unwrap_or(workspace.manifest.entry.as_str());
-        let files = load_workshop_edit_workspace(&workspace.root, Path::new(web_entry))?;
         let files = workshop_reachable_files(&files, Path::new(web_entry))?;
         let source_provenance = files
             .iter()
@@ -7753,6 +7814,8 @@ fn package_mobile_workspace(
     validate_network_client_target(&workspace.manifest, target)?;
     validate_mobile_network_guest_contract(&workspace.manifest, target)?;
     let (network_enabled, network_client_enabled) = workspace.network_roles()?;
+    let files = load_workshop_edit_workspace(&workspace.root, entry)?;
+    validate_included_library_imports(workspace, &files)?;
     if matches!(
         target,
         PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64
@@ -7993,7 +8056,7 @@ fn bundled_network_artifacts_for_executable(
             }
             PackageTarget::Desktop => ("libstasis_network.so", Some("libstasis_network.so")),
             PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
-                ("libstasis_network.so", Some("libstasis_network.so"))
+                ("libstasis_network_v1.so", Some("libstasis_network_v1.so"))
             }
             PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
                 ("libstasis_network.a", None)
@@ -8040,7 +8103,7 @@ fn stage_network_artifacts(
         .map_err(|error| format!("failed to create network staging: {error}"))?;
     let library_destination = match target {
         PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
-            header_destination.join("libstasis_network.so")
+            header_destination.join("libstasis_network_v1.so")
         }
         PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
             header_destination.join("libstasis_network.a")
@@ -8114,7 +8177,7 @@ fn stage_android_network_library(
         rustflags.push(' ');
     }
     rustflags.push_str(&format!(
-        "-C link-arg=--target={api_level} -C link-arg=-Wl,-z,max-page-size=16384"
+        "-C link-arg=--target={api_level} -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-soname,libstasis_network_v1.so"
     ));
     let linker_key = format!(
         "CARGO_TARGET_{}_LINKER",
@@ -8955,7 +9018,7 @@ fn assemble_mobile_shell(
     let network_library = if native_network_enabled {
         Some(match target {
             PackageTarget::AndroidArm64 | PackageTarget::AndroidX86_64 => {
-                "android/app/src/main/cpp/network/libstasis_network.so"
+                "android/app/src/main/cpp/network/libstasis_network_v1.so"
             }
             PackageTarget::IosArm64 | PackageTarget::IosSimulatorArm64 => {
                 "ios/network/libstasis_network.a"
@@ -11566,6 +11629,40 @@ mod tests {
             parse_project_manifest(legacy.as_bytes()).unwrap_err(),
             "included libraries require manifest_version 3"
         );
+
+        let absent = br#"{
+            "manifest_version": 3,
+            "name": "library_fixture",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build",
+            "capabilities": {"network": true}
+        }"#;
+        assert_eq!(
+            parse_project_manifest(absent).unwrap_err(),
+            "manifest_version 3 network capabilities require explicit included libraries"
+        );
+
+        let mixed = br#"{
+            "manifest_version": 3,
+            "name": "library_fixture",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build",
+            "capabilities": {"network": true},
+            "libraries": {
+                "targets": {
+                    "web": {"stasis.network": {"features": ["host"]}}
+                }
+            }
+        }"#;
+        let mixed_error = parse_project_manifest(mixed).unwrap_err();
+        assert!(
+            mixed_error.contains(
+                "manifest_version 3 network capabilities require an explicit stasis.network selection for windows-x86_64"
+            ),
+            "{mixed_error}"
+        );
     }
 
     #[test]
@@ -11583,8 +11680,7 @@ mod tests {
             root.join("vendor/stasis/stdlib/network_client.stasis"),
         )
         .expect("copy network module");
-        let manifest = parse_project_manifest(
-            br#"{
+        let manifest_bytes = br#"{
                 "manifest_version": 3,
                 "name": "disabled_library",
                 "entry": "src/main.stasis",
@@ -11593,11 +11689,15 @@ mod tests {
                 "capabilities": {"network_client": true},
                 "libraries": {
                     "selections": {"stasis.network": {"features": ["client"]}},
-                    "targets": {"android-arm64": {"stasis.network": {"enabled": false}}}
+                    "targets": {
+                        "android-arm64": {"stasis.network": {"enabled": false}},
+                        "web": {"stasis.network": {"enabled": false}}
+                    }
                 }
-            }"#,
-        )
-        .expect("parse disabled target fixture");
+            }"#;
+        fs::write(root.join(MANIFEST_NAME), manifest_bytes).expect("write manifest fixture");
+        let manifest =
+            parse_project_manifest(manifest_bytes).expect("parse disabled target fixture");
         let workspace = Workspace {
             root: canonical_workspace_root(&root).expect("canonical fixture root"),
             manifest,
@@ -11615,6 +11715,47 @@ mod tests {
             ),
             "{error}"
         );
+
+        let web_workspace = Workspace {
+            root: canonical_workspace_root(&root).expect("canonical fixture root"),
+            manifest: parse_project_manifest(manifest_bytes).expect("parse Web fixture"),
+            resolved_settings: None,
+        }
+        .resolve_for(CanonicalTarget::Web)
+        .expect("resolve Web target");
+        let web_output = root.join("web-output");
+        let web_error = package_web_workspace(&web_workspace, &web_output, true)
+            .expect_err("disabled Web import must fail before Wasm output");
+        assert!(
+            web_error.contains(
+                "library stasis.network is disabled for web; imported by src/main.stasis"
+            ),
+            "{web_error}"
+        );
+        assert!(!web_output.exists());
+        assert!(!root.join(".web-output.staging").exists());
+
+        let mobile_output = root.join("android-output");
+        let mobile_error = package_mobile_workspace(
+            &workspace,
+            PackageTarget::AndroidArm64,
+            Path::new("src/main.stasis"),
+            &mobile_output,
+            true,
+            &[],
+            0,
+            0,
+        )
+        .expect_err("disabled Android import must fail before AOT output");
+        assert!(
+            mobile_error.contains(
+                "library stasis.network is disabled for android-arm64; imported by src/main.stasis"
+            ),
+            "{mobile_error}"
+        );
+        assert!(!mobile_output.exists());
+        assert!(!root.join(".android-output.staging").exists());
+        remove_temp(&root);
     }
 
     #[test]
@@ -15541,7 +15682,7 @@ mod tests {
         fs::create_dir_all(android_network.join("android/app/src/main/cpp/network/include"))
             .expect("create Android network staging fixture");
         fs::write(
-            android_network.join("android/app/src/main/cpp/network/libstasis_network.so"),
+            android_network.join("android/app/src/main/cpp/network/libstasis_network_v1.so"),
             b"fixture Android shared library",
         )
         .expect("write Android network library fixture");
@@ -15565,7 +15706,7 @@ mod tests {
                 .expect("read network Android CMake");
         assert!(android_network_cmake.contains("STASIS_NETWORK_ENABLED 1"));
         assert!(android_network_cmake.contains("add_library(stasis_network SHARED IMPORTED)"));
-        assert!(android_network_cmake.contains("network/libstasis_network.so"));
+        assert!(android_network_cmake.contains("network/libstasis_network_v1.so"));
         let android_network_manifest =
             fs::read_to_string(android_network.join("android/app/src/main/AndroidManifest.xml"))
                 .expect("read network Android manifest");
@@ -15578,7 +15719,7 @@ mod tests {
         .expect("parse network Android package receipt");
         assert_eq!(
             android_network_receipt["network_library"],
-            "android/app/src/main/cpp/network/libstasis_network.so"
+            "android/app/src/main/cpp/network/libstasis_network_v1.so"
         );
         assert_eq!(
             android_network_receipt["network_header"],
@@ -15610,7 +15751,7 @@ mod tests {
         fs::create_dir_all(android_client.join("android/app/src/main/cpp/network/include"))
             .expect("create Android client network staging fixture");
         fs::write(
-            android_client.join("android/app/src/main/cpp/network/libstasis_network.so"),
+            android_client.join("android/app/src/main/cpp/network/libstasis_network_v1.so"),
             b"fixture Android client shared library",
         )
         .expect("write Android client network library fixture");
@@ -15669,7 +15810,7 @@ mod tests {
         assert_eq!(client_receipt["network_client"], true);
         assert_eq!(
             client_receipt["network_library"],
-            "android/app/src/main/cpp/network/libstasis_network.so"
+            "android/app/src/main/cpp/network/libstasis_network_v1.so"
         );
         assert_eq!(
             client_receipt["network_header"],
@@ -15797,6 +15938,13 @@ mod tests {
             release_asset_output_directory(requested, requested, true).unwrap(),
             Path::new("dist")
         );
+        assert_eq!(
+            macos_app_bundle_for_executable(linked).unwrap(),
+            Path::new("dist/Game.app")
+        );
+        assert!(macos_app_bundle_for_executable(requested)
+            .unwrap_err()
+            .contains("not inside an app bundle"));
     }
 
     #[test]

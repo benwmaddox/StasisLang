@@ -41,7 +41,10 @@ def main():
     cargo_target = ROOT / "target" / "android-network-client"
     env["CARGO_TARGET_DIR"] = str(cargo_target)
     env["CARGO_TARGET_" + target.upper().replace("-", "_") + "_LINKER"] = str(compiler)
-    env["RUSTFLAGS"] = "-C link-arg=-Wl,-z,max-page-size=16384"
+    env["RUSTFLAGS"] = (
+        "-C link-arg=-Wl,-z,max-page-size=16384 "
+        "-C link-arg=-Wl,-soname,libstasis_network_v1.so"
+    )
     run([sys.executable, "tools/cargo_cache.py", "run", "--", "cargo", "build",
          "-p", "stasis_network", "--release", "--target", target], env=env)
     executable = cargo_target / "native_client_probe"
@@ -63,7 +66,7 @@ def main():
     evidence = "Android ABI: " + abi + "\n"
     try:
         run(adb + ["shell", "mkdir", "-p", remote_dir], timeout=30)
-        run(adb + ["push", library, remote_dir + "/libstasis_network.so"], timeout=30)
+        run(adb + ["push", library, remote_dir + "/libstasis_network_v1.so"], timeout=30)
         for probe, expected in (
             (executable, "background resume passed"),
             (bridge, "stasis_mobile_aot_runtime_test: ok"),

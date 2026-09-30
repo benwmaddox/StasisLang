@@ -2076,6 +2076,11 @@ fn write_mobile_aot_engine_bundle(
     } else {
         None
     };
+    let mut project_configuration =
+        toolchain_cli::project_settings::provenance_summary(&project_settings.configuration);
+    if let Some(included_libraries) = project_settings.included_libraries.as_ref() {
+        project_configuration["included_libraries"] = included_libraries.clone();
+    }
     let package_manifest = write_mobile_aot_package_manifest(
         target,
         &bundle.manifest_path,
@@ -2089,7 +2094,7 @@ fn write_mobile_aot_engine_bundle(
         cmake_file.as_deref(),
         replay_state_snapshot.is_some(),
         portable_replay_compatibility,
-        toolchain_cli::project_settings::provenance_summary(&project_settings.configuration),
+        project_configuration,
         output_dir,
     )?;
     Ok(MobileAotBundleSummary {

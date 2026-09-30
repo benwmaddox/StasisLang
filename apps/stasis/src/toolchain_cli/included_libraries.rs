@@ -183,6 +183,12 @@ pub(super) fn resolve(
         } else {
             Vec::new()
         };
+        if request.is_none() && (capabilities.network || capabilities.network_client) {
+            return Err(format!(
+                "manifest_version 3 network capabilities require an explicit {NETWORK_LIBRARY_ID} selection for {}",
+                target.as_str()
+            ));
+        }
         ("explicit", request, reasons)
     };
 
@@ -329,50 +335,41 @@ fn artifact_for(target: CanonicalTarget) -> Option<CatalogArtifact> {
             "pe-shared-library",
             "stasis_release_provenance.json#desktop_network_artifacts",
         ),
-        CanonicalTarget::WindowsArm64 => (
-            "desktop/network/windows-arm64/stasis_network.dll",
-            "pe-shared-library",
-            "stasis_release_provenance.json#desktop_network_artifacts",
-        ),
+        CanonicalTarget::WindowsArm64 | CanonicalTarget::LinuxArm64 => return None,
         CanonicalTarget::LinuxX86_64 => (
             "desktop/network/linux-x86_64/libstasis_network.so",
-            "elf-shared-library",
-            "stasis_release_provenance.json#desktop_network_artifacts",
-        ),
-        CanonicalTarget::LinuxArm64 => (
-            "desktop/network/linux-arm64/libstasis_network.so",
             "elf-shared-library",
             "stasis_release_provenance.json#desktop_network_artifacts",
         ),
         CanonicalTarget::MacosX86_64 => (
             "desktop/network/macos-x86_64/libstasis_network.dylib",
             "mach-o-dylib",
-            "stasis_release_provenance.json#desktop_network_artifacts",
+            "source-checkout-build; validated by network-browser-acceptance.yml",
         ),
         CanonicalTarget::MacosArm64 => (
             "desktop/network/macos-arm64/libstasis_network.dylib",
             "mach-o-dylib",
-            "stasis_release_provenance.json#desktop_network_artifacts",
+            "source-checkout-build; validated by network-browser-acceptance.yml",
         ),
         CanonicalTarget::AndroidArm64 => (
-            "mobile/network/android-arm64/libstasis_network.so",
+            "mobile/network/android-arm64/libstasis_network_v1.so",
             "elf-shared-library",
             "stasis_release_provenance.json#mobile_network_artifacts",
         ),
         CanonicalTarget::AndroidX86_64 => (
-            "mobile/network/android-x86_64/libstasis_network.so",
+            "mobile/network/android-x86_64/libstasis_network_v1.so",
             "elf-shared-library",
             "stasis_release_provenance.json#mobile_network_artifacts",
         ),
         CanonicalTarget::IosArm64 => (
             "mobile/network/ios-arm64/libstasis_network.a",
             "apple-static-archive",
-            "stasis_release_provenance.json#mobile_network_artifacts",
+            "source-checkout-build; validated by network-browser-acceptance.yml",
         ),
         CanonicalTarget::IosSimulatorArm64 => (
             "mobile/network/ios-simulator-arm64/libstasis_network.a",
             "apple-static-archive",
-            "stasis_release_provenance.json#mobile_network_artifacts",
+            "source-checkout-build; validated by network-browser-acceptance.yml",
         ),
     };
     Some(CatalogArtifact {
@@ -380,6 +377,10 @@ fn artifact_for(target: CanonicalTarget) -> Option<CatalogArtifact> {
         kind: kind.to_string(),
         authentication: authentication.to_string(),
     })
+}
+
+pub(super) fn has_authenticated_artifact(target: CanonicalTarget) -> bool {
+    artifact_for(target).is_some()
 }
 
 fn minimum_os(target: CanonicalTarget) -> &'static str {
@@ -431,8 +432,7 @@ fn catalog_digest() -> String {
             (
                 target.as_str(),
                 json!({
-                    "artifact": artifact_for(*target)
-                        .expect("every canonical target has a catalog artifact"),
+                    "artifact": artifact_for(*target),
                     "minimum_os": minimum_os(*target),
                 }),
             )
@@ -661,12 +661,82 @@ mod tests {
     }
 
     #[test]
-    fn every_canonical_target_has_an_authenticated_artifact() {
-        for target in CanonicalTarget::ALL {
-            let artifact = artifact_for(target).expect("target artifact");
+    fn v3_network_capabilities_require_a_complete_explicit_selection() {
+        let absent = resolve(
+            3,
+            None,
+            Some(&capabilities(true, false)),
+            CanonicalTarget::Web,
+        )
+        .unwrap_err();
+        assert!(absent.contains("require an explicit stasis.network selection for web"));
+
+        let mut partial = LibrariesManifest::default();
+        partial
+            .targets
+            .insert("web".to_string(), manifest(&["host"]).selections);
+        let error = resolve(
+            3,
+            Some(&partial),
+            Some(&capabilities(true, false)),
+            CanonicalTarget::WindowsX86_64,
+        )
+        .unwrap_err();
+        assert!(error.contains("require an explicit stasis.network selection for windows-x86_64"));
+
+        let mut disabled = manifest(&[]);
+        disabled
+            .selections
+            .get_mut(NETWORK_LIBRARY_ID)
+            .unwrap()
+            .enabled = false;
+        let disabled = resolve(
+            3,
+            Some(&disabled),
+            Some(&capabilities(true, false)),
+            CanonicalTarget::Web,
+        )
+        .expect("explicitly disabled target remains unambiguous");
+        assert!(disabled.libraries.is_empty());
+    }
+
+    #[test]
+    fn catalog_authentication_matches_published_target_availability() {
+        for target in [
+            CanonicalTarget::WindowsX86_64,
+            CanonicalTarget::LinuxX86_64,
+            CanonicalTarget::AndroidArm64,
+            CanonicalTarget::AndroidX86_64,
+        ] {
+            let artifact = artifact_for(target).expect("published target artifact");
             assert!(artifact.authentication.contains("provenance.json#"));
-            assert!(!artifact.path.is_empty());
-            assert!(!artifact.kind.is_empty());
         }
+        for target in [
+            CanonicalTarget::MacosX86_64,
+            CanonicalTarget::MacosArm64,
+            CanonicalTarget::IosArm64,
+            CanonicalTarget::IosSimulatorArm64,
+        ] {
+            let artifact = artifact_for(target).expect("source-checkout target artifact");
+            assert!(artifact.authentication.starts_with("source-checkout-build"));
+            assert!(!artifact.authentication.contains("provenance.json#"));
+        }
+        for target in [CanonicalTarget::WindowsArm64, CanonicalTarget::LinuxArm64] {
+            assert!(artifact_for(target).is_none());
+            let error = resolve(
+                3,
+                Some(&manifest(&["host"])),
+                Some(&capabilities(true, false)),
+                target,
+            )
+            .unwrap_err();
+            assert!(error.contains("has no authenticated artifact"));
+        }
+        assert_eq!(
+            artifact_for(CanonicalTarget::Web)
+                .expect("web package mapping")
+                .authentication,
+            "stasis_provenance.json#project_configuration.included_libraries"
+        );
     }
 }

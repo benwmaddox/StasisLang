@@ -208,7 +208,7 @@ generated package metadata uses iOS paths and defines `STASIS_NETWORK_ENABLED=1`
 non-network packages contain none of those references.
 
 Official toolchain archives resolve network libraries relative to the installed
-executable from `mobile/network/<target>/libstasis_network.so` on Android (iOS keeps its
+executable from `mobile/network/<target>/libstasis_network_v1.so` on Android (iOS keeps its
 platform-required static archive) and the shared
 `mobile/network/include/stasis_network.h`; they do not depend on the source
 checkout used to build the compiler. Source-tree Cargo builds retain a
@@ -221,6 +221,10 @@ Nightly archives receive Android support files from a fail-closed, pinned
 mobile-network build job using Android NDK 27.0.12077973/API 26 before archive
 provenance is generated. Android packaging from an official toolchain therefore
 does not need the Stasis source checkout or Cargo to build the network library.
+The Android object has SONAME `libstasis_network_v1.so`. Release APK auditing requires
+the object only when host or client networking is enabled, forbids it offline, proves
+the ELF machine matches the sole packaged ABI, verifies every `PT_LOAD` segment for
+16 KiB alignment, and verifies the stored APK entry begins at a 16 KiB boundary.
 
 The network shell requests `NSLocalNetworkUsageDescription` with a clear nearby
 friends explanation. v1 uses direct TCP/unicast and does not request Bonjour,

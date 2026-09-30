@@ -559,6 +559,9 @@ def finalize(args: argparse.Namespace) -> dict[str, object]:
     package_manifest_path = Path(args.package_manifest).resolve()
     provenance_path = Path(args.provenance).resolve()
     package_manifest = _read_json_object(package_manifest_path, "mobile package manifest")
+    network_enabled = package_manifest.get("network") is True or package_manifest.get(
+        "network_client"
+    ) is True
     expected_development = args.variant == "debug"
     if package_manifest.get("development_build") is not expected_development:
         raise ReleaseError("generated package provenance does not match the requested Android variant")
@@ -645,7 +648,13 @@ def finalize(args: argparse.Namespace) -> dict[str, object]:
                     signing,
                 )
 
-        validate_contents(staged, args.abi, args.required_asset)
+        validate_contents(
+            staged,
+            args.abi,
+            args.required_asset,
+            network_enabled,
+            getattr(args, "readelf", ""),
+        )
         embedded_provenance_identity = _verify_embedded_provenance(
             staged, provenance_path, args.format
         )
@@ -728,6 +737,7 @@ def finalize(args: argparse.Namespace) -> dict[str, object]:
             "artifact_path": str(output.resolve()),
             "artifact_sha256": artifact_sha256,
             "format": args.format,
+            "network_enabled": network_enabled,
             "unsigned_release": unsigned_release,
             "signing_mode": (
                 "unsigned-release" if unsigned_release else
@@ -795,7 +805,13 @@ def verify(args: argparse.Namespace) -> dict[str, object]:
         raise ReleaseError("Android release receipt does not contain an ABI")
     if abi != "arm64-v8a":
         raise ReleaseError("production Android releases require the arm64-v8a ABI")
-    validate_contents(artifact, abi, args.required_asset)
+    validate_contents(
+        artifact,
+        abi,
+        args.required_asset,
+        receipt.get("network_enabled") is True,
+        getattr(args, "readelf", ""),
+    )
     aapt = find_sdk_tool("aapt", args.aapt)
     verify_compiled_launcher(artifact, aapt=aapt)
     badging = run_tool([aapt, "dump", "badging", str(artifact)]).stdout
@@ -873,6 +889,7 @@ def parser() -> argparse.ArgumentParser:
     after.add_argument("--keytool", default="")
     after.add_argument("--bundletool", default="")
     after.add_argument("--java", default="")
+    after.add_argument("--readelf", default="")
     after.add_argument("--sidecar", action="append", default=[])
     after.add_argument("--forbidden-root", action="append", default=[])
 
@@ -882,6 +899,7 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--required-asset", default="")
     check.add_argument("--aapt", default="")
     check.add_argument("--apksigner", default="")
+    check.add_argument("--readelf", default="")
     return result
 
 

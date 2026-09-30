@@ -91,6 +91,10 @@ Network-enabled desktop packages use the shared monolith shell on Windows,
 Linux, and macOS. Hosted release and bootstrap workflows build Windows x86_64
 and Linux x86_64 archives. Native library resolution also distinguishes macOS
 x86_64, macOS arm64 and Linux arm64 for local or separately provisioned builds.
+The compiled catalog fails closed for Windows arm64 and Linux arm64 because hosted
+archives do not currently publish those target artifacts. macOS entries are explicitly
+source-checkout builds validated by the macOS acceptance lane, not release-provenance
+claims.
 Downstream Maddox and Friends application adoption is separate.
 
 Current nightly and bootstrap toolchain archives include one target-native shared-library set:
@@ -115,6 +119,11 @@ and their audit sidecars share the package root with game assets on Unix
 bundle; its asset root resolves back to that package directory. The network library is a normal
 package-local dependency: beside the executable on Windows/Linux and under the app loader path on
 macOS. Offline packages omit it completely.
+macOS uses `@rpath/libstasis_network.dylib` with
+`@executable_path/../Frameworks`; production packaging signs the staged dylib before
+signing the enclosing `.app`. The acceptance lane configures the production signer hook,
+checks this recorded inner-to-outer order, and verifies the emitted signatures without
+repairing them after packaging.
 
 Linux and macOS use the same F1 join card and explicit copy action as Windows.
 The macOS app includes a local-network usage description.

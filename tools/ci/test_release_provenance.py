@@ -33,11 +33,74 @@ VERIFY = ROOT / "tools" / "verify_package_provenance.py"
 
 class ReleaseProvenanceTests(unittest.TestCase):
     @staticmethod
-    def project_configuration(target="windows-x86_64"):
+    def project_configuration(target="windows-x86_64", features=()):
+        features = sorted(features)
+        libraries = {"stasis.network": features} if features else {}
+        resolved_libraries = []
+        if features:
+            source_modules = []
+            if "host" in features:
+                source_modules.append({
+                    "path": "crates/stasis_network/include/stasis_network.h",
+                    "sha256": hashlib.sha256(b"header").hexdigest(),
+                })
+            if "client" in features:
+                source_modules.append({
+                    "path": "src/stdlib/network_client.stasis",
+                    "sha256": hashlib.sha256(b"client").hexdigest(),
+                })
+            source_modules.sort(key=lambda item: item["path"])
+            resolved_libraries.append({
+                "id": "stasis.network",
+                "version": "1.0.0",
+                "selection": "explicit",
+                "features": features,
+                "capabilities": [
+                    "network_client" if feature == "client" else "network"
+                    for feature in features
+                ],
+                "source_modules": source_modules,
+                "artifact": {
+                    "path": "mobile/network/android-arm64/libstasis_network_v1.so",
+                    "kind": "elf-shared-library",
+                    "authentication": (
+                        "stasis_release_provenance.json#mobile_network_artifacts"
+                    ),
+                },
+                "dependencies": [],
+                "abi": "stasis.network.c.v1",
+                "minimum_os": "android-api-26;ndk-r27;page-size-16384",
+                "toolchain": "0.1.0",
+                "license": {
+                    "path": "THIRD_PARTY_NOTICES.md",
+                    "sha256": hashlib.sha256(b"license").hexdigest(),
+                },
+                "load_policy": "normal-platform-dependency",
+                "reasons": ["test fixture"],
+            })
+        digest = hashlib.sha256(
+            json.dumps(
+                {"target": target, "libraries": resolved_libraries},
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
         return {
             "target": target,
             "settings_sha256": hashlib.sha256(b"project settings").hexdigest(),
             "settings": {"channel": "string", "touch_controls": "bool"},
+            "library_set_sha256": digest,
+            "libraries": libraries,
+            "included_libraries": {
+                "schema": "stasis.library_catalog.v1",
+                "catalog_version": "1",
+                "catalog_sha256": hashlib.sha256(b"catalog").hexdigest(),
+                "target": target,
+                "library_set_sha256": digest,
+                "libraries": resolved_libraries,
+                "exclusions": [] if features else [
+                    {"id": "stasis.network", "reason": "not selected"}
+                ],
+            },
         }
 
     def test_project_configuration_rejects_malformed_targets_and_sensitive_keys(self):
@@ -58,6 +121,21 @@ class ReleaseProvenanceTests(unittest.TestCase):
         sensitive["settings"] = {"api_token": "string"}
         with self.assertRaisesRegex(ValueError, "setting summary is malformed"):
             validate_project_configuration(Parser(), sensitive)
+
+        malformed_libraries = json.loads(json.dumps(valid))
+        malformed_libraries["libraries"]["stasis.network"] = ["host", "host"]
+        with self.assertRaisesRegex(ValueError, "features.*malformed"):
+            validate_project_configuration(Parser(), malformed_libraries)
+
+        mismatched_closure = json.loads(json.dumps(valid))
+        mismatched_closure["included_libraries"]["library_set_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "identity differs"):
+            validate_project_configuration(Parser(), mismatched_closure)
+
+        extra_closure_field = json.loads(json.dumps(valid))
+        extra_closure_field["included_libraries"]["unexpected"] = True
+        with self.assertRaisesRegex(ValueError, "closure provenance is malformed"):
+            validate_project_configuration(Parser(), extra_closure_field)
 
     @staticmethod
     def desktop_package_receipt(manifest=b"{}\n"):
@@ -316,7 +394,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 if mode != "offline":
                     receipt["network_artifact"] = {
                         "id": "stasis.network",
-                        "path": "android/app/src/main/cpp/network/libstasis_network.so",
+                        "path": "android/app/src/main/cpp/network/libstasis_network_v1.so",
                         "kind": "elf-shared-object",
                         "load_policy": "normal-platform-dependency",
                         "sha256": hashlib.sha256(b"library").hexdigest(),
@@ -389,7 +467,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 if mode != "offline":
                     network = package / "android/app/src/main/cpp/network"
                     (network / "include").mkdir(parents=True)
-                    (network / "libstasis_network.so").write_bytes(b"library")
+                    (network / "libstasis_network_v1.so").write_bytes(b"library")
                     (network / "include/stasis_network.h").write_bytes(b"header")
                 (package / "common/stasis_package_provenance.h").write_bytes(
                     b"#ifndef STASIS_PACKAGE_PROVENANCE_H\n#define STASIS_PACKAGE_PROVENANCE_H\n"
@@ -1146,7 +1224,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 "network_client": True,
                 "network_artifact": {
                     "id": "stasis.network",
-                    "path": "android/app/src/main/cpp/network/libstasis_network.so",
+                    "path": "android/app/src/main/cpp/network/libstasis_network_v1.so",
                     "kind": "elf-shared-object",
                     "load_policy": "normal-platform-dependency",
                     "sha256": hashlib.sha256(b"library").hexdigest(),
@@ -1170,7 +1248,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             )
             network = package / "android/app/src/main/cpp/network"
             (network / "include").mkdir(parents=True)
-            (network / "libstasis_network.so").write_bytes(b"library")
+            (network / "libstasis_network_v1.so").write_bytes(b"library")
             (network / "include/stasis_network.h").write_bytes(b"header")
             self.assertEqual(subprocess.run(command, check=False).returncode, 0)
             network_client_receipt["network_client"] = False

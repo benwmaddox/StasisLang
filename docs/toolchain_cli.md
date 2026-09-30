@@ -402,7 +402,8 @@ restore release assets.
   shared AOT output, SDL-only runtime, bundled assets, verified provenance, and thin Gradle or
   Xcode app shell. Network-enabled iOS packages require macOS/Xcode, stage and link the
   `stasis_network` arm64 static library, and include the local-network privacy declaration.
-  Android packages stage the ABI-specific `libstasis_network.so` as an imported shared dependency;
+  Android packages stage the ABI-specific `libstasis_network_v1.so` as an imported shared dependency
+  with the matching SONAME and 16 KiB ELF/APK alignment;
   offline packages omit it entirely.
   direct TCP/unicast does not require Bonjour discovery entitlements. Official archives resolve
   prebuilt network libraries from `mobile/network/<target>/` beside the installed executable;

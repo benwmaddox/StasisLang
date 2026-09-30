@@ -74,8 +74,8 @@ DESKTOP_NETWORK_HEADER = "desktop/network/include/stasis_network.h"
 MOBILE_NETWORK_REQUIRED = frozenset(
     {
         "mobile/network/include/stasis_network.h",
-        "mobile/network/android-arm64/libstasis_network.so",
-        "mobile/network/android-x86_64/libstasis_network.so",
+        "mobile/network/android-arm64/libstasis_network_v1.so",
+        "mobile/network/android-x86_64/libstasis_network_v1.so",
     }
 )
 MOBILE_NETWORK_OPTIONAL = frozenset(

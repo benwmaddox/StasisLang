@@ -75,7 +75,7 @@ Offline packages omit network code, permissions, guest bundles, aliases, and run
 | Target | Catalog artifact and loader | Signing/order contract |
 | --- | --- | --- |
 | Windows | optional `stasis_network.dll` plus import library beside reusable payload | authenticate, stage, Authenticode-sign DLL, verify, then sign enclosing package |
-| Android | `libstasis_network.so` for the selected ABI, normal ELF dependency (API 26, NDK r27) | NDK/API identity, SONAME/NEEDED, stripped ABI and 16 KiB alignment before APK signing |
+| Android | `libstasis_network_v1.so` for the selected ABI, normal ELF dependency (API 26, NDK r27) | require the versioned SONAME, exact packaged ABI, 16 KiB ELF `PT_LOAD` and uncompressed APK offset before signing |
 | Linux | `libstasis_network.so`, package-local `$ORIGIN` | authenticate/hash before package publication |
 | macOS | nested `@rpath` dylib with the required architecture slice | sign dylib first, then app, then notarize |
 | iOS | authenticated static archive for the selected device or simulator target | link before final app signing; no downloaded executable code |
@@ -83,6 +83,11 @@ Offline packages omit network code, permissions, guest bundles, aliases, and run
 
 Source checkouts may build authenticated release inputs while developing. Published toolchains must
 consume the release catalog/provenance copy so game packages do not rebuild the shared library.
+Current Linux and Windows x86_64 toolchains publish their matching desktop library plus Android
+arm64/x86_64 libraries. Windows arm64 and Linux arm64 selections fail closed because no matching
+archive is published. macOS x86_64/arm64 and iOS device/simulator entries are source-checkout-only
+and are authenticated by their hosted build/acceptance lane; they are not described as released
+toolchain artifacts until the archive workflows actually publish them.
 
 ## Catalog authoring and release
 

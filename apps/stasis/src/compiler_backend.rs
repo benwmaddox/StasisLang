@@ -5290,7 +5290,7 @@ fn package_engine_bundle_monolithic_desktop(
         )?;
     }
     sign_output_artifact_if_configured(output_exe)?;
-    if cfg!(target_os = "macos") {
+    if cfg!(target_os = "macos") && desktop_network.is_none() {
         if let Some(app_bundle) = output_exe
             .parent()
             .and_then(Path::parent)

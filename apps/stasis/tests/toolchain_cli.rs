@@ -3260,6 +3260,9 @@ fn package_mobile_builds_android_and_ios_projects_from_one_entry() {
         )
         .expect("parse mobile manifest for network fixture");
         network_manifest["capabilities"] = json!({"network": true});
+        network_manifest["libraries"] = json!({
+            "selections": {"stasis.network": {"features": ["host"]}}
+        });
         network_manifest["web"] = json!({"entry": "src/main.stasis"});
         fs::write(
             &manifest_path,

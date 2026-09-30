@@ -143,8 +143,9 @@ def validate_receipt_sha256(
 def validate_project_configuration(
     parser: argparse.ArgumentParser, value: object
 ) -> dict:
-    expected = {"target", "settings_sha256", "settings"}
-    if not isinstance(value, dict) or set(value) != expected:
+    legacy = {"target", "settings_sha256", "settings"}
+    extended = legacy | {"library_set_sha256", "libraries", "included_libraries"}
+    if not isinstance(value, dict) or set(value) not in (legacy, extended):
         parser.error("project configuration provenance is malformed")
     if not isinstance(value["target"], str) or value["target"] not in CANONICAL_PROJECT_TARGETS:
         parser.error(f"project configuration target is invalid: {value['target']!r}")
@@ -165,6 +166,165 @@ def validate_project_configuration(
         )
     ):
         parser.error("project configuration setting summary is malformed")
+    if set(value) == extended:
+        validate_receipt_sha256(
+            parser, value["library_set_sha256"], "included library set"
+        )
+        libraries = validate_library_feature_map(parser, value["libraries"])
+        included = validate_included_libraries(
+            parser,
+            value["included_libraries"],
+            value["target"],
+            value["library_set_sha256"],
+        )
+        resolved = {
+            library["id"]: library["features"]
+            for library in included["libraries"]
+        }
+        if libraries != resolved:
+            parser.error(
+                "project configuration library summary differs from included-library closure"
+            )
+    return value
+
+
+def validate_library_feature_map(
+    parser: argparse.ArgumentParser, value: object
+) -> dict[str, list[str]]:
+    allowed = {"stasis.network": {"client", "host"}}
+    if not isinstance(value, dict) or not set(value).issubset(allowed):
+        parser.error("project configuration library summary is malformed")
+    for library_id, features in value.items():
+        if (
+            not isinstance(features, list)
+            or not features
+            or any(not isinstance(feature, str) for feature in features)
+            or features != sorted(set(features))
+            or not set(features).issubset(allowed[library_id])
+        ):
+            parser.error(
+                f"project configuration features for {library_id} are malformed"
+            )
+    return value
+
+
+def validate_authenticated_input(
+    parser: argparse.ArgumentParser, value: object, label: str
+) -> None:
+    if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
+        parser.error(f"included-library {label} input is malformed")
+    validate_receipt_path(parser, value["path"], f"included-library {label}")
+    validate_receipt_sha256(parser, value["sha256"], f"included-library {label}")
+
+
+def validate_included_libraries(
+    parser: argparse.ArgumentParser,
+    value: object,
+    target: str,
+    library_set_sha256: str,
+) -> dict:
+    expected = {
+        "schema", "catalog_version", "catalog_sha256", "target",
+        "library_set_sha256", "libraries", "exclusions",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        parser.error("included-library closure provenance is malformed")
+    if value["schema"] != "stasis.library_catalog.v1" or value["catalog_version"] != "1":
+        parser.error("included-library closure schema is unsupported")
+    validate_receipt_sha256(parser, value["catalog_sha256"], "library catalog")
+    validate_receipt_sha256(parser, value["library_set_sha256"], "library closure")
+    if value["target"] != target or value["library_set_sha256"] != library_set_sha256:
+        parser.error("included-library closure identity differs from project configuration")
+    libraries = value["libraries"]
+    if not isinstance(libraries, list):
+        parser.error("included-library closure libraries are malformed")
+    ids: list[str] = []
+    for library in libraries:
+        expected_library = {
+            "id", "version", "selection", "features", "capabilities",
+            "source_modules", "artifact", "dependencies", "abi", "minimum_os",
+            "toolchain", "license", "load_policy", "reasons",
+        }
+        if not isinstance(library, dict) or set(library) != expected_library:
+            parser.error("included-library closure entry is malformed")
+        library_id = library["id"]
+        if library_id != "stasis.network" or library_id in ids:
+            parser.error("included-library closure has an unknown or duplicate library")
+        ids.append(library_id)
+        features = validate_library_feature_map(
+            parser, {library_id: library["features"]}
+        )[library_id]
+        expected_capabilities = [
+            "network_client" if feature == "client" else "network"
+            for feature in features
+        ]
+        if library["capabilities"] != expected_capabilities:
+            parser.error("included-library capabilities do not match selected features")
+        if library["selection"] not in {"explicit", "legacy-implicit"}:
+            parser.error("included-library selection source is invalid")
+        for field in ("version", "abi", "minimum_os", "toolchain", "load_policy"):
+            if not isinstance(library[field], str) or not library[field]:
+                parser.error(f"included-library {field} is invalid")
+        source_modules = library["source_modules"]
+        if not isinstance(source_modules, list) or not source_modules:
+            parser.error("included-library source closure is malformed")
+        source_paths: list[str] = []
+        for source in source_modules:
+            validate_authenticated_input(parser, source, "source")
+            source_paths.append(source["path"])
+        if source_paths != sorted(set(source_paths)):
+            parser.error("included-library source closure is not canonical")
+        validate_authenticated_input(parser, library["license"], "license")
+        artifact = library["artifact"]
+        if not isinstance(artifact, dict) or set(artifact) != {
+            "path", "kind", "authentication"
+        }:
+            parser.error("included-library artifact is malformed")
+        validate_receipt_path(parser, artifact["path"], "included-library artifact")
+        if any(
+            not isinstance(artifact[field], str) or not artifact[field]
+            for field in ("kind", "authentication")
+        ):
+            parser.error("included-library artifact identity is invalid")
+        dependencies = library["dependencies"]
+        reasons = library["reasons"]
+        if (
+            not isinstance(dependencies, list)
+            or dependencies != sorted(set(dependencies))
+            or any(not isinstance(item, str) or not item for item in dependencies)
+            or not isinstance(reasons, list)
+            or not reasons
+            or any(not isinstance(reason, str) or not reason for reason in reasons)
+        ):
+            parser.error("included-library dependency or reason closure is malformed")
+    if ids != sorted(ids):
+        parser.error("included-library closure order is not canonical")
+    expected_library_set_sha256 = hashlib.sha256(
+        json.dumps(
+            {"target": target, "libraries": libraries},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if value["library_set_sha256"] != expected_library_set_sha256:
+        parser.error("included-library closure digest does not match its resolved libraries")
+    exclusions = value["exclusions"]
+    if not isinstance(exclusions, list):
+        parser.error("included-library exclusions are malformed")
+    excluded_ids: list[str] = []
+    for exclusion in exclusions:
+        if (
+            not isinstance(exclusion, dict)
+            or set(exclusion) != {"id", "reason"}
+            or exclusion["id"] != "stasis.network"
+            or not isinstance(exclusion["reason"], str)
+            or not exclusion["reason"]
+            or exclusion["id"] in excluded_ids
+        ):
+            parser.error("included-library exclusion is malformed")
+        excluded_ids.append(exclusion["id"])
+    if set(ids) & set(excluded_ids) or set(ids) | set(excluded_ids) != {"stasis.network"}:
+        parser.error("included-library closure is incomplete or contradictory")
     return value
 
 
@@ -553,7 +713,7 @@ def verify_mobile_shells(
         else:
             expected_paths.update(
                 {
-                    ("android", "app/src/main/cpp/network/libstasis_network.so"),
+                    ("android", "app/src/main/cpp/network/libstasis_network_v1.so"),
                     ("android", "app/src/main/cpp/network/include/stasis_network.h"),
                 }
             )

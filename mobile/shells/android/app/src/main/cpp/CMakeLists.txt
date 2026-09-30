@@ -16,7 +16,7 @@ set(STASIS_AOT_DIR "${STASIS_ROOT}/aot")
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if(STASIS_NETWORK_ENABLED OR STASIS_NETWORK_CLIENT_ENABLED)
-    set(STASIS_NETWORK_LIBRARY "${CMAKE_CURRENT_LIST_DIR}/network/libstasis_network.so")
+    set(STASIS_NETWORK_LIBRARY "${CMAKE_CURRENT_LIST_DIR}/network/libstasis_network_v1.so")
     if(NOT EXISTS "${STASIS_NETWORK_LIBRARY}")
         message(FATAL_ERROR "Network capability enabled but ${STASIS_NETWORK_LIBRARY} is missing")
     endif()
