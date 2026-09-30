@@ -2,58 +2,28 @@
 
 <!-- tags: cli, project, vendor, build, package -->
 
-Run the installed `stasis` executable from the project root. A generated
-project has `stasis.json`, `src/`, `tests/`, `assets/`, and the version-matched
-`vendor/stasis` snapshot. `--workspace PATH` selects a different project;
-normal commands can discover the nearest ancestor manifest.
+Run `stasis` from the project containing `stasis.json`. Commands such as
+`check` also accept `--workspace PATH`; `play` discovers the entry from its
+current directory or an explicit source path.
 
-## Edit and verify
+| Command | Purpose |
+| --- | --- |
+| `stasis fmt --check` | Check formatting; `fmt` writes canonical source |
+| `stasis check` | Compile without executing `main` |
+| `stasis test` | Run source tests and supported scenarios |
+| `stasis run --headless --ticks 120` | Execute `main` and 120 ticks without rendering |
+| `stasis play` | Graphical development play with live code swapping |
+| `stasis build --mode release` | Build an AOT executable |
+| `stasis package --target desktop` | Assemble a standalone desktop package |
+| `stasis package --target web --development-build` | Assemble a development Web bundle |
+| `stasis package-mobile --target android-arm64` | Assemble Android AOT output and app shell |
+| `stasis inspect` | Report state storage and capacity projections |
 
-```text
-stasis vendor status
-stasis fmt --check
-stasis check
-stasis test
-stasis run --headless --ticks 120
-stasis play
-```
+`vendor/stasis` is one versioned docs/stdlib snapshot. Use `stasis vendor status`
+to inspect it and `stasis vendor update` to adopt the selected toolchain. Review
+and commit the vendor tree and manifest pin together. Edit game code in `src/`
+and `tests/`; local `check` and `test` preserve the checked-in vendor pin.
 
-`fmt --check` reads without formatting; `fmt` writes canonical source.
-`check` compiles without calling `main`. `test` discovers `.test.stasis`
-declarations and supported scenario files. `run --headless --ticks N` calls
-`main` and then `tick` exactly N times without rendering. `play` opens the
-graphical development runner with live code swapping. `run --watch` is the
-graphical watch spelling. A successful `check` does not prove runtime or
-rendered behavior; use [focused tests](testing.md) and captures as needed.
-
-## Build and package
-
-```text
-stasis build --mode dev
-stasis build --mode release
-stasis package --target desktop
-stasis package --target web --development-build
-stasis package-mobile --target android-arm64
-stasis inspect
-```
-
-The dev build writes a receipt; the release build uses AOT and writes an
-executable. Desktop packaging collects a standalone AOT package, assets, and
-runtime files. Web packaging produces a browser bundle; mobile packaging
-assembles an AOT build and platform app shell. These targets have their own
-host requirements and manifest fields. `inspect` reports direct state storage,
-largest pools, and capacity projections without changing game state.
-
-## Vendor and manifest changes
-
-`vendor/stasis` belongs to Stasis. Do not edit its docs or stdlib in a game
-project. `stasis vendor status` is read-only. `stasis vendor update` installs
-the selected toolchain's snapshot and updates the `stasis.json` pin together.
-Review and commit those two changes together. Source edits belong in project
-`src/`, `tests/`, or `assets/`. Local `check` and `test` can validate an older
-checked-in snapshot without advancing its pin; update explicitly when adopting
-a new toolchain.
-
-Use [semantic edit and validation](semantic-edit-and-validation.md) for source
-item changes. Use [record and replay](record-and-replay.md) for reproducible
-input evidence and [benchmarking](benchmarking.md) for cost comparisons.
+See [semantic editing](semantic-edit-and-validation.md), [testing](testing.md),
+[captures and replay](record-and-replay.md), and [benchmarking](benchmarking.md)
+for the corresponding workflows.
