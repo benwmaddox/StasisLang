@@ -2174,11 +2174,11 @@ fn command_requires_runtime(command: &ToolchainCommand) -> bool {
 }
 
 fn create_new_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
-    create_project_with_options(path, name, true, true)
+    create_project_with_options(path, name, true, true, true)
 }
 
 fn create_project(path: PathBuf, name: String) -> Result<CommandResult, String> {
-    create_project_with_options(path, name, false, false)
+    create_project_with_options(path, name, false, false, false)
 }
 
 fn create_project_with_options(
@@ -2186,6 +2186,7 @@ fn create_project_with_options(
     name: String,
     initialize_git: bool,
     github_actions: bool,
+    android_defaults: bool,
 ) -> Result<CommandResult, String> {
     validate_project_name(&name)?;
     if initialize_git {
@@ -2233,6 +2234,29 @@ fn create_project_with_options(
             )?;
         }
     }
+    if android_defaults {
+        reserved_paths.extend(
+            DEFAULT_ANDROID_LAUNCHER_FILES
+                .iter()
+                .map(|(relative, _)| root.join(relative)),
+        );
+        let mut directories = BTreeSet::new();
+        for (relative, _) in DEFAULT_ANDROID_LAUNCHER_FILES {
+            let mut path = PathBuf::new();
+            if let Some(parent) = Path::new(relative).parent() {
+                for component in parent.components() {
+                    path.push(component);
+                    directories.insert(root.join(&path));
+                }
+            }
+        }
+        for directory in directories {
+            validate_safe_project_directory(
+                &directory,
+                "refusing to write Android launcher resources through",
+            )?;
+        }
+    }
     let vscode_directory = root.join(".vscode");
     validate_safe_project_directory(
         &vscode_directory,
@@ -2262,6 +2286,16 @@ fn create_project_with_options(
     fs::create_dir_all(&assets_directory)
         .map_err(|error| format!("failed to create assets directory: {error}"))?;
     let mut manifest = ProjectManifest::new(name.clone());
+    if android_defaults {
+        manifest.android = Some(AndroidProjectManifest {
+            application_id: default_android_application_id(&name),
+            label: name.clone(),
+            orientation: "unspecified".to_string(),
+            version_code: 1,
+            version_name: "1.0.0".to_string(),
+            launcher_resources: Some(DEFAULT_ANDROID_LAUNCHER_RESOURCE_DIRECTORY.to_string()),
+        });
+    }
     manifest.vendor = Some(vendor_manifest);
     write_manifest(&manifest_path, &manifest)?;
     let vendor_package = root.join("vendor/stasis");
@@ -2313,6 +2347,9 @@ fn create_project_with_options(
     }
     write_new_file(&root.join("src/main.stasis"), DEFAULT_PROJECT_SOURCE)?;
     write_new_file(&root.join("assets/manifest.json"), DEFAULT_ASSET_MANIFEST)?;
+    if android_defaults {
+        write_default_android_launcher_resources(&root)?;
+    }
     write_new_file(
         &root.join("tests/main.test.stasis"),
         "test `new project is ready`(): bool {\r\n    return 1 == 1;\r\n}\r\n",
@@ -2342,6 +2379,52 @@ fn create_project_with_options(
             "github_actions": github_actions,
         }),
     ))
+}
+
+fn default_android_application_id(project_name: &str) -> String {
+    let mut suffix = project_name
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() {
+                (byte as char).to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if !suffix.as_bytes()[0].is_ascii_alphabetic() {
+        suffix.insert_str(0, "game_");
+    }
+    format!("org.stasis.{suffix}")
+}
+
+fn write_default_android_launcher_resources(project_root: &Path) -> Result<(), String> {
+    for (relative, contents) in DEFAULT_ANDROID_LAUNCHER_FILES {
+        let path = project_root.join(relative);
+        let parent = path
+            .parent()
+            .expect("Android launcher template file has a parent directory");
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+        write_new_bytes_file(&path, contents)?;
+    }
+    Ok(())
+}
+
+fn write_new_bytes_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                format!("refusing to overwrite {}", path.display())
+            } else {
+                format!("failed to write {}: {error}", path.display())
+            }
+        })?;
+    file.write_all(contents)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
 }
 
 fn validate_safe_project_directory(path: &Path, refusal: &str) -> Result<(), String> {
@@ -8596,6 +8679,55 @@ fn android_ndk_clang(executable: &str) -> Option<PathBuf> {
 
 const ANDROID_LAUNCHER_DENSITIES: [&str; 5] = ["mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"];
 const ANDROID_LAUNCHER_ADAPTIVE_XML: &str = "mipmap-anydpi-v26/ic_launcher.xml";
+const DEFAULT_ANDROID_LAUNCHER_RESOURCE_DIRECTORY: &str = "branding/android/res";
+const DEFAULT_ANDROID_LAUNCHER_FILES: &[(&str, &[u8])] = &[
+    (
+        "branding/icon.svg",
+        include_bytes!("../templates/new-project/branding/icon.svg"),
+    ),
+    (
+        "branding/android/res/drawable-xxxhdpi/stasis_icon_foreground.png",
+        include_bytes!(
+            "../templates/new-project/branding/android/res/drawable-xxxhdpi/stasis_icon_foreground.png"
+        ),
+    ),
+    (
+        "branding/android/res/mipmap-anydpi-v26/ic_launcher.xml",
+        include_bytes!(
+            "../templates/new-project/branding/android/res/mipmap-anydpi-v26/ic_launcher.xml"
+        ),
+    ),
+    (
+        "branding/android/res/mipmap-mdpi/ic_launcher.png",
+        include_bytes!(
+            "../templates/new-project/branding/android/res/mipmap-mdpi/ic_launcher.png"
+        ),
+    ),
+    (
+        "branding/android/res/mipmap-hdpi/ic_launcher.png",
+        include_bytes!(
+            "../templates/new-project/branding/android/res/mipmap-hdpi/ic_launcher.png"
+        ),
+    ),
+    (
+        "branding/android/res/mipmap-xhdpi/ic_launcher.png",
+        include_bytes!(
+            "../templates/new-project/branding/android/res/mipmap-xhdpi/ic_launcher.png"
+        ),
+    ),
+    (
+        "branding/android/res/mipmap-xxhdpi/ic_launcher.png",
+        include_bytes!(
+            "../templates/new-project/branding/android/res/mipmap-xxhdpi/ic_launcher.png"
+        ),
+    ),
+    (
+        "branding/android/res/mipmap-xxxhdpi/ic_launcher.png",
+        include_bytes!(
+            "../templates/new-project/branding/android/res/mipmap-xxxhdpi/ic_launcher.png"
+        ),
+    ),
+];
 #[cfg(test)]
 const ANDROID_LAUNCHER_FOREGROUND_NAME: &str = "stasis_icon_foreground";
 
@@ -11742,6 +11874,59 @@ mod tests {
         let manifest = serde_json::to_value(ProjectManifest::new("demo".into())).unwrap();
         assert!(manifest.get("ai").is_none());
         assert_eq!(manifest["manifest_version"], MANIFEST_VERSION);
+    }
+
+    #[test]
+    fn new_project_has_android_packaging_defaults() {
+        let root = temp_dir("new_project_android_defaults");
+        create_new_project(root.clone(), "9 lives-game".to_string())
+            .expect("create Android-ready project");
+
+        let manifest: ProjectManifest = serde_json::from_slice(
+            &fs::read(root.join(MANIFEST_NAME)).expect("read generated manifest"),
+        )
+        .expect("parse generated manifest");
+        let android = manifest
+            .android
+            .as_ref()
+            .expect("generated Android defaults");
+        assert_eq!(android.application_id, "org.stasis.game_9_lives_game");
+        assert_eq!(android.label, "9 lives-game");
+        assert_eq!(android.orientation, "unspecified");
+        assert_eq!(android.version_code, 1);
+        assert_eq!(android.version_name, "1.0.0");
+        assert_eq!(
+            android.launcher_resources.as_deref(),
+            Some(DEFAULT_ANDROID_LAUNCHER_RESOURCE_DIRECTORY)
+        );
+        assert!(manifest.validate().is_ok());
+        assert_eq!(
+            default_android_application_id("_snake-case"),
+            "org.stasis.game__snake_case"
+        );
+
+        let workspace = load_workspace(Some(&root)).expect("load generated workspace");
+        let staging = root.join("android-release-staging");
+        assert_eq!(
+            stage_android_launcher_resources(&workspace, &staging, false)
+                .expect("stage generated release icons"),
+            Some(DEFAULT_ANDROID_LAUNCHER_RESOURCE_DIRECTORY.to_string())
+        );
+        for density in ANDROID_LAUNCHER_DENSITIES {
+            assert!(staging
+                .join("android/app/src/main/res")
+                .join(format!("mipmap-{density}/ic_launcher.png"))
+                .is_file());
+        }
+        assert!(staging
+            .join("android/app/src/main/res")
+            .join(ANDROID_LAUNCHER_ADAPTIVE_XML)
+            .is_file());
+        assert!(staging
+            .join("android/app/src/main/res/drawable-xxxhdpi/stasis_icon_foreground.png")
+            .is_file());
+        assert!(root.join("branding/icon.svg").is_file());
+        remove_temp(&root);
     }
 
     use super::*;
@@ -16811,8 +16996,9 @@ mod tests {
     #[test]
     fn github_actions_templates_are_offline_and_match_the_ci_contract() {
         let root = temp_dir("github_actions_templates");
-        let result = create_project_with_options(root.clone(), "demo".to_string(), false, true)
-            .expect("generate GitHub Actions scaffold");
+        let result =
+            create_project_with_options(root.clone(), "demo".to_string(), false, true, false)
+                .expect("generate GitHub Actions scaffold");
         assert_eq!(result.data["github_actions"], true);
 
         for path in [
@@ -16907,12 +17093,31 @@ mod tests {
             "True no-op",
             "ubuntu-latest",
             "windows-latest",
+            "platform: android-web",
+            "platform: win-x64",
             "stasis --json vendor status --workspace .",
             "stasis fmt --check",
             "run: stasis check",
             "run: stasis test",
             "stasis package --target desktop",
-            "Archive desktop release on Unix",
+            "stasis package --target android-arm64",
+            "--out dist/stasis-android",
+            "stasis package --target web",
+            "--out dist/stasis-web",
+            "actions/setup-java@v5",
+            "distribution: temurin",
+            "java-version: '17'",
+            "gradle/actions/setup-gradle@",
+            "android-actions/setup-android@",
+            "Install Android build components",
+            ":app:assembleRelease",
+            "app-release-unsigned.apk",
+            "stasis-game-android-arm64-unsigned.apk",
+            "stasis-game-web.tar.gz",
+            "stasis-game-win-x64.zip",
+            "cannot be installed or used to upgrade an existing app",
+            "mapfile -t actual",
+            "Archive Android and web release on Unix",
             "Archive desktop release on Windows",
             "actions/upload-artifact@v4",
             "gh release create",
@@ -16922,10 +17127,15 @@ mod tests {
                 "weekly workflow missing {expected}"
             );
         }
+        assert!(!weekly.contains("$lastTag = $lastTag.Trim()"));
         assert!(!weekly.contains("macos-"));
         assert!(!weekly.contains("osx-arm64"));
         assert!(!weekly.contains("resolve-stasis-nightly.ps1"));
-        for forbidden in ["package-mobile", "--target web", "signing"] {
+        for forbidden in [
+            "package-mobile",
+            "stasis package-mobile",
+            "stasis-game-linux-x64.tar.gz",
+        ] {
             assert!(
                 !weekly.contains(forbidden),
                 "weekly workflow contains {forbidden}"

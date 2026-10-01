@@ -53,7 +53,6 @@ jobs:
           # unchanged scheduled checkout cheap. The checked-in pin is the
           # only Stasis release input; quarterly automation updates it in a PR.
           $lastTag = [string](git tag --merged HEAD --list 'stasis-release-*' --sort=-creatordate | Select-Object -First 1)
-          $lastTag = $lastTag.Trim()
           $lastReleaseStasis = $null
           $lastReleaseSource = $null
           if ($lastTag) {
@@ -105,7 +104,7 @@ jobs:
           }
 
   build:
-    name: Build desktop release (${{ matrix.platform }})
+    name: Build weekly targets (${{ matrix.platform }})
     needs: decide
     if: needs.decide.outputs.should_release == 'true'
     strategy:
@@ -114,8 +113,7 @@ jobs:
         include:
           - os: ubuntu-latest
             asset: stasis-nightly-linux-x64.tar.gz
-            platform: linux-x64
-            archive: stasis-game-linux-x64.tar.gz
+            platform: android-web
           - os: windows-latest
             asset: stasis-nightly-win-x64.zip
             platform: win-x64
@@ -143,29 +141,76 @@ jobs:
           }
 
       - name: Check formatting
+        if: matrix.platform == 'android-web'
         run: stasis fmt --check
 
       - name: Check
+        if: matrix.platform == 'android-web'
         run: stasis check
 
       - name: Test
+        if: matrix.platform == 'android-web'
         run: stasis test
 
-      - name: Package desktop
+      - name: Package Windows desktop
+        if: matrix.platform == 'win-x64'
         run: stasis package --target desktop
 
-      - name: Archive desktop release on Unix
-        if: runner.os != 'Windows'
+      - name: Setup Java
+        if: matrix.platform == 'android-web'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        if: matrix.platform == 'android-web'
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+        with:
+          gradle-version: "8.9"
+
+      - name: Setup Android SDK
+        if: matrix.platform == 'android-web'
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          packages: platform-tools
+
+      - name: Install Android build components
+        if: matrix.platform == 'android-web'
+        shell: bash
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+
+      - name: Package Android arm64
+        if: matrix.platform == 'android-web'
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
+        run: stasis package --target android-arm64 --out dist/stasis-android
+
+      - name: Build unsigned Android APK
+        if: matrix.platform == 'android-web'
         shell: bash
         run: |
           set -euo pipefail
-          package_dir="$(find dist -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print -quit)"
-          test -n "${package_dir}"
-          tar -czf "dist/${{ matrix.archive }}" -C "${package_dir}" .
-          rm -rf -- "${package_dir}"
+          gradle -p dist/stasis-android/android :app:assembleRelease --no-daemon --max-workers=2 --console=plain
+          unsigned_apk=dist/stasis-android/android/app/build/outputs/apk/release/app-release-unsigned.apk
+          test -f "${unsigned_apk}"
+          cp "${unsigned_apk}" dist/stasis-game-android-arm64-unsigned.apk
+          echo "Android APK is unsigned and cannot be installed or used to upgrade an existing app. A persistent Android app keystore and Gradle signing configuration are required before distributing an installable APK." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package web
+        if: matrix.platform == 'android-web'
+        run: stasis package --target web --out dist/stasis-web
+
+      - name: Archive Android and web release on Unix
+        if: matrix.platform == 'android-web'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist/stasis-web/index.html
+          tar -czf dist/stasis-game-web.tar.gz -C dist/stasis-web .
 
       - name: Archive desktop release on Windows
-        if: runner.os == 'Windows'
+        if: matrix.platform == 'win-x64'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -176,9 +221,21 @@ jobs:
 
       - name: Upload desktop release candidate
         uses: actions/upload-artifact@v4
+        if: matrix.platform == 'win-x64'
         with:
           name: stasis-weekly-${{ needs.decide.outputs.release_tag }}-${{ matrix.platform }}
           path: dist/${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Android and web release candidates
+        uses: actions/upload-artifact@v4
+        if: matrix.platform == 'android-web'
+        with:
+          name: stasis-weekly-${{ needs.decide.outputs.release_tag }}-${{ matrix.platform }}
+          path: |
+            dist/stasis-game-android-arm64-unsigned.apk
+            dist/stasis-game-web.tar.gz
           if-no-files-found: error
           retention-days: 7
 
@@ -204,7 +261,21 @@ jobs:
           SOURCE_COMMIT: ${{ needs.decide.outputs.source_commit }}
         run: |
           set -euo pipefail
-          find dist -type f -printf '%P\n' | sort > dist/ARTIFACT-NAMES.txt
+          expected=(
+            stasis-game-android-arm64-unsigned.apk
+            stasis-game-web.tar.gz
+            stasis-game-win-x64.zip
+          )
+          mapfile -t actual < <(find dist -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [[ "${actual[*]}" != "${expected[*]}" ]]; then
+            printf 'Unexpected release files. Expected:\n%s\nActual:\n%s\n' "${expected[*]}" "${actual[*]}" >&2
+            exit 1
+          fi
+          if find dist -mindepth 1 -maxdepth 1 -type d -print -quit | grep -q .; then
+            echo 'Unexpected directory in downloaded release artifacts.' >&2
+            exit 1
+          fi
+          printf '%s\n' "${expected[@]}" > dist/ARTIFACT-NAMES.txt
           test -s dist/ARTIFACT-NAMES.txt
           while IFS= read -r artifact; do sha256sum "dist/${artifact}"; done < dist/ARTIFACT-NAMES.txt > dist/SHA256SUMS.txt
           jq -n \
@@ -228,7 +299,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Stasis game $RELEASE_TAG" \
-            --notes "Scheduled game release built with complete Stasis $STASIS_RELEASE." \
+            --notes "Scheduled game release built with complete Stasis $STASIS_RELEASE. The Android APK is unsigned and cannot be installed or used to upgrade an existing app; a persistent Android app keystore and Gradle signing configuration are required before distribution." \
             --prerelease
 
   no-op:

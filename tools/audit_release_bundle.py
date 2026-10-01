@@ -70,6 +70,12 @@ PLATFORM_REQUIRED_FILES = {
         "desktop/network/windows-x86_64/stasis_network.dll.lib",
         "desktop/network/windows-x86_64/stasis_network.lib",
         "desktop/network/include/stasis_network.h",
+        "runtime/prebuilt/windows-x64/lib/stasis_mobile_runtime.lib",
+        "runtime/prebuilt/windows-x64/lib/SDL3-static.lib",
+        "runtime/prebuilt/windows-x64/lib/SDL3_image-static.lib",
+        "runtime/prebuilt/windows-x64/lib/stasis_thorvg.lib",
+        "runtime/prebuilt/windows-x64/include/SDL3/SDL.h",
+        "runtime/prebuilt/windows-x64/include/SDL3_image/SDL_image.h",
     ),
     "linux": (
         "bin/stasis",
@@ -85,6 +91,8 @@ PLATFORM_REQUIRED_FILES = {
         "bin/libstasis_dynload.a",
         "bin/libstasis_graphics.dylib",
         "bin/stasis_runner.app/Contents/MacOS/stasis_runner",
+        "desktop/network/macos-arm64/libstasis_network.dylib",
+        "desktop/network/macos-arm64/libstasis_network.a",
         "desktop/network/include/stasis_network.h",
     ),
 }
@@ -93,6 +101,10 @@ RETAINED_LARGE_FILE_RATIONALE = {
     "lld-link.exe": "Required to link per-project Windows AOT outputs offline.",
     "RUST-LLVM-COPYRIGHT.html": "License notice shipped with the bundled Rust LLVM linker.",
     "LLVM-THIRD-PARTY-NOTICES.txt": "License notices for the bundled LLVM compiler tool.",
+    "stasis_mobile_runtime.lib": "Lets Windows offline monolith builds reuse the compiled graphics runtime.",
+    "SDL3-static.lib": "Lets Windows offline monolith builds reuse the pinned SDL3 dependency.",
+    "SDL3_image-static.lib": "Lets Windows offline monolith builds reuse the pinned SDL3_image dependency.",
+    "stasis_thorvg.lib": "Lets Windows offline monolith builds reuse the compiled ThorVG dependency.",
 }
 
 

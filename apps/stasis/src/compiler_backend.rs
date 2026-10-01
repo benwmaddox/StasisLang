@@ -4999,6 +4999,19 @@ fn monolith_configure_arguments(
         format!("-DSTASIS_MONOLITH_OUTPUT_DIR={}", cmake_path(output_dir)),
         format!("-DSTASIS_MONOLITH_OUTPUT_NAME={output_name}"),
     ];
+    if cfg!(windows) && desktop_network.is_none() {
+        let prebuilt = runtime_root.join("prebuilt/windows-x64");
+        if prebuilt.is_dir() {
+            eprintln!(
+                "Stasis desktop package: using prebuilt Windows runtime at {}",
+                prebuilt.display()
+            );
+            arguments.push(format!(
+                "-DSTASIS_MONOLITH_PREBUILT_RUNTIME_DIR={}",
+                cmake_path(&prebuilt)
+            ));
+        }
+    }
     if let Some(network) = desktop_network {
         arguments.push(format!(
             "-DSTASIS_MONOLITH_NETWORK_LIBRARY={}",
@@ -5824,6 +5837,52 @@ mod tests {
             &stasis_jit::AotTarget::AndroidArm64 { min_sdk: 26 },
             Some(&host),
         ));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn offline_windows_monolith_uses_prebuilt_runtime_when_available() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis-prebuilt-monolith-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let runtime = root.join("runtime");
+        std::fs::create_dir_all(runtime.join("prebuilt/windows-x64"))
+            .expect("create prebuilt runtime directory");
+        let arguments = monolith_configure_arguments(
+            &runtime,
+            &root.join("build"),
+            &root.join("aot"),
+            &root.join("main.c"),
+            &root.join("output"),
+            "game",
+            None,
+        );
+        assert!(arguments
+            .iter()
+            .any(|argument| argument.starts_with("-DSTASIS_MONOLITH_PREBUILT_RUNTIME_DIR=")));
+        let network = DesktopNetworkLink {
+            library: root.join("network.lib"),
+            include_dir: root.join("network-include"),
+            mode: DesktopNetworkMode::Host,
+        };
+        let network_arguments = monolith_configure_arguments(
+            &runtime,
+            &root.join("network-build"),
+            &root.join("aot"),
+            &root.join("main.c"),
+            &root.join("output"),
+            "network-game",
+            Some(&network),
+        );
+        assert!(!network_arguments
+            .iter()
+            .any(|argument| argument.starts_with("-DSTASIS_MONOLITH_PREBUILT_RUNTIME_DIR=")));
+        std::fs::remove_dir_all(&root).expect("clean test directory");
     }
 
     #[test]
