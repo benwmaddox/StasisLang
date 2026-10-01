@@ -949,7 +949,11 @@ def main() -> int:
     assert "scrollEditorIntoView" in activity
     assert "keyboardSpacer" in activity
     assert "dp(360)" in activity
-    assert "smoothScrollTo(0, sourceEditor.getBottom())" in activity
+    assert "sourceEditor.getFocusedRect(focusedRect)" in activity
+    assert "scrollView.offsetDescendantRectToMyCoords(sourceEditor, focusedRect)" in activity
+    assert "WorkshopEditorScrollTarget.shouldScroll(requireSourceFocus,\n                                sourceEditor.isFocused())" in activity
+    assert "scrollEditorIntoView(editorPanel, true)" in activity
+    assert "scrollEditorIntoView(editorPanel, false)" in activity
     assert "FastReload: function signature unchanged" in activity
     assert "ResetRequired: function signature changed" in activity
     assert "ResetRequired: struct or layout source changed" in activity
@@ -1292,7 +1296,7 @@ def main() -> int:
     assert '"label": "Stasis Pong"' in pong_project
     assert '"orientation": "sensorLandscape"' in pong_project
     preview_adapter = read("mobile/android/app/src/main/assets/workshop_sample/src/preview_adapter.stasis")
-    assert 'import "/vendor/stasis/src/stdlib/graphics.stasis";' in preview_adapter
+    assert 'import "/vendor/stasis/stdlib/graphics.stasis";' in preview_adapter
     assert "begin_frame();" not in preview_adapter
     assert "end_frame();" not in preview_adapter
     assert "PongHost.writer.reserve(4," in preview_adapter
@@ -1351,7 +1355,7 @@ def main() -> int:
     audio_source = read("mobile/android/app/src/main/assets/audio_sink_sample/src/main.stasis")
     assert "struct AudioAsset" in audio_source
     assert "struct AudioStream" in audio_source
-    assert "import \"/vendor/stasis/src/stdlib/audio.stasis\"" not in audio_source
+    assert "import \"/vendor/stasis/stdlib/audio.stasis\"" not in audio_source
     assert '"assets/tone.mp3"' in audio_source
     assert '"assets/tone.wav"' in audio_source
     assert "function @asset_path(path) load_audio(self: AudioAsset" in audio_source
