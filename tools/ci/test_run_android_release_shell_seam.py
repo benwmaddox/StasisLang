@@ -32,6 +32,39 @@ def write_rgb_png(
 
 
 class AndroidReleaseShellSeamTests(unittest.TestCase):
+    def test_android_numeric_text_receipt_compares_literal_ordered_cases(self):
+        expectations = {
+            "numeric_text": {
+                "capacity": 64,
+                "cases": [
+                    {"id": 1, "status": 3, "actual": "1.3"},
+                    {"id": 2, "status": -1, "actual": "keep"},
+                ],
+            }
+        }
+        log = "I/Stasis: Stasis Android numeric text: 1,3,1.3;2,-1,keep;\n"
+        self.assertEqual(
+            {"case_count": 2, "payload_length": 18},
+            seam.validate_android_numeric_text_acceptance(log, expectations),
+        )
+        with self.assertRaisesRegex(seam.SeamError, "exactly one"):
+            seam.validate_android_numeric_text_acceptance(log + log, expectations)
+        with self.assertRaisesRegex(seam.SeamError, "not terminated"):
+            seam.validate_android_numeric_text_acceptance(log.replace("keep;", "keep"), expectations)
+        with self.assertRaisesRegex(seam.SeamError, "first mismatch"):
+            seam.validate_android_numeric_text_acceptance(log.replace("1.3", "1.2"), expectations)
+        for corruption in ("é", "\x01"):
+            with self.subTest(corruption=repr(corruption)):
+                with self.assertRaisesRegex(seam.SeamError, "non-printable or non-ASCII"):
+                    seam.validate_android_numeric_text_acceptance(
+                        log.rstrip("\n") + corruption + "\n", expectations
+                    )
+        with self.assertRaisesRegex(seam.SeamError, "exceeds"):
+            seam.validate_android_numeric_text_acceptance(
+                log,
+                {"numeric_text": {**expectations["numeric_text"], "capacity": 18}},
+            )
+
     def test_android_generics_digest_marker_is_exactly_the_frame_one_oracle(self):
         expectations = {
             "android_generics": {

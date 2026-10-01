@@ -623,3 +623,44 @@ expanding the ignore allowlist. Bad: the measurement test had mixed required
 correctness with opt-in repetition, which hid both from normal validation.
 Adjustment: keep the one-repetition correctness core default-on and add sampling
 only in the artifact-producing wrapper.
+
+## 2026-10-01 - Maddox #773 allocation-free numeric text
+
+Added checked decimal formatting into caller-owned `ascii[N]` storage for the
+full `i32` range and every finite binary32 value at fixed precision `0..6`.
+Replace, append, and left-pad operations preflight capacity including the NUL,
+return the resulting length or `-1`, and leave the complete header and payload
+unchanged on rejection. Fixed formatting uses exact binary32 quantization,
+halfway-away-from-zero rounding, and unsigned output for rounded negative zero.
+The implementation has one fixed local digit array and no host formatter,
+allocator, runtime ABI, or `i64` surface.
+
+At the source freeze, the independent `BigUint` JIT corpus passed across every
+normal exponent with selected significands, signs, and precisions, plus numeric
+boundaries, tie neighbors, powers of ten, and deterministic raw-bit samples.
+Literal byte and NUL self-checks also passed in JIT, a linked native AOT
+executable, and executable Wasm. Native objects had no formatting or allocator
+imports, and the Wasm module had no imports. The checked-in Stasis behavior
+suite and 115 Android receipt/source-contract tests passed. Fresh exact-head
+API 35 x86_64 execution, arm64 package/link verification, and the complete
+bounded repository gate are recorded externally after the reviewed freeze
+commit because pre-freeze packaging correctly refuses an unverified build
+identity.
+
+Visual evidence: pending at the source freeze. The formatter itself is a byte
+contract; the exact-head API 35 run will capture the sample's green receipt
+frame alongside its literal 98-case device log. No desktop visual change is
+expected.
+
+Theory gained: exact decimal output does not require a host formatting ABI when
+the binary32 mantissa and exponent are reduced into a bounded decimal digit
+vector. Backend parity is strongest when each executable compares literal
+bytes and mobile reads the registered typed storage rather than inferring
+behavior from compilation.
+
+Good: one pure-stdlib implementation serves every backend, while independent
+oracles cover arithmetic, transactionality, capacity, and ownership. Bad:
+compile-only mobile evidence and a prefix-only log regex could hide byte
+differences or trailing corruption. Adjustment: execute literal checks on each
+backend, validate the typed Android header/NUL/full log line, and keep arm64
+link evidence distinct from x86_64 execution evidence.

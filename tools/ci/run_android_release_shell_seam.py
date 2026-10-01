@@ -19,6 +19,9 @@ from pathlib import Path
 SCHEMA = "stasis.seam_test.v1"
 MARKER = re.compile(r"Stasis seam: (\{[^\r\n]+\})")
 GENERICS_ACCEPTANCE_MARKER = re.compile(r"Stasis Android generics: (\{[^\r\n]+\})")
+NUMERIC_TEXT_ACCEPTANCE_MARKER = re.compile(
+    r"Stasis Android numeric text: ([^\r\n]*)"
+)
 ASSET_DIAGNOSTIC = re.compile(r"code=([^ ]+) path=(.*?) detail=(.+)")
 ANDROID_LOG_RECORD_PID = re.compile(r"^[VDIWEF]/\S+\s+\(\s*(\d+)\):")
 ANDROID_GENERICS_MAX_LOG_LINES = 2500
@@ -27,6 +30,61 @@ ANDROID_GENERICS_MAX_LOG_BYTES = 1_000_000
 
 class SeamError(RuntimeError):
     pass
+
+
+def validate_android_numeric_text_acceptance(log: str, expectations: dict) -> dict:
+    """Compare the one typed-array receipt with checked-in literal case bytes."""
+    contract = expectations.get("numeric_text")
+    if not isinstance(contract, dict):
+        raise SeamError("ANDROID-NUMERIC-TEXT has no numeric_text contract")
+    matches = NUMERIC_TEXT_ACCEPTANCE_MARKER.findall(log)
+    if len(matches) != 1:
+        raise SeamError(
+            "ANDROID-NUMERIC-TEXT expected exactly one receipt marker, "
+            f"found {len(matches)}"
+        )
+    payload = matches[0]
+    if not payload.isascii() or any(ord(value) < 32 or ord(value) > 126 for value in payload):
+        raise SeamError(
+            "ANDROID-NUMERIC-TEXT receipt contains non-printable or non-ASCII bytes"
+        )
+    capacity = contract.get("capacity")
+    if not isinstance(capacity, int) or capacity <= 1:
+        raise SeamError("ANDROID-NUMERIC-TEXT has an invalid receipt capacity")
+    if len(payload.encode("ascii")) >= capacity:
+        raise SeamError("ANDROID-NUMERIC-TEXT receipt exceeds its declared capacity")
+    if not payload.endswith(";"):
+        raise SeamError("ANDROID-NUMERIC-TEXT receipt is not terminated")
+    actual = []
+    for record in payload[:-1].split(";"):
+        fields = record.split(",", 2)
+        if len(fields) != 3:
+            raise SeamError(
+                f"ANDROID-NUMERIC-TEXT malformed receipt record: {record!r}"
+            )
+        try:
+            case_id = int(fields[0])
+            status = int(fields[1])
+        except ValueError as error:
+            raise SeamError(
+                f"ANDROID-NUMERIC-TEXT malformed numeric field: {record!r}"
+            ) from error
+        actual.append({"id": case_id, "status": status, "actual": fields[2]})
+    expected = contract.get("cases")
+    if not isinstance(expected, list) or not expected:
+        raise SeamError("ANDROID-NUMERIC-TEXT has no expected cases")
+    if len(actual) != len(expected):
+        raise SeamError(
+            "ANDROID-NUMERIC-TEXT case count mismatch: "
+            f"expected={len(expected)} actual={len(actual)}"
+        )
+    for index, (expected_case, actual_case) in enumerate(zip(expected, actual)):
+        if actual_case != expected_case:
+            raise SeamError(
+                "ANDROID-NUMERIC-TEXT first mismatch at record "
+                f"{index}: expected={expected_case!r} actual={actual_case!r}"
+            )
+    return {"case_count": len(actual), "payload_length": len(payload)}
 
 
 def _run_result(
@@ -2706,6 +2764,12 @@ def main() -> int:
             if generics_contract is not None
             else None
         )
+        numeric_text_contract = expectations.get("numeric_text")
+        numeric_text_receipt = (
+            validate_android_numeric_text_acceptance(log, expectations)
+            if numeric_text_contract is not None
+            else None
+        )
         if test_id == "IT-021" or "assets" in expectations:
             evidence["assets"] = validate_asset_audio_markers(
                 markers, expectations, package, args.package_manifest
@@ -3203,6 +3267,8 @@ def main() -> int:
         )
         if generics_evidence is not None:
             evidence["android_generics"] = generics_evidence
+        if numeric_text_receipt is not None:
+            evidence["android_numeric_text"] = numeric_text_receipt
         if touch_probes:
             evidence["touch_probes"] = touch_probes
         if orientation_probes:

@@ -133,6 +133,43 @@ static float seam_f32(const char *path) {
     return stasis_jit_global_f32_load(hash_global_path(path));
 }
 
+static int log_android_numeric_text_receipt(void) {
+    enum { NUMERIC_TEXT_RECEIPT_CAPACITY = 4096 };
+    int32_t length = seam_i32("numeric_text_receipt.length");
+    int32_t capacity = seam_i32("numeric_text_receipt.max_length");
+    if (seam_i32("numeric_text_negative_zero_verified") != 1) {
+        SDL_Log("Stasis Android numeric text negative-zero input was not preserved");
+        return 0;
+    }
+    if (length < 0 || length >= NUMERIC_TEXT_RECEIPT_CAPACITY ||
+            capacity != NUMERIC_TEXT_RECEIPT_CAPACITY) {
+        SDL_Log(
+            "Stasis Android numeric text invalid header length=%d capacity=%d",
+            length,
+            capacity);
+        return 0;
+    }
+    uint8_t *bytes = stasis_jit_global_u8_array_ptr(
+        hash_global_path("numeric_text_receipt"), 0, NUMERIC_TEXT_RECEIPT_CAPACITY);
+    if (bytes == NULL || bytes[length] != 0) {
+        SDL_Log("Stasis Android numeric text receipt is missing or unterminated");
+        return 0;
+    }
+    char receipt[NUMERIC_TEXT_RECEIPT_CAPACITY];
+    for (int32_t index = 0; index < length; index++) {
+        if (bytes[index] < 32 || bytes[index] > 126) {
+            SDL_Log(
+                "Stasis Android numeric text receipt byte %d is not printable ASCII",
+                index);
+            return 0;
+        }
+        receipt[index] = (char)bytes[index];
+    }
+    receipt[length] = '\0';
+    SDL_Log("Stasis Android numeric text: %s", receipt);
+    return 1;
+}
+
 static int write_ios_generics_receipt(int frame) {
 #if defined(__APPLE__) && !defined(__ANDROID__)
     const char *home = SDL_getenv("HOME");
@@ -723,6 +760,8 @@ int SDL_main(int argc, char **argv) {
         seam_test_id != NULL && strcmp(seam_test_id, "IOS-GENERICS") == 0;
     int android_generics_acceptance =
         seam_test_id != NULL && strcmp(seam_test_id, "ANDROID-GENERICS") == 0;
+    int android_numeric_text_acceptance =
+        seam_test_id != NULL && strcmp(seam_test_id, "ANDROID-NUMERIC-TEXT") == 0;
     if (ios_generics_acceptance) {
         const char *bounds_index = SDL_getenv("STASIS_IOS_GENERICS_BOUNDS_INDEX");
         if (bounds_index != NULL && bounds_index[0] != '\0') {
@@ -782,6 +821,10 @@ int SDL_main(int argc, char **argv) {
                     "\"digest\":%d,\"frame\":%d}",
                     seam_i32("generics_collections_digest_value"),
                     frame);
+            }
+            if (android_numeric_text_acceptance && frame == 1 &&
+                    !log_android_numeric_text_receipt()) {
+                status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
             }
             if (seam_it021_audio && !seam_it021_audio_collected &&
                     seam_i32("seam_audio_handle") > 0 &&

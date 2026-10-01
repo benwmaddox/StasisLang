@@ -1,0 +1,158 @@
+import "/vendor/stasis/src/stdlib/graphics.stasis";
+import "/vendor/stasis/src/stdlib/stdlib.stasis";
+
+global numeric_text_receipt: ascii[4096];
+global numeric_text_scratch: ascii[64];
+global numeric_text_i32_exact: ascii[12];
+global numeric_text_i32_short: ascii[11];
+global numeric_text_f32_exact: ascii[48];
+global numeric_text_f32_short: ascii[47];
+global numeric_text_negative_zero_verified: i32;
+
+function numeric_text_make_f32(mantissa: i32, exp2: i32, negative: bool): f32 {
+    let value: f32 = i32_to_f32(mantissa);
+    let i: i32 = 0;
+    for (i = 0; i < 192; i = i + 1) {
+        if (i < exp2) {
+            value = value * 2.0;
+        }
+        if (i < 0 - exp2) {
+            value = value / 2.0;
+        }
+    }
+    if (negative) {
+        return value * -1.0;
+    }
+    return value;
+}
+
+function numeric_text_record(id: i32, status: i32, value: ascii[]): void {
+    ascii_append_i32(numeric_text_receipt, id);
+    ascii_push(numeric_text_receipt, to_u8_trunc(44));
+    ascii_append_i32(numeric_text_receipt, status);
+    ascii_push(numeric_text_receipt, to_u8_trunc(44));
+    ascii_append(numeric_text_receipt, value);
+    ascii_push(numeric_text_receipt, to_u8_trunc(59));
+}
+
+function numeric_text_record_f32(id: i32, value: f32, decimals: i32): void {
+    let status: i32 = ascii_from_f32_fixed(numeric_text_scratch, value, decimals);
+    numeric_text_record(id, status, numeric_text_scratch);
+}
+
+function numeric_text_seed_keep(dst: ascii[]): void {
+    ascii_clear(dst);
+    ascii_push(dst, to_u8_trunc(107));
+    ascii_push(dst, to_u8_trunc(101));
+    ascii_push(dst, to_u8_trunc(101));
+    ascii_push(dst, to_u8_trunc(112));
+}
+
+function numeric_text_build_receipt(): void {
+    ascii_copy(numeric_text_receipt, "");
+    let id: i32 = 1;
+    let decimals: i32 = 0;
+    let min_subnormal: f32 = numeric_text_make_f32(1, -149, false);
+    let max_subnormal: f32 = numeric_text_make_f32(8388607, -149, false);
+    let negative_zero: f32 = numeric_text_make_f32(0, -149, true);
+    numeric_text_negative_zero_verified = 0;
+    if (negative_zero == 0.0 && 1.0 / negative_zero < 0.0) {
+        numeric_text_negative_zero_verified = 1;
+    }
+    for (decimals = 0; decimals <= 6; decimals = decimals + 1) {
+        numeric_text_record_f32(id, min_subnormal, decimals);
+        id = id + 1;
+        numeric_text_record_f32(id, 0.0 - min_subnormal, decimals);
+        id = id + 1;
+        numeric_text_record_f32(id, max_subnormal, decimals);
+        id = id + 1;
+        numeric_text_record_f32(id, 0.0 - max_subnormal, decimals);
+        id = id + 1;
+        numeric_text_record_f32(id, 0.0, decimals);
+        id = id + 1;
+        numeric_text_record_f32(id, negative_zero, decimals);
+        id = id + 1;
+
+        let tie_exp: i32 = 0 - decimals - 24;
+        numeric_text_record_f32(id, numeric_text_make_f32(16777215, tie_exp - 1, false), decimals);
+        id = id + 1;
+        numeric_text_record_f32(id, numeric_text_make_f32(8388608, tie_exp, false), decimals);
+        id = id + 1;
+        numeric_text_record_f32(id, numeric_text_make_f32(8388609, tie_exp, false), decimals);
+        id = id + 1;
+        numeric_text_record_f32(id, numeric_text_make_f32(16777215, tie_exp - 1, true), decimals);
+        id = id + 1;
+        numeric_text_record_f32(id, numeric_text_make_f32(8388608, tie_exp, true), decimals);
+        id = id + 1;
+        numeric_text_record_f32(id, numeric_text_make_f32(8388609, tie_exp, true), decimals);
+        id = id + 1;
+    }
+
+    let maximum: f32 = numeric_text_make_f32(16777215, 104, false);
+    numeric_text_record_f32(id, maximum, 6);
+    id = id + 1;
+    numeric_text_record_f32(id, 0.0 - maximum, 6);
+    id = id + 1;
+    numeric_text_record_f32(id, 9.999999, 5);
+    id = id + 1;
+
+    numeric_text_seed_keep(numeric_text_scratch);
+    numeric_text_record(id, ascii_from_f32_fixed(numeric_text_scratch, 0.0 / 0.0, 2), numeric_text_scratch);
+    id = id + 1;
+    numeric_text_seed_keep(numeric_text_scratch);
+    numeric_text_record(id, ascii_from_f32_fixed(numeric_text_scratch, 1.0 / 0.0, 2), numeric_text_scratch);
+    id = id + 1;
+    numeric_text_seed_keep(numeric_text_scratch);
+    numeric_text_record(id, ascii_from_f32_fixed(numeric_text_scratch, 0.0 - 1.0 / 0.0, 2), numeric_text_scratch);
+    id = id + 1;
+
+    let minimum: i32 = 0 - 2147483647 - 1;
+    numeric_text_record(id, ascii_from_i32(numeric_text_scratch, minimum), numeric_text_scratch);
+    id = id + 1;
+    numeric_text_record(id, ascii_from_i32(numeric_text_scratch, 2147483647), numeric_text_scratch);
+    id = id + 1;
+    ascii_clear(numeric_text_scratch);
+    ascii_push(numeric_text_scratch, to_u8_trunc(115));
+    ascii_push(numeric_text_scratch, to_u8_trunc(99));
+    ascii_push(numeric_text_scratch, to_u8_trunc(111));
+    ascii_push(numeric_text_scratch, to_u8_trunc(114));
+    ascii_push(numeric_text_scratch, to_u8_trunc(101));
+    ascii_push(numeric_text_scratch, to_u8_trunc(58));
+    numeric_text_record(id, ascii_append_i32(numeric_text_scratch, minimum), numeric_text_scratch);
+    id = id + 1;
+    ascii_clear(numeric_text_scratch);
+    ascii_push(numeric_text_scratch, to_u8_trunc(52));
+    ascii_push(numeric_text_scratch, to_u8_trunc(50));
+    numeric_text_record(id, ascii_pad_left(numeric_text_scratch, 8, to_u8_trunc(48)), numeric_text_scratch);
+    id = id + 1;
+
+    numeric_text_record(id, ascii_from_i32(numeric_text_i32_exact, minimum), numeric_text_i32_exact);
+    id = id + 1;
+    numeric_text_seed_keep(numeric_text_i32_short);
+    numeric_text_record(id, ascii_from_i32(numeric_text_i32_short, minimum), numeric_text_i32_short);
+    id = id + 1;
+    numeric_text_record(id, ascii_from_f32_fixed(numeric_text_f32_exact, 0.0 - maximum, 6), numeric_text_f32_exact);
+    id = id + 1;
+    numeric_text_seed_keep(numeric_text_f32_short);
+    numeric_text_record(id, ascii_from_f32_fixed(numeric_text_f32_short, 0.0 - maximum, 6), numeric_text_f32_short);
+}
+
+function main(): i32 {
+    init_window(320, 180, "Stasis Numeric Text Seam");
+    numeric_text_build_receipt();
+    return 0;
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function render(): i32 {
+    clear(0.02, 0.04, 0.08, 1.0);
+    fill_rect(48.0, 48.0, 224.0, 84.0, 0.10, 0.72, 0.42, 1.0);
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}
