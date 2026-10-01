@@ -572,7 +572,12 @@ jobs:
             New-Item -ItemType Directory -Force -Path "cli-smoke/assets" | Out-Null
             Set-Content -Path "cli-smoke/assets/manifest.json" -Encoding ASCII -Value '{"schema":"stasis-assets","version":1,"assets":[]}'
             python (Join-Path $checkoutRoot "tools/ci/add_smoke_android_launcher.py") cli-smoke
-            .\stasis.exe --workspace cli-smoke package --target desktop
+            python (Join-Path $checkoutRoot "tools/ci/check_package_time.py") `
+              --label "Windows desktop" --max-seconds 120 `
+              --expect-output "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe" `
+              --expect-log "using prebuilt Windows runtime" -- `
+              .\stasis.exe --workspace cli-smoke package --target desktop
+            if ($LASTEXITCODE -ne 0) { throw "Windows desktop packaging benchmark failed" }
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe")) { throw "game package executable missing" }
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis.json")) { throw "game package manifest missing" }
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis_provenance.json")) { throw "game package provenance missing" }
@@ -681,9 +686,30 @@ jobs:
           mkdir -p cli-smoke/assets
           printf '%s\n' '{"schema":"stasis-assets","version":1,"assets":[]}' > cli-smoke/assets/manifest.json
           python3 "${repo_root}/tools/ci/add_smoke_android_launcher.py" cli-smoke
-          ./bin/stasis --workspace cli-smoke package --target desktop
-          ./bin/stasis --workspace cli-smoke package-mobile --target android-arm64 --out dist/android
-          ./bin/stasis --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios
+          python3 "${repo_root}/tools/ci/check_package_time.py" \
+            --label "${RUNNER_OS} desktop" --max-seconds 120 \
+            --expect-output "${smoke_executable}" -- \
+            ./bin/stasis --workspace cli-smoke package --target desktop
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            python3 "${repo_root}/tools/ci/check_package_time.py" \
+              --label "Linux Android arm64" --max-seconds 120 \
+              --expect-output "cli-smoke/dist/android/android/app/src/main/cpp/CMakeLists.txt" -- \
+              ./bin/stasis --workspace cli-smoke package --target android-arm64 --out dist/android
+            python3 "${repo_root}/tools/ci/check_package_time.py" \
+              --label "Linux web" --max-seconds 120 \
+              --expect-output "cli-smoke/dist/web/index.html" -- \
+              ./bin/stasis --workspace cli-smoke package --target web --out dist/web
+          else
+            ./bin/stasis --workspace cli-smoke package-mobile --target android-arm64 --out dist/android
+          fi
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            python3 "${repo_root}/tools/ci/check_package_time.py" \
+              --label "macOS iOS arm64" --max-seconds 120 \
+              --expect-output "cli-smoke/dist/ios/ios/StasisMobile.xcodeproj/project.pbxproj" -- \
+              ./bin/stasis --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios
+          else
+            ./bin/stasis --workspace cli-smoke package-mobile --target ios-arm64 --out dist/ios
+          fi
           mv "${repo_root}/crates/stasis_network" "${network_source_backup}/"
           python3 - <<'PY'
           import json
