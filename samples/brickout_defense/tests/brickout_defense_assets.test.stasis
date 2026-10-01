@@ -1,0 +1,55 @@
+import "../src/main.stasis";
+
+test `generated image catalog covers all static and animation assets`(): bool {
+    if (BRICKOUT_DEFENSE_ASSET_COUNT != 622) {
+        return false;
+    }
+    if (BD_ASSET_BACKGROUND != 0 || BD_ASSET_PROJECTILE_ROCKET != 24) {
+        return false;
+    }
+    if (BD_ASSET_ANIM_BALL_STANDARD_00 != 25 || BD_ASSET_ANIM_TOWER_SNIPER_59 != 621) {
+        return false;
+    }
+    if (brickout_defense_catalog_request(-1)) {
+        return false;
+    }
+    return !brickout_defense_catalog_request(BRICKOUT_DEFENSE_ASSET_COUNT);
+}
+
+test `recovered animation frame wrapping preserves table timing`(): bool {
+    if (original_ball_standard_frame(18) != original_ball_standard_frame(0)) {
+        return false;
+    }
+    if (original_ball_curve_frame(34) != original_ball_curve_frame(0)) {
+        return false;
+    }
+    if (original_ball_fire_frame(40) != original_ball_fire_frame(0)) {
+        return false;
+    }
+    if (original_tower_standard_frame(61) != original_tower_standard_frame(0)) {
+        return false;
+    }
+    if (original_tower_healer_frame(53) != original_tower_healer_frame(0)) {
+        return false;
+    }
+    return original_tower_sniper_frame(-1) == original_tower_sniper_frame(59);
+}
+
+test `a failed image request blocks catalog readiness and gameplay boot`(): bool {
+    brickout_defense_catalog_loader.next_index = 0;
+    brickout_defense_catalog_loader.ready = false;
+    brickout_defense_catalog_loader.failed = false;
+    brickout_defense_catalog_loader.current.request = 0;
+    brickout_defense_catalog_loader.current.state = AssetState.Failed;
+    brickout_defense_catalog_poll();
+    if (!brickout_defense_catalog_failed()) {
+        return false;
+    }
+    if (brickout_defense_catalog_loader.ready) {
+        return false;
+    }
+    if (brickout_defense_catalog_loaded_count() != 0) {
+        return false;
+    }
+    return !original_state.initialized;
+}

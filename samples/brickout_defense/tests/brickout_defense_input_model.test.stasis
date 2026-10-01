@@ -1,0 +1,143 @@
+import "../src/main.stasis";
+
+function original_testkit_reset_frame(): void {
+    brickout_defense_host_frame.pointer_count = 0;
+    for (let i: i32 = 0; i < 512; i += 1) {
+        brickout_defense_host_frame.keys[i] = 0;
+    }
+    brickout_defense_host_frame.display.safe_x = 0.0;
+    brickout_defense_host_frame.display.safe_y = 0.0;
+    brickout_defense_host_frame.display.safe_width = 660.0;
+    brickout_defense_host_frame.display.safe_height = 550.0;
+    brickout_defense_host_frame.display.logical_width = 660.0;
+    brickout_defense_host_frame.display.logical_height = 550.0;
+}
+
+function original_testkit_reset_key_edges(): void {
+    original_state.keys.escape = false;
+    original_state.keys.pause = false;
+    original_state.keys.next = false;
+    original_state.keys.sell = false;
+    original_state.keys.upgrade = false;
+    original_state.keys.one = false;
+    original_state.keys.two = false;
+    original_state.keys.three = false;
+    original_state.keys.four = false;
+    original_state.keys.five = false;
+    original_state.keys.six = false;
+}
+
+test `vector labels remain initialized from the recovered source`(): bool {
+    original_init_text();
+    if (original_text_lengths[TXT_BRICKOUT_DEFENSE] != 16) {
+        return false;
+    }
+    if (original_text_codes[original_text_offsets[TXT_BRICKOUT_DEFENSE]] != 66) {
+        return false;
+    }
+    return true;
+}
+
+test `HostFrame touch starts the recovered challenge`(): bool {
+    original_testkit_reset_frame();
+    original_state.screen = OriginalScreen.MainMenu;
+    brickout_defense_host_frame.pointer_count = 1;
+    brickout_defense_host_frame.pointers[0].went_down = true;
+    brickout_defense_host_frame.pointers[0].x_logical = 200.0;
+    brickout_defense_host_frame.pointers[0].y_logical = 240.0;
+    original_update_layout();
+    original_handle_pointer();
+    if (original_state.screen != OriginalScreen.Game) {
+        return false;
+    }
+    if (original_state.level_index != 2) {
+        return false;
+    }
+    if (original_state.gold != 115) {
+        return false;
+    }
+    return original_spawn_total == 47;
+}
+
+test `HostFrame number keys select the recovered campaign`(): bool {
+    original_testkit_reset_frame();
+    original_testkit_reset_key_edges();
+    original_state.screen = OriginalScreen.MainMenu;
+    brickout_defense_host_frame.keys[KEY_1] = 1;
+    original_handle_keyboard();
+    if (original_state.screen != OriginalScreen.CampaignMenu) {
+        return false;
+    }
+    return original_state.keys.one;
+}
+
+test `touch placement uses original grid and economy`(): bool {
+    original_clear_entities();
+    original_start_level(0);
+    original_state.selected_shop = OriginalTowerKind.Standard;
+    let before: i32 = original_state.gold;
+    let placed: bool = original_try_place_tower(120.0, 180.0);
+    if (!placed) {
+        return false;
+    }
+    if (original_state.gold != before - 5) {
+        return false;
+    }
+    if (original_state.selected_tower_index < 0) {
+        return false;
+    }
+    let index: i32 = original_state.selected_tower_index;
+    if (original_state.towers[index].kind != OriginalTowerKind.Standard) {
+        return false;
+    }
+    if (original_state.towers[index].hp != 10) {
+        return false;
+    }
+    return true;
+}
+
+test `desktop shortcuts select upgrade and sell original towers`(): bool {
+    original_clear_entities();
+    original_testkit_reset_key_edges();
+    original_start_level(0);
+    original_handle_number_press(2);
+    if (original_state.selected_shop != OriginalTowerKind.Standard) {
+        return false;
+    }
+    if (!original_try_place_tower(120.0, 180.0)) {
+        return false;
+    }
+    let index: i32 = original_state.selected_tower_index;
+    let gold_after_place: i32 = original_state.gold;
+    original_upgrade_selected();
+    if (original_state.towers[index].level != 1) {
+        return false;
+    }
+    if (original_state.gold != gold_after_place - 6) {
+        return false;
+    }
+    original_sell_selected();
+    if (original_state.towers[index].active) {
+        return false;
+    }
+    if (original_state.selected_tower_index != -1) {
+        return false;
+    }
+    return true;
+}
+
+test `splitter produces two weakened recovered children`(): bool {
+    original_clear_entities();
+    original_state.rng = 1234;
+    let parent: i32 = original_spawn_ball(OriginalBallKind.Splitter, 1, 200.0, 100.0, 3);
+    if (parent < 0) {
+        return false;
+    }
+    original_state.balls[parent].hp = 40;
+    original_state.balls[parent].split_timer = 1;
+    original_update_ball_behavior(parent);
+    if (original_count_balls() != 3) {
+        return false;
+    }
+    return true;
+}

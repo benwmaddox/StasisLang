@@ -1,0 +1,22 @@
+{
+  "manifest_version": 1,
+  "name": "brickout_defense",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "vendor": {
+    "stasis": {
+      "release_id": "nightly-20260929-369",
+      "sha256": "0c393e4cbbf95609aee9490bf10fe984cc23363f4180a18869409d6000befad8",
+      "hash_version": 2
+    }
+  },
+  "android": {
+    "application_id": "com.rootbeergames.brickoutrevenge",
+    "label": "Brickout Defense",
+    "orientation": "sensorLandscape",
+    "version_code": 2,
+    "version_name": "1.0.1",
+    "launcher_resources": "branding/android/res"
+  }
+}
