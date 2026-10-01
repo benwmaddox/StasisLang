@@ -339,7 +339,6 @@ fn scalar_clif_counts(clif: &str) -> Value {
 }
 
 #[test]
-#[ignore = "measurement harness; run with tools/measure_simd_soa.py"]
 fn simd_soa_characterization_records_arm64_evidence() {
     let warmups = configured_count("STASIS_SIMD_COMPILE_WARMUPS", 0);
     let repetitions = configured_count("STASIS_SIMD_COMPILE_REPETITIONS", 1).max(1);

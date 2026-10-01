@@ -247,7 +247,6 @@ def main() -> int:
         "--lib",
         "simd_soa_characterization_records_arm64_evidence",
         "--",
-        "--ignored",
         "--nocapture",
         "--test-threads=1",
     ]
