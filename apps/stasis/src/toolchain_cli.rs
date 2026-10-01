@@ -16942,6 +16942,8 @@ mod tests {
             "branch=\"automation/stasis-pin-update\"",
             "git branch -f \"$branch\" \"origin/$default_branch\"",
             "git switch \"$branch\"",
+            "echo \"branch=$branch\" >> \"$GITHUB_OUTPUT\"",
+            "echo \"default_branch=$default_branch\" >> \"$GITHUB_OUTPUT\"",
             "git add stasis.json vendor/stasis",
             "git push --force-with-lease origin \"$BRANCH\"",
             "gh pr list",
