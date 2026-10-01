@@ -3614,7 +3614,7 @@ static void stasis_minimize_launch_console(void) {
     if (!console) return;
     HWND terminal = GetAncestor(console, GA_ROOTOWNER);
     if (terminal && IsWindowVisible(terminal)) {
-        ShowWindow(terminal, SW_MINIMIZE);
+        ShowWindow(terminal, SW_FORCEMINIMIZE);
     } else {
         /* ConPTY exposes only a message window; ask its frontend to iconify. */
         stasis_request_terminal_minimize();
