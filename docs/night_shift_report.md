@@ -664,3 +664,35 @@ compile-only mobile evidence and a prefix-only log regex could hide byte
 differences or trailing corruption. Adjustment: execute literal checks on each
 backend, validate the typed Android header/NUL/full log line, and keep arm64
 link evidence distinct from x86_64 execution evidence.
+
+## 2026-10-01 - Maddox #787 stable LSP worker admission
+
+Replaced the deprecated atomic conditional update in LSP live-request worker
+admission with a private weak compare-exchange loop. The existing 64-worker cap,
+successful `AcqRel` publication, `Acquire` observations, backpressure response,
+and both `fetch_sub(AcqRel)` release paths remain unchanged.
+
+Validation at source freeze: the unchanged source reproduced the Rust 1.99.0
+warnings-denied deprecation in `cargo build -p stasis` while stable Rust 1.92.0
+passed the same command. After the repair, that exact build passed under both
+toolchains. Four boundary/contention admission tests passed, including one
+128-thread race with exactly 64 successful reservations, the existing real
+backpressure-path test passed, and all 35 `stasis_lsp` library tests passed
+serially under both Rust versions. The pre-edit repository validator exposed a
+stale native-runtime sibling; after building and verifying one matching source,
+release, and fingerprint tuple, its exact failed display-metrics target passed
+1/1. Final commit-head artifact identity and bounded full target coverage remained
+pending at this source-freeze checkpoint.
+
+Visual evidence: not applicable (private LSP concurrency and compiler-version
+compatibility only).
+
+Theory gained: a small explicit compare-exchange loop can preserve the exact
+linearization point and ordering of a convenience atomic update while spanning
+stable compiler versions on both sides of an API rename.
+
+Good: boundary, overfull, real-path, and concurrent-cap behavior now have direct
+oracles. Bad: the first broad baseline loaded a stale native DLL, obscuring an
+otherwise unrelated gate. Adjustment: verify one source/release/fingerprint
+tuple before native integration tests and keep compatibility checks explicit for
+both the existing local and current stable toolchains.

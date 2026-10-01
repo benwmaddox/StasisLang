@@ -71,6 +71,24 @@ const LIVE_STOP_METHOD: &str = "stasis/live/stop";
 const LIVE_REQUEST_METHOD: &str = "stasis/live/request";
 const MAX_LIVE_REQUEST_WORKERS: usize = 64;
 
+fn try_admit_live_request_worker(workers: &AtomicUsize) -> bool {
+    let mut observed = workers.load(Ordering::Acquire);
+    loop {
+        if observed >= MAX_LIVE_REQUEST_WORKERS {
+            return false;
+        }
+        match workers.compare_exchange_weak(
+            observed,
+            observed + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(current) => observed = current,
+        }
+    }
+}
+
 #[derive(Default, Deserialize)]
 struct LiveStartParams {
     #[serde(default)]
@@ -559,12 +577,7 @@ impl LanguageServer {
                 _ => unreachable!("custom live request was prefiltered"),
             };
         let workers = self.live_request_workers.clone();
-        if workers
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < MAX_LIVE_REQUEST_WORKERS).then_some(count + 1)
-            })
-            .is_err()
-        {
+        if !try_admit_live_request_worker(workers.as_ref()) {
             let response = internal_error(
                 id,
                 format!(
@@ -1762,6 +1775,7 @@ mod tests {
     use super::*;
     use lsp_server::RequestId;
     use stasis_language_service::{workshop_source_hash, LiveObservation, LiveObservationBatch};
+    use std::sync::Barrier;
     use std::time::Duration;
 
     fn test_server(name: &str) -> (LanguageServer, Uri, String) {
@@ -2155,6 +2169,59 @@ mod tests {
             .expect_err("backpressure error")
             .message
             .contains("limited to 64 concurrent operations"));
+    }
+
+    #[test]
+    fn live_request_worker_admission_reserves_from_zero() {
+        let workers = AtomicUsize::new(0);
+
+        assert!(try_admit_live_request_worker(&workers));
+        assert_eq!(workers.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn live_request_worker_admission_uses_last_slot_once() {
+        let workers = AtomicUsize::new(MAX_LIVE_REQUEST_WORKERS - 1);
+
+        assert!(try_admit_live_request_worker(&workers));
+        assert!(!try_admit_live_request_worker(&workers));
+        assert_eq!(workers.load(Ordering::Acquire), MAX_LIVE_REQUEST_WORKERS);
+    }
+
+    #[test]
+    fn live_request_worker_admission_rejects_full_or_overfull_counter() {
+        for count in [MAX_LIVE_REQUEST_WORKERS, MAX_LIVE_REQUEST_WORKERS + 1] {
+            let workers = AtomicUsize::new(count);
+
+            assert!(!try_admit_live_request_worker(&workers));
+            assert_eq!(workers.load(Ordering::Acquire), count);
+        }
+    }
+
+    #[test]
+    fn live_request_worker_admission_caps_concurrent_reservations() {
+        const CONTENDERS: usize = MAX_LIVE_REQUEST_WORKERS * 2;
+
+        let workers = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(CONTENDERS));
+        let contenders = (0..CONTENDERS)
+            .map(|_| {
+                let workers = workers.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    try_admit_live_request_worker(workers.as_ref())
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let admitted = contenders
+            .into_iter()
+            .map(|contender| contender.join().expect("admission contender"))
+            .filter(|admitted| *admitted)
+            .count();
+        assert_eq!(admitted, MAX_LIVE_REQUEST_WORKERS);
+        assert_eq!(workers.load(Ordering::Acquire), MAX_LIVE_REQUEST_WORKERS);
     }
 
     #[test]
