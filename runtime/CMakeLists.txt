@@ -44,6 +44,7 @@ set(STASIS_MONOLITH_OUTPUT_NAME "stasis_game" CACHE STRING "Production executabl
 set(STASIS_MONOLITH_NETWORK_LIBRARY "" CACHE FILEPATH "stasis_network shared-library link artifact")
 set(STASIS_MONOLITH_NETWORK_INCLUDE_DIR "" CACHE PATH "stasis_network header directory")
 set(STASIS_MONOLITH_NETWORK_MODE "" CACHE STRING "stasis_network mode: host, client, or dual")
+set(STASIS_MONOLITH_PREBUILT_RUNTIME_DIR "" CACHE PATH "Portable Windows static runtime bundle for an offline monolith")
 option(
     STASIS_BUILD_MOBILE_RUNTIME
     "Build the shared SDL renderer mobile runtime core"
@@ -75,8 +76,66 @@ if(STASIS_BUILD_MONOLITH)
     set(STASIS_BUILD_MOBILE_RUNTIME ON CACHE BOOL "" FORCE)
 endif()
 
+set(_stasis_monolith_use_prebuilt_runtime OFF)
+if(STASIS_BUILD_MONOLITH AND STASIS_MONOLITH_PREBUILT_RUNTIME_DIR)
+    if(NOT WIN32)
+        message(FATAL_ERROR "STASIS_MONOLITH_PREBUILT_RUNTIME_DIR is currently supported only on Windows")
+    elseif(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+        message(FATAL_ERROR "STASIS_MONOLITH_PREBUILT_RUNTIME_DIR requires a 64-bit Windows target")
+    elseif(NOT MSVC)
+        message(FATAL_ERROR "STASIS_MONOLITH_PREBUILT_RUNTIME_DIR requires an MSVC-compatible compiler")
+    elseif(STASIS_MONOLITH_NETWORK_MODE)
+        message(STATUS "Ignoring the offline prebuilt runtime for a network monolith; using the source build path")
+    else()
+        set(_stasis_monolith_use_prebuilt_runtime ON)
+        set(_stasis_monolith_prebuilt_lib_dir "${STASIS_MONOLITH_PREBUILT_RUNTIME_DIR}/lib")
+        set(_stasis_monolith_prebuilt_include_dir "${STASIS_MONOLITH_PREBUILT_RUNTIME_DIR}/include")
+        foreach(_stasis_prebuilt_library IN ITEMS
+                stasis_mobile_runtime.lib
+                SDL3-static.lib
+                SDL3_image-static.lib
+                stasis_thorvg.lib)
+            if(NOT EXISTS "${_stasis_monolith_prebuilt_lib_dir}/${_stasis_prebuilt_library}")
+                message(FATAL_ERROR
+                    "Prebuilt Windows monolith runtime is missing ${_stasis_monolith_prebuilt_lib_dir}/${_stasis_prebuilt_library}")
+            endif()
+        endforeach()
+        foreach(_stasis_prebuilt_header IN ITEMS SDL3/SDL.h SDL3_image/SDL_image.h)
+            if(NOT EXISTS "${_stasis_monolith_prebuilt_include_dir}/${_stasis_prebuilt_header}")
+                message(FATAL_ERROR
+                    "Prebuilt Windows monolith runtime is missing ${_stasis_monolith_prebuilt_include_dir}/${_stasis_prebuilt_header}")
+            endif()
+        endforeach()
+
+        add_library(stasis_thorvg STATIC IMPORTED GLOBAL)
+        set_target_properties(stasis_thorvg PROPERTIES
+            IMPORTED_LOCATION "${_stasis_monolith_prebuilt_lib_dir}/stasis_thorvg.lib"
+            IMPORTED_LINK_INTERFACE_LANGUAGES CXX
+            INTERFACE_COMPILE_DEFINITIONS TVG_STATIC
+            INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/thorvg/src/bindings/capi"
+        )
+
+        add_library(SDL3::SDL3-static STATIC IMPORTED GLOBAL)
+        set_target_properties(SDL3::SDL3-static PROPERTIES
+            IMPORTED_LOCATION "${_stasis_monolith_prebuilt_lib_dir}/SDL3-static.lib"
+            IMPORTED_LINK_INTERFACE_LANGUAGES "C;CXX"
+            INTERFACE_INCLUDE_DIRECTORIES "${_stasis_monolith_prebuilt_include_dir}"
+            INTERFACE_LINK_LIBRARIES "kernel32;user32;gdi32;winmm;imm32;ole32;oleaut32;version;uuid;advapi32;setupapi;shell32"
+        )
+
+        add_library(SDL3_image::SDL3_image-static STATIC IMPORTED GLOBAL)
+        set_target_properties(SDL3_image::SDL3_image-static PROPERTIES
+            IMPORTED_LOCATION "${_stasis_monolith_prebuilt_lib_dir}/SDL3_image-static.lib"
+            IMPORTED_LINK_INTERFACE_LANGUAGES C
+            INTERFACE_INCLUDE_DIRECTORIES "${_stasis_monolith_prebuilt_include_dir}"
+            INTERFACE_LINK_LIBRARIES SDL3::SDL3-static
+        )
+    endif()
+endif()
+
 if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR
-   STASIS_BUILD_MOBILE_RUNTIME OR STASIS_SVG_BUILD_TESTS)
+   (STASIS_BUILD_MOBILE_RUNTIME AND NOT _stasis_monolith_use_prebuilt_runtime) OR
+   STASIS_SVG_BUILD_TESTS)
     add_subdirectory(third_party/thorvg)
 endif()
 
@@ -101,7 +160,7 @@ endif()
 
 # Find graphics deps only when building graphics targets.
 if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_MOBILE_RUNTIME)
-    if(STASIS_GRAPHICS_BUNDLE_SDL)
+    if(STASIS_GRAPHICS_BUNDLE_SDL AND NOT _stasis_monolith_use_prebuilt_runtime)
         include(FetchContent)
         if(DEFINED ENV{STASIS_SDL3_SOURCE} AND NOT "$ENV{STASIS_SDL3_SOURCE}" STREQUAL "")
             set(FETCHCONTENT_SOURCE_DIR_STASIS_SDL3 "$ENV{STASIS_SDL3_SOURCE}")
@@ -323,7 +382,15 @@ if(STASIS_BUILD_MOBILE_RUNTIME)
         endif()
     endif()
 
-    if(STASIS_BUILD_MOBILE_RUNTIME_VARIANTS)
+    if(_stasis_monolith_use_prebuilt_runtime)
+        add_library(stasis_mobile_runtime STATIC IMPORTED GLOBAL)
+        set_target_properties(stasis_mobile_runtime PROPERTIES
+            IMPORTED_LOCATION "${_stasis_monolith_prebuilt_lib_dir}/stasis_mobile_runtime.lib"
+            IMPORTED_LINK_INTERFACE_LANGUAGES "C;CXX"
+            INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}"
+            INTERFACE_LINK_LIBRARIES "stasis_thorvg;SDL3_image::SDL3_image-static"
+        )
+    elseif(STASIS_BUILD_MOBILE_RUNTIME_VARIANTS)
         add_stasis_mobile_runtime(stasis_mobile_runtime_offline "")
         add_stasis_mobile_runtime(stasis_mobile_runtime_host "host")
         add_stasis_mobile_runtime(stasis_mobile_runtime_client "client")
@@ -483,13 +550,15 @@ if(STASIS_BUILD_MONOLITH)
     target_include_directories(
         stasis_monolith
         PRIVATE "${STASIS_MONOLITH_AOT_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(
-        stasis_monolith
-        PRIVATE
-            stasis_mobile_runtime
-            SDL3::SDL3-static
-            SDL3_image::SDL3_image-static
-    )
+    target_link_libraries(stasis_monolith PRIVATE stasis_mobile_runtime)
+    if(NOT _stasis_monolith_use_prebuilt_runtime)
+        target_link_libraries(
+            stasis_monolith
+            PRIVATE
+                SDL3::SDL3-static
+                SDL3_image::SDL3_image-static
+        )
+    endif()
     if(STASIS_MONOLITH_NETWORK_LIBRARY OR STASIS_MONOLITH_NETWORK_INCLUDE_DIR)
         if(NOT STASIS_MONOLITH_NETWORK_LIBRARY OR NOT EXISTS "${STASIS_MONOLITH_NETWORK_LIBRARY}")
             message(FATAL_ERROR "STASIS_MONOLITH_NETWORK_LIBRARY must name the built stasis_network library")
@@ -534,7 +603,9 @@ if(STASIS_BUILD_MONOLITH)
             target_link_libraries(stasis_monolith PRIVATE ${CMAKE_DL_LIBS} Threads::Threads m)
         endif()
     endif()
-    set_property(TARGET stasis_monolith PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    if(NOT _stasis_monolith_use_prebuilt_runtime)
+        set_property(TARGET stasis_monolith PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
     if(MSVC)
         target_compile_options(stasis_monolith PRIVATE /O1 /Gy /Gw)
         target_link_options(stasis_monolith PRIVATE /OPT:REF /OPT:ICF)
