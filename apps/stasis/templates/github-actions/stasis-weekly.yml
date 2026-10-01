@@ -53,7 +53,6 @@ jobs:
           # unchanged scheduled checkout cheap. The checked-in pin is the
           # only Stasis release input; quarterly automation updates it in a PR.
           $lastTag = [string](git tag --merged HEAD --list 'stasis-release-*' --sort=-creatordate | Select-Object -First 1)
-          $lastTag = $lastTag.Trim()
           $lastReleaseStasis = $null
           $lastReleaseSource = $null
           if ($lastTag) {

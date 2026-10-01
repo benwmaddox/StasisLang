@@ -1127,6 +1127,7 @@ fn new_always_generates_github_actions() {
         .expect("read generated weekly workflow");
     assert!(weekly.contains("asset: stasis-nightly-linux-x64.tar.gz"));
     assert!(weekly.contains("asset: stasis-nightly-win-x64.zip"));
+    assert!(!weekly.contains("$lastTag = $lastTag.Trim()"));
     assert!(!weekly.contains("macos-"));
     assert!(!weekly.contains("osx-arm64"));
     assert!(!weekly.contains("ios-arm64"));

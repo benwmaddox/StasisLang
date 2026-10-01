@@ -16922,6 +16922,7 @@ mod tests {
                 "weekly workflow missing {expected}"
             );
         }
+        assert!(!weekly.contains("$lastTag = $lastTag.Trim()"));
         assert!(!weekly.contains("macos-"));
         assert!(!weekly.contains("osx-arm64"));
         assert!(!weekly.contains("resolve-stasis-nightly.ps1"));

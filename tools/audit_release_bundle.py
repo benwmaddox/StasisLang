@@ -85,6 +85,8 @@ PLATFORM_REQUIRED_FILES = {
         "bin/libstasis_dynload.a",
         "bin/libstasis_graphics.dylib",
         "bin/stasis_runner.app/Contents/MacOS/stasis_runner",
+        "desktop/network/macos-arm64/libstasis_network.dylib",
+        "desktop/network/macos-arm64/libstasis_network.a",
         "desktop/network/include/stasis_network.h",
     ),
 }

@@ -216,6 +216,11 @@ jobs:
             archive: stasis-nightly-win-x64
             ext: zip
             bundle_platform: windows
+          - os: macos-15-arm64
+            rust_target: aarch64-apple-darwin
+            archive: stasis-nightly-osx-arm64
+            ext: tar.gz
+            bundle_platform: macos
     runs-on: ${{ matrix.os }}
     env:
       STASIS_RELEASE_ID: ${{ needs.detect.outputs.nightly_tag }}
@@ -254,6 +259,10 @@ jobs:
           libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev
           libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libegl1 libgl1-mesa-dri
           xvfb
+
+      - name: Install SDL development packages (macos)
+        if: runner.os == 'macOS'
+        run: brew install pkg-config
 
       - name: Setup MSVC dev environment (windows)
         if: runner.os == 'Windows'
@@ -315,6 +324,9 @@ jobs:
             -DSTASIS_RELEASE_ID="${{ needs.detect.outputs.nightly_tag }}" \
             -DSTASIS_BUILD_FINGERPRINT="${STASIS_BUILD_FINGERPRINT}"
           cmake --build runtime/build_ci --config Release --target stasis_graphics stasis_runner
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            test "$(plutil -extract NSHighResolutionCapable raw runtime/build_ci/bin/Release/stasis_runner.app/Contents/Info.plist)" = "true"
+          fi
 
       - name: Assemble bundle (unix)
         if: runner.os != 'Windows'
@@ -325,8 +337,18 @@ jobs:
           mkdir -p "${out}/bin"
           cp "target/${{ matrix.rust_target }}/release/stasis" "${out}/bin/"
           cp "target/${{ matrix.rust_target }}/release/libstasis_dynload.a" "${out}/bin/"
-          cp runtime/build_ci/bin/libstasis_graphics.so "${out}/bin/"
-          cp runtime/build_ci/bin/Release/stasis_runner "${out}/bin/"
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            graphics_dylib=runtime/build_ci/bin/Release/libstasis_graphics.dylib
+            if [[ ! -f "${graphics_dylib}" ]]; then
+              graphics_dylib=runtime/build_ci/bin/libstasis_graphics.dylib
+            fi
+            test -f "${graphics_dylib}"
+            cp "${graphics_dylib}" "${out}/bin/"
+            cp -R runtime/build_ci/bin/Release/stasis_runner.app "${out}/bin/"
+          else
+            cp runtime/build_ci/bin/libstasis_graphics.so "${out}/bin/"
+            cp runtime/build_ci/bin/Release/stasis_runner "${out}/bin/"
+          fi
           cp README.md "${out}/"
           cp LICENSE "${out}/"
           # Ship the stdlib + samples so relative imports keep working in the bundle.
@@ -342,9 +364,16 @@ jobs:
           test -f mobile/network/android-arm64/libstasis_network.a
           test -f mobile/network/android-x86_64/libstasis_network.a
           cp -R mobile/network "${out}/mobile/"
-          mkdir -p "${out}/desktop/network/linux-x86_64" "${out}/desktop/network/include"
-          cp "build/codex-cargo-target/${{ matrix.rust_target }}/release/libstasis_network.so" "${out}/desktop/network/linux-x86_64/"
-          cp "build/codex-cargo-target/${{ matrix.rust_target }}/release/libstasis_network.a" "${out}/desktop/network/linux-x86_64/"
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            network_target=macos-arm64
+            network_shared=libstasis_network.dylib
+          else
+            network_target=linux-x86_64
+            network_shared=libstasis_network.so
+          fi
+          mkdir -p "${out}/desktop/network/${network_target}" "${out}/desktop/network/include"
+          cp "build/codex-cargo-target/${{ matrix.rust_target }}/release/${network_shared}" "${out}/desktop/network/${network_target}/"
+          cp "build/codex-cargo-target/${{ matrix.rust_target }}/release/libstasis_network.a" "${out}/desktop/network/${network_target}/"
           cp crates/stasis_network/include/stasis_network.h "${out}/desktop/network/include/"
           mkdir -p "${out}/runtime"
           cp runtime/CMakeLists.txt runtime/MINIMP3-LICENSE.txt runtime/minimp3.h runtime/minimp3_ex.h runtime/cJSON.c runtime/cJSON.h runtime/stasis_svg.cpp runtime/stasis_svg.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_performance_metrics.h runtime/stasis_package_provenance_reader.h runtime/stasis_audio_assets.c runtime/stasis_audio_assets.h runtime/stasis_recording_audio.h runtime/stasis_graphics.c runtime/stasis_mixed_quad_planner.h runtime/stasis_sprite_atlas_policy.h runtime/stasis_image_writer.c runtime/stasis_image_writer.h runtime/stasis_runner.manifest runtime/stasis_runner_macos.plist.in runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stasis_replay_consumer.c runtime/stasis_replay_consumer.h runtime/stasis_network_join_card.h runtime/stasis_platform_storage.c runtime/stasis_platform_storage.h runtime/stasis_platform_services.c runtime/stasis_platform_services.h runtime/stb_truetype.h "${out}/runtime/"
@@ -593,6 +622,9 @@ jobs:
           ./bin/stasis --workspace cli-smoke test
           ./bin/stasis --workspace cli-smoke build --mode release
           smoke_executable="./cli-smoke/build/ci_smoke"
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            smoke_executable="./cli-smoke/build/ci_smoke.app/Contents/MacOS/ci_smoke"
+          fi
           smoke_driver=(python3)
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             smoke_driver=(xvfb-run -a python3)
@@ -649,12 +681,14 @@ jobs:
           test -f cli-smoke/dist/network-android/android/app/src/main/cpp/network/libstasis_network_v1.so
           test -f cli-smoke/dist/network-android/android/app/src/main/cpp/network/include/stasis_network.h
           test -f cli-smoke/dist/network-android/android/app/src/main/assets/stasis_game/network_guest.bundle
-          set +e
-          network_ios_error="$(./bin/stasis --workspace cli-smoke package-mobile --target ios-arm64 --out dist/network-ios 2>&1)"
-          network_ios_status=$?
-          set -e
-          test "${network_ios_status}" -ne 0
-          grep -q "requires a macOS host with Xcode" <<<"${network_ios_error}"
+          if [[ "${RUNNER_OS}" != "macOS" ]]; then
+            set +e
+            network_ios_error="$(./bin/stasis --workspace cli-smoke package-mobile --target ios-arm64 --out dist/network-ios 2>&1)"
+            network_ios_status=$?
+            set -e
+            test "${network_ios_status}" -ne 0
+            grep -q "requires a macOS host with Xcode" <<<"${network_ios_error}"
+          fi
           restore_network_source
           trap - EXIT
           rmdir "${network_source_backup}"
@@ -983,6 +1017,11 @@ jobs:
             ext: zip
             executable: stasis.exe
             vsce_target: win32-x64
+          - os: macos-15-arm64
+            archive: stasis-nightly-osx-arm64
+            ext: tar.gz
+            executable: bin/stasis
+            vsce_target: darwin-arm64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -1008,6 +1047,10 @@ jobs:
           sudo apt-get update && sudo apt-get install --yes xvfb libx11-dev
           libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev
           libxss-dev libxtst-dev libxkbcommon-dev
+
+      - name: Install graphics dependencies (macos)
+        if: runner.os == 'macOS'
+        run: brew install pkg-config
 
       - name: Download matching nightly toolchain
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -1097,6 +1140,12 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: stasis-nightly-win-x64
+          path: dist
+
+      - name: Download macOS toolchain release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stasis-nightly-osx-arm64
           path: dist
 
       - name: Download editor releases

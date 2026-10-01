@@ -407,7 +407,7 @@ restore release assets.
   offline packages omit it entirely.
   direct TCP/unicast does not require Bonjour discovery entitlements. Official archives resolve
   prebuilt network libraries from `mobile/network/<target>/` beside the installed executable;
-  Linux and Windows nightly archives contain Android arm64/x86_64 support libraries. They do not
+  Linux, Windows, and macOS nightly archives contain Android arm64/x86_64 support libraries. They do not
   contain iOS network archives; source checkouts may build those from the workspace on macOS.
   `ios-simulator-arm64` requires `--development-build`, emits simulator-native
   AOT/network objects, selects the SDL simulator slice, and never qualifies a

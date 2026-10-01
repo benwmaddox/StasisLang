@@ -90,11 +90,11 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
                     self.assertIn("libstasis_network.dylib", workflow)
                     library_copy = 'cp "build/codex-cargo-target/release/libstasis_network.so" "${out}/desktop/network/${network_target}/"'
                 else:
-                    self.assertIn('mkdir -p "${out}/desktop/network/linux-x86_64"', workflow)
-                    self.assertNotIn("network_target=macos-arm64", workflow)
+                    self.assertIn('network_target=macos-arm64', workflow)
+                    self.assertIn('network_target=linux-x86_64', workflow)
                     library_copy = (
                         'cp "build/codex-cargo-target/' + target_directory
-                        + 'release/libstasis_network.so" "${out}/desktop/network/linux-x86_64/"'
+                        + 'release/${network_shared}" "${out}/desktop/network/${network_target}/"'
                     )
                 header_copy = 'cp crates/stasis_network/include/stasis_network.h "${out}/desktop/network/include/"'
                 provenance = workflow.index("generate_release_provenance.py")
@@ -144,7 +144,7 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             self.workflow,
         )
         self.assertIn("runs-on: ubuntu-latest", self.workflow)
-        self.assertNotIn("macos-15", self.workflow)
+        self.assertIn("macos-15-arm64", self.workflow)
         self.assertIn('ndk;27.0.12077973', self.workflow)
         self.assertIn("aarch64-linux-android", self.workflow)
         self.assertIn("x86_64-linux-android", self.workflow)
@@ -190,7 +190,7 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
                     self.assertIn("codesign --verify --strict", package_script)
                     self.assertNotIn("codesign --force --sign -", package_script)
                     self.assertIn("codesign --force --sign -", signer)
-                else:
+                elif path.name != "nightly-release.yml":
                     self.assertNotRegex(
                         workflow,
                         r"(?im)^\s*(?:runs-on|os):\s*[^\n]*\bmacos(?:-[\w]+)?\b",
@@ -198,12 +198,15 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
                 self.assertNotRegex(workflow, r"(?im)^\s*kind:\s*ios\b")
         for marker in ("ios-package-link:", "ios-generics-simulator:"):
             self.assertNotIn(marker, (ROOT / ".github/workflows/pr-ci.yml").read_text(encoding="utf-8"))
-        for archive in ("stasis-nightly-linux-x64", "stasis-nightly-win-x64"):
+        for archive in ("stasis-nightly-linux-x64", "stasis-nightly-win-x64", "stasis-nightly-osx-arm64"):
             self.assertIn(f"archive: {archive}", self.workflow)
+        self.assertIn("vsce_target: darwin-arm64", self.workflow)
+        self.assertIn("name: stasis-nightly-osx-arm64", self.workflow)
         self.assertIn("python3 tools/audit_release_bundle.py", self.workflow)
         self.assertIn("python tools/audit_release_bundle.py", self.workflow)
         self.assertIn("mobile/network/android-arm64/libstasis_network_v1.so", required_files("linux"))
         self.assertIn("mobile/network/android-x86_64/libstasis_network_v1.so", required_files("windows"))
+        self.assertIn("desktop/network/macos-arm64/libstasis_network.dylib", required_files("macos"))
 
     def test_archive_layout_is_copied_before_provenance(self):
         for path in (
