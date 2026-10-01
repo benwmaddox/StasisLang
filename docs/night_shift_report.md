@@ -598,3 +598,28 @@ source-development layout (temporarily unstaging that DLL after the build)
 passed; the original staged DLL was restored and its SHA-256 verified.
 
 Visual evidence: not applicable (documentation and executable-example coverage).
+
+## 2026-10-01 - Maddox #775 SIMD validator repair
+
+The bounded ARM64 SIMD characterization now runs in the default compiler test
+suite instead of being hidden behind `#[ignore]`. Its existing default remains
+one compile repetition across 12 cases, with five-tick JIT correctness checks,
+JIT/AOT CLIF capture, and AOT object inspection. The explicit measurement tool
+still raises repetitions, retains artifacts, and adds NDK disassembly.
+
+Validation: the focused compiler test passed 12 characterization cases in 1.08
+seconds; the exact ignored-test policy audit passed; the Python wrapper compiled;
+and a fresh one-repetition measurement produced
+`D:\code\.automation-evidence\nightly-20261001\775\simd-smoke\analysis.json`.
+Visual evidence: not applicable (compiler validation policy only).
+
+Theory gained: compiler-owned semantic and code-generation characterization can
+run as a bounded correctness test; only external NDK analysis and repeated
+sampling belong in the explicit wrapper. A future characterization can reuse
+this split without suppressing its correctness oracle.
+
+Good: the repair removed the policy mismatch without changing SIMD semantics or
+expanding the ignore allowlist. Bad: the measurement test had mixed required
+correctness with opt-in repetition, which hid both from normal validation.
+Adjustment: keep the one-repetition correctness core default-on and add sampling
+only in the artifact-producing wrapper.
