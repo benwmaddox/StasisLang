@@ -190,6 +190,14 @@ availability does not block ordinary CI or task readiness. Production Android
 packaging remains ARM64; the x86_64 package target exists only for deterministic
 development/emulator tests.
 
+`ANDROID-NUMERIC-TEXT` is an executable byte-parity seam in the generated API
+35 x86_64 package. The guest formats its classified numeric corpus into one
+bounded `ascii` global; the test-only shell reads the registered `u8` storage,
+validates its header and NUL, and logs the literal receipt once. The runner
+compares every ordered case ID, return status, and text byte with checked-in
+expectations. The separate arm64 lane establishes package, link-map, and native
+library provenance only; it does not claim arm64 execution parity.
+
 ### CI placement rule
 
 Ordinary Rust test targets belong only in the broad Cargo workspace lane. A

@@ -162,6 +162,37 @@ Rules:
 - Mutations must keep header values synchronized with payload contents.
 - Invalid updates that break these invariants are compile-time errors (when statically known) or runtime errors through checked runtime helpers.
 
+The standard library formats numeric values directly into caller-owned ASCII
+storage:
+
+- `ascii_from_i32(dst, value)` replaces the logical contents with the complete
+  decimal `i32`; `ascii_append_i32` appends it. `ascii_push_i32` remains the
+  existing append helper; it delegates to checked append and ignores the
+  rejection result.
+- `ascii_from_f32_fixed(dst, value, decimals)` and
+  `ascii_append_f32_fixed` accept every finite binary32 value and a precision
+  from `0` through `6`. They emit exactly that many fractional digits, round
+  the exact binary32 value halfway away from zero, and normalize a negative
+  result that rounds to zero to unsigned zero text.
+- `ascii_pad_left(dst, width, fill)` prepends an ASCII byte until the requested
+  final character count is reached. A width no greater than the current length
+  is a successful no-op.
+
+These checked helpers return the resulting logical length on success and `-1`
+on rejection. They reject insufficient space for the complete result and its
+trailing NUL; fixed formatting also rejects NaN, infinity, and an unsupported
+precision; padding rejects a negative width and, when padding is needed, NUL or
+non-ASCII fill bytes. Rejection leaves both the header and every payload byte
+unchanged. Successful formatting and padding that grows the text write one NUL
+at `dst[result_length]` and do not touch later bytes. Padding to a width no
+greater than the current length preserves all existing bytes, including the
+existing terminator. An `ascii[N]` holds at most `N - 1` formatted characters. The
+longest supported formatted value is negative maximum finite `f32` at six
+decimal places: 47 characters, requiring `ascii[48]`.
+
+Stasis has no source-level `i64` type, so the standard library exposes no
+`i64` text formatter.
+
 ### 4.2.2 Generic Types and Compile-Time Value Parameters
 
 Generic structs declare ordered type and compile-time value parameters. A

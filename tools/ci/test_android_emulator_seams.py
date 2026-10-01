@@ -55,6 +55,10 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             read("samples/generics_collections/android_seam_expectations.json")
         )
         cls.generics_readme = read("samples/generics_collections/README.md")
+        cls.numeric_text_expectations = json.loads(
+            read("samples/android_numeric_text_seam/android_seam_expectations.json")
+        )
+        cls.numeric_text_sample = read("samples/android_numeric_text_seam/main.stasis")
         cls.shell_readme = read("mobile/shells/android/README.md")
         cls.workshop_resource_scope = read(
             "mobile/android/app/src/workshop/java/com/stasislang/workshop/"
@@ -139,6 +143,60 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         )
         self.assertIn("verify_android_native_library.py", self.pr_workflow)
         self.assertIn("mobile_aot_bundle_manifest.json", self.pr_workflow)
+
+    def test_numeric_text_sample_uses_a_typed_bounded_actual_byte_receipt(self):
+        expectations = self.numeric_text_expectations
+        self.assertEqual("ANDROID-NUMERIC-TEXT", expectations["test_id"])
+        self.assertEqual(4096, expectations["numeric_text"]["capacity"])
+        self.assertGreaterEqual(len(expectations["numeric_text"]["cases"]), 90)
+        self.assertEqual(
+            list(range(1, len(expectations["numeric_text"]["cases"]) + 1)),
+            [case["id"] for case in expectations["numeric_text"]["cases"]],
+        )
+        self.assertIn("global numeric_text_receipt: ascii[4096]", self.numeric_text_sample)
+        self.assertIn('TestId = "ANDROID-NUMERIC-TEXT"', self.emulator_script)
+        self.assertIn(
+            'Project = "samples/android_numeric_text_seam"', self.emulator_script
+        )
+        self.assertIn("validate_android_numeric_text_acceptance", self.release_runner)
+        self.assertIn(
+            'stasis_jit_global_u8_array_ptr(\n        hash_global_path("numeric_text_receipt")',
+            self.mobile_main,
+        )
+        self.assertIn('seam_i32("numeric_text_receipt.length")', self.mobile_main)
+        self.assertIn('seam_i32("numeric_text_receipt.max_length")', self.mobile_main)
+        self.assertIn(
+            'seam_i32("numeric_text_negative_zero_verified") != 1',
+            self.mobile_main,
+        )
+        self.assertIn("1.0 / negative_zero < 0.0", self.numeric_text_sample)
+        self.assertIn("function numeric_text_seed_keep(dst: ascii[]): void", self.numeric_text_sample)
+        self.assertEqual(6, self.numeric_text_sample.count("numeric_text_seed_keep("))
+        self.assertNotIn('ascii_copy(numeric_text_scratch, "keep")', self.numeric_text_sample)
+        self.assertNotIn('ascii_copy(numeric_text_scratch, "score:")', self.numeric_text_sample)
+        self.assertNotIn('ascii_copy(numeric_text_scratch, "42")', self.numeric_text_sample)
+        self.assertNotIn('ascii_copy(numeric_text_i32_short, "keep")', self.numeric_text_sample)
+        self.assertNotIn('ascii_copy(numeric_text_f32_short, "keep")', self.numeric_text_sample)
+        for byte in (107, 101, 112, 115, 99, 111, 114, 58, 52, 50):
+            self.assertIn(f"to_u8_trunc({byte})", self.numeric_text_sample)
+        self.assertNotIn("(int32_t *)numeric_text_receipt", self.mobile_main)
+        self.assertIn(
+            "cp -R samples/android_numeric_text_seam/. \"$numeric_text_workspace/\"",
+            self.pr_workflow,
+        )
+        self.assertIn(
+            'cp -R src/stdlib "$numeric_text_workspace/vendor/stasis/src/stdlib"',
+            self.pr_workflow,
+        )
+        self.assertIn(
+            '--workspace "$numeric_text_workspace" package-mobile '
+            "--target android-arm64 --out dist/numeric-text-android",
+            self.pr_workflow,
+        )
+        self.assertIn(
+            "target/numeric-text-android-native-link-evidence.json",
+            self.pr_workflow,
+        )
 
     def test_release_shell_builds_cli_with_a_verified_toolchain_fingerprint(self):
         fingerprint = self.release_script.index("tools/compute_toolchain_fingerprint.py")

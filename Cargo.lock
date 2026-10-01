@@ -2412,6 +2412,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "cranelift-object",
+ "num-bigint",
  "object",
  "serde",
  "serde_json",

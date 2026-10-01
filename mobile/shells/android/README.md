@@ -161,6 +161,22 @@ Run this seam against an already-started x86_64 emulator with:
 mobile/android/test_release_shell_emulator.ps1 -TestId ANDROID-GENERICS
 ```
 
+`ANDROID-NUMERIC-TEXT` packages `samples/android_numeric_text_seam` for the
+same API 35 x86_64 emulator. After frame one, the test-only native shell reads
+`numeric_text_receipt` through the typed `u8` global-array registration,
+requires the declared capacity and trailing NUL, and emits the literal bounded
+ASCII payload once. The runner compares all ordered IDs, statuses, and actual
+strings, including full-range integers, finite-float magnitude classes, tie
+neighbors, invalid values, exact capacities, append, and padding:
+
+```powershell
+mobile/android/test_release_shell_emulator.ps1 -TestId ANDROID-NUMERIC-TEXT
+```
+
+The arm64 PR lane separately packages and links this sample and audits its
+native library and link map. That lane is link evidence; the emulator receipt
+is the execution evidence.
+
 ## Android storage persistence seam
 
 `IT-023` packages `samples/android_storage_seam` and verifies the AOT storage
