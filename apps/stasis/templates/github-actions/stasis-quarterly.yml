@@ -87,8 +87,8 @@ jobs:
           git fetch origin "$branch" || true
           git branch -f "$branch" "origin/$default_branch"
           git switch "$branch"
-          "branch=$branch" >> "$GITHUB_OUTPUT"
-          "default_branch=$default_branch" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "default_branch=$default_branch" >> "$GITHUB_OUTPUT"
 
       - name: Restore resolved Stasis toolchain
         shell: pwsh
