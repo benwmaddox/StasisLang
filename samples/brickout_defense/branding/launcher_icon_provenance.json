@@ -1,0 +1,169 @@
+{
+  "composition": {
+    "adaptive_background": "#17233B",
+    "adaptive_foreground_resource": "@drawable/brickout_icon_foreground",
+    "adaptive_safe_area": {
+      "android_contract": "108dp layers, centered 66dp safe square, logo at least 48dp; tested against central 72dp viewport circle",
+      "ball_position_px": [
+        244,
+        116
+      ],
+      "ball_size_px": 72,
+      "container_dp": 108,
+      "container_px": 432,
+      "fitted_alpha_bounds_px": [
+        116,
+        116,
+        316,
+        316
+      ],
+      "fitted_visible_size_px": [
+        200,
+        200
+      ],
+      "logo_container_size_dp": 50,
+      "logo_container_size_px": 200,
+      "minimum_logo_dp": 48,
+      "outside_safe_square_alpha_pixels": 0,
+      "outside_viewport_circle_alpha_pixels": 0,
+      "safe_size_dp": 66,
+      "safe_zone_bounds_px": [
+        84,
+        84,
+        348,
+        348
+      ],
+      "safe_zone_size_px": 264,
+      "viewport_circle_diameter_dp": 72,
+      "viewport_circle_radius_px": 144
+    },
+    "background_master_crop_px": [
+      0,
+      0,
+      464,
+      464
+    ],
+    "ball_master_position_px": [
+      253,
+      84
+    ],
+    "ball_master_size_px": [
+      86,
+      86
+    ],
+    "base_color": "#17233B",
+    "canvas_px": [
+      432,
+      432
+    ],
+    "density_outputs_px": {
+      "hdpi": 72,
+      "mdpi": 48,
+      "xhdpi": 96,
+      "xxhdpi": 144,
+      "xxxhdpi": 192
+    },
+    "foreground": "transparent RGBA; source master alpha preserved; no new artwork",
+    "full_icon": "opaque color base, then alpha-composite recovered background crop and transparent foreground",
+    "legacy_density_icons": "retain the larger recovered-art composition; not used as adaptive layers",
+    "mask_previews": {
+      "background_layer": "#17233B; same @color resource referenced by ic_launcher.xml",
+      "circle": "adaptive-circle.png; 2x supersampled central 72dp circular viewport preview",
+      "foreground_layer": "same generated PNG referenced by @drawable/brickout_icon_foreground",
+      "outside_preview_backdrop": "#EAEDF3",
+      "squircle": "adaptive-squircle.png; 2x supersampled central 72dp p=4 superellipse viewport preview"
+    },
+    "resampling": "Pillow Image.Resampling.LANCZOS",
+    "tower_master_position_px": [
+      106,
+      150
+    ],
+    "tower_master_size_px": [
+      220,
+      220
+    ]
+  },
+  "contract_version": 2,
+  "masters": [
+    {
+      "alpha": "preserved source alpha",
+      "dimensions": [
+        660,
+        550
+      ],
+      "path": "assets/original/background.png",
+      "sha256": "e3e5f1934ffcb1087efeb5dfe7c7a8178df6673c93f441fcd954445d9ec5b3ff"
+    },
+    {
+      "alpha": "preserved source alpha",
+      "dimensions": [
+        128,
+        128
+      ],
+      "path": "assets/original/generated_4x/animations/towers/standard/frame_00.png",
+      "sha256": "3d723f3452c92dab218ac0b86dcdfef552ea3e7e26e1ba0ff77e86b8c36f6543"
+    },
+    {
+      "alpha": "preserved source alpha",
+      "dimensions": [
+        72,
+        72
+      ],
+      "path": "assets/original/generated_4x/animations/balls/standard/frame_00.png",
+      "sha256": "d0bbfc9febfa676b5fc8f474286ff35be7d5280a421c7a1acb79330e290d3a4e"
+    }
+  ],
+  "outputs": [
+    {
+      "bytes": 34851,
+      "path": "branding/android/previews/adaptive-circle.png",
+      "sha256": "0d9e2d34d2c7f3a3c5396c66cb0538763ad14b4e4ab21ad730586099e1a69a4b"
+    },
+    {
+      "bytes": 33149,
+      "path": "branding/android/previews/adaptive-squircle.png",
+      "sha256": "7dfdd95de12f977ed25942726c8290295417b5fe5f4c8baae6f320763522c7df"
+    },
+    {
+      "bytes": 28301,
+      "path": "branding/android/res/drawable-xxxhdpi/brickout_icon_foreground.png",
+      "sha256": "0ed9b0f6aedabefd79b887084b5374493571095ef93c3b3682569cfecf18f5c9"
+    },
+    {
+      "bytes": 274,
+      "path": "branding/android/res/mipmap-anydpi-v26/ic_launcher.xml",
+      "sha256": "eabadc708ef7d046ff1632745e1010f9e03d0de138aa827be23de09f6c7af55a"
+    },
+    {
+      "bytes": 11431,
+      "path": "branding/android/res/mipmap-hdpi/ic_launcher.png",
+      "sha256": "8d02a37b81e83467846bb1fa004bd2395949230ec21ba3d0638744e23f2c7032"
+    },
+    {
+      "bytes": 5638,
+      "path": "branding/android/res/mipmap-mdpi/ic_launcher.png",
+      "sha256": "cc5a309586c8f8e8c3c3fb1f9d079cb66ca4f484e45e4dc16eb9f445bd6b0e05"
+    },
+    {
+      "bytes": 19033,
+      "path": "branding/android/res/mipmap-xhdpi/ic_launcher.png",
+      "sha256": "c0e58537d2f8bff86cf8301fc16aca6c8ddd6876eca434aa8916811c68045f8f"
+    },
+    {
+      "bytes": 38141,
+      "path": "branding/android/res/mipmap-xxhdpi/ic_launcher.png",
+      "sha256": "e66652ab6a5b0b6f2113bc0ed57ff3cd87d6b4e3dbe4e3dccc5c433fd7234e1c"
+    },
+    {
+      "bytes": 60590,
+      "path": "branding/android/res/mipmap-xxxhdpi/ic_launcher.png",
+      "sha256": "682d2ccd009940f156349e738e2cc78ff94d974bbe0cf359967b9eb57d12a4ce"
+    },
+    {
+      "bytes": 123,
+      "path": "branding/android/res/values/colors.xml",
+      "sha256": "5d0aaeb5bd519263543c49d70c048170af2cd84277b1711727987c515a4cbe38"
+    }
+  ],
+  "source_commit": "7e7f04bfbce8417234435781127e4a17784341be"
+}

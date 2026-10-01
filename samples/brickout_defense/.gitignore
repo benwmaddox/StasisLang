@@ -1,0 +1,10 @@
+# Generated dependencies are materialized from the release pin in stasis.json.
+/vendor/stasis/
+/.stasis_cache/
+
+# Desktop, Android, Gradle, and package outputs are reproducible.
+/build/
+/.gradle/
+/**/.gradle/
+/**/.cxx/
+/**/local.properties
