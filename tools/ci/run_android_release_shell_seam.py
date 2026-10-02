@@ -26,6 +26,11 @@ ASSET_DIAGNOSTIC = re.compile(r"code=([^ ]+) path=(.*?) detail=(.+)")
 ANDROID_LOG_RECORD_PID = re.compile(r"^[VDIWEF]/\S+\s+\(\s*(\d+)\):")
 ANDROID_GENERICS_MAX_LOG_LINES = 2500
 ANDROID_GENERICS_MAX_LOG_BYTES = 1_000_000
+# FrameTracker emits this IME UI timeout as E/ even when the app launch succeeds.
+ANDROID_GENERICS_FRAME_TRACKER_IME_TIMEOUT = re.compile(
+    r"E/FrameTracker\(\s*\d+\s*\): force finish cuj, time out: "
+    r"J<IME_INSETS_HIDE_ANIMATION::\d+@\d+@[A-Za-z0-9_.]+>"
+)
 
 
 class SeamError(RuntimeError):
@@ -521,7 +526,7 @@ def validate_android_generics_acceptance(log: str, expectations: dict) -> dict:
 
 
 def validate_android_generics_clean_log(log: str) -> dict[str, int]:
-    """Bound the successful package log and reject application crash/error evidence."""
+    """Bound launch logs and reject crashes/errors except the known IME UI timeout."""
     line_count = len(log.splitlines())
     byte_count = len(log.encode("utf-8"))
     if (
@@ -537,7 +542,7 @@ def validate_android_generics_clean_log(log: str) -> dict[str, int]:
         raise SeamError(
             f"ANDROID-GENERICS successful launch has fatal evidence: {fatal.group(0)}"
         )
-    app_error = re.search(
+    app_errors = re.finditer(
         r"(?im)^\s*E/[^\r\n]*"
         r"|^\s*[IWD]/Stasis\s*(?:\([^)]*\))?:\s*"
         r"(?:Stasis error\b|Stasis could not\b|"
@@ -545,10 +550,13 @@ def validate_android_generics_clean_log(log: str) -> dict[str, int]:
         r"[^\r\n]*\bruntime error\b)[^\r\n]*",
         log,
     )
-    if app_error is not None:
+    for app_error in app_errors:
+        evidence = app_error.group(0).strip()
+        if ANDROID_GENERICS_FRAME_TRACKER_IME_TIMEOUT.fullmatch(evidence):
+            continue
         raise SeamError(
             "ANDROID-GENERICS successful launch has an application error: "
-            f"{app_error.group(0).strip()}"
+            f"{evidence}"
         )
     return {"line_count": line_count, "byte_count": byte_count}
 

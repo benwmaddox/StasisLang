@@ -92,6 +92,18 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             {"line_count": 1, "byte_count": len("I/Stasis: frame\n".encode())},
             seam.validate_android_generics_clean_log("I/Stasis: frame\n"),
         )
+        framework_ime_timeout = (
+            "E/FrameTracker( 8605): force finish cuj, time out: "
+            "J<IME_INSETS_HIDE_ANIMATION::1@0@com.stasislang.gamegenericsx5fcollections>"
+        )
+        with_framework_ime_timeout = f"I/Stasis: frame\n{framework_ime_timeout}\n"
+        self.assertEqual(
+            {
+                "line_count": 2,
+                "byte_count": len(with_framework_ime_timeout.encode()),
+            },
+            seam.validate_android_generics_clean_log(with_framework_ime_timeout),
+        )
         provenance = (
             'I/Stasis  (11080):     "mobile/shells/ios/StasisMobile/'
             'stasis_ios_external_url.m": "5018aa34029e90e5606df13bd09199e6b2c060d19e01978c5234c4aa8ab29aeb4",\n'
@@ -104,6 +116,12 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             "F libc: Fatal signal 4 (SIGILL)\n",
             "E/Stasis: Stasis runtime error\n",
             "I/Stasis  (11080): Stasis runtime error: no\n",
+            "E/FrameTracker( 8605): render thread failed to initialize\n",
+            "E/FrameTracker( 8605): force finish cuj, time out: "
+            "J<APP_RENDER::1@0@com.stasislang.gamegenericsx5fcollections>\n",
+            framework_ime_timeout + " application render failed\n",
+            framework_ime_timeout
+            + "\nE/AndroidRuntime( 8605): application crashed\n",
         ):
             with self.subTest(log=log):
                 with self.assertRaises(seam.SeamError):
