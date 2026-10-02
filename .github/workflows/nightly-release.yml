@@ -216,7 +216,7 @@ jobs:
             archive: stasis-nightly-win-x64
             ext: zip
             bundle_platform: windows
-          - os: macos-15-arm64
+          - os: macos-15
             rust_target: aarch64-apple-darwin
             archive: stasis-nightly-osx-arm64
             ext: tar.gz
@@ -415,7 +415,7 @@ jobs:
             --platform "${{ matrix.bundle_platform }}" \
             --archive "dist/${{ matrix.archive }}.${{ matrix.ext }}" \
             --output "bundle-audit/${{ matrix.archive }}.json" \
-            --max-archive-bytes 134217728
+            --max-archive-bytes 67108864
 
       - name: Assemble bundle (windows)
         if: runner.os == 'Windows'
@@ -426,17 +426,6 @@ jobs:
           Copy-Item "target/${{ matrix.rust_target }}/release/stasis.exe" "$out/" -Force
           Copy-Item "target/${{ matrix.rust_target }}/release/stasis_dynload.dll" "$out/" -Force
           Copy-Item "target/${{ matrix.rust_target }}/release/stasis_dynload.dll.lib" "$out/" -Force
-          $rustLld = Join-Path (rustc --print sysroot) "lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
-          Copy-Item $rustLld "$out/lld-link.exe" -Force
-          $clangCl = (Get-Command clang-cl.exe -ErrorAction Stop).Source
-          Copy-Item $clangCl "$out/clang-cl.exe" -Force
-          $rustCopyright = Join-Path (rustc --print sysroot) "share/doc/rust/COPYRIGHT.html"
-          Copy-Item $rustCopyright "$out/RUST-LLVM-COPYRIGHT.html" -Force
-          $vsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
-          $vsRoot = & $vsWhere -latest -property installationPath
-          $vsNotice = Get-ChildItem (Join-Path $vsRoot "Licenses") -Recurse -Filter "ThirdPartyNotices.txt" | Select-Object -First 1
-          if (-not $vsNotice) { throw "Visual Studio LLVM third-party notices not found" }
-          Copy-Item $vsNotice.FullName "$out/LLVM-THIRD-PARTY-NOTICES.txt" -Force
           # Keep the runtime DLL beside stasis.exe so `stasis.exe play ...` works from the archive root.
           Copy-Item "runtime/build_ci/bin/Release/*.dll" "$out/" -Force
           Copy-Item "runtime/build_ci/bin/Release/stasis_runner.exe" "$out/" -Force
@@ -497,7 +486,7 @@ jobs:
             --platform "${{ matrix.bundle_platform }}" `
             --archive "dist/${{ matrix.archive }}.${{ matrix.ext }}" `
             --output "bundle-audit/${{ matrix.archive }}.json" `
-            --max-archive-bytes 134217728
+            --max-archive-bytes 67108864
 
       - name: Verify extracted Windows editor toolchain
         if: runner.os == 'Windows'
@@ -573,11 +562,17 @@ jobs:
             Set-Content -Path "cli-smoke/assets/manifest.json" -Encoding ASCII -Value '{"schema":"stasis-assets","version":1,"assets":[]}'
             python (Join-Path $checkoutRoot "tools/ci/add_smoke_android_launcher.py") cli-smoke
             python (Join-Path $checkoutRoot "tools/ci/check_package_time.py") `
-              --label "Windows desktop" --max-seconds 120 `
+              --label "Windows desktop" --max-seconds 60 `
               --expect-output "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe" `
               --expect-log "using prebuilt Windows runtime" -- `
               .\stasis.exe --workspace cli-smoke package --target desktop
             if ($LASTEXITCODE -ne 0) { throw "Windows desktop packaging benchmark failed" }
+            python (Join-Path $checkoutRoot "tools/ci/check_package_time.py") `
+              --label "Windows desktop repeat" --max-seconds 60 `
+              --expect-output "cli-smoke/dist/benchmark-repeat/ci_smoke.exe" `
+              --expect-log "using prebuilt Windows runtime" -- `
+              .\stasis.exe --workspace cli-smoke package --target desktop --out dist/benchmark-repeat
+            if ($LASTEXITCODE -ne 0) { throw "Repeated Windows desktop packaging benchmark failed" }
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe")) { throw "game package executable missing" }
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis.json")) { throw "game package manifest missing" }
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis_provenance.json")) { throw "game package provenance missing" }
@@ -686,9 +681,13 @@ jobs:
           mkdir -p cli-smoke/assets
           printf '%s\n' '{"schema":"stasis-assets","version":1,"assets":[]}' > cli-smoke/assets/manifest.json
           python3 "${repo_root}/tools/ci/add_smoke_android_launcher.py" cli-smoke
+          package_executable="cli-smoke/dist/ci_smoke-desktop/ci_smoke"
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            package_executable="cli-smoke/dist/ci_smoke-desktop/ci_smoke.app/Contents/MacOS/ci_smoke"
+          fi
           python3 "${repo_root}/tools/ci/check_package_time.py" \
             --label "${RUNNER_OS} desktop" --max-seconds 120 \
-            --expect-output "${smoke_executable}" -- \
+            --expect-output "${package_executable}" -- \
             ./bin/stasis --workspace cli-smoke package --target desktop
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             python3 "${repo_root}/tools/ci/check_package_time.py" \
@@ -895,7 +894,7 @@ jobs:
             --platform windows `
             --archive "dist/stasis-nightly-win-x64.zip" `
             --output "bundle-audit/stasis-nightly-win-x64-signed.json" `
-            --max-archive-bytes 134217728
+            --max-archive-bytes 67108864
           if ($LASTEXITCODE -ne 0) { throw "Signed Windows release bundle audit failed" }
           $signedArtifacts = @(python tools/ci/windows_signing_manifest.py list --root $validationRoot --receipt $receipt)
           foreach ($artifact in $signedArtifacts) {
@@ -1025,8 +1024,11 @@ jobs:
               --release-root "$(dirname "$(dirname "${toolchain}")")" \
               --package-root "${root}" \
               --expect-runtime-sources
-            gradle -p "${root}/android" :app:assembleDebug --no-daemon --max-workers=2 --console=plain
             apk="${root}/android/app/build/outputs/apk/debug/app-debug.apk"
+            python3 tools/ci/check_package_time.py \
+              --label "Android ${variant} APK" --max-seconds 120 \
+              --expect-output "${apk}" -- \
+              gradle -p "${root}/android" :app:assembleDebug --no-daemon --max-workers=2 --console=plain
             test -f "${apk}"
             network_audit=()
             if [[ "${variant}" != "offline" ]]; then
@@ -1070,7 +1072,7 @@ jobs:
             ext: zip
             executable: stasis.exe
             vsce_target: win32-x64
-          - os: macos-15-arm64
+          - os: macos-15
             archive: stasis-nightly-osx-arm64
             ext: tar.gz
             executable: bin/stasis
@@ -1156,12 +1158,14 @@ jobs:
         run: |
           $releaseRoot = "target/stasis-editor-release-${{ matrix.vsce_target }}"
           node tools/assemble_editor_release.mjs `
-            --toolchain-archive "target/vscode-nightly/${{ matrix.archive }}.${{ matrix.ext }}" `
             --vsix "vscode-stasis/.vsix/stasislang.stasis-${{ matrix.vsce_target }}.vsix" `
             --out $releaseRoot `
             --release-id "${{ needs.detect.outputs.nightly_tag }}" `
             --platform "${{ matrix.vsce_target }}"
           Compress-Archive -Path "$releaseRoot/*" -DestinationPath "target/stasis-editor-release-${{ matrix.vsce_target }}.zip" -Force
+          $editorArchive = Get-Item "target/stasis-editor-release-${{ matrix.vsce_target }}.zip"
+          if ($editorArchive.Length -gt 67108864) { throw "Editor archive exceeds 64 MiB: $($editorArchive.Length) bytes" }
+          Write-Host "Editor archive: $($editorArchive.Length) bytes"
 
       - name: Upload atomic editor release
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

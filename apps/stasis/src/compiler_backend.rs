@@ -724,6 +724,7 @@ impl IncrementalCompilerBackend {
         backend.aot_artifact_root = aot_artifact_root;
         if cfg!(windows) && backend.aot_link_config.linker_path.is_none() {
             backend.aot_link_config.linker_path = resolve_installed_lld_link()
+                .or_else(resolve_msvc_link_exe)
                 .or_else(|| ensure_rust_lld_link_wrapper(&backend.aot_artifact_root));
         }
         backend.enable_aot_link_step = false;
@@ -2015,27 +2016,22 @@ fn default_runtime_bridge_compiler(target: &stasis_jit::AotTarget) -> PathBuf {
             .ok()
             .and_then(|path| path.parent().map(|parent| parent.join("clang-cl.exe")))
             .filter(|path| path.is_file())
-            .or_else(resolve_host_clang_cl)
-            .unwrap_or_else(|| PathBuf::from("clang-cl.exe"))
+            .or_else(resolve_host_runtime_bridge_compiler)
+            .unwrap_or_else(|| PathBuf::from("cl.exe"))
     } else {
         PathBuf::from("cc")
     }
 }
 
 #[cfg(windows)]
-fn resolve_host_clang_cl() -> Option<PathBuf> {
-    ["BuildTools", "Enterprise", "Community", "Professional"]
-        .into_iter()
-        .map(|edition| {
-            PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\2022")
-                .join(edition)
-                .join("VC/Tools/Llvm/x64/bin/clang-cl.exe")
-        })
-        .find(|path| path.is_file())
+fn resolve_host_runtime_bridge_compiler() -> Option<PathBuf> {
+    let environment = normalize_windows_environment(std::env::vars_os());
+    let installations = native_visual_studio_installations(&environment);
+    resolve_native_visual_studio_compiler(&installations)
 }
 
 #[cfg(not(windows))]
-fn resolve_host_clang_cl() -> Option<PathBuf> {
+fn resolve_host_runtime_bridge_compiler() -> Option<PathBuf> {
     None
 }
 
@@ -2189,30 +2185,16 @@ fn resolve_runtime_graphics_path(repo_root: &Path) -> Option<PathBuf> {
 }
 
 fn resolve_msvc_link_exe() -> Option<PathBuf> {
-    let roots = [
-        PathBuf::from(
-            r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC",
-        ),
-        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC"),
-    ];
-    let mut candidates = Vec::new();
-    for root in roots {
-        let Ok(entries) = std::fs::read_dir(&root) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry
-                .path()
-                .join("bin")
-                .join("HostX64")
-                .join("x64")
-                .join("link.exe");
-            if path.exists() {
-                candidates.push(path);
-            }
-        }
+    #[cfg(windows)]
+    {
+        let environment = normalize_windows_environment(std::env::vars_os());
+        let installations = native_visual_studio_installations(&environment);
+        resolve_native_visual_studio_linker(&installations)
     }
-    resolve_latest_existing_path(candidates)
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 fn resolve_rust_lld_exe() -> Option<PathBuf> {
@@ -4354,6 +4336,14 @@ struct WindowsVisualStudioInstallation {
 }
 
 #[cfg(windows)]
+#[derive(Clone, Copy)]
+enum WindowsVisualStudioNativeTool {
+    ClangCl,
+    MsvcCompiler,
+    MsvcLinker,
+}
+
+#[cfg(windows)]
 struct MonolithCmakeRunner {
     cmake: PathBuf,
     installation: WindowsVisualStudioInstallation,
@@ -4517,6 +4507,18 @@ fn executable_candidates(
         push_unique_windows_path(&mut candidates, path);
     }
     candidates
+}
+
+#[cfg(windows)]
+fn vswhere_executable_candidates(environment: &[(OsString, OsString)]) -> Vec<PathBuf> {
+    executable_candidates(
+        "vswhere.exe",
+        environment,
+        [
+            PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
+            PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
+        ],
+    )
 }
 
 #[cfg(windows)]
@@ -4697,6 +4699,105 @@ fn query_vswhere_installations(
 }
 
 #[cfg(windows)]
+fn visual_studio_native_tool_path(
+    installation: &WindowsVisualStudioInstallation,
+    tool: WindowsVisualStudioNativeTool,
+) -> Option<PathBuf> {
+    match tool {
+        WindowsVisualStudioNativeTool::ClangCl => {
+            let path = installation
+                .root
+                .join(r"VC\Tools\Llvm\x64\bin\clang-cl.exe");
+            path.is_file().then_some(path)
+        }
+        WindowsVisualStudioNativeTool::MsvcCompiler | WindowsVisualStudioNativeTool::MsvcLinker => {
+            let name = match tool {
+                WindowsVisualStudioNativeTool::MsvcCompiler => "cl.exe",
+                WindowsVisualStudioNativeTool::MsvcLinker => "link.exe",
+                WindowsVisualStudioNativeTool::ClangCl => unreachable!(),
+            };
+            let root = installation.root.join(r"VC\Tools\MSVC");
+            let entries = std::fs::read_dir(root).ok()?;
+            let candidates = entries
+                .flatten()
+                .map(|entry| {
+                    entry
+                        .path()
+                        .join("bin")
+                        .join("Hostx64")
+                        .join("x64")
+                        .join(name)
+                })
+                .filter(|path| path.is_file())
+                .collect();
+            resolve_latest_existing_path(candidates)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn native_visual_studio_installations(
+    environment: &[(OsString, OsString)],
+) -> Vec<WindowsVisualStudioInstallation> {
+    let supported_generators = ["17.0", "18.0"]
+        .into_iter()
+        .map(|version| {
+            visual_studio_generator(version)
+                .expect("known supported Visual Studio version")
+                .to_string()
+        })
+        .collect();
+    let mut installations = Vec::new();
+    for vswhere in vswhere_executable_candidates(environment) {
+        if let Ok((mut discovered, _)) = query_vswhere_installations(&vswhere, environment) {
+            installations.append(&mut discovered);
+        }
+    }
+    installations.extend(fixed_visual_studio_installations());
+    let (mut installations, _) =
+        newest_supported_visual_studio_installations(installations, &supported_generators);
+    let mut seen_roots: Vec<String> = Vec::new();
+    installations.retain(|installation| {
+        let identity = installation.root.to_string_lossy().to_ascii_lowercase();
+        if seen_roots.iter().any(|seen| seen == &identity) {
+            false
+        } else {
+            seen_roots.push(identity);
+            true
+        }
+    });
+    installations
+}
+
+#[cfg(windows)]
+fn resolve_native_visual_studio_compiler(
+    installations: &[WindowsVisualStudioInstallation],
+) -> Option<PathBuf> {
+    installations
+        .iter()
+        .find_map(|installation| {
+            visual_studio_native_tool_path(
+                installation,
+                WindowsVisualStudioNativeTool::MsvcCompiler,
+            )
+        })
+        .or_else(|| {
+            installations.iter().find_map(|installation| {
+                visual_studio_native_tool_path(installation, WindowsVisualStudioNativeTool::ClangCl)
+            })
+        })
+}
+
+#[cfg(windows)]
+fn resolve_native_visual_studio_linker(
+    installations: &[WindowsVisualStudioInstallation],
+) -> Option<PathBuf> {
+    installations.iter().find_map(|installation| {
+        visual_studio_native_tool_path(installation, WindowsVisualStudioNativeTool::MsvcLinker)
+    })
+}
+
+#[cfg(windows)]
 fn resolve_visual_studio_from_vswhere_candidates<Query, Validate>(
     vswhere_candidates: &[PathBuf],
     supported_generators: &BTreeSet<String>,
@@ -4747,14 +4848,7 @@ fn resolve_visual_studio_installation(
     environment: &[(OsString, OsString)],
     supported_generators: &BTreeSet<String>,
 ) -> Result<(WindowsVisualStudioInstallation, PathBuf), String> {
-    let vswhere_candidates = executable_candidates(
-        "vswhere.exe",
-        environment,
-        [
-            PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
-            PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
-        ],
-    );
+    let vswhere_candidates = vswhere_executable_candidates(environment);
     let mut attempted = Vec::new();
     if let Some(resolved) = resolve_visual_studio_from_vswhere_candidates(
         &vswhere_candidates,
@@ -5809,6 +5903,35 @@ fn uses_monolithic_desktop_package(
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    struct NativeToolFixtureRoot(PathBuf);
+
+    #[cfg(windows)]
+    impl NativeToolFixtureRoot {
+        fn new(label: &str) -> Self {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            Self(std::env::temp_dir().join(format!(
+                "stasis_native_tools_{label}_{}_{}",
+                std::process::id(),
+                stamp
+            )))
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for NativeToolFixtureRoot {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
     #[test]
     fn windows_packages_keep_replay_capable_monolithic_runtime() {
         let host = DesktopNetworkLink {
@@ -5958,6 +6081,73 @@ mod tests {
         assert!(skipped[0].contains(r"D:\Legacy VS\2019"));
         assert!(skipped[0].contains("16.11.42.0"));
         assert!(skipped[0].contains("is not supported"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_custom_vs2026_native_tools_resolve_from_installation_root() {
+        let root = NativeToolFixtureRoot::new("vs2026_native_tools");
+        let installation = WindowsVisualStudioInstallation {
+            root: root.path().join(r"Custom VS Location\Visual Studio 2026"),
+            version: "18.2.1.0".to_string(),
+            generator: visual_studio_generator("18.2.1.0")
+                .expect("VS2026 generator")
+                .to_string(),
+        };
+        let cl = installation
+            .root
+            .join(r"VC\Tools\MSVC\14.50.35717\bin\Hostx64\x64\cl.exe");
+        let link = installation
+            .root
+            .join(r"VC\Tools\MSVC\14.50.35717\bin\Hostx64\x64\link.exe");
+        for tool in [&cl, &link] {
+            fs::create_dir_all(tool.parent().expect("tool directory"))
+                .expect("create fixture tool directory");
+            fs::write(tool, b"fixture").expect("write fixture tool");
+        }
+
+        assert_eq!(
+            visual_studio_native_tool_path(&installation, WindowsVisualStudioNativeTool::ClangCl),
+            None
+        );
+        assert_eq!(
+            resolve_native_visual_studio_compiler(std::slice::from_ref(&installation)),
+            Some(cl.clone())
+        );
+        assert_eq!(
+            resolve_native_visual_studio_linker(std::slice::from_ref(&installation)),
+            Some(link)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_compiler_prefers_custom_vs2026_cl_over_vs_llvm() {
+        let root = NativeToolFixtureRoot::new("vs2026_cl_fallback");
+        let installation = WindowsVisualStudioInstallation {
+            root: root.path().join(r"Custom VS Location\Visual Studio 2026"),
+            version: "18.2.1.0".to_string(),
+            generator: visual_studio_generator("18.2.1.0")
+                .expect("VS2026 generator")
+                .to_string(),
+        };
+        let cl = installation
+            .root
+            .join(r"VC\Tools\MSVC\14.50.35717\bin\Hostx64\x64\cl.exe");
+        let clang_cl = installation
+            .root
+            .join(r"VC\Tools\Llvm\x64\bin\clang-cl.exe");
+        fs::create_dir_all(cl.parent().expect("compiler directory"))
+            .expect("create fixture compiler directory");
+        fs::write(&cl, b"fixture").expect("write fixture compiler");
+        fs::create_dir_all(clang_cl.parent().expect("LLVM compiler directory"))
+            .expect("create fixture LLVM compiler directory");
+        fs::write(&clang_cl, b"fixture").expect("write fixture LLVM compiler");
+
+        assert_eq!(
+            resolve_native_visual_studio_compiler(std::slice::from_ref(&installation)),
+            Some(cl)
+        );
     }
 
     #[cfg(windows)]

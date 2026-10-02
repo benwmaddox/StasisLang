@@ -10,9 +10,10 @@ invoke Cargo and do not download dependencies.
 Extract a release archive and add its executable directory to `PATH`:
 
 - Windows: the archive root contains `stasis.exe`, `stasis_runner.exe`, `stasis_graphics.dll`,
-  `lld-link.exe`, `clang-cl.exe`, and the project-built `stasis_dynload.dll` /
-  `stasis_dynload.dll.lib` runtime bridge pair. The bundled LLVM tools compile/link generated game
-  bridges; no Windows SDK or MSVC import libraries are redistributed.
+  and the project-built `stasis_dynload.dll` / `stasis_dynload.dll.lib` runtime bridge pair.
+  Prebuilt runtime libraries avoid rebuilding SDL and graphics dependencies for offline games.
+  Native packaging uses the host Visual Studio Build Tools (MSVC and Windows SDK) and CMake;
+  LLVM compiler/linker executables are not redistributed in the archive.
 - Linux/macOS: use `bin/stasis`; the matching static runtime bridge is beside it. Native AOT
   linking currently uses the platform `cc` driver supplied by the supported host image.
 

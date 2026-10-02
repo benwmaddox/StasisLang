@@ -37,6 +37,15 @@ class CheckPackageTimeTests(unittest.TestCase):
             check=False,
         )
 
+    def test_nightly_measures_package_outputs_and_windows_one_minute_budget(self):
+        workflow = (SCRIPT.parents[2] / ".github/workflows/nightly-release.yml").read_text()
+        self.assertNotIn('--expect-output "${smoke_executable}"', workflow)
+        self.assertIn('package_executable="cli-smoke/dist/ci_smoke-desktop/ci_smoke"', workflow)
+        self.assertIn('ci_smoke.app/Contents/MacOS/ci_smoke', workflow)
+        self.assertIn('--expect-output "${package_executable}"', workflow)
+        self.assertIn('--label "Windows desktop" --max-seconds 60', workflow)
+        self.assertIn('--label "Windows desktop repeat" --max-seconds 60', workflow)
+
     def test_success_requires_output_and_log(self):
         with tempfile.TemporaryDirectory() as temp:
             result = self.run_gate(Path(temp), 0, 1)

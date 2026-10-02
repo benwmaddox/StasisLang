@@ -144,7 +144,7 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             self.workflow,
         )
         self.assertIn("runs-on: ubuntu-latest", self.workflow)
-        self.assertIn("macos-15-arm64", self.workflow)
+        self.assertIn("macos-15", self.workflow)
         self.assertIn('ndk;27.0.12077973', self.workflow)
         self.assertIn("aarch64-linux-android", self.workflow)
         self.assertIn("x86_64-linux-android", self.workflow)

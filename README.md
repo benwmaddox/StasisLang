@@ -419,7 +419,7 @@ guest code may still request its normal audio API. See
 
 Stasis is fast-moving and breaking changes are expected. Nightly release archives are published from `main` on the [GitHub Releases page](https://github.com/benwmaddox/StasisLang/releases).
 
-Download the archive for your platform, extract it, and put the `stasis` executable on `PATH`. On Windows, SmartScreen may warn because binaries are currently unsigned. The archive includes the compiler, native build tools, runtime libraries, standard library, samples, mobile shells, agent workflow guide, and Stasis knowledge library needed for offline use.
+Download the archive for your platform, extract it, and put the `stasis` executable on `PATH`. On Windows, SmartScreen may warn because binaries are currently unsigned. The archive includes the compiler, prebuilt runtime libraries, standard library, samples, mobile shells, agent workflow guide, and Stasis knowledge library needed for offline use. Native packaging uses host compiler/linker tools; Windows requires Visual Studio Build Tools with MSVC, the Windows SDK, and CMake.
 
 To build the repository from source:
 

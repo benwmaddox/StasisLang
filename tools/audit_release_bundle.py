@@ -18,7 +18,7 @@ except ModuleNotFoundError:  # pragma: no cover - supports importing as tools.*
     from tools.generate_release_provenance import RUNTIME_DIRS, RUNTIME_FILES
 
 
-MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 ARCHIVE_REQUIRED_FILES = (
     "README.md",
     "LICENSE",
@@ -59,10 +59,6 @@ PLATFORM_REQUIRED_FILES = {
         "stasis_dynload.dll.lib",
         "stasis_graphics.dll",
         "stasis_runner.exe",
-        "lld-link.exe",
-        "clang-cl.exe",
-        "RUST-LLVM-COPYRIGHT.html",
-        "LLVM-THIRD-PARTY-NOTICES.txt",
         "THIRD_PARTY_NOTICES.md",
         "tools/windows/stasis-signing.ps1",
         "tools/diagnose_desktop_network.ps1",
@@ -97,10 +93,6 @@ PLATFORM_REQUIRED_FILES = {
     ),
 }
 RETAINED_LARGE_FILE_RATIONALE = {
-    "clang-cl.exe": "Required to compile per-project Windows AOT runtime bridges offline.",
-    "lld-link.exe": "Required to link per-project Windows AOT outputs offline.",
-    "RUST-LLVM-COPYRIGHT.html": "License notice shipped with the bundled Rust LLVM linker.",
-    "LLVM-THIRD-PARTY-NOTICES.txt": "License notices for the bundled LLVM compiler tool.",
     "stasis_mobile_runtime.lib": "Lets Windows offline monolith builds reuse the compiled graphics runtime.",
     "SDL3-static.lib": "Lets Windows offline monolith builds reuse the pinned SDL3 dependency.",
     "SDL3_image-static.lib": "Lets Windows offline monolith builds reuse the pinned SDL3_image dependency.",
@@ -191,6 +183,9 @@ def _validate_layout(
     root: pathlib.Path, platform: str, files: list[pathlib.Path]
 ) -> tuple[str, ...]:
     present = {_relative(path, root) for path in files}
+    bundled_tools = sorted(present & {"clang-cl.exe", "lld-link.exe", "rust-lld.exe"})
+    if bundled_tools:
+        raise BundleAuditError(f"host build tools must not be bundled: {', '.join(bundled_tools)}")
     missing = [name for name in required_files(platform) if name not in present]
     missing_directories = [
         name

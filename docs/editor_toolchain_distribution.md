@@ -45,8 +45,9 @@ cannot pass the installed-toolchain handshake. Reload VS Code after changing the
 Nightly release jobs build Rust and the native runtime from the same commit and release identity.
 The tested platform archive is then embedded unchanged in the corresponding `linux-x64`,
 `win32-x64`, or `darwin-arm64` VSIX. VSIX packaging never reconstructs or searches for individual
-runtime files. Each downloadable OS release is one archive containing the standalone toolchain
-archive, the matching VSIX, and `stasis-editor-release.json` with hashes for both.
+runtime files. Each downloadable OS release contains the matching VSIX and
+`stasis-editor-release.json`, which records the VSIX size and SHA-256. The VSIX already contains the
+complete toolchain, so the outer release does not duplicate it in a separate CLI archive.
 
 Authenticode signing protects Windows provenance and reputation but is not the compatibility
 mechanism. Signing should occur before archive and VSIX manifests are generated; the shared release
