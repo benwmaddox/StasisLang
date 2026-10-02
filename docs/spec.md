@@ -533,7 +533,10 @@ Rules:
 
 #### 6.5.3 `foreach` loop (index + value form)
 
-Indexed form:
+Stasis `foreach` supports an optional index binding alongside the element view.
+Use this form when full-array traversal also needs the current index; needing
+an index alone is not a reason to switch to `for`. The element binding comes
+first and the index binding comes second:
 
 ```stasis
 foreach (let enemy, i in enemies) {
@@ -544,7 +547,7 @@ foreach (let enemy, i in enemies) {
 ```
 
 Rules:
-- `i` is the current element index (type `i32`).
+- `i` is the current zero-based element index (type `i32`).
 - `enemy` is the element view at `enemies[i]`.
 - Iteration order is deterministic: `0 .. N - 1`.
 

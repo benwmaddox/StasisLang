@@ -197,7 +197,19 @@ foreach (let enemy in enemies) {
 
 A `for` header always has all three clauses. Fixed extents and explicit traversal make loop cost easy to see.
 
-Prefer `foreach` for full-array traversal in ascending index order, using the element binding directly. Use `foreach (let enemy, i in enemies)` when the body also needs the index. This makes the array extent explicit and helps the compiler prove bounds, though emitted checks depend on the backend and access path. This is a recommendation, not a requirement: use `for` for a used prefix, reverse traversal, strides, or other explicit ranges. `foreach` visits the entire declared capacity.
+Prefer `foreach` for full-array traversal in ascending index order, using the element binding directly. This makes the array extent explicit and helps the compiler prove bounds, though emitted checks depend on the backend and access path. This is a recommendation, not a requirement: use `for` for a used prefix, reverse traversal, strides, or other explicit ranges. `foreach` visits the entire declared capacity.
+
+Stasis `foreach` can also provide the index directly, so needing an index alone does not require a `for` loop:
+
+```stasis
+foreach (let enemy, i in enemies) {
+    if (i == focusIndex) {
+        enemy.damage(10);
+    }
+}
+```
+
+The element binding comes first; the optional index binding comes second. Here, `enemy` is a writable view of `enemies[i]`, and `i` is its zero-based `i32` index, ranging from `0` to `enemies.max_length - 1`.
 
 ### Tests are part of the language
 
