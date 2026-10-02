@@ -66,9 +66,10 @@ Platform references, checked September 2026:
 ## Bounded acceptance
 
 Run `python tools/cargo_cache.py run -- cargo test -p stasis_network --lib --tests`
-with a 15-minute limit. `network-browser-acceptance.yml` runs this on Windows,
-Linux and macOS; its existing Android native-client job retains device ABI and
-transport coverage. Deterministic adapter tests cover offline selection,
+with a 15-minute limit. The manual/nightly `network-browser-acceptance.yml`
+workflow runs this on Windows, Linux and macOS; its Android native-client job
+retains device ABI and transport coverage. Deterministic adapter tests cover
+offline selection,
 order/duplicate handling, multi-NIC ambiguity, invalid candidates, enumeration
 failure and independent discovery/local-network states. Native enumeration is
 also exercised on the actual CI operating system. These checks do not prove

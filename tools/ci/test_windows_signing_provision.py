@@ -12,7 +12,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HELPER = ROOT / "tools/windows/invoke-bounded-powershell.ps1"
 PROVISIONER = ROOT / "tools/windows/provision-ci-signing-pfx.ps1"
-WORKFLOW = ROOT / ".github/workflows/pr-ci.yml"
+WORKFLOW = ROOT / ".github/workflows/nightly-validation.yml"
 POWERSHELL = shutil.which("pwsh") or shutil.which("powershell.exe")
 
 

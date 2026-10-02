@@ -11,24 +11,9 @@ on:
       - synchronize
       - ready_for_review
   workflow_dispatch:
-    inputs:
-      run_slow_seams:
-        description: Run platform integration and packaging seams.
-        required: false
-        default: false
-        type: boolean
-  workflow_call:
-    inputs:
-      run_slow_seams:
-        description: Run platform integration and packaging seams.
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
-  pull-requests: read
-  actions: read
 
 concurrency:
   group: pr-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
@@ -39,35 +24,22 @@ jobs:
     if: ${{ always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     needs:
       - pr-ci-preflight
-      - pr-ci-cargo-workspace
-      - pr-ci-cargo-stasis-library
-      - pr-ci-cargo-stasis-test-harness
-      - pr-ci-cargo-stasis-main
-      - pr-ci-cargo-stasis-provenance
-      - pr-ci-cargo-stasis-integration
-      - pr-ci-generics-cross-platform
-      - pr-ci-browser-compiler
+      - pr-ci-core-cargo
     runs-on: ubuntu-latest
     steps:
-      - name: Verify required PR CI lanes
+      - name: Verify PR CI lanes
         env:
           PREFLIGHT_RESULT: ${{ needs.pr-ci-preflight.result }}
-          WORKSPACE_RESULT: ${{ needs.pr-ci-cargo-workspace.result }}
-          STASIS_LIBRARY_RESULT: ${{ needs.pr-ci-cargo-stasis-library.result }}
-          STASIS_TEST_HARNESS_RESULT: ${{ needs.pr-ci-cargo-stasis-test-harness.result }}
-          STASIS_MAIN_RESULT: ${{ needs.pr-ci-cargo-stasis-main.result }}
-          STASIS_PROVENANCE_RESULT: ${{ needs.pr-ci-cargo-stasis-provenance.result }}
-          STASIS_INTEGRATION_RESULT: ${{ needs.pr-ci-cargo-stasis-integration.result }}
-          GENERICS_CROSS_PLATFORM_RESULT: ${{ needs.pr-ci-generics-cross-platform.result }}
-          BROWSER_COMPILER_RESULT: ${{ needs.pr-ci-browser-compiler.result }}
+          CORE_CARGO_RESULT: ${{ needs.pr-ci-core-cargo.result }}
+        shell: bash
         run: |
-          for result in "$PREFLIGHT_RESULT" "$WORKSPACE_RESULT" "$STASIS_LIBRARY_RESULT" "$STASIS_TEST_HARNESS_RESULT" "$STASIS_MAIN_RESULT" "$STASIS_PROVENANCE_RESULT" "$STASIS_INTEGRATION_RESULT" "$GENERICS_CROSS_PLATFORM_RESULT" "$BROWSER_COMPILER_RESULT"; do
+          for lane in "PR CI preflight=$PREFLIGHT_RESULT" "PR CI core Cargo=$CORE_CARGO_RESULT"; do
+            result="${lane#*=}"
             if [[ "$result" != "success" ]]; then
-              echo "A required PR CI lane finished with result: $result"
+              echo "A required PR CI lane finished with result: $lane"
               exit 1
             fi
           done
-
   pr-ci-preflight:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     name: PR CI preflight
@@ -81,9 +53,6 @@ jobs:
         with:
           package-manager-cache: false
           node-version: "24"
-
-      - name: Install VS Code unit-test dependencies
-        run: npm ci --prefix vscode-stasis
 
       - name: Check Stasis src layout
         run: |
@@ -115,7 +84,6 @@ jobs:
           python -m unittest tools.ci.test_nightly_freshness tools.ci.test_removed_ai_surface
           python -m unittest tools.ci.test_pr_ci_seam_placement
 
-
       - name: Test release provenance
         run: python -m unittest tools.ci.test_release_provenance tools.ci.test_audio_stream_native_acceptance tools.ci.test_release_bundle_size tools.ci.test_check_package_time tools.ci.test_assemble_editor_release tools.ci.test_copy_release_samples
 
@@ -146,99 +114,49 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -Iruntime runtime/stasis_audio_ring.c runtime/tests/stasis_audio_ring_test.c -o /tmp/stasis_audio_ring_test
           /tmp/stasis_audio_ring_test
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-
-      - name: Run architecture characterization fast lane
+      - name: Check architecture characterization
         run: |
           python tools/ci/run_architecture_characterization.py --check
           python -m unittest tools.ci.test_run_architecture_characterization
-          python tools/ci/run_architecture_characterization.py --run-fast
 
-  pr-ci-browser-compiler:
+  pr-ci-core-cargo:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    name: PR CI browser compiler
+    name: PR CI core Linux Cargo
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Setup Node
+      - name: Setup Node for architecture characterization
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           package-manager-cache: false
           node-version: "24"
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Test in-memory compiler contract
-        run: python tools/cargo_cache.py run -- cargo test -p stasis_browser_compiler -- --test-threads=1
-
-      - name: Build browser compiler core
-        run: python tools/cargo_cache.py run -- cargo build -p stasis_browser_compiler --target wasm32-unknown-unknown --release
-
-      - name: Stage browser compiler Worker bundle
-        run: node tools/stage_browser_compiler.mjs build/codex-cargo-target/wasm32-unknown-unknown/release/stasis_browser_compiler.wasm target/browser-compiler-bundle
-
-      - name: Prove offline Worker compilation in Chromium
-        run: node tools/run_browser_compiler_smoke.mjs target/browser-compiler-bundle
-
-  pr-ci-cargo-workspace:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    name: PR CI workspace Cargo
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install VS Code unit-test dependencies
+        run: npm ci --prefix vscode-stasis
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Check Rust formatting
+        timeout-minutes: 5
+        run: python tools/cargo_cache.py run -- cargo fmt --all --check
 
       - name: Run workspace Cargo tests
         # The in-process JIT test runner mutates process-global dispatch tables; keep CI deterministic.
         timeout-minutes: 15
         run: python tools/cargo_cache.py run -- cargo test --workspace --exclude stasis --all-targets -- --test-threads=1
 
-  pr-ci-cargo-stasis-library:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    name: PR CI Stasis library Cargo
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-
       - name: Build Stasis test executable
-        # Some isolated app tests launch the sibling CLI; make that prerequisite explicit.
+        # The library and main tests launch the sibling CLI; build it once for both targets.
         timeout-minutes: 15
         run: python tools/cargo_cache.py run -- cargo build -p stasis --bin stasis
 
       - name: Run Stasis unit Cargo tests
-        # The library tests need the sibling CLI built by the preceding step.
         timeout-minutes: 15
         run: python tools/cargo_cache.py run -- cargo test -p stasis --lib -- --test-threads=1
-
-  pr-ci-cargo-stasis-main:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    name: PR CI Stasis main Cargo
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-
-      - name: Build Stasis test executable
-        # The desktop editor's isolated tests launch the sibling CLI; make that prerequisite explicit.
-        timeout-minutes: 15
-        run: python tools/cargo_cache.py run -- cargo build -p stasis --bin stasis
 
       - name: Run Stasis main Cargo tests
         timeout-minutes: 15
@@ -247,644 +165,6 @@ jobs:
           --skip toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources
           --test-threads=1
 
-  pr-ci-cargo-stasis-test-harness:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    name: PR CI Stasis test harness
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-
-      - name: Build Stasis provenance test harness
-        # Compile the full main test target once so the slow provenance test does not recompile it.
+      - name: Run fast architecture characterization
         timeout-minutes: 15
-        run: python tools/cargo_cache.py run -- cargo test -p stasis --bin stasis --no-run
-
-      - name: Stage Stasis provenance test harness
-        shell: bash
-        run: |
-          set -euo pipefail
-          test_binary="$(find build/codex-cargo-target/debug/deps -maxdepth 1 -type f -name 'stasis-*' -executable -print -quit)"
-          test -n "$test_binary"
-          mkdir -p target/pr-ci-stasis
-          cp "$test_binary" target/pr-ci-stasis/provenance-test-harness
-
-      - name: Upload Stasis provenance test harness
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          archive: true
-          name: stasis-provenance-test-harness
-          if-no-files-found: error
-          path: target/pr-ci-stasis/provenance-test-harness
-
-  pr-ci-cargo-stasis-provenance:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    name: PR CI Stasis provenance Cargo
-    needs: pr-ci-cargo-stasis-test-harness
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-
-      - name: Download Stasis provenance test harness
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: stasis-provenance-test-harness
-          path: target/pr-ci-stasis
-
-      - name: Prepare Stasis provenance test harness
-        shell: bash
-        run: chmod +x target/pr-ci-stasis/provenance-test-harness
-
-      - name: Run isolated Stasis provenance Cargo test
-        timeout-minutes: 15
-        run: >-
-          ./target/pr-ci-stasis/provenance-test-harness
-          toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources
-          --exact --test-threads=1
-
-  pr-ci-cargo-stasis-integration:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    name: PR CI Stasis integration Cargo
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-
-      - name: Run Stasis integration Cargo tests
-        timeout-minutes: 15
-        shell: bash
-        run: |
-          test_args=()
-          while IFS= read -r test_file; do
-            test_name="$(basename "${test_file}" .rs)"
-            # The replay browser acceptance runs in the packaged-generics lane with a matching native runtime.
-            if [[ "$test_name" == "web_replay_acceptance" ]]; then continue; fi
-            # Web packaging has its own bounded step below; retain the shared Cargo build.
-            if [[ "$test_name" == "web_package" ]]; then continue; fi
-            test_args+=(--test "$test_name")
-          done < <(find apps/stasis/tests -maxdepth 1 -type f -name '*.rs' | sort)
-          test "${#test_args[@]}" -gt 0
-          python tools/cargo_cache.py run -- cargo test -p stasis "${test_args[@]}" -- --test-threads=1
-
-      - name: Run Stasis Web package Cargo tests
-        timeout-minutes: 15
-        run: python tools/cargo_cache.py run -- cargo test -p stasis --test web_package -- --test-threads=1
-
-  pr-ci-generics-cross-platform:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
-    name: Generics compiler (${{ matrix.name }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux
-            os: ubuntu-latest
-            evidence: linux-x64
-            runtime_library: libstasis_graphics.so
-            expected_arch: x86_64
-          - name: Windows
-            os: windows-latest
-            evidence: windows-x64
-            runtime_library: stasis_graphics.dll
-            expected_arch: x86_64
-    runs-on: ${{ matrix.os }}
-    env:
-      CMAKE_BUILD_PARALLEL_LEVEL: "2"
-      STASIS_RELEASE_ID: ci-generics-desktop-${{ github.run_id }}
-      STASIS_SOURCE_COMMIT: ${{ github.sha }}
-      STASIS_GENERICS_DESKTOP_EVIDENCE_DIR: ${{ github.workspace }}/target/generics-desktop-${{ matrix.evidence }}
-      STASIS_EXPECTED_HOST_ARCH: ${{ matrix.expected_arch }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-          package-manager-cache: false
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-
-      - name: Setup MSVC dev environment for native generics acceptance
-        if: matrix.os == 'windows-latest'
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-
-      - name: Install Linux graphics and display dependencies
-        if: runner.os == 'Linux'
-        run: >-
-          sudo apt-get update && sudo apt-get install -y xvfb pkg-config libx11-dev
-          libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev
-          libxss-dev libxtst-dev libxkbcommon-dev libegl1 libgl1-mesa-dri
-
-      - name: Run generic JIT, Wasm, and diagnostic harness
-        timeout-minutes: 15
-        run: python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test generics_collections_jit_aot_wasm -- --test-threads=1
-
-      - name: Run linked native generics execution and trap acceptance
-        timeout-minutes: 15
-        run: python tools/cargo_cache.py run -- cargo test -p stasis_compiler --test generics_collections_aot_seam -- --test-threads=1 --nocapture
-
-      - name: Compute packaged generics toolchain identity
-        shell: pwsh
-        run: |
-          $fingerprint = (python tools/compute_toolchain_fingerprint.py --source-commit $env:STASIS_SOURCE_COMMIT --release-id $env:STASIS_RELEASE_ID).Trim()
-          "STASIS_BUILD_FINGERPRINT=$fingerprint" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Build matching packaged Web runtime
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          $generator = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/windows/select-cmake-vs-generator.ps1).Trim()
-          if ($LASTEXITCODE -ne 0) { throw "Visual Studio generator detection failed." }
-          cmake -S runtime -B target/generics-web-runtime -G $generator -A x64 -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF -DSTASIS_RELEASE_ID="$env:STASIS_RELEASE_ID" -DSTASIS_BUILD_FINGERPRINT="$env:STASIS_BUILD_FINGERPRINT"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build target/generics-web-runtime --config Release --target stasis_graphics stasis_runner
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $sdlSource = Resolve-Path "target/generics-web-runtime/_deps/stasis_sdl3-src"
-          $sdlImageSource = Resolve-Path "target/generics-web-runtime/_deps/stasis_sdl3_image-src"
-          if (-not (Test-Path -LiteralPath $sdlSource -PathType Container) -or
-              -not (Test-Path -LiteralPath $sdlImageSource -PathType Container)) {
-            throw "CMake did not populate the pinned SDL source cache"
-          }
-          "STASIS_SDL3_SOURCE=$($sdlSource.Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STASIS_SDL3_IMAGE_SOURCE=$($sdlImageSource.Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STASIS_RUNTIME_DLL_PATH=$((Resolve-Path 'target/generics-web-runtime/bin/Release/stasis_graphics.dll').Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STASIS_RUNTIME_LIBRARY_PATH=$((Resolve-Path 'target/generics-web-runtime/bin/Release/stasis_graphics.dll').Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STASIS_RUNTIME_RUNNER_PATH=$((Resolve-Path 'target/generics-web-runtime/bin/Release/stasis_runner.exe').Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Build matching packaged desktop runtime on Unix
-        if: matrix.os != 'windows-latest'
-        shell: bash
-        run: |
-          cmake -S runtime -B target/generics-desktop-runtime \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
-            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
-            -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
-            -DSTASIS_BUILD_RUNNER=ON \
-            -DSTASIS_BUILD_SYS=OFF \
-            -DSTASIS_MOBILE_RUNTIME_BUILD_TESTS=ON \
-            -DSTASIS_RELEASE_ID="$STASIS_RELEASE_ID" \
-            -DSTASIS_BUILD_FINGERPRINT="$STASIS_BUILD_FINGERPRINT"
-          cmake --build target/generics-desktop-runtime --config Release --target stasis_graphics stasis_runner \
-            stasis_runner_package_graphics stasis_runner_package_game \
-            stasis_runner_package_lifecycle_graphics stasis_runner_package_lifecycle_game
-          ctest --test-dir target/generics-desktop-runtime --output-on-failure --no-tests=error -R stasis_runner_packaged_unix_contract
-          runtime="$GITHUB_WORKSPACE/target/generics-desktop-runtime/bin/${{ matrix.runtime_library }}"
-          test -f "$runtime"
-          echo "STASIS_RUNTIME_LIBRARY_PATH=$runtime" >> "$GITHUB_ENV"
-          runner="$GITHUB_WORKSPACE/target/generics-desktop-runtime/bin/Release/stasis_runner"
-          test -x "$runner"
-          echo "STASIS_RUNTIME_RUNNER_PATH=$runner" >> "$GITHUB_ENV"
-
-      - name: Run packaged generics desktop acceptance on Unix
-        if: runner.os != 'Windows'
-        timeout-minutes: 15
-        shell: bash
-        run: |
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            xvfb-run -a python tools/cargo_cache.py run -- cargo test -p stasis --features packaged-desktop-acceptance --test generics_collections_desktop -- --exact full_generics_desktop_package_launches_with_provenance_and_digest_frame --test-threads=1 --nocapture
-          else
-            python tools/cargo_cache.py run -- cargo test -p stasis --features packaged-desktop-acceptance --test generics_collections_desktop -- --exact full_generics_desktop_package_launches_with_provenance_and_digest_frame --test-threads=1 --nocapture
-          fi
-
-      - name: Run packaged Web replay acceptance on Linux
-        if: runner.os == 'Linux'
-        timeout-minutes: 15
-        shell: bash
-        run: xvfb-run -a python tools/cargo_cache.py run -- cargo test -p stasis --test web_replay_acceptance -- --test-threads=1 --nocapture
-
-      - name: Run packaged generics desktop acceptance on Windows
-        if: runner.os == 'Windows'
-        timeout-minutes: 15
-        shell: pwsh
-        run: |
-          python tools/cargo_cache.py run -- cargo test -p stasis --features packaged-desktop-acceptance --test generics_collections_desktop -- --exact full_generics_desktop_package_launches_with_provenance_and_digest_frame --test-threads=1 --nocapture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Run packaged generics Web acceptance
-        if: matrix.os == 'windows-latest'
-        timeout-minutes: 15
-        shell: pwsh
-        run: |
-          python tools/cargo_cache.py run -- cargo test -p stasis --test generics_collections_package -- --test-threads=1 --nocapture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python tools/cargo_cache.py run -- cargo run -p stasis -- --workspace samples/generics_collections package --target web --development-build --out build/web
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node tools/run_generics_collections_browser_acceptance.mjs samples/generics_collections/build/web target/generics-collections-browser
-
-      - name: Upload packaged generics desktop and Web evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          archive: true
-          name: generics-collections-${{ matrix.evidence }}-evidence
-          if-no-files-found: error
-          path: |
-            target/generics-desktop-${{ matrix.evidence }}/**
-            target/generics-collections-browser/**
-            samples/generics_collections/build/web/stasis_provenance.json
-
-  bootstrap-smoke-windows:
-    if: ${{ inputs.run_slow_seams }}
-    runs-on: windows-latest
-    timeout-minutes: 60
-    env:
-      STASIS_RELEASE_ID: ci-${{ github.sha }}
-      STASIS_SOURCE_COMMIT: ${{ github.sha }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Compute shared toolchain fingerprint
-        shell: pwsh
-        run: |
-          $fingerprint = (python tools/compute_toolchain_fingerprint.py --source-commit $env:STASIS_SOURCE_COMMIT --release-id $env:STASIS_RELEASE_ID).Trim()
-          "STASIS_BUILD_FINGERPRINT=$fingerprint" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Check Stasis src layout
-        run: python tools/ci/check_stasis_src_layout.py
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-
-      - name: Setup MSVC dev environment
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
-
-      - name: Provision ephemeral CI signing certificate
-        shell: pwsh
-        env:
-          STASIS_SIGNING_CERTIFICATE: ${{ runner.temp }}\stasis-ci-signing\stasis-ci-signing.pfx
-          STASIS_SIGNING_EPHEMERAL_PFX: "1"
-          STASIS_SIGNING_TIMEOUT_SECONDS: "120"
-          STASIS_SIGNING_LOCAL_RECORD: ${{ runner.temp }}\stasis-ci-signing-thumbprint.txt
-          STASIS_REQUIRE_SIGNED_EXECUTION: "1"
-          STASIS_SIGNING_MODE: required
-        run: |
-          $ErrorActionPreference = "Stop"
-          $boundedPowerShell = (Resolve-Path -LiteralPath ./tools/windows/invoke-bounded-powershell.ps1).Path
-          $signingScript = (Resolve-Path -LiteralPath ./tools/windows/stasis-signing.ps1).Path
-          $pfxScript = (Resolve-Path -LiteralPath ./tools/windows/provision-ci-signing-pfx.ps1).Path
-          $pfxJson = @(& $boundedPowerShell -ScriptPath $pfxScript -Command provision -TimeoutSeconds 120)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $pfx = ($pfxJson -join "`n") | ConvertFrom-Json
-          $expectedCertificate = [IO.Path]::GetFullPath($env:STASIS_SIGNING_CERTIFICATE)
-          $actualCertificate = [IO.Path]::GetFullPath([string]$pfx.certificate)
-          if ($actualCertificate -ne $expectedCertificate -or
-              [string]::IsNullOrWhiteSpace([string]$pfx.password) -or
-              [string]$pfx.thumbprint -notmatch '^[0-9A-Fa-f]{40}$') {
-            throw "ephemeral CI signing PFX output was invalid"
-          }
-          $pfxPassword = [string]$pfx.password
-          "::add-mask::$pfxPassword"
-          $env:STASIS_SIGNING_PFX_PASSWORD = $pfxPassword
-          $statusJson = @(& $boundedPowerShell -ScriptPath $signingScript -Command status -TimeoutSeconds 120)
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $status = ($statusJson -join "`n") | ConvertFrom-Json
-          if (-not $status.certificate_configured -or -not $status.required -or [string]::IsNullOrWhiteSpace([string]$status.signer)) {
-            throw "ephemeral CI signing certificate was not configured for required signing"
-          }
-          $smokeDirectory = Split-Path -Parent $env:STASIS_SIGNING_CERTIFICATE
-          $smokeSource = Join-Path $smokeDirectory 'ephemeral-signing-smoke.c'
-          $smokeObject = Join-Path $smokeDirectory 'ephemeral-signing-smoke.obj'
-          $smokeArtifact = Join-Path $smokeDirectory 'ephemeral-signing-smoke.exe'
-          Set-Content -LiteralPath $smokeSource -Value 'int main(void) { return 0; }' -Encoding ascii
-          try {
-            & cl.exe /nologo /W4 /WX "/Fo$smokeObject" "/Fe$smokeArtifact" $smokeSource
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            & $boundedPowerShell -ScriptPath $signingScript -Command sign -ScriptArguments @('-Artifact', $smokeArtifact) -TimeoutSeconds 120
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            & $boundedPowerShell -ScriptPath $signingScript -Command verify -ScriptArguments @('-Artifact', $smokeArtifact) -TimeoutSeconds 120
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          } finally {
-            Remove-Item -LiteralPath $smokeArtifact -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $smokeObject -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $smokeSource -Force -ErrorAction SilentlyContinue
-          }
-          "STASIS_SIGNING_LOCAL_RECORD=$env:STASIS_SIGNING_LOCAL_RECORD" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STASIS_SIGNING_CERTIFICATE=$env:STASIS_SIGNING_CERTIFICATE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STASIS_SIGNING_PFX_PASSWORD=$pfxPassword" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STASIS_SIGNING_EPHEMERAL_PFX=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STASIS_SIGNING_TIMEOUT_SECONDS=120" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STASIS_REQUIRE_SIGNED_EXECUTION=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "STASIS_SIGNING_MODE=required" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Capture the real Windows SDL parity fixture
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $generator = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/windows/select-cmake-vs-generator.ps1).Trim()
-          if ($LASTEXITCODE -ne 0) { throw "Visual Studio generator detection failed." }
-          $env:STASIS_CMAKE_GENERATOR = $generator
-          cmake -S runtime -B target/render-parity-runtime -G $generator -A x64 -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_GRAPHICS_BUILD_TESTS=ON -DSTASIS_BUILD_RUNNER=ON -DSTASIS_BUILD_SYS=OFF -DSTASIS_RELEASE_ID="$env:STASIS_RELEASE_ID" -DSTASIS_BUILD_FINGERPRINT="$env:STASIS_BUILD_FINGERPRINT"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build target/render-parity-runtime --config Release
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ctest --test-dir target/render-parity-runtime -C Release -R '^stasis_(sprite_atlas_reservation_test|console_launch_contract)$' --output-on-failure --no-tests=error
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $runner = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_runner.exe").Path
-          $runnerManifest = Join-Path $PWD "target/render-parity-runtime/stasis_runner.embedded.manifest"
-          & mt.exe -nologo "-inputresource:$runner;#1" "-out:$runnerManifest"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $manifestText = Get-Content -LiteralPath $runnerManifest -Raw
-          if ($manifestText -notmatch '<dpiAware[^>]*>true/pm</dpiAware>' -or
-              $manifestText -notmatch '<dpiAwareness[^>]*>PerMonitorV2, PerMonitor</dpiAwareness>') {
-            throw "stasis_runner.exe is missing its per-monitor-v2 DPI manifest"
-          }
-          New-Item -ItemType Directory -Force target/render-parity-ci | Out-Null
-          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
-          $env:STASIS_RUNTIME_RUNNER_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_runner.exe")
-          $env:STASIS_GFX_LOG_SPRITES = "1"
-          $env:STASIS_PARITY_CAPTURE_STAGE = "second_frame"
-          python tools/cargo_cache.py run -- cargo run -p stasis -- --workspace samples/render_parity prepare
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python tools/cargo_cache.py run -- cargo run -p stasis -- play samples/render_parity/main.stasis --watch-dir samples/render_parity --ticks 2 --screenshot target/render-parity-ci/frame.png --screenshot-frame 2 --exit-after-screenshot 2>&1 | Tee-Object target/render-parity-ci/runtime.log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python tools/ci/verify_render_parity.py --capture target/render-parity-ci/frame.png --runtime-log target/render-parity-ci/runtime.log --evidence target/render-parity-ci/evidence.json --write-evidence --require-load-details --profile portable --stage second_frame
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python tools/cargo_cache.py run -- cargo test -p stasis --test windows_game_launch -- --test-threads=1 --nocapture
-
-      - name: Test Windows desktop SDL seam suite
-        shell: pwsh
-        run: |
-          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
-          python tools/ci/run_windows_platform_seams.py --suite DesktopSdl
-
-      - name: Test Windows mobile runtime seam suite
-        shell: pwsh
-        run: |
-          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
-          python tools/ci/run_windows_platform_seams.py --suite MobileRuntime
-
-      - name: Bootstrap Compile Smoke (compiler .stasis)
-        # Compiler/JIT tests share process-global dispatch and runtime registration state.
-        run: python tools/cargo_cache.py run -- cargo test -p stasis_compiler -- --test-threads=1 --nocapture
-
-      - name: Upload Windows platform seam evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          archive: true
-          name: windows-platform-seam-evidence
-          if-no-files-found: warn
-          path: |
-            target/render-parity-ci/frame.png
-            target/render-parity-ci/runtime.log
-            target/render-parity-ci/evidence.json
-            target/windows-platform-seams/**/*.log
-            build/codex-cargo-target/seam-tests/
-
-      - name: Cleanup ephemeral CI signing certificate
-        if: always()
-        shell: pwsh
-        run: |
-          $certificate = $env:STASIS_SIGNING_CERTIFICATE
-          if ($certificate -and (Test-Path -LiteralPath $certificate -PathType Leaf)) {
-            Remove-Item -LiteralPath $certificate -Force -ErrorAction SilentlyContinue
-          }
-          $directory = if ($certificate) { Split-Path -Parent $certificate } else { $null }
-          if ($directory -and (Split-Path -Leaf $directory) -eq 'stasis-ci-signing' -and (Test-Path -LiteralPath $directory -PathType Container)) {
-            Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue
-          }
-          if ($env:STASIS_SIGNING_LOCAL_RECORD -and (Test-Path -LiteralPath $env:STASIS_SIGNING_LOCAL_RECORD -PathType Leaf)) {
-            Remove-Item -LiteralPath $env:STASIS_SIGNING_LOCAL_RECORD -Force -ErrorAction SilentlyContinue
-          }
-
-  vscode-extension-e2e:
-    if: ${{ inputs.run_slow_seams }}
-    name: VS Code E2E (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux x64
-            os: ubuntu-latest
-            runtime_library: libstasis_graphics.so
-    env:
-      CMAKE_BUILD_PARALLEL_LEVEL: "2"
-      STASIS_RELEASE_ID: ci-${{ github.sha }}
-      STASIS_SOURCE_COMMIT: ${{ github.sha }}
-      STASIS_E2E_VSCODE_VERSION: "1.96.0"
-      STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/vscode-e2e-runtime/bin/${{ matrix.runtime_library }}
-      STASIS_TOOLCHAIN_DIR: ${{ github.workspace }}/target/vscode-e2e-toolchain
-      STASIS_TOOLCHAIN_EXECUTABLE: bin/stasis
-      STASIS_E2E_EXECUTABLE: ${{ github.workspace }}/target/vscode-e2e-toolchain/bin/stasis
-      STASIS_E2E_SCREENSHOT: ${{ github.workspace }}/target/vscode-e2e/frame.png
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Compute shared toolchain fingerprint
-        shell: bash
-        run: |
-          fingerprint="$(python3 tools/compute_toolchain_fingerprint.py --source-commit "$STASIS_SOURCE_COMMIT" --release-id "$STASIS_RELEASE_ID")"
-          echo "STASIS_BUILD_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-
-      - name: Install Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          package-manager-cache: false
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: vscode-stasis/package-lock.json
-
-      - name: Install Linux graphics and display dependencies
-        if: runner.os == 'Linux'
-        run: >-
-          sudo apt-get update && sudo apt-get install -y xvfb libx11-dev
-          libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev
-          libxss-dev libxtst-dev libxkbcommon-dev
-
-      - name: Build native graphics runtime
-        shell: bash
-        run: |
-          cmake -S runtime -B target/vscode-e2e-runtime \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
-            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
-            -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
-            -DSTASIS_BUILD_RUNNER=OFF \
-            -DSTASIS_BUILD_SYS=OFF \
-            -DSTASIS_RELEASE_ID="$STASIS_RELEASE_ID" \
-            -DSTASIS_BUILD_FINGERPRINT="$STASIS_BUILD_FINGERPRINT"
-          cmake --build target/vscode-e2e-runtime --config Release --target stasis_graphics
-          test -f "$STASIS_RUNTIME_LIBRARY_PATH"
-
-      - name: Build and probe Stasis runtime loading
-        shell: bash
-        run: |
-          python tools/cargo_cache.py run -- cargo test -p stasis_dynload -- --test-threads=1
-          python tools/cargo_cache.py run -- cargo build -p stasis
-          mkdir -p target/vscode-e2e-toolchain/bin
-          cp build/codex-cargo-target/debug/stasis target/vscode-e2e-toolchain/bin/
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            # DWARF pushes the debug executable beyond Node's string limit in the VSIX secret scanner.
-            strip --strip-debug target/vscode-e2e-toolchain/bin/stasis
-          fi
-          cp "$STASIS_RUNTIME_LIBRARY_PATH" target/vscode-e2e-toolchain/bin/
-          cp -R src target/vscode-e2e-toolchain/
-          "$STASIS_E2E_EXECUTABLE" --json editor-info
-
-      - name: Install extension dependencies
-        working-directory: vscode-stasis
-        run: npm ci
-
-      - name: Test installed VSIX in VS Code
-        working-directory: vscode-stasis
-        shell: bash
-        run: |
-          mkdir -p ../target/vscode-e2e
-          set -o pipefail
-          if [[ "${{ runner.os }}" == "Linux" ]]; then
-            xvfb-run -a npm run test:e2e 2>&1 | tee ../target/vscode-e2e/extension-host.log
-          else
-            npm run test:e2e 2>&1 | tee ../target/vscode-e2e/extension-host.log
-          fi
-
-      - name: Upload VS Code E2E evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          archive: true
-          name: vscode-e2e-${{ runner.os }}-${{ runner.arch }}
-          if-no-files-found: warn
-          path: |
-            target/vscode-e2e/frame.png
-            target/vscode-e2e/extension-host.log
-            vscode-stasis/.vsix/stasislang.stasis.vsix
-
-  android-package-link:
-    if: ${{ inputs.run_slow_seams }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Stasis
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
-        with:
-          gradle-version: "8.9"
-
-      - name: Checkout SDL3
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: libsdl-org/SDL
-          ref: 8e37db5e797b6167f3a00d697d816a684bd259c7
-          path: target/android-link-deps/SDL
-
-      - name: Checkout SDL3_image
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: libsdl-org/SDL_image
-          ref: bec9134a26c7d0f31b36d6083c25296e04cabff5
-          path: target/android-link-deps/SDL_image
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
-        with:
-          packages: platform-tools
-
-      - name: Install Android native toolchain
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
-
-      - name: Package and link generated Android game
-        env:
-          CMAKE_BUILD_PARALLEL_LEVEL: "2"
-          STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
-          STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
-        run: |
-          python tools/cargo_cache.py run -- cargo run -p stasis -- --workspace samples/mobile_storage_link package-mobile --target android-arm64 --out dist/android --development-build
-          gradle -p samples/mobile_storage_link/dist/android/android :app:assembleDebug --no-daemon --max-workers=2 --console=plain
-          test -f samples/mobile_storage_link/dist/android/android/app/build/outputs/apk/debug/app-debug.apk
-          native_library=$(find samples/mobile_storage_link/dist/android/android/app/build/intermediates/cxx/Debug -path '*/obj/arm64-v8a/libmain.so' -print -quit)
-          link_map=$(find samples/mobile_storage_link/dist/android/android/app/.cxx/Debug -name libmain.map -print -quit)
-          test -n "$native_library"
-          test -n "$link_map"
-          python tools/ci/verify_android_native_library.py \
-            --library "$native_library" \
-            --bundle-manifest samples/mobile_storage_link/dist/android/aot/mobile_aot_bundle_manifest.json \
-            --link-map "$link_map" \
-            --readelf "$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
-            --evidence target/android-native-link-evidence.json
-
-      - name: Upload Android native-link evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          archive: true
-          name: android-native-link-evidence
-          path: target/android-native-link-evidence.json
-
-      - name: Package and link generic collections Android game
-        env:
-          CMAKE_BUILD_PARALLEL_LEVEL: "2"
-          STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
-          STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
-        run: |
-          python tools/cargo_cache.py run -- cargo run -p stasis -- --workspace samples/generics_collections package-mobile --target android-arm64 --out dist/generics-android --development-build
-          gradle -p samples/generics_collections/dist/generics-android/android :app:assembleDebug --no-daemon --max-workers=2 --console=plain
-          test -f samples/generics_collections/dist/generics-android/android/app/build/outputs/apk/debug/app-debug.apk
-          native_library=$(find samples/generics_collections/dist/generics-android/android/app/build/intermediates/cxx/Debug -path '*/obj/arm64-v8a/libmain.so' -print -quit)
-          link_map=$(find samples/generics_collections/dist/generics-android/android/app/.cxx/Debug -name libmain.map -print -quit)
-          test -n "$native_library"
-          test -n "$link_map"
-          python tools/ci/verify_android_native_library.py \
-            --library "$native_library" \
-            --bundle-manifest samples/generics_collections/dist/generics-android/aot/mobile_aot_bundle_manifest.json \
-            --link-map "$link_map" \
-            --readelf "$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
-            --evidence target/generics-android-native-link-evidence.json
-
-      - name: Upload generic Android native-link evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          archive: true
-          name: generics-android-native-link-evidence
-          path: target/generics-android-native-link-evidence.json
-
-      - name: Package and link numeric-text Android game
-        env:
-          CMAKE_BUILD_PARALLEL_LEVEL: "2"
-          STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
-          STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
-        run: |
-          numeric_text_workspace=target/numeric-text-android-workspace
-          rm -rf "$numeric_text_workspace"
-          mkdir -p "$numeric_text_workspace/vendor/stasis/src"
-          cp -R samples/android_numeric_text_seam/. "$numeric_text_workspace/"
-          cp -R src/stdlib "$numeric_text_workspace/vendor/stasis/src/stdlib"
-          python tools/cargo_cache.py run -- cargo run -p stasis -- --workspace "$numeric_text_workspace" package-mobile --target android-arm64 --out dist/numeric-text-android --development-build
-          gradle -p "$numeric_text_workspace/dist/numeric-text-android/android" :app:assembleDebug --no-daemon --max-workers=2 --console=plain
-          test -f "$numeric_text_workspace/dist/numeric-text-android/android/app/build/outputs/apk/debug/app-debug.apk"
-          native_library=$(find "$numeric_text_workspace/dist/numeric-text-android/android/app/build/intermediates/cxx/Debug" -path '*/obj/arm64-v8a/libmain.so' -print -quit)
-          link_map=$(find "$numeric_text_workspace/dist/numeric-text-android/android/app/.cxx/Debug" -name libmain.map -print -quit)
-          test -n "$native_library"
-          test -n "$link_map"
-          python tools/ci/verify_android_native_library.py \
-            --library "$native_library" \
-            --bundle-manifest "$numeric_text_workspace/dist/numeric-text-android/aot/mobile_aot_bundle_manifest.json" \
-            --link-map "$link_map" \
-            --readelf "$ANDROID_HOME/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
-            --evidence target/numeric-text-android-native-link-evidence.json
-
-      - name: Upload numeric-text Android native-link evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          archive: true
-          name: numeric-text-android-native-link-evidence
-          path: target/numeric-text-android-native-link-evidence.json
+        run: python tools/ci/run_architecture_characterization.py --run-fast

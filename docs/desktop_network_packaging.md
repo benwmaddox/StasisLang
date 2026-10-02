@@ -173,14 +173,15 @@ For browser acceptance, build the `browser_acceptance_host` example from
 `node tools/run_network_browser_acceptance.mjs` with Chrome or Edge and FFmpeg
 available. The harness writes PNG, MP4 and JSON evidence under
 `target/network-browser-acceptance`. The MP4 records the asserted protocol
-stages; it is not a timing or animation benchmark. The focused
+stages; it is not a timing or animation benchmark. The manual/nightly
 `network-browser-acceptance.yml` workflow runs these gates plus package-content
 tests on Windows. Its Linux job runs the native link/lifecycle probe
 (`bash tools/ci/test_desktop_network_link.sh`), package contract tests, and
 provenance tests. Nightly packaging additionally builds a network-enabled
 desktop package from the relocated release archive with source inputs detached.
-PR CI also runs `bash tools/ci/test_unix_desktop_network_package.sh` on Linux
-to build a native host package and audit its staged browser guest. The test
+Nightly network acceptance also runs
+`bash tools/ci/test_unix_desktop_network_package.sh` on Linux to build a native
+host package and audit its staged browser guest. The test
 runs the HTTP and process-exit listener probes. The network acceptance workflow's
 macOS lane builds the dylib and both iOS static archives, exercises nested
 dylib-before-app signing, and runs the same package lifecycle probe.

@@ -37,7 +37,7 @@ PINNED = {
         'REQUIRED_NATIVE_LIBRARIES = {"libmain.so"}',
         "non-monolithic native libraries",
     ),
-    ".github/workflows/pr-ci.yml": (
+    ".github/workflows/nightly-validation.yml": (
         "STASIS_GRAPHICS_BUNDLE_SDL=ON",
         "libx11-dev",
         "libxrandr-dev",

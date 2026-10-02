@@ -41,7 +41,7 @@ def write_bmp(path: Path, width: int, height: int, rgba: bytes) -> None:
 
 class RenderParityGateTest(unittest.TestCase):
     def test_windows_workflow_does_not_mask_parity_verifier_failure(self):
-        lines = (ROOT / ".github/workflows/pr-ci.yml").read_text(
+        lines = (ROOT / ".github/workflows/nightly-validation.yml").read_text(
             encoding="utf-8"
         ).splitlines()
         verifier = next(

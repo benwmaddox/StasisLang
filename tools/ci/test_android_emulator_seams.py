@@ -18,6 +18,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.workflow = read(".github/workflows/android-device-seams.yml")
         cls.nightly_workflow = read(".github/workflows/nightly-release.yml")
+        cls.nightly_validation_workflow = read(".github/workflows/nightly-validation.yml")
         cls.pr_workflow = read(".github/workflows/pr-ci.yml")
         cls.release_script = read("mobile/android/test_release_shell.ps1")
         cls.release_runner = read("tools/ci/run_android_release_shell_seam.py")
@@ -91,13 +92,11 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", self.workflow)
         self.assertIn("uses: ./.github/workflows/android-device-seams.yml", self.nightly_workflow)
         self.assertIn(
-            "needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams]",
+            "needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams, performance_benchmarks, network_browser_acceptance]",
             self.nightly_workflow,
         )
         self.assertIn(
-            "uses: ./.github/workflows/pr-ci.yml\n"
-            "    with:\n"
-            "      run_slow_seams: true",
+            "uses: ./.github/workflows/nightly-validation.yml",
             self.nightly_workflow,
         )
         self.assertNotIn("self-hosted", self.workflow)
@@ -141,10 +140,10 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
     def test_generics_emulator_coverage_preserves_arm64_package_link_lane(self):
         self.assertIn(
             "--target android-arm64 --out dist/generics-android --development-build",
-            self.pr_workflow,
+            self.nightly_validation_workflow,
         )
-        self.assertIn("verify_android_native_library.py", self.pr_workflow)
-        self.assertIn("mobile_aot_bundle_manifest.json", self.pr_workflow)
+        self.assertIn("verify_android_native_library.py", self.nightly_validation_workflow)
+        self.assertIn("mobile_aot_bundle_manifest.json", self.nightly_validation_workflow)
 
     def test_numeric_text_sample_uses_a_typed_bounded_actual_byte_receipt(self):
         expectations = self.numeric_text_expectations
@@ -184,20 +183,20 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertNotIn("(int32_t *)numeric_text_receipt", self.mobile_main)
         self.assertIn(
             "cp -R samples/android_numeric_text_seam/. \"$numeric_text_workspace/\"",
-            self.pr_workflow,
+            self.nightly_validation_workflow,
         )
         self.assertIn(
             'cp -R src/stdlib "$numeric_text_workspace/vendor/stasis/src/stdlib"',
-            self.pr_workflow,
+            self.nightly_validation_workflow,
         )
         self.assertIn(
             '--workspace "$numeric_text_workspace" package-mobile '
             "--target android-arm64 --out dist/numeric-text-android",
-            self.pr_workflow,
+            self.nightly_validation_workflow,
         )
         self.assertIn(
             "target/numeric-text-android-native-link-evidence.json",
-            self.pr_workflow,
+            self.nightly_validation_workflow,
         )
 
     def test_release_shell_builds_cli_with_a_verified_toolchain_fingerprint(self):
@@ -224,50 +223,44 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("$process.Kill($true)", self.emulator_script)
         self.assertIn("$runtimeBuildDirectory = Join-Path $repoRoot \"target/android-emulator-host-runtime\"", self.emulator_script)
 
-    def test_pr_ci_slow_seams_are_boolean_input_gated(self):
-        input_declaration = (
-            "    inputs:\n"
-            "      run_slow_seams:\n"
-            "        description: Run platform integration and packaging seams.\n"
-            "        required: false\n"
-            "        default: false\n"
-            "        type: boolean\n"
-        )
-        for event in ("workflow_dispatch", "workflow_call"):
-            match = re.search(
-                rf"(?ms)^  {event}:\n(?P<body>.*?)(?=^  [A-Za-z_][A-Za-z0-9_-]*:|\Z)",
-                self.pr_workflow,
-            )
-            self.assertIsNotNone(match, event)
-            self.assertIn(input_declaration, match.group("body"))
+    def test_full_platform_seams_live_in_unconditional_nightly_validation(self):
+        self.assertNotIn("run_slow_seams", self.pr_workflow)
+        self.assertNotIn("bootstrap-smoke-windows:", self.pr_workflow)
+        self.assertNotIn("vscode-extension-e2e:", self.pr_workflow)
+        self.assertNotIn("android-package-link:", self.pr_workflow)
+        self.assertNotIn("pull_request:", self.nightly_validation_workflow)
+        self.assertIn("workflow_dispatch:", self.nightly_validation_workflow)
+        self.assertIn("workflow_call:", self.nightly_validation_workflow)
+        self.assertNotIn("run_slow_seams", self.nightly_validation_workflow)
 
-        self.assertNotIn(
-            "github.event_name == 'workflow_call' && inputs.run_slow_seams",
-            self.pr_workflow,
-        )
-
-        slow_jobs = (
+        full_lanes = (
+            "pr-ci-browser-compiler",
+            "pr-ci-cargo-stasis-test-harness",
+            "pr-ci-cargo-stasis-provenance",
+            "pr-ci-cargo-stasis-integration",
+            "pr-ci-generics-cross-platform",
             "bootstrap-smoke-windows",
             "vscode-extension-e2e",
             "android-package-link",
         )
-        slow_gate = "if: ${{ inputs.run_slow_seams }}"
-        self.assertEqual(3, self.pr_workflow.count(slow_gate))
-        for job in slow_jobs:
-            match = re.search(
-                rf"(?ms)^  {re.escape(job)}:\n(?P<body>.*?)(?=^  [A-Za-z_][A-Za-z0-9_-]*:|\Z)",
-                self.pr_workflow,
-            )
-            self.assertIsNotNone(match, job)
-            self.assertEqual(1, match.group("body").count(slow_gate))
-            if job == "bootstrap-smoke-windows":
-                self.assertEqual(
-                    1,
-                    match.group("body").count(
-                        "run: python tools/cargo_cache.py run -- "
-                        "cargo test -p stasis_compiler -- --test-threads=1 --nocapture"
-                    ),
-                )
+        summary = self.nightly_validation_workflow.split("  test:\n", 1)[1].split(
+            "\n  pr-ci-preflight:", 1
+        )[0]
+        for lane in full_lanes:
+            with self.subTest(lane=lane):
+                self.assertRegex(summary, rf"(?m)^\s+- {lane}$")
+                self.assertIn(f"needs.{lane}.result", summary)
+        bootstrap = re.search(
+            r"(?ms)^  bootstrap-smoke-windows:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            self.nightly_validation_workflow,
+        ).group(1)
+        self.assertEqual(
+            1,
+            bootstrap.count(
+                "run: python tools/cargo_cache.py run -- "
+                "cargo test -p stasis_compiler -- --test-threads=1 --nocapture"
+            ),
+        )
 
     def test_workshop_benchmark_identity_tolerates_missing_console_avd_name(self):
         self.assertIn('Invoke-Adb @("emu", "avd", "name")', self.workshop_script)

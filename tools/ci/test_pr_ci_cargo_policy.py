@@ -1,4 +1,4 @@
-"""Source-level guard for Cargo commands in PR CI (no YAML dependency)."""
+"""Source-level guard for Cargo commands in CI workflows (no YAML dependency)."""
 
 import pathlib
 import re
@@ -36,6 +36,9 @@ class PrCiCargoPolicyTests(unittest.TestCase):
     def test_network_automation_uses_wrapper_owned_target(self):
         workflow = (ROOT / ".github/workflows/network-browser-acceptance.yml").read_text(encoding="utf-8")
         self.assertEqual(raw_cargo_lines(workflow), [])
+        self.assertNotIn("pull_request:", workflow)
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("workflow_call:", workflow)
         self.assertNotIn("--target-dir", workflow)
         self.assertIn("build/codex-cargo-target/debug/examples/browser_acceptance_host.exe", workflow.replace("\\", "/"))
         native = (ROOT / "tools/ci/test_desktop_network_link.ps1").read_text(encoding="utf-8")
@@ -48,6 +51,10 @@ class PrCiCargoPolicyTests(unittest.TestCase):
 
     def test_pr_ci_routes_all_cargo_through_cache(self):
         source = (ROOT / ".github/workflows/pr-ci.yml").read_text(encoding="utf-8")
+        self.assertEqual(raw_cargo_lines(source), [], "raw Cargo run lines")
+
+    def test_nightly_validation_routes_all_cargo_through_cache(self):
+        source = (ROOT / ".github/workflows/nightly-validation.yml").read_text(encoding="utf-8")
         self.assertEqual(raw_cargo_lines(source), [], "raw Cargo run lines")
 
     def test_rejects_inline_block_folded_and_chained_commands(self):
@@ -85,7 +92,7 @@ class PrCiCargoPolicyTests(unittest.TestCase):
         self.assertEqual(raw_cargo_lines("  - run: cargo check"), [1])
 
     def test_staging_uses_shared_cargo_target(self):
-        source = (ROOT / ".github/workflows/pr-ci.yml").read_text(encoding="utf-8")
+        source = (ROOT / ".github/workflows/nightly-validation.yml").read_text(encoding="utf-8")
         self.assertIn(
             "cp build/codex-cargo-target/debug/stasis target/vscode-e2e-toolchain/bin/",
             source,

@@ -12,6 +12,7 @@ from tools.ci import run_windows_platform_seams as seam_runner
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/pr-ci.yml"
+NIGHTLY_WORKFLOW = ROOT / ".github/workflows/nightly-validation.yml"
 RUNNER = ROOT / "tools/ci/run_windows_platform_seams.py"
 STRATEGY = ROOT / "docs/integration_seam_testing_strategy.md"
 
@@ -53,11 +54,13 @@ class PrCiSeamPlacementTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.workflow = WORKFLOW.read_text(encoding="utf-8")
+        cls.nightly_workflow = NIGHTLY_WORKFLOW.read_text(encoding="utf-8")
         cls.runner = RUNNER.read_text(encoding="utf-8")
         cls.strategy = STRATEGY.read_text(encoding="utf-8")
         cls.linux = job(cls.workflow, "test")
+        cls.nightly_summary = job(cls.nightly_workflow, "test")
         cls.linux_ordinary = "\n".join(
-            job(cls.workflow, name)
+            job(cls.nightly_workflow, name)
             for name in (
                 "pr-ci-preflight",
                 "pr-ci-cargo-workspace",
@@ -68,8 +71,8 @@ class PrCiSeamPlacementTests(unittest.TestCase):
                 "pr-ci-cargo-stasis-integration",
             )
         )
-        cls.windows = job(cls.workflow, "bootstrap-smoke-windows")
-        cls.generics = job(cls.workflow, "pr-ci-generics-cross-platform")
+        cls.windows = job(cls.nightly_workflow, "bootstrap-smoke-windows")
+        cls.generics = job(cls.nightly_workflow, "pr-ci-generics-cross-platform")
 
     def test_linux_ordinary_rust_seams_run_once_in_bounded_shards(self):
         commands = (
@@ -93,8 +96,8 @@ class PrCiSeamPlacementTests(unittest.TestCase):
                 )
         self.assertEqual(self.linux_ordinary.count("timeout-minutes: 15"), 9)
         self.assertIn("find apps/stasis/tests", self.linux_ordinary)
-        self.assertIn("needs:", self.linux)
-        self.assertIn("always()", self.linux)
+        self.assertIn("needs:", self.nightly_summary)
+        self.assertIn("always()", self.nightly_summary)
         for lane in (
             "pr-ci-preflight",
             "pr-ci-cargo-workspace",
@@ -105,7 +108,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             "pr-ci-cargo-stasis-integration",
         ):
             with self.subTest(lane=lane):
-                self.assertIn(f"needs.{lane}.result", self.linux)
+                self.assertIn(f"needs.{lane}.result", self.nightly_summary)
         self.assertIn("actions/upload-artifact@", self.linux_ordinary)
         self.assertIn("actions/download-artifact@", self.linux_ordinary)
         redundant_commands = (
@@ -118,8 +121,72 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertNotIn(command, self.linux_ordinary)
 
+    def test_pull_request_workflow_declares_only_three_required_jobs(self):
+        jobs = re.findall(
+            r"(?m)^  ([A-Za-z0-9_-]+):\s*$",
+            self.workflow.split("jobs:", 1)[1],
+        )
+        self.assertEqual(
+            jobs,
+            ["test", "pr-ci-preflight", "pr-ci-core-cargo"],
+        )
+        self.assertIn("needs.pr-ci-preflight.result", self.linux)
+        self.assertIn("needs.pr-ci-core-cargo.result", self.linux)
+        self.assertIn('[[ "$result" != "success" ]]', self.linux)
+        self.assertNotIn("run_slow_seams", self.workflow)
+
+    def test_pr_core_cargo_keeps_fast_linux_coverage_and_formatting(self):
+        core = job(self.workflow, "pr-ci-core-cargo")
+        commands = (
+            "cargo fmt --all --check",
+            "cargo test --workspace --exclude stasis --all-targets -- --test-threads=1",
+            "cargo build -p stasis --bin stasis",
+            "cargo test -p stasis --lib -- --test-threads=1",
+            "cargo test -p stasis --bin stasis --",
+            "python tools/ci/run_architecture_characterization.py --run-fast",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertIn(command, core)
+        self.assertEqual(core.count("cargo build -p stasis --bin stasis"), 1)
+        self.assertLess(
+            core.index("cargo build -p stasis --bin stasis"),
+            core.index("run_architecture_characterization.py --run-fast"),
+        )
+        self.assertIn("--skip toolchain_cli::tests::release_provenance_rejects_substituted_renderer_sources", core)
+        self.assertIn("npm ci --prefix vscode-stasis", core)
+        preflight = job(self.workflow, "pr-ci-preflight")
+        self.assertIn("run_architecture_characterization.py --check", preflight)
+        self.assertNotIn("run_architecture_characterization.py --run-fast", preflight)
+        self.assertNotIn("npm ci --prefix vscode-stasis", preflight)
+
+    def test_nightly_validation_reusable_workflow_runs_and_requires_full_suite(self):
+        self.assertNotIn("pull_request:", self.nightly_workflow)
+        self.assertIn("workflow_dispatch:", self.nightly_workflow)
+        self.assertIn("workflow_call:", self.nightly_workflow)
+        self.assertNotIn("run_slow_seams", self.nightly_workflow)
+        full_lanes = (
+            "pr-ci-preflight",
+            "pr-ci-cargo-workspace",
+            "pr-ci-cargo-stasis-library",
+            "pr-ci-cargo-stasis-test-harness",
+            "pr-ci-cargo-stasis-main",
+            "pr-ci-cargo-stasis-provenance",
+            "pr-ci-cargo-stasis-integration",
+            "pr-ci-generics-cross-platform",
+            "pr-ci-browser-compiler",
+            "bootstrap-smoke-windows",
+            "vscode-extension-e2e",
+            "android-package-link",
+        )
+        for lane in full_lanes:
+            with self.subTest(lane=lane):
+                self.assertRegex(self.nightly_summary, rf"(?m)^\s+- {lane}$")
+                self.assertIn(f"needs.{lane}.result", self.nightly_summary)
+        self.assertIn('[[ "$result" != "success" ]]', self.nightly_summary)
+
     def test_web_packages_have_a_separate_bounded_step_in_required_integration_job(self):
-        integration = job(self.workflow, "pr-ci-cargo-stasis-integration")
+        integration = job(self.nightly_workflow, "pr-ci-cargo-stasis-integration")
         ordinary = step(integration, "Run Stasis integration Cargo tests")
         web = step(integration, "Run Stasis Web package Cargo tests")
         self.assertIn('if [[ "$test_name" == "web_package" ]]; then continue; fi', ordinary)
@@ -133,7 +200,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         for target in DESKTOP_SDL_TARGETS + MOBILE_RUNTIME_TARGETS:
             with self.subTest(target=target):
                 self.assertEqual(self.runner.count(f'"{target}"'), 1)
-                self.assertNotIn(target, self.workflow)
+                self.assertNotIn(target, self.nightly_workflow)
 
     def test_windows_duplicate_focused_seams_are_absent(self):
         duplicates = (
@@ -187,9 +254,9 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             "android-package-link",
         ):
             with self.subTest(job=boundary_job):
-                self.assertRegex(self.workflow, rf"(?m)^  {boundary_job}:$")
-        self.assertNotIn("ios-package-link:", self.workflow)
-        self.assertNotIn("ios-generics-simulator:", self.workflow)
+                self.assertRegex(self.nightly_workflow, rf"(?m)^  {boundary_job}:$")
+        self.assertNotIn("ios-package-link:", self.nightly_workflow)
+        self.assertNotIn("ios-generics-simulator:", self.nightly_workflow)
 
     def test_generics_desktop_parity_runs_and_uploads_on_linux_and_windows(self):
         for marker in (

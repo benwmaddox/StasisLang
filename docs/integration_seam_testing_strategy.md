@@ -51,7 +51,7 @@ Existing coverage already proves important pieces:
   renderer lifecycle state, and the mobile runtime against C fakes.
 - `apps/stasis/tests/toolchain_cli.rs` verifies mobile package assembly and
   generated paths/manifests.
-- PR CI builds and links a generated Android package.
+- Nightly validation builds and links a generated Android package.
 - Windows CI runs the desktop renderer and verifies a real capture.
 - `mobile/android/test_render_emulator.ps1` runs the Workshop JIT renderer and
   verifies stable frames.

@@ -1,4 +1,5 @@
 import pathlib
+import re
 import unittest
 
 
@@ -42,6 +43,8 @@ class NightlyFreshnessContractTests(unittest.TestCase):
     def test_expensive_seams_wait_for_release_detection(self):
         for job in (
             "integration_seams",
+            "performance_benchmarks",
+            "network_browser_acceptance",
             "android_device_seams",
             "android_runtime_support",
         ):
@@ -51,9 +54,20 @@ class NightlyFreshnessContractTests(unittest.TestCase):
                     rf"(?ms)^  {job}:\n    needs: detect\n    if: needs\.detect\.outputs\.should_release == 'true'",
                 )
         self.assertIn(
-            "if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.windows_signing.result == 'success' && needs.android_prebuilt_acceptance.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' }}",
+            "if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.windows_signing.result == 'success' && needs.android_prebuilt_acceptance.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' && needs.performance_benchmarks.result == 'success' && needs.network_browser_acceptance.result == 'success' }}",
             self.release,
         )
+
+    def test_nightly_calls_performance_and_network_validation(self):
+        for job, workflow in (
+            ("performance_benchmarks", "perf-ci.yml"),
+            ("network_browser_acceptance", "network-browser-acceptance.yml"),
+        ):
+            with self.subTest(job=job):
+                self.assertRegex(
+                    self.release,
+                    rf"(?ms)^  {job}:\n    needs: detect\n    if: needs\.detect\.outputs\.should_release == 'true'\n    uses: \.\/\.github\/workflows\/{re.escape(workflow)}",
+                )
 
     def test_windows_archive_is_extracted_and_graphical_windows_are_required(self):
         self.assertIn("Verify extracted Windows editor toolchain", self.release)
