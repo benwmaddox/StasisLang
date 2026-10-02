@@ -44,7 +44,7 @@ set(STASIS_MONOLITH_OUTPUT_NAME "stasis_game" CACHE STRING "Production executabl
 set(STASIS_MONOLITH_NETWORK_LIBRARY "" CACHE FILEPATH "stasis_network shared-library link artifact")
 set(STASIS_MONOLITH_NETWORK_INCLUDE_DIR "" CACHE PATH "stasis_network header directory")
 set(STASIS_MONOLITH_NETWORK_MODE "" CACHE STRING "stasis_network mode: host, client, or dual")
-set(STASIS_MONOLITH_PREBUILT_RUNTIME_DIR "" CACHE PATH "Portable Windows static runtime bundle for an offline monolith")
+set(STASIS_MONOLITH_PREBUILT_RUNTIME_DIR "" CACHE PATH "Portable Windows static runtime and graphics bundle for a monolith")
 option(
     STASIS_BUILD_MOBILE_RUNTIME
     "Build the shared SDL renderer mobile runtime core"
@@ -76,6 +76,7 @@ if(STASIS_BUILD_MONOLITH)
     set(STASIS_BUILD_MOBILE_RUNTIME ON CACHE BOOL "" FORCE)
 endif()
 
+set(_stasis_monolith_use_prebuilt_dependencies OFF)
 set(_stasis_monolith_use_prebuilt_runtime OFF)
 if(STASIS_BUILD_MONOLITH AND STASIS_MONOLITH_PREBUILT_RUNTIME_DIR)
     if(NOT WIN32)
@@ -84,28 +85,37 @@ if(STASIS_BUILD_MONOLITH AND STASIS_MONOLITH_PREBUILT_RUNTIME_DIR)
         message(FATAL_ERROR "STASIS_MONOLITH_PREBUILT_RUNTIME_DIR requires a 64-bit Windows target")
     elseif(NOT MSVC)
         message(FATAL_ERROR "STASIS_MONOLITH_PREBUILT_RUNTIME_DIR requires an MSVC-compatible compiler")
-    elseif(STASIS_MONOLITH_NETWORK_MODE)
-        message(STATUS "Ignoring the offline prebuilt runtime for a network monolith; using the source build path")
     else()
-        set(_stasis_monolith_use_prebuilt_runtime ON)
+        set(_stasis_monolith_use_prebuilt_dependencies ON)
         set(_stasis_monolith_prebuilt_lib_dir "${STASIS_MONOLITH_PREBUILT_RUNTIME_DIR}/lib")
         set(_stasis_monolith_prebuilt_include_dir "${STASIS_MONOLITH_PREBUILT_RUNTIME_DIR}/include")
         foreach(_stasis_prebuilt_library IN ITEMS
-                stasis_mobile_runtime.lib
                 SDL3-static.lib
                 SDL3_image-static.lib
                 stasis_thorvg.lib)
             if(NOT EXISTS "${_stasis_monolith_prebuilt_lib_dir}/${_stasis_prebuilt_library}")
                 message(FATAL_ERROR
-                    "Prebuilt Windows monolith runtime is missing ${_stasis_monolith_prebuilt_lib_dir}/${_stasis_prebuilt_library}")
+                    "Prebuilt Windows monolith bundle is missing ${_stasis_monolith_prebuilt_lib_dir}/${_stasis_prebuilt_library}")
             endif()
         endforeach()
         foreach(_stasis_prebuilt_header IN ITEMS SDL3/SDL.h SDL3_image/SDL_image.h)
             if(NOT EXISTS "${_stasis_monolith_prebuilt_include_dir}/${_stasis_prebuilt_header}")
                 message(FATAL_ERROR
-                    "Prebuilt Windows monolith runtime is missing ${_stasis_monolith_prebuilt_include_dir}/${_stasis_prebuilt_header}")
+                    "Prebuilt Windows monolith bundle is missing ${_stasis_monolith_prebuilt_include_dir}/${_stasis_prebuilt_header}")
             endif()
         endforeach()
+
+        if(STASIS_MONOLITH_NETWORK_MODE)
+            message(STATUS
+                "Using prebuilt Windows graphics dependencies; building the network runtime from source")
+        else()
+            if(NOT EXISTS "${_stasis_monolith_prebuilt_lib_dir}/stasis_mobile_runtime.lib")
+                message(FATAL_ERROR
+                    "Prebuilt Windows monolith runtime is missing ${_stasis_monolith_prebuilt_lib_dir}/stasis_mobile_runtime.lib")
+            endif()
+            set(_stasis_monolith_use_prebuilt_runtime ON)
+            message(STATUS "Using prebuilt Windows runtime at ${STASIS_MONOLITH_PREBUILT_RUNTIME_DIR}")
+        endif()
 
         add_library(stasis_thorvg STATIC IMPORTED GLOBAL)
         set_target_properties(stasis_thorvg PROPERTIES
@@ -134,7 +144,7 @@ if(STASIS_BUILD_MONOLITH AND STASIS_MONOLITH_PREBUILT_RUNTIME_DIR)
 endif()
 
 if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR
-   (STASIS_BUILD_MOBILE_RUNTIME AND NOT _stasis_monolith_use_prebuilt_runtime) OR
+   (STASIS_BUILD_MOBILE_RUNTIME AND NOT _stasis_monolith_use_prebuilt_dependencies) OR
    STASIS_SVG_BUILD_TESTS)
     add_subdirectory(third_party/thorvg)
 endif()
@@ -160,7 +170,7 @@ endif()
 
 # Find graphics deps only when building graphics targets.
 if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_MOBILE_RUNTIME)
-    if(STASIS_GRAPHICS_BUNDLE_SDL AND NOT _stasis_monolith_use_prebuilt_runtime)
+    if(STASIS_GRAPHICS_BUNDLE_SDL AND NOT _stasis_monolith_use_prebuilt_dependencies)
         include(FetchContent)
         if(DEFINED ENV{STASIS_SDL3_SOURCE} AND NOT "$ENV{STASIS_SDL3_SOURCE}" STREQUAL "")
             set(FETCHCONTENT_SOURCE_DIR_STASIS_SDL3 "$ENV{STASIS_SDL3_SOURCE}")
@@ -230,12 +240,14 @@ if(STASIS_GRAPHICS_BUILD_SHARED OR STASIS_GRAPHICS_BUILD_STATIC OR STASIS_BUILD_
         FetchContent_MakeAvailable(stasis_sdl3_image)
     endif()
 
-    # Find SDL3 (via vcpkg, system package, or the pinned bundled family).
-    if(NOT TARGET SDL3::SDL3 AND NOT TARGET SDL3::SDL3-static)
-        find_package(SDL3 CONFIG REQUIRED)
-    endif()
-    if(NOT TARGET SDL3_image::SDL3_image AND NOT TARGET SDL3_image::SDL3_image-static)
-        find_package(SDL3_image CONFIG REQUIRED)
+    if(NOT _stasis_monolith_use_prebuilt_dependencies)
+        # Find SDL3 (via vcpkg, system package, or the pinned bundled family).
+        if(NOT TARGET SDL3::SDL3 AND NOT TARGET SDL3::SDL3-static)
+            find_package(SDL3 CONFIG REQUIRED)
+        endif()
+        if(NOT TARGET SDL3_image::SDL3_image AND NOT TARGET SDL3_image::SDL3_image-static)
+            find_package(SDL3_image CONFIG REQUIRED)
+        endif()
     endif()
 
 endif()

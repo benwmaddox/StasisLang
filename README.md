@@ -243,17 +243,21 @@ stasis new my_game
 cd my_game
 ```
 
-Every `stasis new` project includes GitHub Actions for a pull-request check and a Friday/manual
-three-platform nightly compatibility run. The PR job checks the vendored snapshot and runs only
-`stasis check`. Both workflows resolve the newest complete published Stasis nightly at CI runtime;
-the PR job records its selection in the job summary. The `stasis.json` release ID continues to
-describe the checked-in `vendor/stasis` snapshot and does not select the CI toolchain. The weekly
-job updates the vendor snapshot,
-checks formatting and compilation, runs tests, packages desktop builds, and retains temporary
-workflow artifacts. It does not publish, tag, create releases, sign packages, or build mobile or
-web targets. Project generation remains offline, including from development builds. Network access
-occurs only when the generated workflows restore a GitHub release and verify its GitHub-published
-SHA-256 digest and toolchain identity.
+Every `stasis new` project includes GitHub Actions for pull-request checks, Friday/manual releases,
+and quarterly Stasis pin updates. PR and weekly workflows restore the exact release recorded in
+`stasis.json` and verify the checked-in vendor snapshot. PR checks run formatting and `stasis check`;
+weekly releases also run tests.
+
+The weekly build uses two jobs. Windows restore, vendor verification, desktop packaging, and ZIP
+creation share a 60-second budget. Android arm64 APK assembly and optimized web packaging share a
+180-second budget on Linux; Linux toolchain, Java, SDK, and optimizer setup run before that timer.
+Successful builds publish a prerelease with Windows ZIP, Android APK, web archive, checksums, and
+an immutable build manifest. Unchanged projects skip the build unless a release is forced.
+The Android APK is unsigned and requires a persistent app signing identity and Gradle signing
+configuration before it can be installed or used to upgrade an existing app.
+
+Project generation remains offline, including from development builds. Generated workflows download
+the pinned GitHub release and verify its published SHA-256 digest and toolchain identity.
 
 `stasis new` initializes Git and activates the generated formatting hook without pinning a
 line-ending style. An attempted commit with noncanonical Stasis source formats the files

@@ -5093,13 +5093,20 @@ fn monolith_configure_arguments(
         format!("-DSTASIS_MONOLITH_OUTPUT_DIR={}", cmake_path(output_dir)),
         format!("-DSTASIS_MONOLITH_OUTPUT_NAME={output_name}"),
     ];
-    if cfg!(windows) && desktop_network.is_none() {
+    if cfg!(windows) {
         let prebuilt = runtime_root.join("prebuilt/windows-x64");
         if prebuilt.is_dir() {
-            eprintln!(
-                "Stasis desktop package: using prebuilt Windows runtime at {}",
-                prebuilt.display()
-            );
+            if desktop_network.is_some() {
+                eprintln!(
+                    "Stasis desktop package: reusing prebuilt Windows graphics dependencies at {} for the network runtime source build",
+                    prebuilt.display()
+                );
+            } else {
+                eprintln!(
+                    "Stasis desktop package: using prebuilt Windows runtime at {}",
+                    prebuilt.display()
+                );
+            }
             arguments.push(format!(
                 "-DSTASIS_MONOLITH_PREBUILT_RUNTIME_DIR={}",
                 cmake_path(&prebuilt)
@@ -5964,7 +5971,7 @@ mod tests {
 
     #[test]
     #[cfg(windows)]
-    fn offline_windows_monolith_uses_prebuilt_runtime_when_available() {
+    fn windows_monolith_reuses_prebuilt_graphics_dependencies_for_network_modes() {
         let root = std::env::temp_dir().join(format!(
             "stasis-prebuilt-monolith-{}-{}",
             std::process::id(),
@@ -6002,9 +6009,32 @@ mod tests {
             "network-game",
             Some(&network),
         );
-        assert!(!network_arguments
+        assert!(network_arguments
             .iter()
             .any(|argument| argument.starts_with("-DSTASIS_MONOLITH_PREBUILT_RUNTIME_DIR=")));
+        assert!(network_arguments
+            .iter()
+            .any(|argument| argument == "-DSTASIS_MONOLITH_NETWORK_MODE=host"));
+
+        let client = DesktopNetworkLink {
+            mode: DesktopNetworkMode::Client,
+            ..network
+        };
+        let client_arguments = monolith_configure_arguments(
+            &runtime,
+            &root.join("client-build"),
+            &root.join("aot"),
+            &root.join("main.c"),
+            &root.join("output"),
+            "client-game",
+            Some(&client),
+        );
+        assert!(client_arguments
+            .iter()
+            .any(|argument| argument.starts_with("-DSTASIS_MONOLITH_PREBUILT_RUNTIME_DIR=")));
+        assert!(client_arguments
+            .iter()
+            .any(|argument| argument == "-DSTASIS_MONOLITH_NETWORK_MODE=client"));
         std::fs::remove_dir_all(&root).expect("clean test directory");
     }
 
@@ -6413,6 +6443,33 @@ mod tests {
         assert!(configured
             .iter()
             .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_MODE=client"));
+    }
+
+    #[test]
+    fn desktop_monolith_cmake_links_network_only_when_configured() {
+        let cmake = include_str!("../../../runtime/CMakeLists.txt");
+        let network_guard =
+            "if(STASIS_MONOLITH_NETWORK_LIBRARY OR STASIS_MONOLITH_NETWORK_INCLUDE_DIR)";
+        let network_link =
+            "target_link_libraries(stasis_monolith PRIVATE \"${STASIS_MONOLITH_NETWORK_LIBRARY}\")";
+        let guard_start = cmake
+            .find(network_guard)
+            .expect("optional network configuration guard");
+        let guard_end_marker = "\n    if(NOT _stasis_monolith_use_prebuilt_runtime)";
+        let guard_end = cmake[guard_start..]
+            .find(guard_end_marker)
+            .map(|offset| guard_start + offset)
+            .expect("network configuration block end");
+        let guarded_configuration = &cmake[guard_start..guard_end];
+
+        assert!(guarded_configuration.contains(network_link));
+        assert_eq!(cmake.matches(network_link).count(), 1);
+        assert!(guarded_configuration.contains(
+            "target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_NETWORK_ENABLED=1)"
+        ));
+        assert!(guarded_configuration.contains(
+            "target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_NETWORK_CLIENT_ENABLED=1)"
+        ));
     }
 
     #[test]

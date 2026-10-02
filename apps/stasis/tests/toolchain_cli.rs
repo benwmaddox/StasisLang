@@ -1129,7 +1129,15 @@ fn new_always_generates_github_actions() {
     assert!(weekly.contains("asset: stasis-nightly-win-x64.zip"));
     assert!(weekly.contains("platform: android-web"));
     assert!(weekly.contains("platform: win-x64"));
-    assert!(weekly.contains("stasis package --target desktop"));
+    assert!(weekly.contains("Build Windows desktop within 60 seconds"));
+    assert!(weekly.contains("timeout-minutes: 1"));
+    assert!(weekly.contains("& $stasisPath package --target desktop"));
+    assert!(weekly.contains("budgetSeconds = 60.0"));
+    assert!(weekly.contains("Package Android arm64 and web within 180 seconds"));
+    assert!(weekly.contains("timeout-minutes: 3"));
+    assert!(weekly.contains("readonly budget_ms=180000"));
+    assert!(weekly.contains("Windows package time budget"));
+    assert!(weekly.contains("Linux Android and web package time budget"));
     assert!(weekly.contains("stasis package --target android-arm64"));
     assert!(weekly.contains("--out dist/stasis-android"));
     assert!(weekly.contains("stasis package --target web"));

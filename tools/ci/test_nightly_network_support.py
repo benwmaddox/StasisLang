@@ -1,5 +1,9 @@
+import json
 import pathlib
+import tempfile
+import textwrap
 import unittest
+from unittest.mock import patch
 
 from tools.audit_release_bundle import required_files
 from tools.desktop_network_target import network_target
@@ -249,6 +253,39 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
         self.assertIn("stasis-network-source-backup", self.workflow)
         self.assertIn("requires a macOS host with Xcode", self.workflow)
         self.assertIn("verify_package_provenance.py", self.workflow)
+
+    def test_legacy_android_acceptance_preserves_host_guest_entry(self):
+        legacy_loop = self.workflow.split(
+            "for legacy_variant in legacy-v1-host legacy-v2-client; do", 1
+        )[1]
+        script = textwrap.dedent(
+            legacy_loop.split("<<'PY'\n", 1)[1].split("          PY", 1)[0]
+        )
+        for variant, version, capability in (
+            ("legacy-v1-host", 1, "network"),
+            ("legacy-v2-client", 2, "network_client"),
+        ):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                manifest_path = pathlib.Path(directory) / "stasis.json"
+                manifest_path.write_text(
+                    json.dumps({
+                        "manifest_version": 3,
+                        "entry": "src/main.stasis",
+                        "libraries": {"selections": {}},
+                        "web": {"entry": "old.stasis"},
+                    }),
+                    encoding="utf-8",
+                )
+                with patch("sys.argv", ["fixture", str(manifest_path), variant]):
+                    exec(compile(script, "nightly legacy fixture", "exec"), {})
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                self.assertEqual(version, manifest["manifest_version"])
+                self.assertEqual({capability: True}, manifest["capabilities"])
+                self.assertNotIn("libraries", manifest)
+                if capability == "network":
+                    self.assertEqual({"entry": "src/main.stasis"}, manifest["web"])
+                else:
+                    self.assertNotIn("web", manifest)
 
     def test_relocated_smoke_hides_checkout_source_and_restores_it(self):
         windows_root = '$checkoutRoot = (Get-Location).Path'
