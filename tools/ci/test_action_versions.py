@@ -24,7 +24,7 @@ class ActionVersionTests(unittest.TestCase):
             self.assertTrue(validate("      - uses: " + ref))
 
     def test_runtime_cache_and_archive_regressions(self):
-        source = (ROOT / ".github/workflows/pr-ci.yml").read_text()
+        source = (ROOT / ".github/workflows/nightly-validation.yml").read_text()
         for before, after in (('node-version: "24"', 'node-version: "20"'),
                               ('package-manager-cache: false', 'package-manager-cache: true'),
                               ('archive: true', 'archive: false')):
@@ -33,7 +33,7 @@ class ActionVersionTests(unittest.TestCase):
         self.assertTrue(validate(source + '\nNODE_NO_WARNINGS: 1\n'))
 
     def test_android_setup_excludes_retired_tools_package(self):
-        source = (ROOT / ".github/workflows/pr-ci.yml").read_text()
+        source = (ROOT / ".github/workflows/nightly-validation.yml").read_text()
         self.assertTrue(
             validate(
                 source.replace(
@@ -43,7 +43,16 @@ class ActionVersionTests(unittest.TestCase):
         )
 
     def test_local_reusable_workflow_is_allowed(self):
-        self.assertEqual(validate("    uses: ./.github/workflows/pr-ci.yml"), [])
+        for workflow in (
+            "pr-ci.yml",
+            "nightly-validation.yml",
+            "perf-ci.yml",
+            "network-browser-acceptance.yml",
+        ):
+            with self.subTest(workflow=workflow):
+                self.assertEqual(
+                    validate(f"    uses: ./.github/workflows/{workflow}"), []
+                )
 
 
 if __name__ == "__main__":

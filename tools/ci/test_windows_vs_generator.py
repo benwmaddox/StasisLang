@@ -17,7 +17,7 @@ class WindowsVisualStudioGeneratorTests(unittest.TestCase):
                 target = root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-            workflow = root / ".github/workflows/pr-ci.yml"
+            workflow = root / ".github/workflows/nightly-validation.yml"
             workflow.write_text(
                 workflow.read_text(encoding="utf-8") + "\n# cmake --help\n",
                 encoding="utf-8",

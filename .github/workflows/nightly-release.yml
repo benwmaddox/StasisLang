@@ -21,9 +21,17 @@ jobs:
   integration_seams:
     needs: detect
     if: needs.detect.outputs.should_release == 'true'
-    uses: ./.github/workflows/pr-ci.yml
-    with:
-      run_slow_seams: true
+    uses: ./.github/workflows/nightly-validation.yml
+
+  performance_benchmarks:
+    needs: detect
+    if: needs.detect.outputs.should_release == 'true'
+    uses: ./.github/workflows/perf-ci.yml
+
+  network_browser_acceptance:
+    needs: detect
+    if: needs.detect.outputs.should_release == 'true'
+    uses: ./.github/workflows/network-browser-acceptance.yml
 
   android_device_seams:
     needs: detect
@@ -1193,8 +1201,8 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams]
-    if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.windows_signing.result == 'success' && needs.android_prebuilt_acceptance.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' }}
+    needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams, performance_benchmarks, network_browser_acceptance]
+    if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.windows_signing.result == 'success' && needs.android_prebuilt_acceptance.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' && needs.performance_benchmarks.result == 'success' && needs.network_browser_acceptance.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       actions: read

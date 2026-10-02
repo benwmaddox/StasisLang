@@ -210,6 +210,19 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
         self.assertIn("mobile/network/android-x86_64/libstasis_network_v1.so", required_files("windows"))
         self.assertIn("desktop/network/macos-arm64/libstasis_network.dylib", required_files("macos"))
 
+    def test_network_browser_acceptance_is_nightly_gated_and_not_a_pr_trigger(self):
+        acceptance = (ROOT / ".github/workflows/network-browser-acceptance.yml").read_text(encoding="utf-8")
+        self.assertNotIn("pull_request:", acceptance)
+        self.assertIn("workflow_dispatch:", acceptance)
+        self.assertIn("workflow_call:", acceptance)
+        self.assertRegex(
+            self.workflow,
+            r"(?ms)^  network_browser_acceptance:\n    needs: detect\n    if: needs\.detect\.outputs\.should_release == 'true'\n    uses: \.\/\.github\/workflows\/network-browser-acceptance\.yml",
+        )
+        release = self.workflow.split("  release:", 1)[1].split("  no_changes:", 1)[0]
+        self.assertIn("needs.network_browser_acceptance.result == 'success'", release)
+        self.assertIn("needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams, performance_benchmarks, network_browser_acceptance]", release)
+
     def test_archive_layout_is_copied_before_provenance(self):
         for path in (
             "mobile/network/android-arm64/libstasis_network_v1.so",

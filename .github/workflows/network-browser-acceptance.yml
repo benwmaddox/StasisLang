@@ -1,21 +1,8 @@
 name: Network browser acceptance
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/network-browser-acceptance.yml"
-      - "Cargo.lock"
-      - "docs/portable_lan.md"
-      - ".github/workflows/nightly-release.yml"
-      - ".github/workflows/bootstrap-artifacts.yml"
-      - "apps/stasis/**"
-      - "crates/stasis_network/**"
-      - "crates/stasis_jit/**"
-      - "mobile/shells/**"
-      - "runtime/**"
-      - "tests/fixtures/network_supervision/**"
-      - "tools/**"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

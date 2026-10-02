@@ -8,7 +8,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 HELPER = "tools/windows/select-cmake-vs-generator.ps1"
 CALLERS = (
-    ".github/workflows/pr-ci.yml",
+    ".github/workflows/nightly-validation.yml",
     ".github/workflows/bootstrap-artifacts.yml",
     ".github/workflows/nightly-release.yml",
     "scripts/build_local_editor_release.ps1",
