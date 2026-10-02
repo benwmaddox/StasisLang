@@ -121,6 +121,11 @@ and their audit sidecars share the package root with game assets on Unix
 bundle; its asset root resolves back to that package directory. The network library is a normal
 package-local dependency: beside the executable on Windows/Linux and under the app loader path on
 macOS. Offline packages omit it completely.
+Windows monolith packages reuse the prebuilt SDL3, SDL3_image and ThorVG archives and headers from
+the toolchain's `runtime/prebuilt/windows-x64` bundle when that bundle is available. Offline packages can
+also reuse its matching `stasis_mobile_runtime.lib`; host and client packages compile that runtime
+from source so the selected network mode is applied to the runtime itself. When the graphics bundle
+is absent, CMake keeps the existing dependency source and fetch path.
 macOS uses `@rpath/libstasis_network.dylib` with
 `@executable_path/../Frameworks`; production packaging signs the staged dylib before
 signing the enclosing `.app`. The acceptance lane configures the production signer hook,

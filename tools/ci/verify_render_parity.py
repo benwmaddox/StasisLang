@@ -326,9 +326,8 @@ def _normalize_viewport(
     output_width: int,
     output_height: int,
 ) -> bytes:
+    _validate_viewport_bounds(capture_width, capture_height, viewport)
     x, y, width, height = viewport
-    if x < 0 or y < 0 or width <= 0 or height <= 0 or x + width > capture_width or y + height > capture_height:
-        raise ValueError(f"capture viewport is out of bounds: {viewport}")
     output = bytearray(output_width * output_height * 4)
     for output_y in range(output_height):
         source_y = y + min(height - 1, output_y * height // output_height)
@@ -338,6 +337,23 @@ def _normalize_viewport(
             target = (output_y * output_width + output_x) * 4
             output[target : target + 4] = rgba[source : source + 4]
     return bytes(output)
+
+
+def _validate_viewport_bounds(
+    capture_width: int,
+    capture_height: int,
+    viewport: list[int],
+) -> None:
+    x, y, width, height = viewport
+    if (
+        x < 0
+        or y < 0
+        or width <= 0
+        or height <= 0
+        or x + width > capture_width
+        or y + height > capture_height
+    ):
+        raise ValueError(f"capture viewport is out of bounds: {viewport}")
 
 
 def verify_capture(
@@ -354,14 +370,7 @@ def verify_capture(
     capture_width, capture_height, capture_rgba = read_capture(capture_path)
     logical_width, logical_height = manifest["logical_size"]
     if viewport is not None:
-        _normalize_viewport(
-            capture_rgba,
-            capture_width,
-            capture_height,
-            viewport,
-            logical_width,
-            logical_height,
-        )
+        _validate_viewport_bounds(capture_width, capture_height, viewport)
     candidates = [viewport]
     if viewport is not None:
         candidates.extend(
@@ -422,7 +431,7 @@ def _verify_capture_rgba(
     if profile["comparison"] != "regions":
         raise ValueError(f"unsupported comparison mode: {profile['comparison']}")
 
-    background = Counter(tuple(rgba[index : index + 4]) for index in range(0, len(rgba), 4)).most_common(1)[0][0]
+    background = None
     for region in profile["regions"]:
         pixels = _region_pixels(rgba, width, height, region["rect"])
         if "rgba" in region:
@@ -494,6 +503,11 @@ def _verify_capture_rgba(
                     f"at least {region['min_red_coverage']:.3f}/{region['min_cyan_coverage']:.3f}"
                 )
         elif "non_background_fraction" in region:
+            if background is None:
+                background = Counter(
+                    tuple(rgba[index : index + 4])
+                    for index in range(0, len(rgba), 4)
+                ).most_common(1)[0][0]
             changed = sum(pixel != background for pixel in pixels) / len(pixels)
             if changed < float(region["non_background_fraction"]):
                 raise ValueError(

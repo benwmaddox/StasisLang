@@ -122,13 +122,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Restore resolved immutable Stasis release
+      - name: Restore resolved immutable Stasis release for Linux
+        if: matrix.platform == 'android-web'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./tools/restore-stasis-release.ps1 -ReleaseId '${{ needs.decide.outputs.stasis_release }}' -AssetName '${{ matrix.asset }}'
 
       - name: Verify the checked-in vendor snapshot
+        if: matrix.platform == 'android-web'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -152,9 +154,58 @@ jobs:
         if: matrix.platform == 'android-web'
         run: stasis test
 
-      - name: Package Windows desktop
+      - name: Build Windows desktop within 60 seconds
         if: matrix.platform == 'win-x64'
-        run: stasis package --target desktop
+        timeout-minutes: 1
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.decide.outputs.stasis_release }}
+          ASSET_NAME: ${{ matrix.asset }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $budgetSeconds = 60.0
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
+          $phases = [System.Collections.Generic.List[string]]::new()
+          $status = 'failed'
+          try {
+            $restoreOutput = @(& ./tools/restore-stasis-release.ps1 -ReleaseId $env:RELEASE_ID -AssetName $env:ASSET_NAME)
+            if ($restoreOutput.Count -ne 1) { throw "Restore helper returned $($restoreOutput.Count) paths; expected exactly one Stasis executable." }
+            $stasisPath = [IO.Path]::GetFullPath([string]$restoreOutput[0])
+            if (-not (Test-Path -LiteralPath $stasisPath -PathType Leaf)) { throw "Restored Stasis executable was not found: $stasisPath" }
+            $phases.Add(('Restore: {0:N2}s cumulative' -f $timer.Elapsed.TotalSeconds)) | Out-Null
+
+            $statusJson = @(& $stasisPath --json vendor status --workspace .)
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect the checked-in Stasis vendor snapshot.' }
+            try { $vendorStatus = ($statusJson -join [Environment]::NewLine) | ConvertFrom-Json -ErrorAction Stop }
+            catch { throw 'Stasis vendor status returned invalid JSON.' }
+            if ($vendorStatus.ok -ne $true -or $vendorStatus.result.current -ne $true) {
+              throw 'Checked-in Stasis vendor snapshot is not current for the immutable pin.'
+            }
+            $phases.Add(('Vendor gate: {0:N2}s cumulative' -f $timer.Elapsed.TotalSeconds)) | Out-Null
+
+            & $stasisPath package --target desktop
+            if ($LASTEXITCODE -ne 0) { throw "Windows desktop packaging failed with exit code $LASTEXITCODE." }
+            $phases.Add(('Desktop package: {0:N2}s cumulative' -f $timer.Elapsed.TotalSeconds)) | Out-Null
+
+            $packages = @(Get-ChildItem -LiteralPath 'dist' -Directory)
+            if ($packages.Count -ne 1) { throw "Expected one desktop package directory, found $($packages.Count)." }
+            $archivePath = Join-Path (Get-Location) 'dist/stasis-game-win-x64.zip'
+            Compress-Archive -Path (Join-Path $packages[0].FullName '*') -DestinationPath $archivePath -Force
+            if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) { throw "Windows release archive was not created: $archivePath" }
+            $phases.Add(('ZIP archive: {0:N2}s cumulative' -f $timer.Elapsed.TotalSeconds)) | Out-Null
+            if ($timer.Elapsed.TotalSeconds -gt $budgetSeconds) { throw "Windows packaging exceeded its $budgetSeconds second total budget." }
+            $status = 'passed'
+          }
+          finally {
+            $timer.Stop()
+            $summaryLines = @(
+              '### Windows package time budget',
+              "- Result: **$status**",
+              ("- Total: {0:N2}s / {1:N0}s" -f $timer.Elapsed.TotalSeconds, $budgetSeconds)
+            ) + @($phases | ForEach-Object { "- $_" })
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ($summaryLines -join [Environment]::NewLine)
+          }
 
       - name: Setup Java
         if: matrix.platform == 'android-web'
@@ -180,23 +231,6 @@ jobs:
         shell: bash
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
-      - name: Package Android arm64
-        if: matrix.platform == 'android-web'
-        env:
-          CMAKE_BUILD_PARALLEL_LEVEL: "2"
-        run: stasis package --target android-arm64 --out dist/stasis-android
-
-      - name: Build unsigned Android APK
-        if: matrix.platform == 'android-web'
-        shell: bash
-        run: |
-          set -euo pipefail
-          gradle -p dist/stasis-android/android :app:assembleRelease --no-daemon --max-workers=2 --console=plain
-          unsigned_apk=dist/stasis-android/android/app/build/outputs/apk/release/app-release-unsigned.apk
-          test -f "${unsigned_apk}"
-          cp "${unsigned_apk}" dist/stasis-game-android-arm64-unsigned.apk
-          echo "Android APK is unsigned and cannot be installed or used to upgrade an existing app. A persistent Android app keystore and Gradle signing configuration are required before distributing an installable APK." >> "$GITHUB_STEP_SUMMARY"
-
       - name: Install web optimizer
         if: matrix.platform == 'android-web'
         shell: bash
@@ -205,31 +239,57 @@ jobs:
           sudo apt-get install --yes binaryen
           wasm-opt --version
 
-      - name: Package web
+      - name: Package Android arm64 and web within 180 seconds
         if: matrix.platform == 'android-web'
+        timeout-minutes: 3
         shell: bash
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
         run: |
           set -euo pipefail
+          readonly budget_ms=180000
+          total_start_ns="$(date +%s%N)"
+          phase_results=()
+          record_phase() {
+            local elapsed_ms=$((( $(date +%s%N) - total_start_ns) / 1000000))
+            phase_results+=("$1: ${elapsed_ms} ms cumulative")
+          }
+          finish() {
+            local result=$? elapsed_ms status
+            trap - EXIT
+            elapsed_ms=$((( $(date +%s%N) - total_start_ns) / 1000000))
+            if (( result == 0 && elapsed_ms > budget_ms )); then result=1; fi
+            if (( result == 0 )); then status=passed; else status=failed; fi
+            {
+              printf '### Linux Android and web package time budget\n'
+              printf -- '- Result: **%s**\n- Total: %d ms / %d ms\n' "$status" "$elapsed_ms" "$budget_ms"
+              for phase in "${phase_results[@]}"; do printf -- '- %s\n' "$phase"; done
+            } >> "$GITHUB_STEP_SUMMARY" || true
+            exit "$result"
+          }
+          trap finish EXIT
+
+          stasis package --target android-arm64 --out dist/stasis-android
+          record_phase 'Android project generation'
+
+          gradle -p dist/stasis-android/android :app:assembleRelease --no-daemon --max-workers=2 --console=plain
+          record_phase 'Gradle APK assembly'
+
+          unsigned_apk=dist/stasis-android/android/app/build/outputs/apk/release/app-release-unsigned.apk
+          test -f "$unsigned_apk"
+          cp "$unsigned_apk" dist/stasis-game-android-arm64-unsigned.apk
+          echo "Android APK is unsigned and cannot be installed or used to upgrade an existing app. A persistent Android app keystore and Gradle signing configuration are required before distributing an installable APK." >> "$GITHUB_STEP_SUMMARY"
+          record_phase 'Unsigned APK copy'
+
           stasis package --target web --out dist/stasis-web | tee "$RUNNER_TEMP/stasis-web-package.log"
           grep -F 'wasm-opt -Oz' "$RUNNER_TEMP/stasis-web-package.log"
+          record_phase 'Optimized web package'
 
-      - name: Archive Android and web release on Unix
-        if: matrix.platform == 'android-web'
-        shell: bash
-        run: |
-          set -euo pipefail
           test -f dist/stasis-web/index.html
           tar -czf dist/stasis-game-web.tar.gz -C dist/stasis-web .
-
-      - name: Archive desktop release on Windows
-        if: matrix.platform == 'win-x64'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $packages = @(Get-ChildItem -LiteralPath dist -Directory)
-          if ($packages.Count -ne 1) { throw "Expected one desktop package directory, found $($packages.Count)." }
-          Compress-Archive -Path (Join-Path $packages[0].FullName '*') -DestinationPath (Join-Path (Get-Location) 'dist/${{ matrix.archive }}') -Force
-          Remove-Item -LiteralPath $packages[0].FullName -Recurse -Force
+          record_phase 'Web archive'
+          elapsed_ms=$((( $(date +%s%N) - total_start_ns) / 1000000))
+          if (( elapsed_ms > budget_ms )); then echo "Packaging exceeded the ${budget_ms} ms total budget." >&2; exit 1; fi
 
       - name: Upload desktop release candidate
         uses: actions/upload-artifact@v4

@@ -1021,7 +1021,10 @@ jobs:
           value["manifest_version"] = int(version[1:])
           value["capabilities"] = {"network" if role == "host" else "network_client": True}
           value.pop("libraries", None)
-          value.pop("web", None)
+          if role == "host":
+              value["web"] = {"entry": value["entry"]}
+          else:
+              value.pop("web", None)
           path.write_text(json.dumps(value, indent=2) + "\n")
           PY
             "${toolchain}" --workspace "${sample}" package-mobile --target android-arm64 --out "dist/prebuilt-${legacy_variant}"
