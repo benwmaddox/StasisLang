@@ -28,6 +28,24 @@ class AndroidRuntimeBuildTests(unittest.TestCase):
             (root / "src/runtime.c").write_text("two\n", encoding="ascii")
             self.assertNotEqual(BUILD.source_tree_hash(root), baseline)
 
+    def test_source_tree_hash_does_not_follow_external_or_dangling_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "source"
+            root.mkdir()
+            (root / "runtime.c").write_text("source\n", encoding="ascii")
+            external = base / "external.h"
+            external.write_text("one\n", encoding="ascii")
+            baseline = BUILD.source_tree_hash(root)
+            try:
+                (root / "external.h").symlink_to(external)
+                (root / "dangling.h").symlink_to(base / "missing.h")
+            except OSError as error:
+                self.skipTest(f"symbolic links unavailable: {error}")
+            self.assertEqual(BUILD.source_tree_hash(root), baseline)
+            external.write_text("two\n", encoding="ascii")
+            self.assertEqual(BUILD.source_tree_hash(root), baseline)
+
     def test_assemble_records_all_three_variants_and_file_hashes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -87,7 +105,7 @@ class AndroidRuntimeBuildTests(unittest.TestCase):
         self.assertIn("android_runtime_support:", workflow)
         self.assertIn("android_prebuilt_acceptance:", workflow)
         self.assertIn("tools/build_android_runtime.py", workflow)
-        self.assertIn("package-mobile (three variants)", workflow)
+        self.assertIn("package-mobile (five variants)", workflow)
         self.assertIn('build-tools/35.0.0/apksigner" verify --verbose "${apk}"', workflow)
         self.assertIn(
             'network_audit=(--network-enabled --readelf "${readelf}")', workflow

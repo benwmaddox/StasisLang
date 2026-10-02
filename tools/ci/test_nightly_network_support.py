@@ -144,7 +144,7 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             self.workflow,
         )
         self.assertIn("runs-on: ubuntu-latest", self.workflow)
-        self.assertIn("macos-15-arm64", self.workflow)
+        self.assertIn("macos-15", self.workflow)
         self.assertIn('ndk;27.0.12077973', self.workflow)
         self.assertIn("aarch64-linux-android", self.workflow)
         self.assertIn("x86_64-linux-android", self.workflow)
@@ -155,10 +155,8 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             "network-artifact/android-arm64/libstasis_network_v1.so",
             self.workflow,
         )
-        self.assertIn(
-            "network-artifact/android-arm64/libstasis_network.a",
-            self.workflow,
-        )
+        self.assertNotIn("libstasis_network.a", self.workflow)
+        self.assertNotIn("release/stasis_network.lib", self.workflow)
         self.assertIn("--network-enabled --readelf", self.workflow)
         self.assertNotIn("xcrun", self.workflow)
         self.assertNotIn("aarch64-apple-ios", self.workflow)

@@ -197,9 +197,21 @@ jobs:
           cp "${unsigned_apk}" dist/stasis-game-android-arm64-unsigned.apk
           echo "Android APK is unsigned and cannot be installed or used to upgrade an existing app. A persistent Android app keystore and Gradle signing configuration are required before distributing an installable APK." >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Install web optimizer
+        if: matrix.platform == 'android-web'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binaryen
+          wasm-opt --version
+
       - name: Package web
         if: matrix.platform == 'android-web'
-        run: stasis package --target web --out dist/stasis-web
+        shell: bash
+        run: |
+          set -euo pipefail
+          stasis package --target web --out dist/stasis-web | tee "$RUNNER_TEMP/stasis-web-package.log"
+          grep -F 'wasm-opt -Oz' "$RUNNER_TEMP/stasis-web-package.log"
 
       - name: Archive Android and web release on Unix
         if: matrix.platform == 'android-web'

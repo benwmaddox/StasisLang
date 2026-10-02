@@ -26,9 +26,10 @@ the authoritative native application. Run `stasis package --target desktop`
 from the project, or add `--development-build` for a source-built toolchain.
 The guest is compiled through the existing web packaging pipeline. Its Wasm,
 JavaScript, HTML and reachable assets are encoded into `network_guest.bundle`
-and staged with the native assets. A manifest-v3 explicit library selection links the
-target-native reusable Rust `stasis_network` shared library. A manifest-v1/v2 capability keeps the
-legacy static monolithic link and unchanged package/receipt layout. Both use the same bounded native mailbox ABI.
+and staged with the native assets. Manifest-v1/v2 capabilities and manifest-v3 explicit library
+selections link the target-native reusable Rust `stasis_network` shared library. Legacy manifests
+retain their package receipt keys and omit v3 included-library provenance metadata. All versions use
+the same bounded native mailbox ABI.
 Non-network packages do not start a listener or stage a guest bundle.
 
 The native runtime starts the host after graphics initialization and AOT runtime
@@ -98,12 +99,11 @@ source-checkout builds validated by the macOS acceptance lane, not release-prove
 claims.
 Downstream Maddox and Friends application adoption is separate.
 
-Current nightly and bootstrap toolchain archives include one target-native shared-library set plus
-the prior static archive for manifest-v1/v2 compatibility:
+Current nightly and bootstrap toolchain archives include the target-native shared-library set:
 
 - `desktop/network/windows-x86_64/stasis_network.dll` and its
-  `stasis_network.dll.lib` import library, plus `stasis_network.lib`
-- `desktop/network/linux-x86_64/libstasis_network.so`, plus `libstasis_network.a`
+  `stasis_network.dll.lib` import library
+- `desktop/network/linux-x86_64/libstasis_network.so`
 - bootstrap archives on macOS use `libstasis_network.dylib` for the runner architecture
 
 The desktop network target helper still recognizes macOS and additional Unix

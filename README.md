@@ -419,7 +419,13 @@ guest code may still request its normal audio API. See
 
 Stasis is fast-moving and breaking changes are expected. Nightly release archives are published from `main` on the [GitHub Releases page](https://github.com/benwmaddox/StasisLang/releases).
 
-Download the archive for your platform, extract it, and put the `stasis` executable on `PATH`. On Windows, SmartScreen may warn because binaries are currently unsigned. The archive includes the compiler, native build tools, runtime libraries, standard library, samples, mobile shells, agent workflow guide, and Stasis knowledge library needed for offline use.
+Download the archive for your platform, extract it, and put the `stasis` executable on `PATH`. On Windows, SmartScreen may warn because binaries are currently unsigned. The archive includes the compiler, prebuilt runtime libraries, standard library, samples, mobile shells, agent workflow guide, and Stasis knowledge library needed for offline use. Native packaging uses host compiler/linker tools; Windows requires Visual Studio Build Tools with MSVC, the Windows SDK, and CMake.
+
+Release archives omit the large [Brickout Defense sample](samples/brickout_defense), which remains
+available in the source repository. Other samples, including Brickout Revenge and the Windows
+launch smoke project, remain bundled. Install [Binaryen's `wasm-opt`](https://github.com/WebAssembly/binaryen)
+for optimized web packages; the weekly release scaffold and nightly web qualification install it
+and require optimization to run.
 
 To build the repository from source:
 

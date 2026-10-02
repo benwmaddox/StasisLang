@@ -113,8 +113,6 @@ jobs:
           done
           cp target/aarch64-linux-android/release/libstasis_network.so network-artifact/android-arm64/libstasis_network_v1.so
           cp target/x86_64-linux-android/release/libstasis_network.so network-artifact/android-x86_64/libstasis_network_v1.so
-          cp target/aarch64-linux-android/release/libstasis_network.a network-artifact/android-arm64/libstasis_network.a
-          cp target/x86_64-linux-android/release/libstasis_network.a network-artifact/android-x86_64/libstasis_network.a
 
       - name: Upload immutable mobile network support
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -216,7 +214,7 @@ jobs:
             archive: stasis-nightly-win-x64
             ext: zip
             bundle_platform: windows
-          - os: macos-15-arm64
+          - os: macos-15
             rust_target: aarch64-apple-darwin
             archive: stasis-nightly-osx-arm64
             ext: tar.gz
@@ -258,7 +256,7 @@ jobs:
           sudo apt-get update && sudo apt-get install --yes pkg-config
           libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev
           libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libegl1 libgl1-mesa-dri
-          xvfb
+          xvfb binaryen
 
       - name: Install SDL development packages (macos)
         if: runner.os == 'macOS'
@@ -374,7 +372,7 @@ jobs:
           cp LICENSE "${out}/"
           # Ship the stdlib + samples so relative imports keep working in the bundle.
           cp -R src "${out}/"
-          cp -R samples "${out}/"
+          python3 tools/copy_release_samples.py --source samples --destination "${out}/samples"
           mkdir -p "${out}/mobile"
           cp -R mobile/shells "${out}/mobile/"
           test -f mobile/android-runtime/arm64-v8a/manifest.json
@@ -382,8 +380,6 @@ jobs:
           test -f mobile/network/include/stasis_network.h
           test -f mobile/network/android-arm64/libstasis_network_v1.so
           test -f mobile/network/android-x86_64/libstasis_network_v1.so
-          test -f mobile/network/android-arm64/libstasis_network.a
-          test -f mobile/network/android-x86_64/libstasis_network.a
           cp -R mobile/network "${out}/mobile/"
           if [[ "${RUNNER_OS}" == "macOS" ]]; then
             network_target=macos-arm64
@@ -394,7 +390,6 @@ jobs:
           fi
           mkdir -p "${out}/desktop/network/${network_target}" "${out}/desktop/network/include"
           cp "build/codex-cargo-target/${{ matrix.rust_target }}/release/${network_shared}" "${out}/desktop/network/${network_target}/"
-          cp "build/codex-cargo-target/${{ matrix.rust_target }}/release/libstasis_network.a" "${out}/desktop/network/${network_target}/"
           cp crates/stasis_network/include/stasis_network.h "${out}/desktop/network/include/"
           mkdir -p "${out}/runtime"
           cp runtime/CMakeLists.txt runtime/MINIMP3-LICENSE.txt runtime/minimp3.h runtime/minimp3_ex.h runtime/cJSON.c runtime/cJSON.h runtime/stasis_svg.cpp runtime/stasis_svg.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_performance_metrics.h runtime/stasis_package_provenance_reader.h runtime/stasis_audio_assets.c runtime/stasis_audio_assets.h runtime/stasis_recording_audio.h runtime/stasis_graphics.c runtime/stasis_mixed_quad_planner.h runtime/stasis_sprite_atlas_policy.h runtime/stasis_image_writer.c runtime/stasis_image_writer.h runtime/stasis_runner.manifest runtime/stasis_runner_macos.plist.in runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stasis_replay_consumer.c runtime/stasis_replay_consumer.h runtime/stasis_network_join_card.h runtime/stasis_platform_storage.c runtime/stasis_platform_storage.h runtime/stasis_platform_services.c runtime/stasis_platform_services.h runtime/stb_truetype.h "${out}/runtime/"
@@ -415,7 +410,7 @@ jobs:
             --platform "${{ matrix.bundle_platform }}" \
             --archive "dist/${{ matrix.archive }}.${{ matrix.ext }}" \
             --output "bundle-audit/${{ matrix.archive }}.json" \
-            --max-archive-bytes 134217728
+            --max-archive-bytes 41943040
 
       - name: Assemble bundle (windows)
         if: runner.os == 'Windows'
@@ -426,17 +421,6 @@ jobs:
           Copy-Item "target/${{ matrix.rust_target }}/release/stasis.exe" "$out/" -Force
           Copy-Item "target/${{ matrix.rust_target }}/release/stasis_dynload.dll" "$out/" -Force
           Copy-Item "target/${{ matrix.rust_target }}/release/stasis_dynload.dll.lib" "$out/" -Force
-          $rustLld = Join-Path (rustc --print sysroot) "lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
-          Copy-Item $rustLld "$out/lld-link.exe" -Force
-          $clangCl = (Get-Command clang-cl.exe -ErrorAction Stop).Source
-          Copy-Item $clangCl "$out/clang-cl.exe" -Force
-          $rustCopyright = Join-Path (rustc --print sysroot) "share/doc/rust/COPYRIGHT.html"
-          Copy-Item $rustCopyright "$out/RUST-LLVM-COPYRIGHT.html" -Force
-          $vsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
-          $vsRoot = & $vsWhere -latest -property installationPath
-          $vsNotice = Get-ChildItem (Join-Path $vsRoot "Licenses") -Recurse -Filter "ThirdPartyNotices.txt" | Select-Object -First 1
-          if (-not $vsNotice) { throw "Visual Studio LLVM third-party notices not found" }
-          Copy-Item $vsNotice.FullName "$out/LLVM-THIRD-PARTY-NOTICES.txt" -Force
           # Keep the runtime DLL beside stasis.exe so `stasis.exe play ...` works from the archive root.
           Copy-Item "runtime/build_ci/bin/Release/*.dll" "$out/" -Force
           Copy-Item "runtime/build_ci/bin/Release/stasis_runner.exe" "$out/" -Force
@@ -447,7 +431,7 @@ jobs:
           Copy-Item tools/windows/stasis-signing.ps1 "$out/tools/windows/" -Force
           # Ship the stdlib + samples so relative imports keep working in the bundle.
           Copy-Item src "$out/" -Recurse -Force
-          Copy-Item samples "$out/" -Recurse -Force
+          python tools/copy_release_samples.py --source samples --destination "$out/samples"
           New-Item -ItemType Directory -Force -Path "$out/mobile" | Out-Null
           Copy-Item mobile/shells "$out/mobile/" -Recurse -Force
           if (-not (Test-Path "mobile/android-runtime/arm64-v8a/manifest.json")) { throw "prebuilt Android runtime manifest missing" }
@@ -455,16 +439,13 @@ jobs:
           @(
             "mobile/network/include/stasis_network.h",
             "mobile/network/android-arm64/libstasis_network_v1.so",
-            "mobile/network/android-x86_64/libstasis_network_v1.so",
-            "mobile/network/android-arm64/libstasis_network.a",
-            "mobile/network/android-x86_64/libstasis_network.a"
+            "mobile/network/android-x86_64/libstasis_network_v1.so"
           ) | ForEach-Object {
             if (-not (Test-Path $_)) { throw "mobile network support missing: $_" }
           }
           Copy-Item mobile/network "$out/mobile/" -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/desktop/network/windows-x86_64", "$out/desktop/network/include" | Out-Null
           Copy-Item -Path "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.dll", "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.dll.lib" -Destination "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
-          Copy-Item -Path "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis_network.lib" -Destination "$out/desktop/network/windows-x86_64/" -ErrorAction Stop
           Copy-Item crates/stasis_network/include/stasis_network.h "$out/desktop/network/include/" -ErrorAction Stop
           Copy-Item "build/codex-cargo-target/${{ matrix.rust_target }}/release/stasis-network-supervise.exe" "$out/" -ErrorAction Stop
           Copy-Item tools/diagnose_desktop_network.ps1 "$out/tools/" -ErrorAction Stop
@@ -497,7 +478,7 @@ jobs:
             --platform "${{ matrix.bundle_platform }}" `
             --archive "dist/${{ matrix.archive }}.${{ matrix.ext }}" `
             --output "bundle-audit/${{ matrix.archive }}.json" `
-            --max-archive-bytes 134217728
+            --max-archive-bytes 41943040
 
       - name: Verify extracted Windows editor toolchain
         if: runner.os == 'Windows'
@@ -573,11 +554,17 @@ jobs:
             Set-Content -Path "cli-smoke/assets/manifest.json" -Encoding ASCII -Value '{"schema":"stasis-assets","version":1,"assets":[]}'
             python (Join-Path $checkoutRoot "tools/ci/add_smoke_android_launcher.py") cli-smoke
             python (Join-Path $checkoutRoot "tools/ci/check_package_time.py") `
-              --label "Windows desktop" --max-seconds 120 `
+              --label "Windows desktop" --max-seconds 60 `
               --expect-output "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe" `
               --expect-log "using prebuilt Windows runtime" -- `
               .\stasis.exe --workspace cli-smoke package --target desktop
             if ($LASTEXITCODE -ne 0) { throw "Windows desktop packaging benchmark failed" }
+            python (Join-Path $checkoutRoot "tools/ci/check_package_time.py") `
+              --label "Windows desktop repeat" --max-seconds 60 `
+              --expect-output "cli-smoke/dist/benchmark-repeat/ci_smoke.exe" `
+              --expect-log "using prebuilt Windows runtime" -- `
+              .\stasis.exe --workspace cli-smoke package --target desktop --out dist/benchmark-repeat
+            if ($LASTEXITCODE -ne 0) { throw "Repeated Windows desktop packaging benchmark failed" }
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/ci_smoke.exe")) { throw "game package executable missing" }
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis.json")) { throw "game package manifest missing" }
             if (-not (Test-Path "cli-smoke/dist/ci_smoke-desktop/app/stasis_provenance.json")) { throw "game package provenance missing" }
@@ -686,9 +673,13 @@ jobs:
           mkdir -p cli-smoke/assets
           printf '%s\n' '{"schema":"stasis-assets","version":1,"assets":[]}' > cli-smoke/assets/manifest.json
           python3 "${repo_root}/tools/ci/add_smoke_android_launcher.py" cli-smoke
+          package_executable="cli-smoke/dist/ci_smoke-desktop/ci_smoke"
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            package_executable="cli-smoke/dist/ci_smoke-desktop/ci_smoke.app/Contents/MacOS/ci_smoke"
+          fi
           python3 "${repo_root}/tools/ci/check_package_time.py" \
             --label "${RUNNER_OS} desktop" --max-seconds 120 \
-            --expect-output "${smoke_executable}" -- \
+            --expect-output "${package_executable}" -- \
             ./bin/stasis --workspace cli-smoke package --target desktop
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             python3 "${repo_root}/tools/ci/check_package_time.py" \
@@ -697,6 +688,7 @@ jobs:
               ./bin/stasis --workspace cli-smoke package --target android-arm64 --out dist/android
             python3 "${repo_root}/tools/ci/check_package_time.py" \
               --label "Linux web" --max-seconds 120 \
+              --expect-log "wasm-opt -Oz" \
               --expect-output "cli-smoke/dist/web/index.html" -- \
               ./bin/stasis --workspace cli-smoke package --target web --out dist/web
           else
@@ -895,7 +887,7 @@ jobs:
             --platform windows `
             --archive "dist/stasis-nightly-win-x64.zip" `
             --output "bundle-audit/stasis-nightly-win-x64-signed.json" `
-            --max-archive-bytes 134217728
+            --max-archive-bytes 41943040
           if ($LASTEXITCODE -ne 0) { throw "Signed Windows release bundle audit failed" }
           $signedArtifacts = @(python tools/ci/windows_signing_manifest.py list --root $validationRoot --receipt $receipt)
           foreach ($artifact in $signedArtifacts) {
@@ -937,6 +929,12 @@ jobs:
         uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
         with:
           packages: platform-tools
+      - name: Install web optimizer for network guests
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binaryen
+          wasm-opt --version
       - name: Build and audit prebuilt offline, host, and client APKs
         shell: bash
         env:
@@ -1014,19 +1012,37 @@ jobs:
           path.write_text(json.dumps(value, indent=2) + "\n")
           PY
           "${toolchain}" --workspace "${sample}" package-mobile --target android-arm64 --out dist/prebuilt-client
+          for legacy_variant in legacy-v1-host legacy-v2-client; do
+            python3 - "${sample}/stasis.json" "${legacy_variant}" <<'PY'
+          import json, pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          value = json.loads(path.read_text())
+          version, role = sys.argv[2].split("-")[1:]
+          value["manifest_version"] = int(version[1:])
+          value["capabilities"] = {"network" if role == "host" else "network_client": True}
+          value.pop("libraries", None)
+          value.pop("web", None)
+          path.write_text(json.dumps(value, indent=2) + "\n")
+          PY
+            "${toolchain}" --workspace "${sample}" package-mobile --target android-arm64 --out "dist/prebuilt-${legacy_variant}"
+          done
           package_finished="$(date +%s)"
           readelf="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
           test -x "${readelf}"
-          for variant in offline host client; do
+          for variant in offline host client legacy-v1-host legacy-v2-client; do
             root="${sample}/dist/prebuilt-${variant}"
+            runtime_variant="${variant##*-}"
             grep -Fq 'set(STASIS_ANDROID_RUNTIME_MODE "prebuilt")' "${root}/android/app/src/main/cpp/CMakeLists.txt"
-            grep -Fq "set(STASIS_ANDROID_RUNTIME_VARIANT \"${variant}\")" "${root}/android/app/src/main/cpp/CMakeLists.txt"
+            grep -Fq "set(STASIS_ANDROID_RUNTIME_VARIANT \"${runtime_variant}\")" "${root}/android/app/src/main/cpp/CMakeLists.txt"
             python3 tools/verify_package_provenance.py \
               --release-root "$(dirname "$(dirname "${toolchain}")")" \
               --package-root "${root}" \
               --expect-runtime-sources
-            gradle -p "${root}/android" :app:assembleDebug --no-daemon --max-workers=2 --console=plain
             apk="${root}/android/app/build/outputs/apk/debug/app-debug.apk"
+            python3 tools/ci/check_package_time.py \
+              --label "Android ${variant} APK" --max-seconds 120 \
+              --expect-output "${apk}" -- \
+              gradle -p "${root}/android" :app:assembleDebug --no-daemon --max-workers=2 --console=plain
             test -f "${apk}"
             network_audit=()
             if [[ "${variant}" != "offline" ]]; then
@@ -1044,11 +1060,11 @@ jobs:
             echo "| --- | ---: |"
             echo "| Nightly artifact restore | $((ANDROID_RESTORE_FINISHED - ANDROID_COLD_STARTED)) |"
             echo "| Gradle + Android SDK/NDK setup | $((setup_finished - ANDROID_RESTORE_FINISHED)) |"
-            echo "| package-mobile (three variants) | $((package_finished - package_started)) |"
+            echo "| package-mobile (five variants) | $((package_finished - package_started)) |"
             echo "| Gradle configure, CMake shell/AOT link, APK assembly, debug signing, audit | $((build_finished - package_finished)) |"
             echo "| Complete cold acceptance | $((build_finished - ANDROID_COLD_STARTED)) |"
             echo ""
-            echo "Three debug APK bytes: ${artifact_bytes}"
+            echo "Five debug APK bytes: ${artifact_bytes}"
             echo ""
             echo "This public acceptance reports hosted phase evidence; it does not claim the private consumer job is under 60 seconds."
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -1070,7 +1086,7 @@ jobs:
             ext: zip
             executable: stasis.exe
             vsce_target: win32-x64
-          - os: macos-15-arm64
+          - os: macos-15
             archive: stasis-nightly-osx-arm64
             ext: tar.gz
             executable: bin/stasis
@@ -1156,12 +1172,14 @@ jobs:
         run: |
           $releaseRoot = "target/stasis-editor-release-${{ matrix.vsce_target }}"
           node tools/assemble_editor_release.mjs `
-            --toolchain-archive "target/vscode-nightly/${{ matrix.archive }}.${{ matrix.ext }}" `
             --vsix "vscode-stasis/.vsix/stasislang.stasis-${{ matrix.vsce_target }}.vsix" `
             --out $releaseRoot `
             --release-id "${{ needs.detect.outputs.nightly_tag }}" `
             --platform "${{ matrix.vsce_target }}"
           Compress-Archive -Path "$releaseRoot/*" -DestinationPath "target/stasis-editor-release-${{ matrix.vsce_target }}.zip" -Force
+          $editorArchive = Get-Item "target/stasis-editor-release-${{ matrix.vsce_target }}.zip"
+          if ($editorArchive.Length -gt 41943040) { throw "Editor archive exceeds 40 MiB: $($editorArchive.Length) bytes" }
+          Write-Host "Editor archive: $($editorArchive.Length) bytes"
 
       - name: Upload atomic editor release
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

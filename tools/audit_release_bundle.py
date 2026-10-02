@@ -18,7 +18,7 @@ except ModuleNotFoundError:  # pragma: no cover - supports importing as tools.*
     from tools.generate_release_provenance import RUNTIME_DIRS, RUNTIME_FILES
 
 
-MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 40 * 1024 * 1024
 ARCHIVE_REQUIRED_FILES = (
     "README.md",
     "LICENSE",
@@ -33,8 +33,6 @@ ARCHIVE_REQUIRED_FILES = (
     "mobile/network/include/stasis_network.h",
     "mobile/network/android-arm64/libstasis_network_v1.so",
     "mobile/network/android-x86_64/libstasis_network_v1.so",
-    "mobile/network/android-arm64/libstasis_network.a",
-    "mobile/network/android-x86_64/libstasis_network.a",
     "mobile/android-runtime/arm64-v8a/manifest.json",
     "mobile/android-runtime/arm64-v8a/lib/libSDL3.a",
     "mobile/android-runtime/arm64-v8a/lib/libSDL3_image.a",
@@ -59,16 +57,11 @@ PLATFORM_REQUIRED_FILES = {
         "stasis_dynload.dll.lib",
         "stasis_graphics.dll",
         "stasis_runner.exe",
-        "lld-link.exe",
-        "clang-cl.exe",
-        "RUST-LLVM-COPYRIGHT.html",
-        "LLVM-THIRD-PARTY-NOTICES.txt",
         "THIRD_PARTY_NOTICES.md",
         "tools/windows/stasis-signing.ps1",
         "tools/diagnose_desktop_network.ps1",
         "desktop/network/windows-x86_64/stasis_network.dll",
         "desktop/network/windows-x86_64/stasis_network.dll.lib",
-        "desktop/network/windows-x86_64/stasis_network.lib",
         "desktop/network/include/stasis_network.h",
         "runtime/prebuilt/windows-x64/lib/stasis_mobile_runtime.lib",
         "runtime/prebuilt/windows-x64/lib/SDL3-static.lib",
@@ -83,7 +76,6 @@ PLATFORM_REQUIRED_FILES = {
         "bin/libstasis_graphics.so",
         "bin/stasis_runner",
         "desktop/network/linux-x86_64/libstasis_network.so",
-        "desktop/network/linux-x86_64/libstasis_network.a",
         "desktop/network/include/stasis_network.h",
     ),
     "macos": (
@@ -92,15 +84,10 @@ PLATFORM_REQUIRED_FILES = {
         "bin/libstasis_graphics.dylib",
         "bin/stasis_runner.app/Contents/MacOS/stasis_runner",
         "desktop/network/macos-arm64/libstasis_network.dylib",
-        "desktop/network/macos-arm64/libstasis_network.a",
         "desktop/network/include/stasis_network.h",
     ),
 }
 RETAINED_LARGE_FILE_RATIONALE = {
-    "clang-cl.exe": "Required to compile per-project Windows AOT runtime bridges offline.",
-    "lld-link.exe": "Required to link per-project Windows AOT outputs offline.",
-    "RUST-LLVM-COPYRIGHT.html": "License notice shipped with the bundled Rust LLVM linker.",
-    "LLVM-THIRD-PARTY-NOTICES.txt": "License notices for the bundled LLVM compiler tool.",
     "stasis_mobile_runtime.lib": "Lets Windows offline monolith builds reuse the compiled graphics runtime.",
     "SDL3-static.lib": "Lets Windows offline monolith builds reuse the pinned SDL3 dependency.",
     "SDL3_image-static.lib": "Lets Windows offline monolith builds reuse the pinned SDL3_image dependency.",
@@ -191,6 +178,18 @@ def _validate_layout(
     root: pathlib.Path, platform: str, files: list[pathlib.Path]
 ) -> tuple[str, ...]:
     present = {_relative(path, root) for path in files}
+    bundled_tools = sorted(present & {"clang-cl.exe", "lld-link.exe", "rust-lld.exe"})
+    if bundled_tools:
+        raise BundleAuditError(f"host build tools must not be bundled: {', '.join(bundled_tools)}")
+    duplicate_network_archives = sorted(
+        name for name in present
+        if (name.startswith("desktop/network/") or name.startswith("mobile/network/android-"))
+        and (name.endswith("/libstasis_network.a") or name.endswith("/stasis_network.lib"))
+    )
+    if duplicate_network_archives:
+        raise BundleAuditError(
+            f"duplicate static networking runtimes must not be bundled: {', '.join(duplicate_network_archives)}"
+        )
     missing = [name for name in required_files(platform) if name not in present]
     missing_directories = [
         name
