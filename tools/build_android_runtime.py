@@ -46,7 +46,7 @@ def source_tree_hash(root: Path) -> str:
         relative = path.relative_to(root)
         if any(part in {".git", "build", "build_ci"} for part in relative.parts):
             continue
-        if not path.is_file():
+        if path.is_symlink() or not path.is_file():
             continue
         digest.update(relative.as_posix().encode("utf-8"))
         digest.update(b"\0")

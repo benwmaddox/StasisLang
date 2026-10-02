@@ -570,6 +570,21 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 desktop_network_artifact_hashes(root),
             )
 
+    def test_release_network_artifact_sets_match_the_compiler_contract(self):
+        source = (ROOT / "apps/stasis/src/toolchain_cli.rs").read_text(encoding="utf-8")
+
+        def paths_in_constant(name, prefix):
+            start = source.index(f"const {name}:")
+            end = source.index("];", start)
+            return set(re.findall(r'"(' + prefix + r'/[^"\n]+)"', source[start:end]))
+
+        desktop = set().union(*DESKTOP_NETWORK_ARTIFACT_SETS) | {DESKTOP_NETWORK_HEADER}
+        self.assertEqual(paths_in_constant("DESKTOP_NETWORK_ARTIFACTS", "desktop/network"), desktop)
+        self.assertEqual(
+            paths_in_constant("MOBILE_NETWORK_REQUIRED_ARTIFACTS", "mobile/network"),
+            set(MOBILE_NETWORK_REQUIRED),
+        )
+
     def test_desktop_network_shared_artifacts_require_exactly_one_target(self):
         for artifact_set in DESKTOP_NETWORK_ARTIFACT_SETS:
             with self.subTest(artifacts=artifact_set), tempfile.TemporaryDirectory() as temporary:
@@ -1047,7 +1062,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/nightly-release.yml").read_text(
             encoding="utf-8"
         )
-        start = workflow.index("for variant in offline host client; do")
+        start = workflow.index("for variant in offline host client legacy-v1-host legacy-v2-client; do")
         end = workflow.index("\n          done", start)
         block = workflow[start:end]
         self.assertLess(

@@ -155,10 +155,8 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             "network-artifact/android-arm64/libstasis_network_v1.so",
             self.workflow,
         )
-        self.assertIn(
-            "network-artifact/android-arm64/libstasis_network.a",
-            self.workflow,
-        )
+        self.assertNotIn("libstasis_network.a", self.workflow)
+        self.assertNotIn("release/stasis_network.lib", self.workflow)
         self.assertIn("--network-enabled --readelf", self.workflow)
         self.assertNotIn("xcrun", self.workflow)
         self.assertNotIn("aarch64-apple-ios", self.workflow)

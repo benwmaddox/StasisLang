@@ -79,12 +79,12 @@ class AssembleEditorReleaseTests(unittest.TestCase):
             vsix = root / "oversized.vsix"
             output = root / "release"
             with vsix.open("wb") as oversized_file:
-                oversized_file.truncate(64 * 1024 * 1024 + 1)
+                oversized_file.truncate(40 * 1024 * 1024 + 1)
 
             result = self.run_assembler(vsix, output)
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("above the 67108864-byte budget", result.stderr)
+            self.assertIn("above the 41943040-byte budget", result.stderr)
             self.assertFalse(output.exists())
 
     def test_stale_toolchain_archive_is_rejected_without_deleting_it(self):

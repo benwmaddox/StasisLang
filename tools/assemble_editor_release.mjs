@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-const MAX_RELEASE_PAYLOAD_BYTES = 64 * 1024 * 1024;
+const MAX_RELEASE_PAYLOAD_BYTES = 40 * 1024 * 1024;
 const MANIFEST_NAME = "stasis-editor-release.json";
 const args = new Map();
 for (let index = 2; index < process.argv.length; index += 2) {

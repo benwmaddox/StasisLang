@@ -51,10 +51,19 @@ class ReleaseBundleSizeTests(unittest.TestCase):
             with self.assertRaisesRegex(AUDIT.BundleAuditError, "host build tools must not be bundled"):
                 AUDIT.build_report(root, "windows")
 
+    def test_archive_rejects_duplicate_static_networking_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self._fixture(root)
+            duplicate = root / "mobile/network/android-arm64/libstasis_network.a"
+            duplicate.write_bytes(b"duplicate static runtime")
+            with self.assertRaisesRegex(AUDIT.BundleAuditError, "duplicate static networking runtimes"):
+                AUDIT.build_report(root, "windows")
+
     def test_workflow_runs_the_audit_with_a_regression_budget(self):
         workflow = (ROOT / ".github/workflows/nightly-release.yml").read_text(encoding="utf-8")
         self.assertEqual(workflow.count("tools/audit_release_bundle.py"), 3)
-        self.assertEqual(workflow.count("--max-archive-bytes 67108864"), 3)
+        self.assertEqual(workflow.count("--max-archive-bytes 41943040"), 3)
         self.assertIn("bundle-audit", workflow)
 
 
