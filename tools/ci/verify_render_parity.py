@@ -325,17 +325,31 @@ def _normalize_viewport(
     viewport: list[int],
     output_width: int,
     output_height: int,
+    row_cache: dict[tuple[int, int, int, int, int, int], bytes] | None = None,
 ) -> bytes:
     _validate_viewport_bounds(capture_width, capture_height, viewport)
     x, y, width, height = viewport
-    output = bytearray(output_width * output_height * 4)
+    source_xs = [
+        x + min(width - 1, output_x * width // output_width)
+        for output_x in range(output_width)
+    ]
+    sampled_rows = row_cache if row_cache is not None else {}
+    cache_prefix = (id(rgba), capture_width, x, width, output_width)
+    output = bytearray()
+    output_row_bytes = output_width * 4
     for output_y in range(output_height):
         source_y = y + min(height - 1, output_y * height // output_height)
-        for output_x in range(output_width):
-            source_x = x + min(width - 1, output_x * width // output_width)
-            source = (source_y * capture_width + source_x) * 4
-            target = (output_y * output_width + output_x) * 4
-            output[target : target + 4] = rgba[source : source + 4]
+        cache_key = (*cache_prefix, source_y)
+        row = sampled_rows.get(cache_key)
+        if row is None:
+            resized_row = bytearray(output_row_bytes)
+            for output_x, source_x in enumerate(source_xs):
+                source = (source_y * capture_width + source_x) * 4
+                target = output_x * 4
+                resized_row[target : target + 4] = rgba[source : source + 4]
+            row = bytes(resized_row)
+            sampled_rows[cache_key] = row
+        output.extend(row)
     return bytes(output)
 
 
@@ -371,6 +385,7 @@ def verify_capture(
     logical_width, logical_height = manifest["logical_size"]
     if viewport is not None:
         _validate_viewport_bounds(capture_width, capture_height, viewport)
+    row_cache: dict[tuple[int, int, int, int, int, int], bytes] = {}
     candidates = [viewport]
     if viewport is not None:
         candidates.extend(
@@ -393,6 +408,7 @@ def verify_capture(
                     candidate,
                     logical_width,
                     logical_height,
+                    row_cache,
                 )
                 width, height = logical_width, logical_height
             digest = _verify_capture_rgba(

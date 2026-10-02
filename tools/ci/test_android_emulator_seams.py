@@ -1,6 +1,8 @@
 from pathlib import Path
 import json
 import re
+import shutil
+import subprocess
 import unittest
 
 
@@ -857,6 +859,114 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertNotIn("--viewport-y-search-radius=0", self.workshop_script)
         self.assertNotIn("--viewport-y-search-radius=1080", self.workshop_script)
         self.assertNotIn("min_coverage", self.workshop_script)
+
+    def test_workshop_it032_readiness_helpers_execute_bounded_terminal_cases(self):
+        pwsh = shutil.which("pwsh")
+        if not pwsh:
+            self.skipTest("PowerShell is unavailable for executable readiness-helper checks")
+        start = self.workshop_script.index("function Get-WorkshopIT032ReadinessState(")
+        end = self.workshop_script.index("function Fit-LogicalViewport(", start)
+        helpers = self.workshop_script[start:end]
+        passed = json.dumps(
+            {
+                "schema": "stasis.workshop_soak.v1",
+                "test_id": "IT-032",
+                "event": "bounded_soak",
+                "status": "passed",
+                "frame_count": 300,
+                "cleanup_receipt": {"status": "Restored"},
+            },
+            separators=(",", ":"),
+        )
+        failed = json.dumps(
+            {
+                "schema": "stasis.workshop_soak.v1",
+                "test_id": "IT-032",
+                "event": "bounded_soak",
+                "status": "failed",
+                "cleanup_receipt": {"status": "Restored"},
+            },
+            separators=(",", ":"),
+        )
+        script = f"""
+$ErrorActionPreference = 'Stop'
+{helpers}
+function Assert-Throws([scriptblock]$Action, [string]$Expected) {{
+    try {{ & $Action | Out-Null }} catch {{
+        if ($_.Exception.Message -like "*$Expected*") {{ return }}
+        throw
+    }}
+    throw "Expected an exception containing '$Expected'"
+}}
+$passed = '{passed}'
+$failed = '{failed}'
+$milestone = 'I Stasis Workshop IT-032 milestone: ' + $passed
+if ((Get-WorkshopIT032ReadinessState @($milestone)) -ne 'pending') {{
+    throw 'An IT-032 milestone was accepted as terminal readiness'
+}}
+Assert-Throws {{ Get-WorkshopIT032ReadinessState @('I Stasis Workshop IT-032: {{broken') }} 'malformed'
+Assert-Throws {{ Get-WorkshopIT032ReadinessState @("I Stasis Workshop IT-032: $failed") }} 'reported failure'
+Assert-Throws {{
+    Get-WorkshopIT032ReadinessState @("I Stasis Workshop IT-032: $($passed.Replace('IT-032', 'IT-031'))")
+}} 'unexpected schema or identity'
+Assert-Throws {{
+    Get-WorkshopIT032ReadinessState @("I Stasis Workshop IT-032: $($passed.Replace('Restored', 'failed'))")
+}} 'restored cleanup'
+$logState = [pscustomobject]@{{ Count = 0 }}
+$readPid = {{ '4242' }}
+$readLog = {{
+    param($ProcessId)
+    $logState.Count += 1
+    if ($logState.Count -eq 1) {{ $milestone }} else {{ "I Stasis Workshop IT-032: $passed" }}
+}}.GetNewClosure()
+$ready = Wait-ForWorkshopIT032Readiness -TimeoutMilliseconds 500 -PollIntervalMilliseconds 1 `
+    -ReadProcessId $readPid -ReadProcessLog $readLog
+if ($ready.ProcessId -ne '4242' -or $logState.Count -ne 2) {{
+    throw 'Readiness did not wait through a milestone for the terminal receipt'
+}}
+$probeState = @{{ NextProbeAt = [DateTime]::MinValue }}
+$probes = [pscustomobject]@{{ Count = 0 }}
+$probe = {{ if (Take-WorkshopSurfaceProbe $probeState) {{ $probes.Count += 1 }} }}.GetNewClosure()
+& $probe
+& $probe
+if ($probes.Count -ne 1) {{ throw 'The readiness surface probe was not throttled across callback calls' }}
+$pendingLog = {{ param($ProcessId) $milestone }}
+Assert-Throws {{
+    Wait-ForWorkshopIT032Readiness -TimeoutMilliseconds 35 -PollIntervalMilliseconds 3 `
+        -ReadProcessId $readPid -ReadProcessLog $pendingLog
+}} 'not observed'
+$noPidState = [pscustomobject]@{{ LogCalls = 0 }}
+$noPidLog = {{ param($ProcessId) $noPidState.LogCalls += 1; $passed }}.GetNewClosure()
+Assert-Throws {{
+    Wait-ForWorkshopIT032Readiness -TimeoutMilliseconds 35 -PollIntervalMilliseconds 3 `
+        -ReadProcessId {{ '' }} -ReadProcessLog $noPidLog
+}} 'not observed'
+if ($noPidState.LogCalls -ne 0) {{ throw 'The log was read without a package process id' }}
+'readiness helper cases passed'
+"""
+        result = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-Command", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("readiness helper cases passed", result.stdout)
+
+    def test_workshop_waits_for_terminal_soak_before_resolving_capture_viewport(self):
+        readiness = self.workshop_script.index("Wait-ForWorkshopIT032Readiness `")
+        viewport = self.workshop_script.index("$surface = Read-SurfaceBounds", readiness)
+        self.assertLess(readiness, viewport)
+        self.assertIn("StartupReadinessTimeoutSeconds = 90", self.workshop_script)
+        self.assertIn("startup_readiness_timeout_seconds = $StartupReadinessTimeoutSeconds", self.workshop_script)
+        self.assertIn("readiness_elapsed_seconds = $script:workshopReadinessElapsedSeconds", self.workshop_script)
+        self.assertIn("capture_timeout_seconds = $RenderTimeoutSeconds", self.workshop_script)
+        self.assertIn("capture_elapsed_seconds = $script:workshopCaptureElapsedSeconds", self.workshop_script)
+        self.assertIn("render_timeout_seconds = $RenderTimeoutSeconds", self.workshop_script)
+        self.assertIn('"{0}-attempt-{1:D3}-{2}.png"', self.workshop_script)
+        self.assertIn('Destination $capture -Force', self.workshop_script)
+        self.assertIn("Take-WorkshopSurfaceProbe $surfaceProbeState", self.workshop_script)
 
     def test_observed_workshop_surface_maps_to_exact_crop_on_test_avd(self):
         app_window = (0, 136, 1080, 2337)
