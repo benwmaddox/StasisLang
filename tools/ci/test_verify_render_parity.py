@@ -10,6 +10,7 @@ from tools.ci.verify_render_parity import (
     DEFAULT_MANIFEST,
     _atlas_sprite_handles,
     _function_body,
+    _normalize_viewport,
     _parity_command_counts,
     read_capture,
     validate_fixture,
@@ -262,6 +263,35 @@ function append_marker(missing_sprite: i32): void {
                 manifest, capture, "portable", [0, 1, 4, 2], 2
             )
             self.assertEqual(selected, [0, 3, 4, 2])
+
+    def test_cached_viewport_rows_match_reference_pixel_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "device.bmp"
+            pixels = bytes(
+                channel
+                for index in range(7 * 8)
+                for channel in (index, (index + 31) & 0xFF, (index + 79) & 0xFF, 255)
+            )
+            write_bmp(capture, 7, 8, pixels)
+            capture_width, capture_height, rgba = read_capture(capture)
+            row_cache: dict[tuple[int, int, int, int, int, int], bytes] = {}
+
+            for top in (1, 2, 3):
+                viewport = [1, top, 5, 5]
+                actual = _normalize_viewport(
+                    rgba, capture_width, capture_height, viewport, 3, 2, row_cache
+                )
+                expected = bytearray()
+                x, y, width, height = viewport
+                for output_y in range(2):
+                    source_y = y + min(height - 1, output_y * height // 2)
+                    for output_x in range(3):
+                        source_x = x + min(width - 1, output_x * width // 3)
+                        source = (source_y * capture_width + source_x) * 4
+                        expected.extend(rgba[source : source + 4])
+                self.assertEqual(actual, bytes(expected))
+
+            self.assertEqual(len(row_cache), 5)
 
     def test_bounded_vertical_search_rejects_out_of_radius_offset(self):
         with tempfile.TemporaryDirectory() as directory:
