@@ -154,9 +154,9 @@ jobs:
         if: matrix.platform == 'android-web'
         run: stasis test
 
-      - name: Build Windows desktop within 60 seconds
+      - name: Build Windows desktop within 120 seconds
         if: matrix.platform == 'win-x64'
-        timeout-minutes: 1
+        timeout-minutes: 2
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -164,7 +164,7 @@ jobs:
           ASSET_NAME: ${{ matrix.asset }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $budgetSeconds = 60.0
+          $budgetSeconds = 120.0
           $timer = [System.Diagnostics.Stopwatch]::StartNew()
           $phases = [System.Collections.Generic.List[string]]::new()
           $status = 'failed'

@@ -2137,6 +2137,8 @@ fn encode_function(
     let mut local_declarations = Vec::new();
     collect_locals(&hir.statements, &mut local_declarations)?;
     let mut locals = BTreeMap::new();
+    let mut declaration_bindings = BTreeMap::new();
+    let mut local_types = Vec::new();
     let mut physical_cursor = 0u32;
     for (name, type_id) in function.param_names.iter().zip(function.params.iter()) {
         let struct_view =
@@ -2155,10 +2157,13 @@ fn encode_function(
         );
         physical_cursor += if struct_view.is_some() { 3 } else { 1 };
     }
-    for (name, type_id, default_initialized) in &local_declarations {
-        if locals.contains_key(name) {
-            return Err(format!("duplicate local '{name}' in '{}'", function.name));
-        }
+    for declaration in &local_declarations {
+        let LocalDeclaration {
+            key,
+            name,
+            type_id,
+            default_initialized,
+        } = declaration;
         let owned_fixed = if *default_initialized
             && types.type_info(*type_id).map(|info| info.category) == Some(TypeCategory::ArrayFixed)
             && !is_wasm_struct_view_type(*type_id, types, named_structs)
@@ -2185,8 +2190,8 @@ fn encode_function(
                 index: physical_cursor + 1,
                 len: physical_cursor + 2,
             });
-        locals.insert(
-            name.clone(),
+        declaration_bindings.insert(
+            *key,
             LocalBinding {
                 index: physical_cursor,
                 type_id: *type_id,
@@ -2194,20 +2199,8 @@ fn encode_function(
                 owned_fixed,
             },
         );
-        physical_cursor += if struct_view.is_some() { 3 } else { 1 };
-        if let Some(owned) = owned_fixed {
-            physical_cursor = physical_cursor
-                .checked_add(owned.len)
-                .ok_or_else(|| "web local fixed-array count overflow".to_string())?;
-        }
-    }
-
-    let mut local_types = Vec::new();
-    for (_, type_id, default_initialized) in &local_declarations {
-        if is_wasm_struct_view_type(*type_id, types, named_structs) {
-            for _ in 0..3 {
-                local_types.push(I32);
-            }
+        if struct_view.is_some() {
+            local_types.extend([I32, I32, I32]);
         } else {
             local_types.push(wasm_value_type(*type_id)?);
             if *default_initialized
@@ -2224,6 +2217,12 @@ fn encode_function(
                     local_types.push(wasm_value_type(element_type)?);
                 }
             }
+        }
+        physical_cursor += if struct_view.is_some() { 3 } else { 1 };
+        if let Some(owned) = owned_fixed {
+            physical_cursor = physical_cursor
+                .checked_add(owned.len)
+                .ok_or_else(|| "web local fixed-array count overflow".to_string())?;
         }
     }
     let scratch_index = physical_cursor;
@@ -2247,8 +2246,9 @@ fn encode_function(
     ]);
     let mut body = Vec::new();
     encode_local_declarations(&local_types, &mut body);
-    let context = EncodeContext {
-        locals: &locals,
+    let mut context = EncodeContext {
+        locals,
+        declaration_bindings: &declaration_bindings,
         globals,
         global_types,
         memory,
@@ -2282,7 +2282,7 @@ fn encode_function(
         foreach: BTreeMap::new(),
         continue_depth: None,
     };
-    encode_statements(&hir.statements, &context, &mut body)?;
+    encode_statements(&hir.statements, &mut context, &mut body)?;
     // Structured statements use void block types, so only a direct return proves that
     // the function end does not need its declared result on the operand stack.
     if function.return_type != TYPE_ID_VOID && !ends_with_explicit_return(&hir.statements) {
@@ -2317,9 +2317,23 @@ fn ends_with_explicit_return(statements: &[SimpleStmt]) -> bool {
     )
 }
 
+#[derive(Debug, Clone)]
+struct LocalDeclaration {
+    key: usize,
+    name: String,
+    type_id: TypeId,
+    default_initialized: bool,
+}
+
+// This key identifies an immutable HIR node only while encode_function holds its borrow;
+// local slots are assigned from traversal order in LocalDeclaration, never from key order.
+fn local_declaration_key(statement: &SimpleStmt) -> usize {
+    statement as *const SimpleStmt as usize
+}
+
 fn collect_locals(
     statements: &[SimpleStmt],
-    out: &mut Vec<(String, TypeId, bool)>,
+    out: &mut Vec<LocalDeclaration>,
 ) -> Result<(), String> {
     for statement in statements {
         match statement {
@@ -2334,7 +2348,13 @@ fn collect_locals(
                 wasm_value_type(type_id)?;
                 let default_initialized =
                     matches!(expression, SimpleExpr::DefaultValue(value) if *value == type_id);
-                collect_local(name, type_id, default_initialized, out)?;
+                collect_local(
+                    local_declaration_key(statement),
+                    name,
+                    type_id,
+                    default_initialized,
+                    out,
+                )?;
             }
             SimpleStmt::If {
                 then_statements,
@@ -2363,7 +2383,13 @@ fn collect_locals(
                 ..
             } => {
                 let index_name = foreach_index_name(item_name, index_name.as_deref());
-                collect_local(&index_name, TYPE_ID_I32, false, out)?;
+                collect_local(
+                    local_declaration_key(statement),
+                    &index_name,
+                    TYPE_ID_I32,
+                    false,
+                    out,
+                )?;
                 collect_locals(body_statements, out)?;
             }
             _ => {}
@@ -2373,33 +2399,30 @@ fn collect_locals(
 }
 
 fn collect_local(
+    key: usize,
     name: &str,
     type_id: TypeId,
     default_initialized: bool,
-    out: &mut Vec<(String, TypeId, bool)>,
+    out: &mut Vec<LocalDeclaration>,
 ) -> Result<(), String> {
-    if let Some((_, existing, existing_default)) =
-        out.iter().find(|(existing, _, _)| existing == name)
-    {
-        if *existing == type_id && *existing_default == default_initialized {
-            return Ok(());
-        }
-        if *existing == type_id {
-            return Err(format!(
-                "web local '{name}' cannot mix owned fixed-array and borrowed declarations"
-            ));
-        }
+    if out.iter().any(|declaration| declaration.key == key) {
         return Err(format!(
-            "web local '{name}' is redeclared with conflicting types {existing} and {type_id}"
+            "duplicate Wasm local declaration identity for '{name}'"
         ));
     }
-    out.push((name.to_string(), type_id, default_initialized));
+    out.push(LocalDeclaration {
+        key,
+        name: name.to_string(),
+        type_id,
+        default_initialized,
+    });
     Ok(())
 }
 
 #[derive(Clone)]
 struct EncodeContext<'a> {
-    locals: &'a BTreeMap<String, LocalBinding>,
+    locals: BTreeMap<String, LocalBinding>,
+    declaration_bindings: &'a BTreeMap<usize, LocalBinding>,
     globals: &'a BTreeMap<String, u32>,
     global_types: &'a BTreeMap<String, TypeId>,
     memory: &'a BTreeMap<String, MemoryBinding>,
@@ -2505,7 +2528,7 @@ fn require_same_struct_type(expected: TypeId, actual: TypeId, context: &str) -> 
 
 fn encode_statements(
     statements: &[SimpleStmt],
-    context: &EncodeContext<'_>,
+    context: &mut EncodeContext<'_>,
     out: &mut Vec<u8>,
 ) -> Result<(), String> {
     for statement in statements {
@@ -2514,7 +2537,11 @@ fn encode_statements(
             SimpleStmt::Let {
                 name, expression, ..
             } => {
-                let binding = local_binding(context, name)?;
+                let binding = context
+                    .declaration_bindings
+                    .get(&local_declaration_key(statement))
+                    .copied()
+                    .ok_or_else(|| format!("web local '{name}' has no allocated declaration"))?;
                 if let Some(owned) = binding.owned_fixed {
                     if !matches!(expression, SimpleExpr::DefaultValue(value) if *value == binding.type_id)
                     {
@@ -2529,6 +2556,7 @@ fn encode_statements(
                         out.push(0x21);
                         uleb(owned.element_start + offset, out);
                     }
+                    context.locals.insert(name.clone(), binding);
                     continue;
                 }
                 if let Some(view) = binding.struct_view {
@@ -2560,12 +2588,14 @@ fn encode_statements(
                         require_same_struct_type(binding.type_id, value_type, "local initializer")?;
                     }
                     set_struct_view_locals(binding.index, view, out);
+                    context.locals.insert(name.clone(), binding);
                     continue;
                 }
                 let value_type = encode_expr_as(expression, Some(binding.type_id), context, out)?;
                 require_same_type(binding.type_id, value_type, "local initializer")?;
                 out.push(0x21);
                 uleb(binding.index, out);
+                context.locals.insert(name.clone(), binding);
             }
             SimpleStmt::Assign {
                 target,
@@ -2703,11 +2733,12 @@ fn encode_statements(
             } => {
                 encode_condition(condition, context, out)?;
                 out.extend([0x04, 0x40]);
-                let nested = nested_control_context(context)?;
-                encode_statements(then_statements, &nested, out)?;
+                let mut then_context = nested_control_context(context)?;
+                encode_statements(then_statements, &mut then_context, out)?;
                 if let Some(values) = else_statements {
                     out.push(0x05);
-                    encode_statements(values, &nested, out)?;
+                    let mut else_context = nested_control_context(context)?;
+                    encode_statements(values, &mut else_context, out)?;
                 }
                 out.push(0x0b);
             }
@@ -2717,15 +2748,16 @@ fn encode_statements(
                 step,
                 body_statements,
             } => {
-                encode_statements(std::slice::from_ref(init), context, out)?;
+                let mut loop_context = context.clone();
+                encode_statements(std::slice::from_ref(init), &mut loop_context, out)?;
                 out.extend([0x02, 0x40, 0x03, 0x40]);
-                encode_condition(condition, context, out)?;
+                encode_condition(condition, &loop_context, out)?;
                 out.extend([0x45, 0x0d, 0x01]);
                 out.extend([0x02, 0x40]);
-                let nested = loop_body_context(context);
-                encode_statements(body_statements, &nested, out)?;
+                let mut body_context = loop_body_context(&loop_context);
+                encode_statements(body_statements, &mut body_context, out)?;
                 out.push(0x0b);
-                encode_statements(std::slice::from_ref(step), context, out)?;
+                encode_statements(std::slice::from_ref(step), &mut loop_context, out)?;
                 out.extend([0x0c, 0x00, 0x0b, 0x0b]);
             }
             SimpleStmt::Continue => {
@@ -2748,7 +2780,13 @@ fn encode_statements(
                 body_statements,
             } => {
                 let index_name = foreach_index_name(item_name, index_name.as_deref());
-                let index = local_binding(context, &index_name)?;
+                let index = context
+                    .declaration_bindings
+                    .get(&local_declaration_key(statement))
+                    .copied()
+                    .ok_or_else(|| {
+                        format!("web foreach index '{index_name}' has no allocated declaration")
+                    })?;
                 out.extend([0x41, 0, 0x21]);
                 uleb(index.index, out);
                 out.extend([0x02, 0x40, 0x03, 0x40, 0x20]);
@@ -2769,6 +2807,7 @@ fn encode_statements(
                 }
                 out.extend([0x4f, 0x0d, 0x01]);
                 let mut nested = context.clone();
+                nested.locals.insert(index_name.clone(), index);
                 nested.foreach.insert(
                     item_name.clone(),
                     WebForeachBinding {
@@ -2778,7 +2817,7 @@ fn encode_statements(
                 );
                 nested.continue_depth = Some(0);
                 out.extend([0x02, 0x40]);
-                encode_statements(body_statements, &nested, out)?;
+                encode_statements(body_statements, &mut nested, out)?;
                 out.push(0x0b);
                 out.extend([0x20]);
                 uleb(index.index, out);
@@ -7908,6 +7947,64 @@ function render(): i32 { return 0; }
             "function main(): i32 { if (true) { let row: i32 = 2; } else { let row: i32 = 3; } if (true) { let row: i32 = 4; return row; } return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
         );
         process.compile().expect("compile repeated scoped locals");
+    }
+
+    #[test]
+    fn executes_different_typed_local_names_in_disjoint_scopes() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "scopes.stasis",
+            "function main(): i32 { let visible: i32 = 40; let result: i32 = 0; if (true) { let r: f32 = 3.5; if (r > 3.0) { result = result + 5; } } let r: i32 = visible + 2; return result + r; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile scoped locals with different types");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let wasm_path = std::env::temp_dir().join(format!(
+            "stasis_wasm_scoped_local_types_{}_{}.wasm",
+            std::process::id(),
+            stamp
+        ));
+        fs::write(&wasm_path, process.module_bytes()).expect("write scoped-local Wasm module");
+        let output = Command::new("node")
+            .args([
+                "-e",
+                "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+            ])
+            .arg(&wasm_path)
+            .output()
+            .expect("run Node for scoped-local Wasm");
+        let _ = fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "47");
+    }
+
+    #[test]
+    fn rejects_shadowing_a_visible_local_in_wasm() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "shadowing.stasis",
+            "function main(): i32 { let value: i32 = 1; if (true) { let value: i32 = 2; } return value; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+
+        let error = process
+            .compile()
+            .expect_err("reject visible local shadowing");
+        assert!(matches!(
+            error,
+            crate::compiler::CompileError::Frontend(message)
+                if message.contains("let binding 'value' shadows existing variable")
+        ));
     }
 
     #[test]
