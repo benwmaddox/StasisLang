@@ -197,6 +197,8 @@ foreach (let enemy in enemies) {
 
 A `for` header always has all three clauses. Fixed extents and explicit traversal make loop cost easy to see.
 
+Prefer `foreach` for full-array traversal in ascending index order, using the element binding directly. Use `foreach (let enemy, i in enemies)` when the body also needs the index. This makes the array extent explicit and helps the compiler prove bounds, though emitted checks depend on the backend and access path. This is a recommendation, not a requirement: use `for` for a used prefix, reverse traversal, strides, or other explicit ranges. `foreach` visits the entire declared capacity.
+
 ### Tests are part of the language
 
 Place tests in a `.test.stasis` file next to the code when practical:

@@ -454,6 +454,18 @@ Rules:
 
 Stasis includes `for` and `foreach`.
 
+For full-array traversal in ascending index order, prefer `foreach` and access
+the current element through its binding. Use the indexed form when the body
+also needs the element index. This expresses the array extent directly and
+gives the compiler a known iteration range for bounds-check proofs. Actual
+check elimination depends on the backend and access path; `foreach` does not
+guarantee that every access is emitted without a bounds check.
+
+This is a recommendation, not a language requirement. Use `for` when the
+algorithm needs a used prefix, reverse traversal, a stride, or another explicit
+range. `foreach` visits the entire declared capacity, so it is not a substitute
+for a loop over a separately tracked logical count.
+
 #### 6.5.1 `for` loop
 
 Canonical form:
