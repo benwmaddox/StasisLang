@@ -126,6 +126,11 @@ the toolchain's `runtime/prebuilt/windows-x64` bundle when that bundle is availa
 also reuse its matching `stasis_mobile_runtime.lib`; host and client packages compile that runtime
 from source so the selected network mode is applied to the runtime itself. When the graphics bundle
 is absent, CMake keeps the existing dependency source and fetch path.
+The nightly Windows release producer runs on `windows-2022` and builds these archives with the
+VS2022 v143 toolset, the minimum supported consumer toolset. This keeps the static ThorVG archive
+linkable from VS2022 installations: a newer-toolset archive can reference MSVC STL helpers such as
+`__std_rotate` that are absent from the VS2022 standard-library link libraries. Signing and
+editor-consumer jobs remain on `windows-latest` to validate the newer consumer toolset.
 macOS uses `@rpath/libstasis_network.dylib` with
 `@executable_path/../Frameworks`; production packaging signs the staged dylib before
 signing the enclosing `.app`. The acceptance lane configures the production signer hook,

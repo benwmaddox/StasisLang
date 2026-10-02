@@ -548,7 +548,12 @@ fn append_replay_scalar_write(
             scalar.path
         )
     })?;
-    let source = if let Some(binding) = memory.get(&scalar.path) {
+    let source = if let Some(index) = global_indices.get(&scalar.path) {
+        // A flattened dotted path can also name a collection lane, such as a
+        // struct field called `length`. Scalar collection metadata owns its
+        // separate Wasm global when both identities share that spelling.
+        ReplayStateSource::Global(*index)
+    } else if let Some(binding) = memory.get(&scalar.path) {
         if !binding.scalar {
             return Err(format!(
                 "web replay state snapshot scalar '{}' is backed by a collection lane",
@@ -559,8 +564,6 @@ fn append_replay_scalar_write(
             binding: binding.clone(),
             element_index: 0,
         }
-    } else if let Some(index) = global_indices.get(&scalar.path) {
-        ReplayStateSource::Global(*index)
     } else {
         return Err(format!(
             "web replay state snapshot scalar '{}' has no Wasm storage binding",
@@ -1230,7 +1233,11 @@ fn encode_module(
     let struct_collections = build_struct_collections(analysis, types, &memory_bindings)?;
     let mut globals = Vec::new();
     for (name, type_id) in &analysis.global_path_types {
-        if memory_bindings.contains_key(name) {
+        let initial_i32 = initial_i32_for_path(name, analysis);
+        if memory_bindings
+            .get(name)
+            .is_some_and(|binding| binding.scalar || initial_i32.is_none())
+        {
             continue;
         }
         let Some(info) = types.type_info(*type_id) else {
@@ -1258,7 +1265,6 @@ fn encode_module(
                 info.name
             ));
         }
-        let initial_i32 = initial_i32_for_path(name, analysis);
         globals.push((name.clone(), *type_id, initial_i32));
     }
     let global_indices = globals
@@ -6835,6 +6841,11 @@ global host_i32: i32[1];
 struct Pair { value: i32; active: bool; }
 global pairs: Pair[2];
 
+struct WallRun { length: i32; }
+struct MazeWallCache { horizontal: WallRun[2]; }
+struct AppState { maze_wall_cache: MazeWallCache; }
+global app: AppState;
+
 function main(): i32 {
     scalar_bool = true;
     scalar_u8 = 251;
@@ -6847,6 +6858,8 @@ function main(): i32 {
     primitive_values[1] = 8;
     pairs[0].value = 42;
     pairs[0].active = true;
+    app.maze_wall_cache.horizontal[0].length = 31;
+    app.maze_wall_cache.horizontal[1].length = 32;
     host_i32[0] = 99;
     return 0;
 }
@@ -6862,6 +6875,8 @@ function tick(): i32 {
     primitive_values[1] = 14;
     pairs[0].value = 15;
     pairs[0].active = false;
+    app.maze_wall_cache.horizontal[0].length = 13;
+    app.maze_wall_cache.horizontal[1].length = 14;
     return 0;
 }
 function render(): i32 { return 0; }
@@ -6883,6 +6898,14 @@ function render(): i32 { return 0; }
             .any(|entry| entry.kind == "collection"
                 && entry.path == "pairs"
                 && entry.field == "active"));
+        assert!(descriptor.entries.iter().any(|entry| {
+            entry.kind == "scalar" && entry.path == "app.maze_wall_cache.horizontal.length"
+        }));
+        assert!(descriptor.entries.iter().any(|entry| {
+            entry.kind == "collection"
+                && entry.path == "app.maze_wall_cache.horizontal"
+                && entry.field == "length"
+        }));
         assert!(descriptor
             .entries
             .iter()
@@ -6970,7 +6993,8 @@ WebAssembly.instantiate(fs.readFileSync(path), {}).then(({instance}) => {
         let expected = vec![
             // Canonical scalars, sorted by path. Collection length metadata is
             // simulation state and therefore precedes the authored scalars.
-            2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, // *.length/max_length
+            2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0,
+            0, // *.length/max_length
             1, // scalar_bool
             0, 0, 0xc0, 0x3f, // scalar_f32 = 1.5
             0, 0, 0, 0, 0, 0, 4, 0xc0, // scalar_f64 = -2.5
@@ -6979,6 +7003,7 @@ WebAssembly.instantiate(fs.readFileSync(path), {}).then(({instance}) => {
             0xff, 0xff, 0xff, 0xff, // scalar_u32 = 0xffffffff
             0xfb, // scalar_u8 = 251
             // Canonical collection lanes, sorted by path then field.
+            31, 0, 0, 0, 32, 0, 0, 0, // app.maze_wall_cache.horizontal.length
             1, 0, // pairs.active
             42, 0, 0, 0, 0, 0, 0, 0, // pairs.value
             0xf9, 0xff, 0xff, 0xff, 8, 0, 0, 0, // primitive_values
