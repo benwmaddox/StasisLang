@@ -310,6 +310,7 @@ def validate_included_libraries(
         json.dumps(
             {"target": target, "libraries": libraries},
             ensure_ascii=False,
+            sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()

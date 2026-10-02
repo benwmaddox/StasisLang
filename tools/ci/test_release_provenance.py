@@ -20,6 +20,7 @@ from tools.generate_release_provenance import (
 from tools.verify_package_provenance import (
     validate_desktop_package_receipt,
     validate_project_configuration,
+    validate_included_libraries,
     verify_asset_package_identities,
     verify_mobile_shells,
     verify_network_guest_bundles,
@@ -36,7 +37,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
     TOOLCHAIN_SHA256 = hashlib.sha256(b"toolchain").hexdigest()
 
     @staticmethod
-    def project_configuration(target="windows-x86_64", features=()):
+    def project_configuration(target="windows-x86_64", features=(), reason="test fixture"):
         features = sorted(features)
         libraries = {"stasis.network": features} if features else {}
         resolved_libraries = []
@@ -82,13 +83,15 @@ class ReleaseProvenanceTests(unittest.TestCase):
                     "sha256": hashlib.sha256(b"license").hexdigest(),
                 },
                 "load_policy": "normal-platform-dependency",
-                "reasons": ["test fixture"],
+                "reasons": [reason],
             })
         digest = hashlib.sha256(
             json.dumps(
                 {"target": target, "libraries": resolved_libraries},
+                ensure_ascii=False,
+                sort_keys=True,
                 separators=(",", ":"),
-            ).encode()
+            ).encode("utf-8")
         ).hexdigest()
         return {
             "target": target,
@@ -142,6 +145,46 @@ class ReleaseProvenanceTests(unittest.TestCase):
         extra_closure_field["included_libraries"]["unexpected"] = True
         with self.assertRaisesRegex(ValueError, "closure provenance is malformed"):
             validate_project_configuration(Parser(), extra_closure_field)
+
+    def test_included_library_digest_matches_canonical_unicode_struct_receipt(self):
+        class Parser:
+            @staticmethod
+            def error(message):
+                raise ValueError(message)
+
+        configuration = self.project_configuration(
+            target="linux-x86_64", features=("host",), reason="réseau fixture"
+        )
+        included_json = json.dumps(
+            configuration["included_libraries"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        included = json.loads(included_json)
+        library_json = json.dumps(
+            included["libraries"][0], ensure_ascii=False, separators=(",", ":")
+        )
+        self.assertIn('"reasons":["réseau fixture"]', library_json)
+        self.assertLess(library_json.index('"id"'), library_json.index('"version"'))
+
+        canonical_json = json.dumps(
+            {"target": configuration["target"], "libraries": included["libraries"]},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+        self.assertEqual(
+            digest,
+            "2e57e41c9e2ea9f6348eb53ad45e77c32e8b896e78ef6175fa17d1e629260e79",
+        )
+        self.assertEqual(configuration["library_set_sha256"], digest)
+        self.assertEqual(
+            validate_included_libraries(
+                Parser(), included, configuration["target"], digest
+            ),
+            included,
+        )
 
     @staticmethod
     def desktop_package_receipt(manifest=b"{}\n"):

@@ -256,7 +256,7 @@ jobs:
           sudo apt-get update && sudo apt-get install --yes pkg-config
           libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev
           libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libegl1 libgl1-mesa-dri
-          xvfb
+          xvfb binaryen
 
       - name: Install SDL development packages (macos)
         if: runner.os == 'macOS'
@@ -372,7 +372,7 @@ jobs:
           cp LICENSE "${out}/"
           # Ship the stdlib + samples so relative imports keep working in the bundle.
           cp -R src "${out}/"
-          cp -R samples "${out}/"
+          python3 tools/copy_release_samples.py --source samples --destination "${out}/samples"
           mkdir -p "${out}/mobile"
           cp -R mobile/shells "${out}/mobile/"
           test -f mobile/android-runtime/arm64-v8a/manifest.json
@@ -431,7 +431,7 @@ jobs:
           Copy-Item tools/windows/stasis-signing.ps1 "$out/tools/windows/" -Force
           # Ship the stdlib + samples so relative imports keep working in the bundle.
           Copy-Item src "$out/" -Recurse -Force
-          Copy-Item samples "$out/" -Recurse -Force
+          python tools/copy_release_samples.py --source samples --destination "$out/samples"
           New-Item -ItemType Directory -Force -Path "$out/mobile" | Out-Null
           Copy-Item mobile/shells "$out/mobile/" -Recurse -Force
           if (-not (Test-Path "mobile/android-runtime/arm64-v8a/manifest.json")) { throw "prebuilt Android runtime manifest missing" }
@@ -688,6 +688,7 @@ jobs:
               ./bin/stasis --workspace cli-smoke package --target android-arm64 --out dist/android
             python3 "${repo_root}/tools/ci/check_package_time.py" \
               --label "Linux web" --max-seconds 120 \
+              --expect-log "wasm-opt -Oz" \
               --expect-output "cli-smoke/dist/web/index.html" -- \
               ./bin/stasis --workspace cli-smoke package --target web --out dist/web
           else
@@ -928,6 +929,12 @@ jobs:
         uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
         with:
           packages: platform-tools
+      - name: Install web optimizer for network guests
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binaryen
+          wasm-opt --version
       - name: Build and audit prebuilt offline, host, and client APKs
         shell: bash
         env:

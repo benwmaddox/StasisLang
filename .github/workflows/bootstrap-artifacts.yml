@@ -177,7 +177,7 @@ jobs:
           cp README.md "${out}/"
           cp LICENSE "${out}/"
           cp -R src "${out}/"
-          cp -R samples "${out}/"
+          python3 tools/copy_release_samples.py --source samples --destination "${out}/samples"
           mkdir -p "${out}/mobile"
           cp -R mobile/shells "${out}/mobile/"
           cp -R mobile/android-runtime "${out}/mobile/"
@@ -229,7 +229,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$out/tools/windows" | Out-Null
           Copy-Item tools/windows/stasis-signing.ps1 "$out/tools/windows/" -Force
           Copy-Item src "$out/" -Recurse -Force
-          Copy-Item samples "$out/" -Recurse -Force
+          python tools/copy_release_samples.py --source samples --destination "$out/samples"
           New-Item -ItemType Directory -Force -Path "$out/mobile" | Out-Null
           Copy-Item mobile/shells "$out/mobile/" -Recurse -Force
           Copy-Item mobile/android-runtime "$out/mobile/" -Recurse -Force
