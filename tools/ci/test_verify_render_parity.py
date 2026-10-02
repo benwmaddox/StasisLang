@@ -3,6 +3,7 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.ci.verify_render_parity import (
     ATLAS_SPRITE_HANDLES,
@@ -167,6 +168,48 @@ function append_marker(missing_sprite: i32): void {
                 },
             }
             verify_capture(manifest, capture, "portable")
+
+    def test_background_histogram_is_lazy_after_an_earlier_region_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "device.bmp"
+            background = bytes((18, 30, 48, 255))
+            write_bmp(capture, 2, 4, background * 8)
+            manifest = {
+                "logical_size": [2, 1],
+                "capture_profiles": {
+                    "android": {
+                        "comparison": "regions",
+                        "regions": [
+                            {
+                                "name": "atlas_canvas_sprite",
+                                "rect": [0, 0, 2, 1],
+                                "predicate": "atlas_canvas",
+                                "min_coverage": 1.0,
+                            },
+                            {
+                                "name": "translucent_sprite",
+                                "rect": [0, 0, 2, 1],
+                                "non_background_fraction": 0.5,
+                            },
+                        ],
+                    }
+                },
+            }
+            viewport = [0, 1, 2, 1]
+            with self.assertRaisesRegex(ValueError, "no viewport matched") as base_failure:
+                verify_capture(manifest, capture, "android", viewport, 0)
+
+            with patch("tools.ci.verify_render_parity.Counter") as counter:
+                with self.assertRaisesRegex(
+                    ValueError, "no viewport matched"
+                ) as searched_failure:
+                    verify_capture(manifest, capture, "android", viewport, 1)
+                counter.assert_not_called()
+
+            self.assertEqual(
+                str(base_failure.exception).split("base failure: ", 1)[1],
+                str(searched_failure.exception).split("base failure: ", 1)[1],
+            )
 
     def test_letterboxed_capture_uses_explicit_viewport(self):
         with tempfile.TemporaryDirectory() as directory:
