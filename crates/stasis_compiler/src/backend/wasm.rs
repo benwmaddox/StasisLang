@@ -1234,7 +1234,10 @@ fn encode_module(
     let mut globals = Vec::new();
     for (name, type_id) in &analysis.global_path_types {
         let initial_i32 = initial_i32_for_path(name, analysis);
-        if memory_bindings.contains_key(name) && initial_i32.is_none() {
+        if memory_bindings
+            .get(name)
+            .is_some_and(|binding| binding.scalar || initial_i32.is_none())
+        {
             continue;
         }
         let Some(info) = types.type_info(*type_id) else {
