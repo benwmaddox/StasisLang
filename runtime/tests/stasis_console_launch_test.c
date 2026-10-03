@@ -139,6 +139,46 @@ static int configure_child_environment(void) {
         SetEnvironmentVariableA("SDL_AUDIODRIVER", "dummy");
 }
 
+static int request_terminal_window_state(const char* sequence) {
+    HANDLE output = CreateFileW(
+        L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL, OPEN_EXISTING, 0, NULL);
+    if (output == INVALID_HANDLE_VALUE) return 0;
+
+    DWORD mode = 0;
+    if (!GetConsoleMode(output, &mode)) {
+        CloseHandle(output);
+        return 0;
+    }
+
+    const DWORD vt_mode = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    if (!SetConsoleMode(output, vt_mode)) {
+        CloseHandle(output);
+        return 0;
+    }
+    const DWORD sequence_length = (DWORD)strlen(sequence);
+    DWORD written = 0;
+    const int requested = WriteConsoleA(output, sequence, sequence_length, &written, NULL) &&
+        written == sequence_length;
+    SetConsoleMode(output, mode);
+    CloseHandle(output);
+    return requested;
+}
+
+static int restore_test_terminal(HWND console, HWND terminal) {
+    char class_name[64] = {0};
+    const int class_name_length = console
+        ? GetClassNameA(console, class_name, (int)sizeof(class_name))
+        : 0;
+    if (class_name_length > 0 && strcmp(class_name, "PseudoConsoleWindow") == 0) {
+        /* Windows Terminal restores its pseudo-console host through VT. */
+        return request_terminal_window_state("\x1b[1t");
+    }
+    if (!terminal) return 0;
+    ShowWindow(terminal, SW_RESTORE);
+    return 1;
+}
+
 static int run_child(const char* mode) {
     HWND console = GetConsoleWindow();
     HWND terminal = console ? GetAncestor(console, GA_ROOTOWNER) : NULL;
@@ -147,7 +187,7 @@ static int run_child(const char* mode) {
     ULONGLONG deadline = GetTickCount64() + 2000;
     while (!IsWindowVisible(terminal) && GetTickCount64() < deadline) Sleep(10);
     if (!IsWindowVisible(terminal)) return 77;
-    ShowWindow(terminal, SW_RESTORE);
+    if (!restore_test_terminal(console, terminal)) return 1;
     if (!wait_iconic("initial-restore", console, terminal, 0, 1000)) return 1;
 
     const int hidden = strcmp(mode, "hidden") == 0;
@@ -172,7 +212,7 @@ static int run_child(const char* mode) {
         if (!wait_iconic("hidden-reinit-minimize", console, terminal, 1, ICONIFY_TIMEOUT_MS)) return 6;
         if (!game_visible(title)) return 12;
     }
-    ShowWindow(terminal, SW_RESTORE);
+    if (!restore_test_terminal(console, terminal)) return 7;
     if (!wait_iconic("post-restore", console, terminal, 0, 1000)) return 7;
     stasis_set_window_size(400, 300);
     if (!remains_restored(terminal)) return 8;

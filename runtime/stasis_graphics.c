@@ -3656,6 +3656,13 @@ static void stasis_request_terminal_minimize(void) {
     CloseHandle(output);
 }
 
+static BOOL stasis_console_uses_pseudoconsole_window(HWND console) {
+    char class_name[64] = {0};
+    const int class_name_length = GetClassNameA(
+        console, class_name, (int)sizeof(class_name));
+    return class_name_length > 0 && strcmp(class_name, "PseudoConsoleWindow") == 0;
+}
+
 static void stasis_minimize_launch_console(void) {
     static bool applied = false;
     if (applied) return;
@@ -3673,17 +3680,23 @@ static void stasis_minimize_launch_console(void) {
         return;
     }
     HWND terminal = GetAncestor(console, GA_ROOTOWNER);
-    const BOOL minimize_window = terminal && IsWindowVisible(terminal);
+    /* In the Windows Terminal ConPTY path, GetConsoleWindow returns a
+       PseudoConsoleWindow whose visible root owner is the frontend. Request
+       iconification through VT instead of ShowWindow on that HWND. */
+    const BOOL pseudoconsole = stasis_console_uses_pseudoconsole_window(console);
+    const BOOL minimize_window = !pseudoconsole && terminal && IsWindowVisible(terminal);
     stasis_console_diag_trace("branch-selected",
-        minimize_window ? "windows" : "conpty", console, terminal, -1);
+        minimize_window ? "windows" : (pseudoconsole ? "pseudoconsole-vt" : "conpty"),
+        console, terminal, -1);
     if (minimize_window) {
         stasis_console_diag_trace("before-show-window", "windows", console, terminal, -1);
         const int show_return = ShowWindow(terminal, SW_FORCEMINIMIZE);
         stasis_console_diag_trace("after-show-window", "windows", console, terminal, show_return);
     } else {
-        /* ConPTY exposes only a message window; ask its frontend to iconify. */
+        /* ConPTY and pseudoconsole windows ask their frontend to iconify. */
         stasis_request_terminal_minimize();
-        stasis_console_diag_trace("after-conpty-request", "conpty", console, terminal, -1);
+        stasis_console_diag_trace("after-terminal-vt-request",
+            pseudoconsole ? "pseudoconsole-vt" : "conpty", console, terminal, -1);
     }
 }
 #endif
