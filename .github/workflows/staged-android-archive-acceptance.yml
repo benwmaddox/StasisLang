@@ -272,17 +272,13 @@ jobs:
               --release-root target/stasis-nightly-linux-x64 \
               --package-root "$package" \
               --expect-runtime-sources 2>&1 | tee "$shipping/package-provenance.log"
-            python - "$package/stasis_mobile_package.json" <<'PY'
-          import json
-          from pathlib import Path
-          import sys
-
-          manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          if manifest.get("target") != "android-arm64" or manifest.get("development_build") is not False:
-              raise SystemExit("shipping package is not the official android-arm64 release target")
-          if manifest.get("android_runtime", {}).get("mode") != "source":
-              raise SystemExit("shipping package did not build its runtime from the accepted archive sources")
-          PY
+            python tools/ci/verify_staged_android_shipping_runtime.py \
+              --archive-root target/stasis-nightly-linux-x64 \
+              --package-root "$package" \
+              --release-id "$STASIS_RELEASE_ID" \
+              --source-commit "$STASIS_SOURCE_COMMIT" \
+              --build-fingerprint "$STASIS_BUILD_FINGERPRINT" \
+              2>&1 | tee "$shipping/runtime-kit-identity.log"
             gradle --init-script "$STASIS_GRADLE_INIT_SCRIPT" -p "$package/android" :app:assembleDebug \
               --no-daemon --max-workers=2 --console=plain 2>&1 | tee "$shipping/gradle-link.log"
             apk="$package/android/app/build/outputs/apk/debug/app-debug.apk"
