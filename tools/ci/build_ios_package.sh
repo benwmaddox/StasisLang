@@ -28,12 +28,13 @@ package_mobile() {
       echo "configured staged archive CLI is not executable: ${STASIS_CLI_EXECUTABLE}" >&2
       return 1
     }
-    local development_flag=()
     if [[ "${target}" == "ios-simulator-arm64" ]]; then
-      development_flag=(--development-build)
+      "${STASIS_CLI_EXECUTABLE}" --workspace "${workspace}" package-mobile \
+        --target "${target}" --out "${output}" --development-build
+    else
+      "${STASIS_CLI_EXECUTABLE}" --workspace "${workspace}" package-mobile \
+        --target "${target}" --out "${output}"
     fi
-    "${STASIS_CLI_EXECUTABLE}" --workspace "${workspace}" package-mobile \
-      --target "${target}" --out "${output}" "${development_flag[@]}"
   else
     python tools/cargo_cache.py run -- cargo run -p stasis -- \
       --workspace "${workspace}" \

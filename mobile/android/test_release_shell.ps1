@@ -75,6 +75,7 @@ $workspaceRoot = Join-Path $artifactRoot "w"
 $packageRoot = Join-Path $workspaceRoot "d"
 $evidenceRoot = Join-Path $artifactRoot "e"
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null
 Copy-Item -LiteralPath $projectRoot -Destination $workspaceRoot -Recurse
 if (-not $env:STASIS_CLI_EXECUTABLE) {
     $vendorRoot = [System.IO.Path]::Combine($workspaceRoot, "vendor", "stasis", "src")

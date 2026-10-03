@@ -44,13 +44,28 @@ class NightlyFreshnessContractTests(unittest.TestCase):
         browser = self.release.split(
             "- name: Locate and verify hosted Chrome", 1
         )[1].split("- name: Setup MSVC dev environment", 1)[0]
+        self.assertIn(
+            "linux)\n              candidates=(/usr/bin/google-chrome /usr/bin/google-chrome-stable /opt/google/chrome/chrome)",
+            browser,
+        )
         for executable in (
-            "chrome=/usr/bin/google-chrome",
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/opt/google/chrome/chrome",
             '"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"',
             '"C:/Program Files/Google/Chrome/Application/chrome.exe"',
         ):
             with self.subTest(executable=executable):
                 self.assertIn(executable, browser)
+        self.assertIn('command -v "$name" 2>/dev/null', browser)
+        self.assertIn('if [[ ! -x "$candidate" ]]', browser)
+        self.assertIn("version_status=$?", browser)
+        self.assertIn(
+            "Google Chrome version probe: path=%s exit=%s output=%s", browser
+        )
+        self.assertIn(
+            "::error::No executable branded Google Chrome was found", browser
+        )
         self.assertIn("[System.Diagnostics.FileVersionInfo]::GetVersionInfo($chrome).ProductVersion", browser)
         self.assertIn("^\\d+(?:\\.\\d+){2,3}$", browser)
         self.assertIn("STASIS_BROWSER_EXECUTABLE=$chrome", browser)

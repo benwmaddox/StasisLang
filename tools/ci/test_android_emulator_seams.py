@@ -178,6 +178,18 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("if: always()", self.staged_android_workflow)
         self.assertIn("STASIS_ANDROID_TEST_KEY_PASSWORD", self.release_script)
         self.assertIn("Assert-AndroidTestSigner", self.release_script)
+        self.assertIn('$evidenceRoot = Join-Path $artifactRoot "e"', self.release_script)
+        self.assertIn(
+            "New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null",
+            self.release_script,
+        )
+        self.assertLess(
+            self.release_script.index(
+                "New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null"
+            ),
+            self.release_script.index("function Assert-AndroidTestSigner"),
+        )
+        self.assertIn('Set-Content -LiteralPath $EvidencePath', self.release_script)
         init_script = read("tools/ci/android_test_debug_signing.init.gradle")
         self.assertIn("androiddebugkey", init_script)
         self.assertIn("buildTypes.getByName('debug').signingConfig", init_script)

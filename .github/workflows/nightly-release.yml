@@ -1276,13 +1276,46 @@ jobs:
         run: |
           set -euo pipefail
           case "$STASIS_TARGET" in
-            linux) chrome=/usr/bin/google-chrome ;;
-            macos) chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ;;
+            linux)
+              candidates=(/usr/bin/google-chrome /usr/bin/google-chrome-stable /opt/google/chrome/chrome)
+              for name in google-chrome google-chrome-stable; do
+                if resolved="$(command -v "$name" 2>/dev/null)"; then
+                  candidates+=("$resolved")
+                fi
+              done
+              ;;
+            macos) candidates=("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome") ;;
             *) echo "No staged Unix browser path is defined for $STASIS_TARGET" >&2; exit 1 ;;
           esac
-          test -f "$chrome"
-          version="$("$chrome" --version)"
-          [[ "$version" =~ ^Google\ Chrome(\ for\ Testing)?\ [0-9]+(\.[0-9]+){2,3}$ ]]
+          chrome=""
+          version=""
+          for candidate in "${candidates[@]}"; do
+            printf 'Google Chrome candidate: %s\n' "$candidate"
+            if [[ ! -x "$candidate" ]]; then
+              printf 'Candidate is missing or not executable: %s\n' "$candidate"
+              continue
+            fi
+            if version_output="$("$candidate" --version 2>&1)"; then
+              version_status=0
+            else
+              version_status=$?
+            fi
+            printf 'Google Chrome version probe: path=%s exit=%s output=%s\n' \
+              "$candidate" "$version_status" "$version_output"
+            if [[ "$version_status" -ne 0 ]]; then
+              continue
+            fi
+            if [[ "$version_output" =~ ^Google\ Chrome(\ for\ Testing)?\ [0-9]+(\.[0-9]+){2,3}$ ]]; then
+              chrome="$candidate"
+              version="$version_output"
+              break
+            fi
+            printf 'Candidate did not report a branded Google Chrome version: %s\n' "$candidate"
+          done
+          if [[ -z "$chrome" ]]; then
+            echo "::error::No executable branded Google Chrome was found for $STASIS_TARGET" >&2
+            exit 1
+          fi
           printf 'Verified hosted Google Chrome (%s): %s\n' "$STASIS_TARGET" "$version"
           mkdir -p target/staged-acceptance
           printf '%s\n' "$version" > target/staged-acceptance/hosted-chrome-version.txt
