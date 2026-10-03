@@ -69,16 +69,20 @@ def add_android(root: Path, staged: Path) -> Path:
             "bounds-high-logcat.txt",
             "android-test-signer.json",
         ):
-            write(runtime_root, f"test/e/{name}")
+            write(runtime_root, f"test/android_generics_collections/e/{name}")
         for relative in (
             "stasis_mobile_package.json",
             "stasis_provenance.json",
             "aot/mobile_aot_bundle_manifest.json",
             "aot/engine_bundle_manifest.json",
         ):
-            write(runtime_root, f"test/w/d/{relative}")
+            write(runtime_root, f"test/android_generics_collections/w/d/{relative}")
             write(runtime_root, f"shipping/package/{relative}")
-        write(runtime_root, "test/w/d/android/app/build/outputs/apk/debug/app-debug.apk", b"not review evidence")
+        write(
+            runtime_root,
+            "test/android_generics_collections/w/d/android/app/build/outputs/apk/debug/app-debug.apk",
+            b"not review evidence",
+        )
         write(runtime_root, "shipping/android/app/build/outputs/apk/debug/app-debug.apk", b"not review evidence")
         for name in ("android-apk-audit.log", "gradle-link.log", "package-provenance.log", "apksigner.log"):
             write(runtime_root, f"shipping/{name}")
@@ -111,6 +115,51 @@ class CollectStagedArchiveEvidenceTests(unittest.TestCase):
             for item in manifest["files"]:
                 retained = output / item["path"]
                 self.assertEqual(item["sha256"], hashlib.sha256(retained.read_bytes()).hexdigest())
+
+    def test_android_partial_failure_retains_existing_bounds_logs_verbatim(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            staged, archive = base_tree(root, target="android")
+            runtime = add_android(root, staged)
+            bundled_evidence = runtime / "bundled/test/android_generics_collections/e"
+            generated_evidence = runtime / "generated/test/android_generics_collections/e"
+            bundled_low = b"I/Stasis (123): bounds index=-1\r\nF/libc (123): Fatal signal 4 (SIGILL)\n"
+            bundled_high = b"I/Stasis (456): bounds index=2\nF/libc (456): Fatal signal 4 (SIGILL)\n"
+            generated_low = b"I/Stasis (789): bounds index=-1\nF/libc (789): Fatal signal 4 (SIGILL)\n"
+            write(bundled_evidence, "bounds-low-logcat.txt", bundled_low)
+            write(bundled_evidence, "bounds-high-logcat.txt", bundled_high)
+            write(generated_evidence, "bounds-low-logcat.txt", generated_low)
+            (generated_evidence / "bounds-high-logcat.txt").unlink()
+
+            output = root / "evidence"
+            manifest = collect_evidence(
+                target="android",
+                staged_root=staged,
+                archive_root=archive,
+                runtime_root=runtime,
+                output=output,
+                lane_passed=False,
+            )
+
+            self.assertEqual(manifest["status"], "diagnostic_partial")
+            paths = {item["path"] for item in manifest["files"]}
+            expected = {
+                "android/bundled/runtime/bounds-low-logcat.txt": bundled_low,
+                "android/bundled/runtime/bounds-high-logcat.txt": bundled_high,
+                "android/generated/runtime/bounds-low-logcat.txt": generated_low,
+            }
+            self.assertTrue(set(expected).issubset(paths))
+            self.assertIn("android/bundled/runtime/evidence.json", paths)
+            self.assertIn("android/generated/runtime/evidence.json", paths)
+            self.assertNotIn("android/generated/runtime/bounds-high-logcat.txt", paths)
+            self.assertFalse(any("bounds-high-logcat.txt" in item for item in manifest["missing_required"]))
+            self.assertFalse(any(path.endswith(".apk") or "/build/" in path for path in paths))
+            for destination, raw in expected.items():
+                retained = output / destination
+                self.assertEqual(retained.read_bytes(), raw)
+                entry = next(item for item in manifest["files"] if item["path"] == destination)
+                self.assertEqual(entry["size_bytes"], len(raw))
+                self.assertEqual(entry["sha256"], hashlib.sha256(raw).hexdigest())
 
     def test_passed_lane_rejects_receipt_for_a_different_target(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

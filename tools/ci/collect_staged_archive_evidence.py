@@ -321,8 +321,10 @@ def collect_android(
         collector.require(staged_root / name, f"staged/{name}") if lane_passed else None
     for label, consumer_name in (("bundled", "bundled-generics"), ("generated", "generated-generics")):
         consumer_root = runtime_root / label
-        runtime_evidence = consumer_root / "test" / "e"
-        collector.add_direct(runtime_evidence, f"android/{label}/runtime", f"android-runtime/{label}/test/e")
+        consumer_test_root = consumer_root / "test" / "android_generics_collections"
+        runtime_evidence = consumer_test_root / "e"
+        runtime_evidence_label = f"android-runtime/{label}/test/android_generics_collections/e"
+        collector.add_direct(runtime_evidence, f"android/{label}/runtime", runtime_evidence_label)
         if lane_passed:
             for name in (
                 "evidence.json",
@@ -332,12 +334,12 @@ def collect_android(
                 "bounds-high-logcat.txt",
                 "android-test-signer.json",
             ):
-                collector.require(runtime_evidence / name, f"android-runtime/{label}/test/e/{name}")
-        test_package = consumer_root / "test" / "w" / "d"
+                collector.require(runtime_evidence / name, f"{runtime_evidence_label}/{name}")
+        test_package = consumer_test_root / "w" / "d"
         collector.add_package_manifests(
             test_package,
             f"android/{label}/test-package-manifests",
-            f"android-runtime/{label}/test/w/d",
+            f"android-runtime/{label}/test/android_generics_collections/w/d",
             require_provenance=lane_passed,
         )
         shipping = consumer_root / "shipping"
