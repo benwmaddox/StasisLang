@@ -1,5 +1,9 @@
 import pathlib
 import re
+import os
+import shutil
+import subprocess
+import textwrap
 import unittest
 
 
@@ -61,8 +65,10 @@ class NightlyFreshnessContractTests(unittest.TestCase):
         self.assertIn('if [[ ! -x "$candidate" ]]', browser)
         self.assertIn("version_status=$?", browser)
         self.assertIn(
-            "Google Chrome version probe: path=%s exit=%s output=%s", browser
+            "Google Chrome version probe: path=%s exit=%s raw=%q", browser
         )
+        self.assertIn("Google Chrome normalized version: %q", browser)
+        self.assertIn('version="$version_normalized"', browser)
         self.assertIn(
             "::error::No executable branded Google Chrome was found", browser
         )
@@ -76,6 +82,75 @@ class NightlyFreshnessContractTests(unittest.TestCase):
         )[1].split("- name: Collect staged archive review evidence", 1)[0]
         self.assertIn('$arguments += "--browser"', qualify)
         self.assertLess(qualify.index('$arguments += "--browser"'), qualify.index("python @arguments"))
+
+    def test_chrome_version_probe_trims_only_outer_ascii_whitespace(self):
+        browser = self.release.split(
+            "- name: Locate and verify hosted Chrome on Linux and macOS", 1
+        )[1].split("- name: Setup MSVC dev environment", 1)[0]
+        start = browser.index("trim_ascii_whitespace() {")
+        end = browser.index('case "$STASIS_TARGET"', start)
+        functions = textwrap.dedent(browser[start:end])
+        bash = None
+        if os.name == "nt":
+            for candidate in (
+                pathlib.Path(r"C:\Program Files\Git\bin\bash.exe"),
+                pathlib.Path(r"C:\Program Files\Git\usr\bin\bash.exe"),
+            ):
+                if candidate.is_file():
+                    bash = str(candidate)
+                    break
+        if bash is None:
+            bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "Bash is required to execute the workflow's exact version helpers")
+
+        cases = (
+            ("Google Chrome 152.0.7977.83 ", "Google Chrome 152.0.7977.83", True),
+            ("Google Chrome 154.0.8037.57 ", "Google Chrome 154.0.8037.57", True),
+            ("Google Chrome 123.4.5", "Google Chrome 123.4.5", True),
+            ("Google Chrome 123.4.5\r", "Google Chrome 123.4.5", True),
+            (" \tGoogle Chrome 123.4.5 \f", "Google Chrome 123.4.5", True),
+            (
+                "Google Chrome for Testing 123.4.5",
+                "Google Chrome for Testing 123.4.5",
+                True,
+            ),
+            ("Chromium 154.0.8037.57", "Chromium 154.0.8037.57", False),
+            ("Google Chrome 123x4.5", "Google Chrome 123x4.5", False),
+            (
+                "Google Chrome 123.4.5\nextra",
+                "Google Chrome 123.4.5\nextra",
+                False,
+            ),
+        )
+        script = "set -euo pipefail\n" + functions + """
+normalized="$(trim_ascii_whitespace "$STASIS_TEST_VERSION")"
+if is_branded_chrome_version "$normalized"; then
+  actual=accepted
+else
+  actual=rejected
+fi
+[[ "$normalized" == "$STASIS_TEST_EXPECTED_NORMALIZED" ]]
+[[ "$actual" == "$STASIS_TEST_EXPECTED_RESULT" ]]
+printf '%s\\n' "$actual"
+"""
+        for raw, expected_normalized, accepted in cases:
+            with self.subTest(raw=raw):
+                env = os.environ.copy()
+                env["STASIS_TEST_VERSION"] = raw
+                env["STASIS_TEST_EXPECTED_NORMALIZED"] = expected_normalized
+                env["STASIS_TEST_EXPECTED_RESULT"] = "accepted" if accepted else "rejected"
+                result = subprocess.run(
+                    [bash, "--noprofile", "--norc", "-c", script],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                )
+                self.assertEqual(0, result.returncode, result.stderr or result.stdout)
+                self.assertEqual(
+                    "accepted\n" if accepted else "rejected\n", result.stdout
+                )
 
     def test_staged_review_evidence_is_uploaded_separately_from_receipts(self):
         desktop = self.release.split(

@@ -1275,6 +1275,28 @@ jobs:
           STASIS_TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
+          trim_ascii_whitespace() {
+            local value="$1"
+            local edge
+            while [[ -n "$value" ]]; do
+              edge="${value:0:1}"
+              case "$edge" in
+                ' '|$'\t'|$'\n'|$'\r'|$'\v'|$'\f') value="${value:1}" ;;
+                *) break ;;
+              esac
+            done
+            while [[ -n "$value" ]]; do
+              edge="${value:$((${#value} - 1)):1}"
+              case "$edge" in
+                ' '|$'\t'|$'\n'|$'\r'|$'\v'|$'\f') value="${value%?}" ;;
+                *) break ;;
+              esac
+            done
+            printf '%s' "$value"
+          }
+          is_branded_chrome_version() {
+            [[ "$1" =~ ^Google\ Chrome(\ for\ Testing)?\ [0-9]+(\.[0-9]+){2,3}$ ]]
+          }
           case "$STASIS_TARGET" in
             linux)
               candidates=(/usr/bin/google-chrome /usr/bin/google-chrome-stable /opt/google/chrome/chrome)
@@ -1300,14 +1322,16 @@ jobs:
             else
               version_status=$?
             fi
-            printf 'Google Chrome version probe: path=%s exit=%s output=%s\n' \
+            printf 'Google Chrome version probe: path=%s exit=%s raw=%q\n' \
               "$candidate" "$version_status" "$version_output"
+            version_normalized="$(trim_ascii_whitespace "$version_output")"
+            printf 'Google Chrome normalized version: %q\n' "$version_normalized"
             if [[ "$version_status" -ne 0 ]]; then
               continue
             fi
-            if [[ "$version_output" =~ ^Google\ Chrome(\ for\ Testing)?\ [0-9]+(\.[0-9]+){2,3}$ ]]; then
+            if is_branded_chrome_version "$version_normalized"; then
               chrome="$candidate"
-              version="$version_output"
+              version="$version_normalized"
               break
             fi
             printf 'Candidate did not report a branded Google Chrome version: %s\n' "$candidate"
