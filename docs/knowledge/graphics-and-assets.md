@@ -16,7 +16,9 @@ same logical units; see [display spaces](display-and-coordinate-spaces.md).
 
 Use `PresentationList` for reusable sprite/rectangle input, `LineBatch` for
 lines, or `SpriteRunWriter` for streaming sprites. Finalize or cancel a writer
-in the same frame. Keep simulation rules in `tick()`.
+in the same frame. Its source rectangle uses logical image pixels, while its
+explicit pivot is in destination-local units; see [Rig2D attachments](../rig2d.md#solve-then-render-attachments)
+for a complete joint-to-pivot example. Keep simulation rules in `tick()`.
 
 In the display example, `button_rect` is resolved during `tick()` and
 `button_presentation` is a persistent `PresentationList`. Rebuild its draw

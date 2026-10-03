@@ -118,19 +118,86 @@ transform. The rig has no scale or shear. Mirroring is therefore an attachment
 rendering choice, or must be authored explicitly in local positions.
 
 After a successful solve, read `world_x`, `world_y`, and `world_angle` and map
-them into the graphics API. Attachment source rectangles, sizes, pivots, alpha,
-layering, and sprite ownership are intentionally caller data:
+them into the graphics API. `SpriteRunWriter.write` receives the destination
+top-left, destination size, logical source rectangle, and a pivot measured in
+destination-local units. Its transform rotates and scales around
+`(x + pivot_x, y + pivot_y)`. Therefore, to place a joint at the sprite pivot,
+use `x = joint_x - pivot_x` and `y = joint_y - pivot_y`. If the authored pivot
+is in source pixels, scale it by destination size divided by source-rectangle
+size before passing it. Tint is a signed `i32` RGBA8 bit pattern; `-1` is
+opaque white. The writer angle is clockwise `f32` degrees.
+
+This complete one-part example uses a 2-by-2 sheet whose declared logical
+extent is 96-by-96 pixels. It selects the top-left 48-by-48 cell and maps the
+root joint at `(240, 180)` to the part pivot `(12, 24)`, so the destination
+origin is `(228, 156)`. The writer reservation is either finalized with the
+written count or canceled on failure.
 
 ```stasis
-function draw_arm(arm: i32): void {
-    let x: f32 = courier_rig.world_x(arm);
-    let y: f32 = courier_rig.world_y(arm);
-    let angle: f32 = courier_rig.world_angle(arm);
+import "/vendor/stasis/stdlib/graphics.stasis";
+import "/vendor/stasis/stdlib/rig2d.stasis";
 
-    // A real consumer passes x/y/angle to SpriteRunWriter together with its
-    // own sprite handle, source rectangle, dimensions, and pivot.
+global courier_rig: Rig2D<1>;
+global sheet: SpriteSheet;
+global writer: SpriteRunWriter;
+
+function main(): i32 {
+    if (!sheet.load_sprite_sheet_from("assets/sprite_sheet_2x2.png", 2, 2, 48, 48)) {
+        return 1;
+    }
+    courier_rig.clear();
+    if (courier_rig.add_bone(-1, 0.0, 0.0, 0.0) != 0) {
+        return 2;
+    }
+    if (!courier_rig.solve(240.0, 180.0, 15.0)) {
+        return 3;
+    }
+    return 0;
+}
+
+function render(): i32 {
+    if (!writer.reserve(1, -1, 0, 0, 0, 0, 0)) {
+        return 1;
+    }
+    let joint_x: f32 = courier_rig.world_x(0);
+    let joint_y: f32 = courier_rig.world_y(0);
+    let angle: f32 = courier_rig.world_angle(0);
+    if (
+        !writer.write(
+            sheet.sprite_ref,
+            -1,
+            0,
+            joint_x - 12.0,
+            joint_y - 24.0,
+            48.0,
+            48.0,
+            0.0,
+            0.0,
+            48.0,
+            48.0,
+            12.0,
+            24.0,
+            1.0,
+            1.0,
+            angle
+        )
+    ) {
+        writer.cancel();
+        return 2;
+    }
+    if (!writer.finalize(1)) {
+        writer.cancel();
+        return 3;
+    }
+    return 0;
 }
 ```
+
+For centered frames with uniform defaults, `draw_frame_scaled` is shorter: it
+selects a row-major frame and uses the frame center as its pivot. It takes
+integer alpha in the 0-255 range and integer degrees. The explicit writer call
+above instead carries the source rectangle, destination-local pivot, scale,
+and floating-point angle directly.
 
 Invalid world indexes return `0.0`; invalid parent indexes return `-1`.
 Because a root also has parent `-1`, callers should retain successful bone
