@@ -2,8 +2,6 @@ import pathlib
 import re
 import unittest
 
-import yaml
-
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -130,12 +128,31 @@ class NightlyFreshnessContractTests(unittest.TestCase):
 
     def test_android_archive_lane_receives_the_exact_calling_run_id(self):
         android = (ROOT / ".github/workflows/staged-android-archive-acceptance.yml").read_text(encoding="utf-8")
-        parsed_android = yaml.load(android, Loader=yaml.BaseLoader)
-        workflow_call = parsed_android["on"]["workflow_call"]
-        self.assertEqual(workflow_call["inputs"]["run_id"]["required"], "true")
-        self.assertEqual(workflow_call["inputs"]["run_id"]["type"], "string")
+
+        def mapping_block(source, name, indent):
+            lines = source.splitlines()
+            header = f"{' ' * indent}{name}:"
+            self.assertEqual(lines.count(header), 1)
+            start = lines.index(header) + 1
+            body = []
+            for line in lines[start:]:
+                if line.strip():
+                    line_indent = len(line) - len(line.lstrip(" "))
+                    if line_indent <= indent:
+                        break
+                body.append(line)
+            return "\n".join(body)
+
+        on = mapping_block(android, "on", 0)
+        workflow_call = mapping_block(on, "workflow_call", 2)
+        inputs = mapping_block(workflow_call, "inputs", 4)
+        run_id = mapping_block(inputs, "run_id", 6)
+        self.assertIn("        required: true", run_id)
+        self.assertIn("        type: string", run_id)
+        secrets = mapping_block(workflow_call, "secrets", 4)
+        secret_names = set(re.findall(r"(?m)^      ([A-Za-z0-9_-]+):$", secrets))
         self.assertEqual(
-            set(workflow_call["secrets"]),
+            secret_names,
             {
                 "android_test_keystore_base64",
                 "android_test_store_password",

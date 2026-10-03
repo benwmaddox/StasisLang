@@ -59,7 +59,68 @@ jobs:
       - name: Install Android production package toolchain
         shell: bash
         run: |
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+          sdkmanager "emulator" "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+
+      - name: Enable and verify hardware KVM
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          udev_settle_status=0
+          if sudo udevadm settle --timeout=30; then
+            echo "KVM udev settle: passed"
+          else
+            udev_settle_status=$?
+            echo "KVM udev settle: failed (exit $udev_settle_status)"
+          fi
+          echo "KVM device metadata:"
+          stat --printf='type=%F mode=%a uid=%u gid=%g path=%n\n' /dev/kvm || echo "::warning::could not stat /dev/kvm"
+          echo "Runner identity:"
+          id || echo "::warning::could not read runner identity"
+          if command -v getfacl >/dev/null 2>&1; then
+            getfacl --absolute-names /dev/kvm || echo "::warning::getfacl failed for /dev/kvm"
+          else
+            echo "getfacl is not installed"
+          fi
+          kvm_readable=0
+          if test -r /dev/kvm; then
+            kvm_readable=1
+            echo "KVM read probe: passed"
+          else
+            echo "KVM read probe: failed"
+          fi
+          kvm_writable=0
+          if test -w /dev/kvm; then
+            kvm_writable=1
+            echo "KVM write probe: passed"
+          else
+            echo "KVM write probe: failed"
+          fi
+          emulator="${ANDROID_HOME:-}/emulator/emulator"
+          if [[ ! -x "$emulator" ]]; then
+            echo "::error::Android SDK emulator is missing or not executable: $emulator"
+            exit 1
+          fi
+          accel_output="$(mktemp "${RUNNER_TEMP:-/tmp}/staged-kvm-accel-check.XXXXXX")"
+          trap 'rm -f "$accel_output"' EXIT
+          accel_status=0
+          if "$emulator" -accel-check >"$accel_output" 2>&1; then
+            :
+          else
+            accel_status=$?
+          fi
+          cat "$accel_output"
+          kvm_usable_report=0
+          if grep -Eq '^KVM .* is installed and usable\.?$' "$accel_output"; then
+            kvm_usable_report=1
+          fi
+          if [[ "$udev_settle_status" -ne 0 || "$kvm_readable" -ne 1 || "$kvm_writable" -ne 1 || "$accel_status" -ne 0 || "$kvm_usable_report" -ne 1 ]]; then
+            printf '::error::KVM checks failed: udev_settle_exit=%s readable=%s writable=%s accel_exit=%s usable_report=%s\n' \
+              "$udev_settle_status" "$kvm_readable" "$kvm_writable" "$accel_status" "$kvm_usable_report"
+            exit 1
+          fi
 
       - name: Materialize the documented Android test key in runner temp
         shell: bash
@@ -142,8 +203,9 @@ jobs:
           ndk: 27.0.12077973
           cmake: 3.22.1
           emulator-boot-timeout: 900
+          disable-linux-hw-accel: false
           emulator-options: >-
-            -no-window -gpu swiftshader_indirect -no-snapshot -noaudio
+            -accel on -no-window -gpu swiftshader_indirect -no-snapshot -noaudio
             -no-boot-anim -camera-back none
           script: pwsh -NoProfile -File tools/ci/run_staged_android_archive_acceptance.ps1
 
