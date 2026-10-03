@@ -192,6 +192,14 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
                     self.assertIn("codesign --verify --strict", package_script)
                     self.assertNotIn("codesign --force --sign -", package_script)
                     self.assertIn("codesign --force --sign -", signer)
+                elif path.name == "ios-generics-simulator.yml":
+                    triggers = workflow.split("on:\n", 1)[1].split("\n\n", 1)[0]
+                    self.assertEqual(triggers.strip(), "workflow_dispatch:")
+                    self.assertIn("runs-on: macos-15", workflow)
+                    self.assertIn("STASIS_IOS_SIMULATOR_ACCEPTANCE: generics", workflow)
+                    self.assertIn("tools/ci/build_ios_package.sh", workflow)
+                    self.assertNotIn("workflow_call:", workflow)
+                    self.assertNotIn("network-artifact", workflow)
                 elif path.name != "nightly-release.yml":
                     self.assertNotRegex(
                         workflow,

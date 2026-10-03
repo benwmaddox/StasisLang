@@ -192,13 +192,18 @@ Validate both supported landscape rotations, safe-area changes, screenshot
 bounds, and touch mapping on a signed device before claiming iOS orientation
 acceptance.
 
-Device arm64 is the v1 target; simulator and multi-architecture packaging are intentionally out
-of scope. The manual `tools/ci/build_ios_package.sh` helper can be run on macOS
-with code signing disabled; it builds `samples/mobile_storage_link` and verifies
-the arm64 executable, embedded SDL frameworks, packaged assets and provenance,
-and absence of Stasis source. The network acceptance workflow builds both iOS
+Device arm64 remains the v1 target; simulator execution is an optional CI
+acceptance lane, not a physical-device or signed-device qualification. The
+manual `tools/ci/build_ios_package.sh` helper supports
+`STASIS_IOS_SIMULATOR_ACCEPTANCE=generics`: it packages
+`samples/generics_collections`, builds the arm64 iOS simulator app, launches an
+iPhone simulator with `IOS-GENERICS`, and verifies digest 507, rendered evidence,
+package provenance, and bounds traps. The dispatch-only
+`.github/workflows/ios-generics-simulator.yml` workflow stays outside ordinary PR,
+nightly, and release gating. The network acceptance workflow builds both iOS
 device and arm64-simulator network archives on macOS, but does not produce a
-signed app. A signed device install still requires the developer's `DEVELOPMENT_TEAM` and
+signed app. Simulator signing is ad hoc and uses no persistent signing identity.
+A signed device install still requires a developer `DEVELOPMENT_TEAM` and
 provisioning profile.
 
 iOS uses the immutable app-bundle asset tree directly and has no Android-style
