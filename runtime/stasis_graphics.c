@@ -4170,6 +4170,72 @@ static void stasis_set_logical_size(int width, int height) {
     g_window_resized = true;
 }
 
+#if defined(_WIN32)
+#define STASIS_WINDOW_RESTORE_PUMP_LIMIT 64
+static int stasis_wait_for_window_restore(void) {
+    for (int attempt = 0; attempt < STASIS_WINDOW_RESTORE_PUMP_LIMIT; attempt++) {
+        SDL_PumpEvents();
+        const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
+        if ((flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) == 0) {
+            return 1;
+        }
+    }
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
+    stasis_report_runtime_errorf(
+        "Window restore did not settle before resize (flags=0x%llx)",
+        (unsigned long long)flags);
+    SDL_Log(
+        "Stasis window restore failed to settle after %d event pumps: flags=0x%llx",
+        STASIS_WINDOW_RESTORE_PUMP_LIMIT,
+        (unsigned long long)flags);
+    return 0;
+}
+
+static int stasis_apply_windows_windowed_extent(int width, int height) {
+    int actual_width = 0;
+    int actual_height = 0;
+    int settled_observations = 0;
+
+    if (!SDL_SetWindowSize(g_window, width, height)) {
+        stasis_report_runtime_errorf(
+            "Window resize to %dx%d failed: %s", width, height, SDL_GetError());
+        return 0;
+    }
+
+    for (int attempt = 0; attempt < STASIS_WINDOW_RESTORE_PUMP_LIMIT; attempt++) {
+        SDL_PumpEvents();
+        SDL_GetWindowSize(g_window, &actual_width, &actual_height);
+        const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
+        if ((flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) == 0 &&
+            actual_width == width && actual_height == height) {
+            settled_observations++;
+            if (settled_observations >= 2) {
+                return 1;
+            }
+            continue;
+        }
+
+        settled_observations = 0;
+        if ((flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) == 0 &&
+            !SDL_SetWindowSize(g_window, width, height)) {
+            stasis_report_runtime_errorf(
+                "Window resize to %dx%d failed: %s", width, height, SDL_GetError());
+            return 0;
+        }
+    }
+
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
+    stasis_report_runtime_errorf(
+        "Window resize did not settle at %dx%d (actual=%dx%d flags=0x%llx)",
+        width, height, actual_width, actual_height, (unsigned long long)flags);
+    SDL_Log(
+        "Stasis window resize failed to settle after %d event pumps: requested=%dx%d actual=%dx%d flags=0x%llx",
+        STASIS_WINDOW_RESTORE_PUMP_LIMIT,
+        width, height, actual_width, actual_height, (unsigned long long)flags);
+    return 0;
+}
+#endif
+
 /*
  * Set window size (windowed mode).
  * width/height are logical canvas/window points, not necessarily drawable pixels.
@@ -4179,9 +4245,9 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
         return;
     }
 
-    stasis_set_logical_size(width, height);
 #if !defined(__ANDROID__) && !defined(STASIS_PLATFORM_IOS)
     if (g_recording_presentation) {
+        stasis_set_logical_size(width, height);
         if (g_renderer) {
             SDL_SetRenderLogicalPresentation(
                 g_renderer, width, height, SDL_LOGICAL_PRESENTATION_LETTERBOX);
@@ -4191,9 +4257,25 @@ STASIS_EXPORT void stasis_set_window_size(int width, int height) {
     }
     const SDL_WindowFlags window_flags = SDL_GetWindowFlags(g_window);
     if ((window_flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED)) != 0) {
-        SDL_RestoreWindow(g_window);
+        if (!SDL_RestoreWindow(g_window)) {
+            return;
+        }
+#if defined(_WIN32)
+        if (!stasis_wait_for_window_restore()) {
+            return;
+        }
+#else
         SDL_SyncWindow(g_window);
+#endif
     }
+#endif
+#if defined(_WIN32)
+    if (!stasis_apply_windows_windowed_extent(width, height)) {
+        return;
+    }
+#endif
+    stasis_set_logical_size(width, height);
+#if !defined(_WIN32) && !defined(__ANDROID__) && !defined(STASIS_PLATFORM_IOS)
     /* X11 window-manager state can remain maximized briefly after restore.
        The explicit request still owns the retained windowed backing extent. */
     stasis_apply_x11_window_scale(1);
