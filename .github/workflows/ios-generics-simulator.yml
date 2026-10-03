@@ -1,0 +1,209 @@
+name: iOS Generics Simulator
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-generics-simulator-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ios-generics-simulator:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      STASIS_SOURCE_COMMIT: ${{ github.sha }}
+      STASIS_RELEASE_ID: ci-ios-generics-${{ github.run_id }}
+      STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/ios-generics-simulator-${{ github.run_id }}/host-runtime/bin/libstasis_graphics.dylib
+      STASIS_IOS_BUILD_ROOT: ${{ github.workspace }}/target/ios-generics-simulator-${{ github.run_id }}
+    steps:
+      - name: Checkout dispatched source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust and iOS targets
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Verify exact source and available ARM64 simulator
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          test "$(git rev-parse HEAD)" = "$STASIS_SOURCE_COMMIT"
+          test -z "$(git status --porcelain)"
+          test "$(uname -m)" = "arm64"
+          mkdir -p "$STASIS_IOS_BUILD_ROOT"
+          uname -m | tee "$STASIS_IOS_BUILD_ROOT/host-architecture.txt"
+          xcode-select -p | tee "$STASIS_IOS_BUILD_ROOT/xcode-select-path.txt"
+          xcodebuild -version | tee "$STASIS_IOS_BUILD_ROOT/host-xcode-version.txt"
+          xcrun simctl list runtimes --json > "$STASIS_IOS_BUILD_ROOT/simulator-runtimes.json"
+          xcrun simctl list devicetypes --json > "$STASIS_IOS_BUILD_ROOT/simulator-device-types.json"
+          python3 - "$STASIS_IOS_BUILD_ROOT/simulator-runtimes.json" "$STASIS_IOS_BUILD_ROOT/simulator-device-types.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              runtimes = json.load(source)["runtimes"]
+          if not any(
+              runtime.get("isAvailable") and runtime.get("platform") == "iOS"
+              for runtime in runtimes
+          ):
+              raise SystemExit("no available iOS simulator runtime")
+          with open(sys.argv[2], encoding="utf-8") as source:
+              device_types = json.load(source)["devicetypes"]
+          preferred = {"iPhone 16 Pro", "iPhone 15 Pro", "iPhone 14 Pro"}
+          if not any(device.get("name") in preferred for device in device_types):
+              raise SystemExit("no simulator device type supported by the packaging helper")
+          PY
+
+      - name: Compute run-specific CLI and runtime identity
+        run: |
+          fingerprint="$(python tools/compute_toolchain_fingerprint.py \
+            --source-commit "$STASIS_SOURCE_COMMIT" --release-id "$STASIS_RELEASE_ID")"
+          printf '%s\n' "$fingerprint" > "$STASIS_IOS_BUILD_ROOT/toolchain-build-fingerprint.txt"
+          echo "STASIS_BUILD_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
+
+      - name: Build fresh host graphics runtime
+        timeout-minutes: 15
+        run: |
+          cmake -S runtime -B "$STASIS_IOS_BUILD_ROOT/host-runtime" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
+            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
+            -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
+            -DSTASIS_BUILD_RUNNER=OFF \
+            -DSTASIS_BUILD_SYS=OFF \
+            -DSTASIS_RELEASE_ID="$STASIS_RELEASE_ID" \
+            -DSTASIS_BUILD_FINGERPRINT="$STASIS_BUILD_FINGERPRINT"
+          set -o pipefail
+          cmake --build "$STASIS_IOS_BUILD_ROOT/host-runtime" --config Release \
+            --target stasis_graphics 2>&1 | tee "$STASIS_IOS_BUILD_ROOT/host-runtime-build.log"
+          test -s "$STASIS_RUNTIME_LIBRARY_PATH"
+
+      - name: Build fresh host package compiler
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          python tools/cargo_cache.py run -- cargo build -p stasis \
+            2>&1 | tee "$STASIS_IOS_BUILD_ROOT/host-cli-build.log"
+
+      - name: Build packages and run iOS Generics simulator acceptance
+        timeout-minutes: 15
+        env:
+          STASIS_IOS_SIMULATOR_ACCEPTANCE: generics
+        run: |
+          set -o pipefail
+          bash tools/ci/build_ios_package.sh \
+            samples/generics_collections "dist/ios-ci-${GITHUB_RUN_ID}" \
+            2>&1 | tee "$STASIS_IOS_BUILD_ROOT/helper.log"
+
+      - name: Verify package provenance and complete evidence
+        if: always()
+        run: |
+          build_root="$STASIS_IOS_BUILD_ROOT"
+          package_root="$GITHUB_WORKSPACE/samples/generics_collections/dist/ios-ci-${GITHUB_RUN_ID}"
+          simulator_package="${package_root}-simulator"
+          required=(
+            host-architecture.txt
+            xcode-select-path.txt
+            host-xcode-version.txt
+            simulator-runtimes.json
+            simulator-device-types.json
+            toolchain-build-fingerprint.txt
+            host-runtime-build.log
+            host-cli-build.log
+            helper.log
+            xcode-version.txt
+            xcodebuild.log
+            device-platform.txt
+            linked-libraries.txt
+            device-symbols.txt
+            device-hashes.txt
+            evidence.txt
+            simulator-xcodebuild.log
+            simulator-platform.txt
+            simulator-linked-libraries.txt
+            simulator-symbols.txt
+            simulator-hashes.txt
+            simulator-launch.txt
+            simulator-result.json
+            simulator-frame.png
+            simulator.log
+            bounds-low.json
+            bounds-high.json
+            bounds-low-launch.txt
+            bounds-high-launch.txt
+            simulator-evidence.json
+            simulator-evidence.txt
+          )
+          for file in "${required[@]}"; do
+            test -s "$build_root/$file" || {
+              echo "required iOS simulator evidence is missing: $build_root/$file" >&2
+              exit 1
+            }
+          done
+          test -s "$STASIS_RUNTIME_LIBRARY_PATH"
+          shopt -s nullglob
+          low_crash=("$build_root"/bounds-low-crash.*)
+          high_crash=("$build_root"/bounds-high-crash.*)
+          test "${#low_crash[@]}" -eq 1
+          test -s "${low_crash[0]}"
+          test "${#high_crash[@]}" -eq 1
+          test -s "${high_crash[0]}"
+          test -s "$package_root/stasis_provenance.json"
+          test -s "$package_root/stasis_mobile_package.json"
+          test -s "$package_root/aot/mobile_aot_bundle_manifest.json"
+          test -s "$simulator_package/stasis_provenance.json"
+          test -s "$simulator_package/stasis_mobile_package.json"
+          test -s "$simulator_package/aot/mobile_aot_bundle_manifest.json"
+          python3 - "$STASIS_SOURCE_COMMIT" "$simulator_package" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          expected_commit, package = sys.argv[1], pathlib.Path(sys.argv[2])
+          with (package / "stasis_provenance.json").open(encoding="utf-8") as source:
+              provenance = json.load(source)
+          with (package / "stasis_mobile_package.json").open(encoding="utf-8") as source:
+              manifest = json.load(source)
+          if provenance.get("source_commit") != expected_commit:
+              raise SystemExit(
+                  f"simulator package source {provenance.get('source_commit')!r} "
+                  f"does not match dispatched commit {expected_commit!r}"
+              )
+          if manifest.get("target") != "ios-simulator-arm64":
+              raise SystemExit(f"unexpected simulator package target: {manifest.get('target')!r}")
+          if manifest.get("development_build") is not True:
+              raise SystemExit("simulator package is not marked as a development build")
+          PY
+
+      - name: Upload simulator evidence and package manifests
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ios-generics-simulator-${{ github.run_id }}
+          path: |
+            ${{ github.workspace }}/target/ios-generics-simulator-${{ github.run_id }}/
+            ${{ github.workspace }}/samples/generics_collections/dist/ios-ci-${{ github.run_id }}/stasis_provenance.json
+            ${{ github.workspace }}/samples/generics_collections/dist/ios-ci-${{ github.run_id }}/stasis_mobile_package.json
+            ${{ github.workspace }}/samples/generics_collections/dist/ios-ci-${{ github.run_id }}/aot/mobile_aot_bundle_manifest.json
+            ${{ github.workspace }}/samples/generics_collections/dist/ios-ci-${{ github.run_id }}-simulator/stasis_provenance.json
+            ${{ github.workspace }}/samples/generics_collections/dist/ios-ci-${{ github.run_id }}-simulator/stasis_mobile_package.json
+            ${{ github.workspace }}/samples/generics_collections/dist/ios-ci-${{ github.run_id }}-simulator/aot/mobile_aot_bundle_manifest.json
+          if-no-files-found: warn
+          archive: true

@@ -2,6 +2,12 @@
 
 ## 2026-10-03
 
+- Added a dispatch-only iOS Generics simulator workflow with fresh matching host runtime/compiler builds, ARM64 runner checks, fail-closed package provenance/evidence validation, and partial artifact upload.
+- Updated the mobile packaging guide and added focused workflow policy coverage; the new lane remains outside PR and nightly required checks and does not claim physical-device qualification.
+- Verification: 107 focused workflow/helper/Android seam, placement, network-policy, and action-version tests passed; action-version and SDL migration checks passed; YAML parse and git diff check passed. Hosted iOS dispatch remains pending infrastructure merge and registration on the default branch.
+- Visual evidence: not applicable; no user-visible behavior changed.
+- Theory gained: package linking is not simulator runtime evidence; the generated app must run the selected generics oracle on an ARM64 simulator, and every saved result must carry the dispatched source commit.
+
 - Documented the public `SpriteRunWriter` frame contract and a compilable Rig2D-to-sprite attachment recipe with an explicit destination-local pivot.
 - Added Rig2D to the knowledge index and linked its example from the graphics and assets guide.
 - Verification: fresh current-branch CLI fixture `format --check` and `check`; `cargo fmt -- --check`; `generated_knowledge_examples_compile_and_test`; `git diff --check`.
