@@ -13,6 +13,20 @@
 - Verification: fresh current-branch CLI fixture `format --check` and `check`; `cargo fmt -- --check`; `generated_knowledge_examples_compile_and_test`; `git diff --check`.
 - Visual evidence: not applicable.
 
+### Maddox #786 integer bitwise operators
+
+Implemented integer `&`, `^`, `|`, `~`, `<<`, and `>>` across frontend validation, HIR/data-flow, and JIT/AOT/Wasm lowering. Literal-only trees inherit an exact expected integer lane recursively; validation rejects non-integer operands, mismatched typed lanes, and out-of-range contextual literals. Shift counts are masked by the left lane width, signed `i32 >>` is arithmetic, unsigned `>>` is logical, and narrow results are normalized. Generic type scanning now keeps parenthesized shift operators inside values such as `Bits<(1 << 3)>`, while parsing the following declaration separately. Docs, VS Code operator scopes, and LSP diagnostics cover the same surface. A shared `.stasis` oracle probes runtime parameters across `i32`, `u8`, `u16`, and `u32`; the existing generics sample runs the same oracle without changing its 507 digest.
+
+Validation so far: `python tools/cargo_cache.py run -- cargo test -p stasis_compiler -j1 --test bitwise_operators_jit_aot_wasm -- --test-threads=1` passed 4/4, including JIT, linked/signed Windows native AOT execution, Node no-import Wasm, the public shifted-generic JIT fixture, operand/range diagnostics, and unsupported compounds. `python tools/cargo_cache.py run -- cargo test -p stasis_lsp -j1 -- --test-threads=1` passed 36/36, including diagnostic clearing after a full-document change. VS Code `npm test` passed 16/16; Rust formatting and `git diff --check` passed. The full serial compiler library suite passed 920/920 under the initialized Windows linker. Fresh exact-feature-SHA packaged sample and Android/iOS runtime gates remain pending.
+
+Visual evidence: not applicable (language semantics and editor token scopes; runtime behavior has executable parity oracles).
+
+Theory gained: runtime-parameter callees keep expected operator cases dynamic, so each backend is checked against independent golden values rather than a frontend-folded result. Narrow-lane correctness also needs chained expressions that expose whether an intermediate result was normalized before the next shift.
+
+Good: one runtime-parameter oracle feeds JIT, linked AOT, Wasm, and the sample, with independent golden results, contextual-lane failures, and generic value-application coverage.
+Bad: the initial compound-assignment fixture required the wrong diagnostic phase; the public generic test also exposed a scanner bug where shift `>` inside parentheses was treated as a generic closer and swallowed the next global declaration.
+Adjustment: assert the unsupported-assignment cause independent of phase, track nested parentheses while scanning generic values, and document the required parentheses around shift expressions in generic applications. Initialize the supported MSVC environment so native AOT links and executes.
+
 ## 2026-03-27
 
 - Completed issue #263 by replacing the fixed OpenGL sprite atlas model with pageable atlas textures and reusable free-rect allocation in [runtime/stasis_graphics.c](/home/ben/StasisLang/runtime/stasis_graphics.c).

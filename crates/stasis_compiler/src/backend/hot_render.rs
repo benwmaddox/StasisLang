@@ -1430,6 +1430,7 @@ fn visit_expr(expr: &SimpleExpr, callback: &mut impl FnMut(&str, &[SimpleExpr]))
                 visit_expr(arg, callback);
             }
         }
+        SimpleExpr::Unary { operand, .. } => visit_expr(operand, callback),
         SimpleExpr::Binary { lhs, rhs, .. } => {
             visit_expr(lhs, callback);
             visit_expr(rhs, callback);

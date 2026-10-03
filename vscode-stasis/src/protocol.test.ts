@@ -146,6 +146,12 @@ test("Stasis grammar scopes receiver-bound generic types without making function
   assert.match(operatorPattern?.match as string, />=/u);
   assert.match(operatorPattern?.match as string, /\|</u);
   assert.match(operatorPattern?.match as string, /\|>/u);
+  const operatorRegex = new RegExp(operatorPattern?.match as string, "gu");
+  const source = "<< >> & | ^ ~ && || <= >= < >";
+  assert.deepEqual(
+    Array.from(source.matchAll(operatorRegex), match => match[0]),
+    ["<<", ">>", "&", "|", "^", "~", "&&", "||", "<=", ">=", "<", ">"],
+  );
 });
 
 test("packaged toolchain rejects changed binaries before launch", async () => {

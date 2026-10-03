@@ -214,7 +214,11 @@ function capacity(self: Buffer<T, N>): i32 {
 compile-time signed 32-bit value, not a runtime parameter and not inherently an
 array capacity. Value arguments may use literals, named constants, enclosing
 generic values, parentheses, unary signs, and checked integer `+`, `-`, `*`,
-`/`, and `%` expressions. Overflow, division by zero, and an invalid
+`/`, and `%` expressions. They also support integer bitwise complement `~`,
+bitwise `&`, `^`, and `|`, and shifts `<<` and `>>`; these compile-time
+expressions use the `i32` value domain. Parenthesize a shift expression inside
+a generic application so its closing `>` is unambiguous, for example
+`Bits<(1 << 3)>` or `Bits<(8 >> 1)>`. Overflow, division by zero, and an invalid
 substituted fixed-array extent are diagnostics. Ordinary runtime parameters
 remain runtime values.
 
@@ -357,7 +361,40 @@ Arithmetic and comparison are infix only:
 
 Method-style arithmetic/comparison forms are not part of the language surface.
 
-### 5.2 Logical Operators
+### 5.2 Integer Bitwise and Shift Operators
+
+Integer bitwise operators are `&`, `^`, and `|`; unary `~` complements every
+bit in its integer lane. Shifts use `<<` and `>>`. These operators accept only
+the builtin integer lanes `u8`, `u16`, `u32`, and `i32`; booleans, floating
+point values, and named types are not integer lanes.
+
+Bitwise binary operands for `&`, `^`, and `|` must use the same lane, and the
+result keeps that lane. An unsuffixed integer literal paired with a typed
+bitwise operand takes that operand's lane when it is representable there. When
+no typed operand determines an expression's result lane, bare operands of
+`&`, `^`, or `|`, a literal operand of unary `~`, and a literal shift's left
+operand use an exact surrounding builtin integer result lane when one is
+available; otherwise integer literals default to `i32`. A bare shift count
+defaults to `i32` and does not inherit the left operand's lane. The result
+context lets `~0`, `1 | 2`, and `1 << 8` produce `u8` values when assigned to
+`u8`; it propagates through literal-only trees, so `(1 | 2) << 8` also
+produces the `u8` value `3`. Out-of-range contextual literals such as `-1` in
+a `u8` bitwise operand are errors. Generic compile-time value expressions
+remain in the signed `i32` domain.
+
+The left shift operand determines a shift's result lane. The right operand may
+be any builtin integer lane, independent of the left lane. Before either shift,
+the count is reduced to its low 3, 4, or 5 bits (`count & (width - 1)` for an
+8-, 16-, or 32-bit left lane). A negative count uses the low bits of its
+two's-complement representation. Left shifts discard bits beyond the result
+lane. `>>` is arithmetic for signed `i32` and logical for unsigned lanes.
+Narrow-lane bitwise, complement, and shift results are reduced to their
+declared width.
+
+Bitwise operators do not have compound-assignment forms. The assignment
+operators remain `=`, `+=`, `-=`, `*=`, `/=`, and `%=`.
+
+### 5.3 Logical Operators
 
 Logical operators are:
 - `&&`
@@ -370,21 +407,31 @@ Semantics:
 - Operands for logical operators must be `bool`.
 - Logical operator results are `bool`.
 
-### 5.3 Assignment Operators
+### 5.4 Assignment Operators
 
 Assignment is infix:
 - `=`
 - `+= -= *= /= %=`
 
-### 5.4 Precedence
+### 5.5 Precedence
 
-Infix expressions follow TypeScript-like precedence for:
-- multiplicative
-- additive
-- relational
-- equality
-- logical operators
-- assignment
+Infix operators follow C-like precedence, from tighter to looser:
+- unary operators, including `!` and `~`
+- multiplicative: `* / %`
+- additive: `+ -`
+- shifts: `<< >>`
+- relational: `< <= > >=`
+- equality: `== !=`
+- bitwise AND: `&`
+- bitwise XOR: `^`
+- bitwise OR: `|`
+- logical AND: `&&`
+- logical OR: `||`
+- assignment: `= += -= *= /= %=`
+
+For example, `flags & mask == expected` parses as `flags & (mask == expected)`;
+write `(flags & mask) == expected` when the comparison applies to the masked
+value.
 
 ## 6. Declarations and Statements
 

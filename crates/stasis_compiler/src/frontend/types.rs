@@ -888,6 +888,28 @@ impl TypeTable {
         }
     }
 
+    /// Width of the language's exact builtin integer lanes. Nominal and ABI-
+    /// compatible types are deliberately excluded.
+    pub fn integer_width_bits(&self, type_id: TypeId) -> Option<u8> {
+        match self.type_key(type_id)? {
+            TypeKey::Builtin(BuiltinType::I32) => Some(32),
+            _ => self.unsigned_integer_bits(type_id),
+        }
+    }
+
+    /// Whether an unsuffixed integer literal can be represented in an exact
+    /// builtin integer lane when an operator supplies its contextual type.
+    pub fn integer_literal_fits(&self, value: i64, type_id: TypeId) -> bool {
+        let Some(bits) = self.integer_width_bits(type_id) else {
+            return false;
+        };
+        if self.unsigned_integer_bits(type_id).is_some() {
+            value >= 0 && value <= (1_i64 << bits) - 1
+        } else {
+            i32::try_from(value).is_ok()
+        }
+    }
+
     pub fn is_integer(&self, type_id: TypeId) -> bool {
         matches!(
             self.type_key(type_id),
@@ -1494,6 +1516,29 @@ impl Default for TypeTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integer_lane_helpers_cover_only_exact_builtin_lanes() {
+        let mut table = TypeTable::new();
+        let nominal = table.intern_named("NominalI32").expect("nominal type");
+
+        assert_eq!(table.integer_width_bits(TYPE_ID_I32), Some(32));
+        assert_eq!(table.integer_width_bits(TYPE_ID_U8), Some(8));
+        assert_eq!(table.integer_width_bits(TYPE_ID_U16), Some(16));
+        assert_eq!(table.integer_width_bits(TYPE_ID_U32), Some(32));
+        assert_eq!(table.integer_width_bits(TYPE_ID_BOOL), None);
+        assert_eq!(table.integer_width_bits(nominal), None);
+
+        assert!(table.integer_literal_fits(i32::MIN as i64, TYPE_ID_I32));
+        assert!(table.integer_literal_fits(i32::MAX as i64, TYPE_ID_I32));
+        assert!(!table.integer_literal_fits(i64::from(i32::MIN) - 1, TYPE_ID_I32));
+        assert!(table.integer_literal_fits(255, TYPE_ID_U8));
+        assert!(!table.integer_literal_fits(-1, TYPE_ID_U8));
+        assert!(!table.integer_literal_fits(256, TYPE_ID_U8));
+        assert!(table.integer_literal_fits(i64::from(u32::MAX), TYPE_ID_U32));
+        assert!(!table.integer_literal_fits(i64::from(u32::MAX) + 1, TYPE_ID_U32));
+        assert!(!table.integer_literal_fits(0, nominal));
+    }
 
     #[test]
     fn type_id_capacity_accepts_last_u16_id_and_rejects_next_without_mutation() {

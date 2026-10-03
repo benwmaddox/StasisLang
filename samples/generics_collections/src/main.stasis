@@ -1,4 +1,5 @@
 import "live_edit_helper.stasis";
+import "bitwise_oracle.stasis";
 import "/vendor/stasis/stdlib/rig2d.stasis";
 import "/vendor/stasis/stdlib/graphics.stasis";
 
@@ -363,6 +364,9 @@ function main(): i32 {
 
     if (live_edit_tick() != 8 || live_edit_tick() != 9) {
         return 19;
+    }
+    if (bitwise_operator_oracle() != 0) {
+        return 20;
     }
     web_bounds_probe_index = 0;
     generics_collections_digest_value = generics_collections_state_digest();

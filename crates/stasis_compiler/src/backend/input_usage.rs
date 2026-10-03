@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::backend::compile_analysis::ConstantValue;
 use crate::compiler::{FunctionId, FunctionMeta};
 use crate::ir::hir::{
-    AssignOp, AssignTarget, ComparisonOp, FunctionHIR, SimpleCondition, SimpleExpr, SimpleStmt,
+    AssignOp, AssignTarget, ComparisonOp, ExprBinaryOp, FunctionHIR, SimpleCondition, SimpleExpr,
+    SimpleStmt,
 };
 use sha2::{Digest, Sha256};
 
@@ -794,6 +795,9 @@ fn visit_expr_with_environment(
                     .collect(),
             });
         }
+        SimpleExpr::Unary { operand, .. } => {
+            visit_expr_with_environment(operand, constants, environment, usage, calls)
+        }
         SimpleExpr::Binary { lhs, rhs, .. } => {
             visit_expr_with_environment(lhs, constants, environment, usage, calls);
             visit_expr_with_environment(rhs, constants, environment, usage, calls);
@@ -1194,6 +1198,9 @@ fn integer_values(
                 _ => None,
             }
         }
+        // Exact input analysis does not carry expression lane types. Complement
+        // and shifts differ for narrow unsigned lanes, so remain conservative.
+        SimpleExpr::Unary { .. } => None,
         SimpleExpr::Binary { lhs, op, rhs } => {
             let lhs = integer_values(lhs, constants, environment)?;
             let rhs = integer_values(rhs, constants, environment)?;
@@ -1203,13 +1210,16 @@ fn integer_values(
                     let lhs = i32::try_from(lhs).ok()?;
                     let rhs = i32::try_from(*rhs).ok()?;
                     let value = match *op {
-                        '+' => Some(lhs.wrapping_add(rhs)),
-                        '-' => Some(lhs.wrapping_sub(rhs)),
-                        '*' => Some(lhs.wrapping_mul(rhs)),
-                        '/' if rhs != 0 => Some(lhs.wrapping_div(rhs)),
-                        '%' if rhs != 0 => Some(lhs.wrapping_rem(rhs)),
-                        '/' | '%' => None,
-                        _ => None,
+                        ExprBinaryOp::Add => Some(lhs.wrapping_add(rhs)),
+                        ExprBinaryOp::Subtract => Some(lhs.wrapping_sub(rhs)),
+                        ExprBinaryOp::Multiply => Some(lhs.wrapping_mul(rhs)),
+                        ExprBinaryOp::Divide if rhs != 0 => Some(lhs.wrapping_div(rhs)),
+                        ExprBinaryOp::Remainder if rhs != 0 => Some(lhs.wrapping_rem(rhs)),
+                        ExprBinaryOp::Divide | ExprBinaryOp::Remainder => None,
+                        ExprBinaryOp::BitAnd => Some(lhs & rhs),
+                        ExprBinaryOp::BitXor => Some(lhs ^ rhs),
+                        ExprBinaryOp::BitOr => Some(lhs | rhs),
+                        ExprBinaryOp::ShiftLeft | ExprBinaryOp::ShiftRight => None,
                     }?;
                     result.insert(i64::from(value));
                     if result.len() > MAX_EXACT_INTEGER_VALUES {
@@ -1237,19 +1247,19 @@ fn integer_interval(
             let lhs = integer_interval(lhs, constants, environment)?;
             let rhs = integer_interval(rhs, constants, environment)?;
             let candidates = match op {
-                '+' => [
+                ExprBinaryOp::Add => [
                     lhs.min.checked_add(rhs.min)?,
                     lhs.min.checked_add(rhs.max)?,
                     lhs.max.checked_add(rhs.min)?,
                     lhs.max.checked_add(rhs.max)?,
                 ],
-                '-' => [
+                ExprBinaryOp::Subtract => [
                     lhs.min.checked_sub(rhs.min)?,
                     lhs.min.checked_sub(rhs.max)?,
                     lhs.max.checked_sub(rhs.min)?,
                     lhs.max.checked_sub(rhs.max)?,
                 ],
-                '*' => [
+                ExprBinaryOp::Multiply => [
                     lhs.min.checked_mul(rhs.min)?,
                     lhs.min.checked_mul(rhs.max)?,
                     lhs.max.checked_mul(rhs.min)?,

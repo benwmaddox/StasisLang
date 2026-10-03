@@ -14,7 +14,7 @@ use crate::frontend::types::{
 };
 use crate::ir::hir::{
     eval_const_i64, AssignOp, AssignTarget, ComparisonOp, ConversionKind, DebugStatement,
-    FunctionHIR, SimpleCondition, SimpleExpr, SimpleStmt,
+    ExprBinaryOp, ExprUnaryOp, FunctionHIR, SimpleCondition, SimpleExpr, SimpleStmt,
 };
 use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
@@ -4720,6 +4720,7 @@ fn collect_call_targets_from_hir(hir: &FunctionHIR) -> BTreeSet<String> {
                     expression(argument, out);
                 }
             }
+            SimpleExpr::Unary { operand, .. } => expression(operand, out),
             SimpleExpr::Binary { lhs, rhs, .. } => {
                 expression(lhs, out);
                 expression(rhs, out);
@@ -12022,7 +12023,44 @@ pub(crate) fn emit_simple_expression(
                 type_id: signature.return_type,
             })
         }
+        SimpleExpr::Unary {
+            op: ExprUnaryOp::BitwiseNot,
+            operand,
+        } => emit_bitwise_not_expression(
+            builder,
+            operand,
+            expected_type,
+            values_by_name,
+            runtime_call_refs,
+            internal_calls,
+            call_signatures,
+            type_table,
+            global_path_types,
+            constant_values,
+            collection_infos,
+            named_struct_field_types,
+            foreach_bindings,
+        ),
         SimpleExpr::Binary { lhs, op, rhs } => {
+            if op.requires_integer_operands() {
+                return emit_integer_bitwise_expression(
+                    builder,
+                    lhs,
+                    *op,
+                    rhs,
+                    expected_type,
+                    values_by_name,
+                    runtime_call_refs,
+                    internal_calls,
+                    call_signatures,
+                    type_table,
+                    global_path_types,
+                    constant_values,
+                    collection_infos,
+                    named_struct_field_types,
+                    foreach_bindings,
+                );
+            }
             let child_expected = match expected_type {
                 Some(TYPE_ID_F32) => Some(TYPE_ID_F32),
                 Some(TYPE_ID_F64) => Some(TYPE_ID_F64),
@@ -12116,17 +12154,23 @@ pub(crate) fn emit_simple_expression(
                 );
                 let unsigned = type_table.unsigned_integer_bits(result_type).is_some();
                 let value = match op {
-                    '+' => builder.ins().iadd(lhs_value.value, rhs_value.value),
-                    '-' => builder.ins().isub(lhs_value.value, rhs_value.value),
-                    '*' => builder.ins().imul(lhs_value.value, rhs_value.value),
-                    '/' if unsigned => builder.ins().udiv(lhs_value.value, rhs_value.value),
-                    '%' if unsigned => builder.ins().urem(lhs_value.value, rhs_value.value),
-                    '/' => builder.ins().sdiv(lhs_value.value, rhs_value.value),
-                    '%' => builder.ins().srem(lhs_value.value, rhs_value.value),
-                    other => {
-                        return Err(format!(
-                            "unsupported binary operator '{other}' in expression"
-                        ))
+                    ExprBinaryOp::Add => builder.ins().iadd(lhs_value.value, rhs_value.value),
+                    ExprBinaryOp::Subtract => builder.ins().isub(lhs_value.value, rhs_value.value),
+                    ExprBinaryOp::Multiply => builder.ins().imul(lhs_value.value, rhs_value.value),
+                    ExprBinaryOp::Divide if unsigned => {
+                        builder.ins().udiv(lhs_value.value, rhs_value.value)
+                    }
+                    ExprBinaryOp::Remainder if unsigned => {
+                        builder.ins().urem(lhs_value.value, rhs_value.value)
+                    }
+                    ExprBinaryOp::Divide => builder.ins().sdiv(lhs_value.value, rhs_value.value),
+                    ExprBinaryOp::Remainder => builder.ins().srem(lhs_value.value, rhs_value.value),
+                    ExprBinaryOp::ShiftLeft
+                    | ExprBinaryOp::ShiftRight
+                    | ExprBinaryOp::BitAnd
+                    | ExprBinaryOp::BitXor
+                    | ExprBinaryOp::BitOr => {
+                        unreachable!("integer-only operators returned above")
                     }
                 };
                 return Ok(ValueBinding {
@@ -12136,23 +12180,30 @@ pub(crate) fn emit_simple_expression(
             }
 
             if lhs_value.type_id == TYPE_ID_F64 || rhs_value.type_id == TYPE_ID_F64 {
-                let (lhs_f64, rhs_f64) =
-                    coerce_numeric_operands_to_f64(builder, lhs_value, rhs_value, *op, type_table)?;
+                let (lhs_f64, rhs_f64) = coerce_numeric_operands_to_f64(
+                    builder,
+                    lhs_value,
+                    rhs_value,
+                    op.spelling(),
+                    type_table,
+                )?;
                 let value = match op {
-                    '+' => builder.ins().fadd(lhs_f64, rhs_f64),
-                    '-' => builder.ins().fsub(lhs_f64, rhs_f64),
-                    '*' => builder.ins().fmul(lhs_f64, rhs_f64),
-                    '/' => builder.ins().fdiv(lhs_f64, rhs_f64),
-                    '%' => {
+                    ExprBinaryOp::Add => builder.ins().fadd(lhs_f64, rhs_f64),
+                    ExprBinaryOp::Subtract => builder.ins().fsub(lhs_f64, rhs_f64),
+                    ExprBinaryOp::Multiply => builder.ins().fmul(lhs_f64, rhs_f64),
+                    ExprBinaryOp::Divide => builder.ins().fdiv(lhs_f64, rhs_f64),
+                    ExprBinaryOp::Remainder => {
                         return Err(
                             "unsupported '%' operator for f64 expression in current jit path"
                                 .to_string(),
                         )
                     }
-                    other => {
-                        return Err(format!(
-                            "unsupported binary operator '{other}' in expression"
-                        ))
+                    ExprBinaryOp::ShiftLeft
+                    | ExprBinaryOp::ShiftRight
+                    | ExprBinaryOp::BitAnd
+                    | ExprBinaryOp::BitXor
+                    | ExprBinaryOp::BitOr => {
+                        unreachable!("integer-only operators returned above")
                     }
                 };
                 return Ok(ValueBinding {
@@ -12161,23 +12212,30 @@ pub(crate) fn emit_simple_expression(
                 });
             }
 
-            let (lhs_f32, rhs_f32) =
-                coerce_numeric_operands_to_f32(builder, lhs_value, rhs_value, *op, type_table)?;
+            let (lhs_f32, rhs_f32) = coerce_numeric_operands_to_f32(
+                builder,
+                lhs_value,
+                rhs_value,
+                op.spelling(),
+                type_table,
+            )?;
             let value = match op {
-                '+' => builder.ins().fadd(lhs_f32, rhs_f32),
-                '-' => builder.ins().fsub(lhs_f32, rhs_f32),
-                '*' => builder.ins().fmul(lhs_f32, rhs_f32),
-                '/' => builder.ins().fdiv(lhs_f32, rhs_f32),
-                '%' => {
+                ExprBinaryOp::Add => builder.ins().fadd(lhs_f32, rhs_f32),
+                ExprBinaryOp::Subtract => builder.ins().fsub(lhs_f32, rhs_f32),
+                ExprBinaryOp::Multiply => builder.ins().fmul(lhs_f32, rhs_f32),
+                ExprBinaryOp::Divide => builder.ins().fdiv(lhs_f32, rhs_f32),
+                ExprBinaryOp::Remainder => {
                     return Err(
                         "unsupported '%' operator for f32 expression in current jit path"
                             .to_string(),
                     )
                 }
-                other => {
-                    return Err(format!(
-                        "unsupported binary operator '{other}' in expression"
-                    ))
+                ExprBinaryOp::ShiftLeft
+                | ExprBinaryOp::ShiftRight
+                | ExprBinaryOp::BitAnd
+                | ExprBinaryOp::BitXor
+                | ExprBinaryOp::BitOr => {
+                    unreachable!("integer-only operators returned above")
                 }
             };
             Ok(ValueBinding {
@@ -12186,6 +12244,392 @@ pub(crate) fn emit_simple_expression(
             })
         }
     }
+}
+
+fn validate_bitwise_literal_context(
+    expression: &SimpleExpr,
+    expected_type: Option<TypeId>,
+    operator: &str,
+    side: &str,
+    type_table: &TypeTable,
+) -> Result<(), String> {
+    let Some(type_id) = expected_type else {
+        return Ok(());
+    };
+    if let Some(value) = expression.contextual_integer_literal_value() {
+        return if type_table.integer_literal_fits(value, type_id) {
+            Ok(())
+        } else {
+            Err(format!(
+                "integer literal {value} does not fit the contextual '{operator}' {side} type {type_id}"
+            ))
+        };
+    }
+    match expression {
+        SimpleExpr::Unary { operand, .. } if operand.is_contextual_integer_expression() => {
+            validate_bitwise_literal_context(operand, expected_type, operator, side, type_table)
+        }
+        SimpleExpr::Binary { lhs, op, rhs } if op.requires_integer_operands() => {
+            if lhs.is_contextual_integer_expression() {
+                validate_bitwise_literal_context(lhs, expected_type, operator, side, type_table)?;
+            }
+            if !op.is_shift() && rhs.is_contextual_integer_expression() {
+                validate_bitwise_literal_context(rhs, expected_type, operator, side, type_table)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_contextual_bitwise_operand(
+    builder: &mut FunctionBuilder<'_>,
+    expression: &SimpleExpr,
+    expected_type: Option<TypeId>,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<ValueBinding, String> {
+    if let (Some(value), Some(type_id)) = (
+        expression.contextual_integer_literal_value(),
+        expected_type.filter(|type_id| type_table.integer_width_bits(*type_id).is_some()),
+    ) {
+        if !type_table.integer_literal_fits(value, type_id) {
+            return Err(format!(
+                "integer literal {value} does not fit contextual type {type_id}"
+            ));
+        }
+        let value = if type_table.unsigned_integer_bits(type_id).is_some() {
+            value as u32 as i32
+        } else {
+            i32::try_from(value).map_err(|_| {
+                format!("integer literal out of i32 range in bitwise expression: {value}")
+            })?
+        };
+        return Ok(ValueBinding {
+            value: builder.ins().iconst(types::I32, i64::from(value)),
+            type_id,
+        });
+    }
+    emit_simple_expression(
+        builder,
+        expression,
+        expected_type,
+        values_by_name,
+        runtime_call_refs,
+        internal_calls,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        foreach_bindings,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_bitwise_not_expression(
+    builder: &mut FunctionBuilder<'_>,
+    operand: &SimpleExpr,
+    expected_type: Option<TypeId>,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<ValueBinding, String> {
+    let operand_expected = operand
+        .is_contextual_integer_expression()
+        .then_some(Some(
+            expected_type
+                .filter(|type_id| type_table.integer_width_bits(*type_id).is_some())
+                .unwrap_or(TYPE_ID_I32),
+        ))
+        .flatten();
+    validate_bitwise_literal_context(
+        operand,
+        operand_expected,
+        ExprUnaryOp::BitwiseNot.spelling(),
+        "operand",
+        type_table,
+    )?;
+    let operand = emit_contextual_bitwise_operand(
+        builder,
+        operand,
+        operand_expected,
+        values_by_name,
+        runtime_call_refs,
+        internal_calls,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        foreach_bindings,
+    )?;
+    if type_table.integer_width_bits(operand.type_id).is_none() {
+        return Err(format!(
+            "'{}' requires an exact builtin integer operand, found type {}",
+            ExprUnaryOp::BitwiseNot.spelling(),
+            operand.type_id,
+        ));
+    }
+    let value = builder.ins().bnot(operand.value);
+    Ok(ValueBinding {
+        value: normalize_unsigned_value(builder, value, operand.type_id, type_table),
+        type_id: operand.type_id,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_integer_bitwise_expression(
+    builder: &mut FunctionBuilder<'_>,
+    lhs: &SimpleExpr,
+    op: ExprBinaryOp,
+    rhs: &SimpleExpr,
+    expected_type: Option<TypeId>,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<ValueBinding, String> {
+    let expected_integer =
+        expected_type.filter(|type_id| type_table.integer_width_bits(*type_id).is_some());
+    let (lhs_value, rhs_value) = if op.is_shift() {
+        let lhs_expected = lhs
+            .is_contextual_integer_expression()
+            .then_some(Some(expected_integer.unwrap_or(TYPE_ID_I32)))
+            .flatten();
+        validate_bitwise_literal_context(lhs, lhs_expected, op.spelling(), "lhs", type_table)?;
+        let lhs_value = emit_contextual_bitwise_operand(
+            builder,
+            lhs,
+            lhs_expected,
+            values_by_name,
+            runtime_call_refs,
+            internal_calls,
+            call_signatures,
+            type_table,
+            global_path_types,
+            constant_values,
+            collection_infos,
+            named_struct_field_types,
+            foreach_bindings,
+        )?;
+        let rhs_expected = rhs
+            .is_contextual_integer_expression()
+            .then_some(Some(TYPE_ID_I32))
+            .flatten();
+        validate_bitwise_literal_context(rhs, rhs_expected, op.spelling(), "rhs", type_table)?;
+        let rhs_value = emit_contextual_bitwise_operand(
+            builder,
+            rhs,
+            rhs_expected,
+            values_by_name,
+            runtime_call_refs,
+            internal_calls,
+            call_signatures,
+            type_table,
+            global_path_types,
+            constant_values,
+            collection_infos,
+            named_struct_field_types,
+            foreach_bindings,
+        )?;
+        (lhs_value, rhs_value)
+    } else if lhs.is_contextual_integer_expression() && rhs.is_contextual_integer_expression() {
+        let contextual_lane = Some(expected_integer.unwrap_or(TYPE_ID_I32));
+        validate_bitwise_literal_context(lhs, contextual_lane, op.spelling(), "lhs", type_table)?;
+        validate_bitwise_literal_context(rhs, contextual_lane, op.spelling(), "rhs", type_table)?;
+        let lhs_value = emit_contextual_bitwise_operand(
+            builder,
+            lhs,
+            contextual_lane,
+            values_by_name,
+            runtime_call_refs,
+            internal_calls,
+            call_signatures,
+            type_table,
+            global_path_types,
+            constant_values,
+            collection_infos,
+            named_struct_field_types,
+            foreach_bindings,
+        )?;
+        let rhs_value = emit_contextual_bitwise_operand(
+            builder,
+            rhs,
+            contextual_lane,
+            values_by_name,
+            runtime_call_refs,
+            internal_calls,
+            call_signatures,
+            type_table,
+            global_path_types,
+            constant_values,
+            collection_infos,
+            named_struct_field_types,
+            foreach_bindings,
+        )?;
+        (lhs_value, rhs_value)
+    } else if lhs.is_contextual_integer_expression() {
+        let rhs_value = emit_contextual_bitwise_operand(
+            builder,
+            rhs,
+            None,
+            values_by_name,
+            runtime_call_refs,
+            internal_calls,
+            call_signatures,
+            type_table,
+            global_path_types,
+            constant_values,
+            collection_infos,
+            named_struct_field_types,
+            foreach_bindings,
+        )?;
+        let lhs_expected = type_table
+            .integer_width_bits(rhs_value.type_id)
+            .is_some()
+            .then_some(rhs_value.type_id);
+        validate_bitwise_literal_context(lhs, lhs_expected, op.spelling(), "lhs", type_table)?;
+        let lhs_value = emit_contextual_bitwise_operand(
+            builder,
+            lhs,
+            lhs_expected,
+            values_by_name,
+            runtime_call_refs,
+            internal_calls,
+            call_signatures,
+            type_table,
+            global_path_types,
+            constant_values,
+            collection_infos,
+            named_struct_field_types,
+            foreach_bindings,
+        )?;
+        (lhs_value, rhs_value)
+    } else {
+        let lhs_value = emit_contextual_bitwise_operand(
+            builder,
+            lhs,
+            None,
+            values_by_name,
+            runtime_call_refs,
+            internal_calls,
+            call_signatures,
+            type_table,
+            global_path_types,
+            constant_values,
+            collection_infos,
+            named_struct_field_types,
+            foreach_bindings,
+        )?;
+        let rhs_expected = rhs
+            .is_contextual_integer_expression()
+            .then(|| {
+                type_table
+                    .integer_width_bits(lhs_value.type_id)
+                    .is_some()
+                    .then_some(lhs_value.type_id)
+            })
+            .flatten();
+        validate_bitwise_literal_context(rhs, rhs_expected, op.spelling(), "rhs", type_table)?;
+        let rhs_value = emit_contextual_bitwise_operand(
+            builder,
+            rhs,
+            rhs_expected,
+            values_by_name,
+            runtime_call_refs,
+            internal_calls,
+            call_signatures,
+            type_table,
+            global_path_types,
+            constant_values,
+            collection_infos,
+            named_struct_field_types,
+            foreach_bindings,
+        )?;
+        (lhs_value, rhs_value)
+    };
+
+    let lhs_width = type_table
+        .integer_width_bits(lhs_value.type_id)
+        .ok_or_else(|| {
+            format!(
+                "'{}' requires an exact builtin integer lhs, found type {}",
+                op.spelling(),
+                lhs_value.type_id,
+            )
+        })?;
+    if type_table.integer_width_bits(rhs_value.type_id).is_none() {
+        return Err(format!(
+            "'{}' requires an exact builtin integer rhs, found type {}",
+            op.spelling(),
+            rhs_value.type_id,
+        ));
+    }
+    if !op.is_shift() && lhs_value.type_id != rhs_value.type_id {
+        return Err(format!(
+            "'{}' requires matching integer lanes, found {} and {}",
+            op.spelling(),
+            lhs_value.type_id,
+            rhs_value.type_id,
+        ));
+    }
+    let shift_count = if op.is_shift() {
+        builder
+            .ins()
+            .band_imm(rhs_value.value, i64::from(lhs_width - 1))
+    } else {
+        rhs_value.value
+    };
+    let value = match op {
+        ExprBinaryOp::BitAnd => builder.ins().band(lhs_value.value, rhs_value.value),
+        ExprBinaryOp::BitXor => builder.ins().bxor(lhs_value.value, rhs_value.value),
+        ExprBinaryOp::BitOr => builder.ins().bor(lhs_value.value, rhs_value.value),
+        ExprBinaryOp::ShiftLeft => builder.ins().ishl(lhs_value.value, shift_count),
+        ExprBinaryOp::ShiftRight
+            if type_table
+                .unsigned_integer_bits(lhs_value.type_id)
+                .is_some() =>
+        {
+            builder.ins().ushr(lhs_value.value, shift_count)
+        }
+        ExprBinaryOp::ShiftRight => builder.ins().sshr(lhs_value.value, shift_count),
+        ExprBinaryOp::Add
+        | ExprBinaryOp::Subtract
+        | ExprBinaryOp::Multiply
+        | ExprBinaryOp::Divide
+        | ExprBinaryOp::Remainder => {
+            unreachable!("integer bitwise lowering received an arithmetic operator")
+        }
+    };
+    Ok(ValueBinding {
+        value: normalize_unsigned_value(builder, value, lhs_value.type_id, type_table),
+        type_id: lhs_value.type_id,
+    })
 }
 
 fn nested_fixed_lane_info(
@@ -12283,7 +12727,7 @@ pub(crate) fn coerce_numeric_operands_to_f32(
     builder: &mut FunctionBuilder<'_>,
     lhs: ValueBinding,
     rhs: ValueBinding,
-    op: char,
+    op: &str,
     type_table: &TypeTable,
 ) -> Result<(Value, Value), String> {
     let lhs_value = if lhs.type_id == TYPE_ID_F32 {
@@ -12321,7 +12765,7 @@ pub(crate) fn coerce_numeric_operands_to_f64(
     builder: &mut FunctionBuilder<'_>,
     lhs: ValueBinding,
     rhs: ValueBinding,
-    op: char,
+    op: &str,
     type_table: &TypeTable,
 ) -> Result<(Value, Value), String> {
     let lhs_value = if lhs.type_id == TYPE_ID_F64 {
@@ -12450,6 +12894,7 @@ impl ForeachCacheScanner<'_> {
         locals: &BTreeMap<String, Option<TypeId>>,
     ) -> bool {
         match expression {
+            SimpleExpr::Unary { operand, .. } => self.expression(operand, dominates, locals),
             SimpleExpr::Identifier(name) => {
                 if name == self.item_name {
                     return false;
@@ -14555,7 +15000,12 @@ fn canonical_fixed_array_loop_bound(
     let SimpleStmt::Assign {
         target: AssignTarget::Local(step_index),
         op: AssignOp::Set,
-        expression: SimpleExpr::Binary { lhs, op: '+', rhs },
+        expression:
+            SimpleExpr::Binary {
+                lhs,
+                op: ExprBinaryOp::Add,
+                rhs,
+            },
     } = step
     else {
         return None;
@@ -15419,12 +15869,12 @@ pub(crate) fn emit_simple_condition(
 
             if lhs.type_id == TYPE_ID_F64 || rhs.type_id == TYPE_ID_F64 {
                 let (lhs_f64, rhs_f64) =
-                    coerce_numeric_operands_to_f64(builder, lhs, rhs, '?', type_table)?;
+                    coerce_numeric_operands_to_f64(builder, lhs, rhs, "?", type_table)?;
                 return Ok(builder.ins().fcmp(floatcc, lhs_f64, rhs_f64));
             }
 
             let (lhs_f32, rhs_f32) =
-                coerce_numeric_operands_to_f32(builder, lhs, rhs, '?', type_table)?;
+                coerce_numeric_operands_to_f32(builder, lhs, rhs, "?", type_table)?;
             Ok(builder.ins().fcmp(floatcc, lhs_f32, rhs_f32))
         }
         SimpleCondition::Expr(expression) => {

@@ -1,7 +1,7 @@
 use crate::frontend::types::TypeTable;
 use crate::ir::hir::{
     eval_const_i64, AssignOp, AssignTarget, ComparisonOp, ConversionKind, DebugStatement,
-    ParsedSimpleStatements, SimpleCondition, SimpleExpr, SimpleStmt,
+    ExprBinaryOp, ExprUnaryOp, ParsedSimpleStatements, SimpleCondition, SimpleExpr, SimpleStmt,
 };
 
 pub(crate) fn parse_simple_statements_with_debug(
@@ -710,233 +710,7 @@ fn parse_if_statement_at(
 }
 
 pub(crate) fn parse_simple_condition(condition_text: &str) -> Result<SimpleCondition, String> {
-    parse_or_condition(condition_text.trim())
-}
-
-pub(crate) fn parse_or_condition(condition_text: &str) -> Result<SimpleCondition, String> {
-    let parts = split_top_level_condition(condition_text, b"||");
-    if parts.len() == 1 {
-        return parse_and_condition(parts[0]);
-    }
-    let mut cursor = parts.into_iter();
-    let first = cursor
-        .next()
-        .ok_or_else(|| format!("invalid logical-or condition '{}'", condition_text))?;
-    let mut out = parse_and_condition(first)?;
-    for part in cursor {
-        let rhs = parse_and_condition(part)?;
-        out = SimpleCondition::Or(Box::new(out), Box::new(rhs));
-    }
-    Ok(out)
-}
-
-pub(crate) fn parse_and_condition(condition_text: &str) -> Result<SimpleCondition, String> {
-    let parts = split_top_level_condition(condition_text, b"&&");
-    if parts.len() == 1 {
-        return parse_not_condition(parts[0]);
-    }
-    let mut cursor = parts.into_iter();
-    let first = cursor
-        .next()
-        .ok_or_else(|| format!("invalid logical-and condition '{}'", condition_text))?;
-    let mut out = parse_not_condition(first)?;
-    for part in cursor {
-        let rhs = parse_not_condition(part)?;
-        out = SimpleCondition::And(Box::new(out), Box::new(rhs));
-    }
-    Ok(out)
-}
-
-pub(crate) fn parse_not_condition(condition_text: &str) -> Result<SimpleCondition, String> {
-    let trimmed = condition_text.trim();
-    if trimmed.is_empty() {
-        return Err("condition expression cannot be empty".to_string());
-    }
-    if let Some(rest) = trimmed.strip_prefix('!') {
-        let inner = parse_not_condition(rest)?;
-        return Ok(SimpleCondition::Not(Box::new(inner)));
-    }
-    parse_condition_atom(trimmed)
-}
-
-pub(crate) fn parse_condition_atom(condition_text: &str) -> Result<SimpleCondition, String> {
-    let trimmed = condition_text.trim();
-    if trimmed.is_empty() {
-        return Err("condition expression cannot be empty".to_string());
-    }
-    if trimmed.starts_with('(') && trimmed.ends_with(')') {
-        if let Some(close_index) = find_matching_delimiter(trimmed, 0, b'(', b')') {
-            if close_index == trimmed.len() - 1 {
-                let inner = &trimmed[1..trimmed.len() - 1];
-                return parse_or_condition(inner.trim());
-            }
-        }
-    }
-    if let Some((op, position, width)) = find_condition_operator(trimmed) {
-        let lhs_text = trimmed[..position].trim();
-        let rhs_text = trimmed[position + width..].trim();
-        if lhs_text.is_empty() || rhs_text.is_empty() {
-            return Err(format!(
-                "invalid if condition '{}': both sides of comparison are required",
-                trimmed
-            ));
-        }
-        return Ok(SimpleCondition::Comparison {
-            lhs: parse_simple_expression(lhs_text)?,
-            op,
-            rhs: parse_simple_expression(rhs_text)?,
-        });
-    }
-    Ok(SimpleCondition::Expr(parse_simple_expression(trimmed)?))
-}
-
-pub(crate) fn split_top_level_condition<'a>(condition_text: &'a str, op: &[u8; 2]) -> Vec<&'a str> {
-    let bytes = condition_text.as_bytes();
-    let mut parts: Vec<&'a str> = Vec::new();
-    let mut depth = 0i32;
-    let mut segment_start = 0usize;
-    let mut index = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    while index < bytes.len() {
-        if in_string {
-            if escaped {
-                escaped = false;
-                index += 1;
-                continue;
-            }
-            if bytes[index] == b'\\' {
-                escaped = true;
-                index += 1;
-                continue;
-            }
-            if bytes[index] == b'"' {
-                in_string = false;
-            }
-            index += 1;
-            continue;
-        }
-        if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'/' {
-            index += 2;
-            while index < bytes.len() && bytes[index] != b'\n' {
-                index += 1;
-            }
-            continue;
-        }
-        if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
-            index += 2;
-            while index + 1 < bytes.len() {
-                if bytes[index] == b'*' && bytes[index + 1] == b'/' {
-                    index += 2;
-                    break;
-                }
-                index += 1;
-            }
-            continue;
-        }
-        match bytes[index] {
-            b'"' => {
-                in_string = true;
-                index += 1;
-                continue;
-            }
-            b'(' => {
-                depth += 1;
-                index += 1;
-                continue;
-            }
-            b')' => {
-                depth -= 1;
-                index += 1;
-                continue;
-            }
-            _ => {}
-        }
-        if depth == 0
-            && index + 1 < bytes.len()
-            && bytes[index] == op[0]
-            && bytes[index + 1] == op[1]
-        {
-            parts.push(condition_text[segment_start..index].trim());
-            segment_start = index + 2;
-            index += 2;
-            continue;
-        }
-        index += 1;
-    }
-    parts.push(condition_text[segment_start..].trim());
-    parts
-}
-
-pub(crate) fn find_condition_operator(
-    condition_text: &str,
-) -> Option<(ComparisonOp, usize, usize)> {
-    let bytes = condition_text.as_bytes();
-    let mut depth = 0i32;
-    let mut index = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    while index < bytes.len() {
-        if in_string {
-            if escaped {
-                escaped = false;
-                index += 1;
-                continue;
-            }
-            if bytes[index] == b'\\' {
-                escaped = true;
-                index += 1;
-                continue;
-            }
-            if bytes[index] == b'"' {
-                in_string = false;
-            }
-            index += 1;
-            continue;
-        }
-        if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'/' {
-            index += 2;
-            while index < bytes.len() && bytes[index] != b'\n' {
-                index += 1;
-            }
-            continue;
-        }
-        if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
-            index += 2;
-            while index + 1 < bytes.len() {
-                if bytes[index] == b'*' && bytes[index + 1] == b'/' {
-                    index += 2;
-                    break;
-                }
-                index += 1;
-            }
-            continue;
-        }
-        match bytes[index] {
-            b'"' => in_string = true,
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            b'=' | b'!' | b'<' | b'>' if depth == 0 => {
-                if index + 1 < bytes.len() {
-                    match (bytes[index], bytes[index + 1]) {
-                        (b'=', b'=') => return Some((ComparisonOp::Eq, index, 2)),
-                        (b'!', b'=') => return Some((ComparisonOp::Ne, index, 2)),
-                        (b'<', b'=') => return Some((ComparisonOp::Le, index, 2)),
-                        (b'>', b'=') => return Some((ComparisonOp::Ge, index, 2)),
-                        _ => {}
-                    }
-                }
-                match bytes[index] {
-                    b'<' => return Some((ComparisonOp::Lt, index, 1)),
-                    b'>' => return Some((ComparisonOp::Gt, index, 1)),
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    None
+    Ok(parse_expression(condition_text.trim())?.into_condition())
 }
 
 pub(crate) fn skip_ascii_whitespace(source: &str, mut cursor: usize) -> usize {
@@ -1355,6 +1129,14 @@ pub(crate) fn snippet_from(source: &str, cursor: usize) -> String {
 }
 
 pub(crate) fn parse_simple_expression(expression: &str) -> Result<SimpleExpr, String> {
+    parse_expression(expression)?.into_value()
+}
+
+pub(crate) fn parse_value_expression(expression: &str) -> Result<SimpleExpr, String> {
+    parse_expression(expression)?.into_expression()
+}
+
+fn parse_expression(expression: &str) -> Result<ParsedExpression, String> {
     let tokens = tokenize_simple_expression(expression)?;
     let mut parser = ExprParser {
         tokens: &tokens,
@@ -1370,47 +1152,55 @@ pub(crate) fn parse_simple_expression(expression: &str) -> Result<SimpleExpr, St
     Ok(parsed)
 }
 
-pub(crate) fn parse_value_expression(expression: &str) -> Result<SimpleExpr, String> {
-    match parse_simple_expression(expression) {
-        Ok(parsed) => Ok(parsed),
-        Err(primary_error) => {
-            if !looks_like_condition_expression(expression) {
-                return Err(primary_error);
-            }
-            match parse_simple_condition(expression) {
-                Ok(condition) => Ok(SimpleExpr::Condition(Box::new(condition))),
-                Err(_) => Err(primary_error),
-            }
+#[derive(Debug, Clone, PartialEq)]
+enum ParsedExpression {
+    Value(SimpleExpr),
+    Condition(SimpleCondition),
+}
+
+impl ParsedExpression {
+    fn into_value(self) -> Result<SimpleExpr, String> {
+        match self {
+            Self::Value(expression) => Ok(expression),
+            Self::Condition(_) => Err("condition cannot be used in a scalar expression".into()),
+        }
+    }
+
+    fn into_expression(self) -> Result<SimpleExpr, String> {
+        Ok(match self {
+            Self::Value(expression) => expression,
+            Self::Condition(condition) => SimpleExpr::Condition(Box::new(condition)),
+        })
+    }
+
+    fn into_condition(self) -> SimpleCondition {
+        match self {
+            Self::Value(expression) => SimpleCondition::Expr(expression),
+            Self::Condition(condition) => condition,
         }
     }
 }
 
-pub(crate) fn looks_like_condition_expression(expression: &str) -> bool {
-    let bytes = expression.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte == b'<' || byte == b'>' {
-            return true;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InfixOperator {
+    Binary(ExprBinaryOp),
+    Compare(ComparisonOp),
+    And,
+    Or,
+}
+
+impl InfixOperator {
+    fn precedence(self) -> u8 {
+        match self {
+            Self::Binary(operator) => operator.precedence(),
+            Self::Compare(
+                ComparisonOp::Lt | ComparisonOp::Le | ComparisonOp::Gt | ComparisonOp::Ge,
+            ) => 70,
+            Self::Compare(ComparisonOp::Eq | ComparisonOp::Ne) => 65,
+            Self::And => 30,
+            Self::Or => 20,
         }
-        if byte == b'=' && index + 1 < bytes.len() && bytes[index + 1] == b'=' {
-            return true;
-        }
-        if byte == b'!' {
-            if index + 1 < bytes.len() && bytes[index + 1] == b'=' {
-                return true;
-            }
-            return true;
-        }
-        if byte == b'&' && index + 1 < bytes.len() && bytes[index + 1] == b'&' {
-            return true;
-        }
-        if byte == b'|' && index + 1 < bytes.len() && bytes[index + 1] == b'|' {
-            return true;
-        }
-        index += 1;
     }
-    false
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1419,7 +1209,12 @@ pub(crate) enum ExprToken {
     Float(f64),
     StringLiteral(String),
     Identifier(String),
-    Op(char),
+    Operator(ExprBinaryOp),
+    Compare(ComparisonOp),
+    LogicalNot,
+    BitwiseNot,
+    LogicalAnd,
+    LogicalOr,
     Comma,
     ColonColon,
     Dot,
@@ -1568,8 +1363,60 @@ pub(crate) fn tokenize_simple_expression(expression: &str) -> Result<Vec<ExprTok
         }
         match byte {
             b'+' | b'-' | b'*' | b'/' | b'%' => {
-                tokens.push(ExprToken::Op(byte as char));
+                let operator = match byte {
+                    b'+' => ExprBinaryOp::Add,
+                    b'-' => ExprBinaryOp::Subtract,
+                    b'*' => ExprBinaryOp::Multiply,
+                    b'/' => ExprBinaryOp::Divide,
+                    b'%' => ExprBinaryOp::Remainder,
+                    _ => unreachable!(),
+                };
+                tokens.push(ExprToken::Operator(operator));
                 index += 1;
+            }
+            b'&' if index + 1 < bytes.len() && bytes[index + 1] == b'&' => {
+                tokens.push(ExprToken::LogicalAnd);
+                index += 2;
+            }
+            b'&' => {
+                tokens.push(ExprToken::Operator(ExprBinaryOp::BitAnd));
+                index += 1;
+            }
+            b'|' if index + 1 < bytes.len() && bytes[index + 1] == b'|' => {
+                tokens.push(ExprToken::LogicalOr);
+                index += 2;
+            }
+            b'|' => {
+                tokens.push(ExprToken::Operator(ExprBinaryOp::BitOr));
+                index += 1;
+            }
+            b'^' => {
+                tokens.push(ExprToken::Operator(ExprBinaryOp::BitXor));
+                index += 1;
+            }
+            b'~' => {
+                tokens.push(ExprToken::BitwiseNot);
+                index += 1;
+            }
+            b'!' if index + 1 < bytes.len() && bytes[index + 1] == b'=' => {
+                tokens.push(ExprToken::Compare(ComparisonOp::Ne));
+                index += 2;
+            }
+            b'!' => {
+                tokens.push(ExprToken::LogicalNot);
+                index += 1;
+            }
+            b'=' if index + 1 < bytes.len() && bytes[index + 1] == b'=' => {
+                tokens.push(ExprToken::Compare(ComparisonOp::Eq));
+                index += 2;
+            }
+            b'<' if index + 1 < bytes.len() && bytes[index + 1] == b'<' => {
+                tokens.push(ExprToken::Operator(ExprBinaryOp::ShiftLeft));
+                index += 2;
+            }
+            b'<' if index + 1 < bytes.len() && bytes[index + 1] == b'=' => {
+                tokens.push(ExprToken::Compare(ComparisonOp::Le));
+                index += 2;
             }
             b',' => {
                 tokens.push(ExprToken::Comma);
@@ -1586,6 +1433,14 @@ pub(crate) fn tokenize_simple_expression(expression: &str) -> Result<Vec<ExprTok
             b'<' => {
                 tokens.push(ExprToken::Less);
                 index += 1;
+            }
+            b'>' if index + 1 < bytes.len() && bytes[index + 1] == b'>' => {
+                tokens.push(ExprToken::Operator(ExprBinaryOp::ShiftRight));
+                index += 2;
+            }
+            b'>' if index + 1 < bytes.len() && bytes[index + 1] == b'=' => {
+                tokens.push(ExprToken::Compare(ComparisonOp::Ge));
+                index += 2;
             }
             b'>' => {
                 tokens.push(ExprToken::Greater);
@@ -1624,24 +1479,46 @@ pub(crate) struct ExprParser<'a> {
 }
 
 impl ExprParser<'_> {
-    fn parse_precedence(&mut self, min_precedence: u8) -> Result<SimpleExpr, String> {
+    fn parse_precedence(&mut self, min_precedence: u8) -> Result<ParsedExpression, String> {
         let mut lhs = self.parse_primary()?;
-        while let Some((operator, precedence)) = self.peek_binary_operator() {
+        while let Some((operator, precedence)) = self.peek_infix_operator() {
             if precedence < min_precedence {
                 break;
             }
             self.cursor += 1;
             let rhs = self.parse_precedence(precedence + 1)?;
-            lhs = SimpleExpr::Binary {
-                lhs: Box::new(lhs),
-                op: operator,
-                rhs: Box::new(rhs),
+            lhs = match operator {
+                InfixOperator::Binary(operator) => {
+                    let (lhs, rhs) = if operator.requires_integer_operands() {
+                        (lhs.into_expression()?, rhs.into_expression()?)
+                    } else {
+                        (lhs.into_value()?, rhs.into_value()?)
+                    };
+                    ParsedExpression::Value(SimpleExpr::Binary {
+                        lhs: Box::new(lhs),
+                        op: operator,
+                        rhs: Box::new(rhs),
+                    })
+                }
+                InfixOperator::Compare(op) => {
+                    let lhs = lhs.into_expression()?;
+                    let rhs = rhs.into_expression()?;
+                    ParsedExpression::Condition(SimpleCondition::Comparison { lhs, op, rhs })
+                }
+                InfixOperator::And => ParsedExpression::Condition(SimpleCondition::And(
+                    Box::new(lhs.into_condition()),
+                    Box::new(rhs.into_condition()),
+                )),
+                InfixOperator::Or => ParsedExpression::Condition(SimpleCondition::Or(
+                    Box::new(lhs.into_condition()),
+                    Box::new(rhs.into_condition()),
+                )),
             };
         }
         Ok(lhs)
     }
 
-    fn parse_primary(&mut self) -> Result<SimpleExpr, String> {
+    fn parse_primary(&mut self) -> Result<ParsedExpression, String> {
         let token = self
             .tokens
             .get(self.cursor)
@@ -1649,15 +1526,17 @@ impl ExprParser<'_> {
             .clone();
         self.cursor += 1;
         match token {
-            ExprToken::Int(value) => Ok(SimpleExpr::Int(value)),
-            ExprToken::Float(value) => Ok(SimpleExpr::Float(value)),
-            ExprToken::StringLiteral(value) => Ok(SimpleExpr::StringLiteral(value)),
+            ExprToken::Int(value) => Ok(ParsedExpression::Value(SimpleExpr::Int(value))),
+            ExprToken::Float(value) => Ok(ParsedExpression::Value(SimpleExpr::Float(value))),
+            ExprToken::StringLiteral(value) => {
+                Ok(ParsedExpression::Value(SimpleExpr::StringLiteral(value)))
+            }
             ExprToken::Identifier(name) => {
                 if name == "true" {
-                    return Ok(SimpleExpr::Bool(true));
+                    return Ok(ParsedExpression::Value(SimpleExpr::Bool(true)));
                 }
                 if name == "false" {
-                    return Ok(SimpleExpr::Bool(false));
+                    return Ok(ParsedExpression::Value(SimpleExpr::Bool(false)));
                 }
                 self.consume_explicit_generic_arguments()?;
                 if matches!(self.tokens.get(self.cursor), Some(ExprToken::LParen)) {
@@ -1665,7 +1544,7 @@ impl ExprParser<'_> {
                     let mut args = Vec::new();
                     if !matches!(self.tokens.get(self.cursor), Some(ExprToken::RParen)) {
                         loop {
-                            args.push(self.parse_precedence(0)?);
+                            args.push(self.parse_precedence(0)?.into_expression()?);
                             if matches!(self.tokens.get(self.cursor), Some(ExprToken::Comma)) {
                                 self.cursor += 1;
                                 continue;
@@ -1676,27 +1555,41 @@ impl ExprParser<'_> {
                     match self.tokens.get(self.cursor) {
                         Some(ExprToken::RParen) => {
                             self.cursor += 1;
-                            Ok(SimpleExpr::Call { target: name, args })
+                            Ok(ParsedExpression::Value(SimpleExpr::Call {
+                                target: name,
+                                args,
+                            }))
                         }
                         _ => Err("expected ')' after call arguments".to_string()),
                     }
                 } else {
                     self.parse_identifier_access_chain(name)
+                        .map(ParsedExpression::Value)
                 }
             }
-            ExprToken::Op('-') => {
-                let rhs = self.parse_primary()?;
+            ExprToken::Operator(ExprBinaryOp::Subtract) => {
+                let rhs = self.parse_precedence(110)?.into_value()?;
                 let lhs = match rhs {
                     SimpleExpr::Float(_) => SimpleExpr::Float(0.0),
                     _ => SimpleExpr::Int(0),
                 };
-                Ok(SimpleExpr::Binary {
+                Ok(ParsedExpression::Value(SimpleExpr::Binary {
                     lhs: Box::new(lhs),
-                    op: '-',
+                    op: ExprBinaryOp::Subtract,
                     rhs: Box::new(rhs),
-                })
+                }))
             }
-            ExprToken::Op('+') => self.parse_primary(),
+            ExprToken::Operator(ExprBinaryOp::Add) => self.parse_precedence(110),
+            ExprToken::BitwiseNot => {
+                let operand = self.parse_precedence(110)?.into_value()?;
+                Ok(ParsedExpression::Value(SimpleExpr::Unary {
+                    op: ExprUnaryOp::BitwiseNot,
+                    operand: Box::new(operand),
+                }))
+            }
+            ExprToken::LogicalNot => Ok(ParsedExpression::Condition(SimpleCondition::Not(
+                Box::new(self.parse_precedence(110)?.into_condition()),
+            ))),
             ExprToken::LParen => {
                 let expr = self.parse_precedence(0)?;
                 match self.tokens.get(self.cursor) {
@@ -1765,7 +1658,7 @@ impl ExprParser<'_> {
                     let mut args = vec![receiver];
                     if !matches!(self.tokens.get(self.cursor), Some(ExprToken::RParen)) {
                         loop {
-                            args.push(self.parse_precedence(0)?);
+                            args.push(self.parse_precedence(0)?.into_expression()?);
                             if matches!(self.tokens.get(self.cursor), Some(ExprToken::Comma)) {
                                 self.cursor += 1;
                                 continue;
@@ -1803,7 +1696,7 @@ impl ExprParser<'_> {
             }
             if matches!(self.tokens.get(self.cursor), Some(ExprToken::LBracket)) {
                 self.cursor += 1;
-                let expression = self.parse_precedence(0)?;
+                let expression = self.parse_precedence(0)?.into_value()?;
                 if let Some(const_i64) = eval_const_i64(&expression) {
                     if const_i64 < 0 {
                         return Err(
@@ -1878,6 +1771,17 @@ impl ExprParser<'_> {
                         return Ok(cursor + 1);
                     }
                 }
+                ExprToken::Operator(ExprBinaryOp::ShiftRight) if depth >= 2 => {
+                    depth -= 2;
+                    if depth == 0 {
+                        if !has_argument {
+                            return Err(
+                                "explicit generic call requires at least one argument".to_string()
+                            );
+                        }
+                        return Ok(cursor + 1);
+                    }
+                }
                 ExprToken::Comma if depth == 1 => {}
                 ExprToken::ColonColon => {
                     return Err("nested explicit generic call is not a type argument".to_string())
@@ -1890,15 +1794,152 @@ impl ExprParser<'_> {
         Err("missing closing '>' in explicit generic call".to_string())
     }
 
-    fn peek_binary_operator(&self) -> Option<(char, u8)> {
-        let ExprToken::Op(op) = self.tokens.get(self.cursor)? else {
-            return None;
-        };
-        let precedence = match *op {
-            '*' | '/' | '%' => 20,
-            '+' | '-' => 10,
+    fn peek_infix_operator(&self) -> Option<(InfixOperator, u8)> {
+        let operator = match self.tokens.get(self.cursor)? {
+            ExprToken::Operator(operator) => InfixOperator::Binary(*operator),
+            ExprToken::Compare(operator) => InfixOperator::Compare(*operator),
+            ExprToken::Less => InfixOperator::Compare(ComparisonOp::Lt),
+            ExprToken::Greater => InfixOperator::Compare(ComparisonOp::Gt),
+            ExprToken::LogicalAnd => InfixOperator::And,
+            ExprToken::LogicalOr => InfixOperator::Or,
             _ => return None,
         };
-        Some((*op, precedence))
+        Some((operator, operator.precedence()))
+    }
+}
+
+#[cfg(test)]
+mod expression_parser_tests {
+    use super::*;
+
+    #[test]
+    fn parses_c_integer_operator_precedence() {
+        let bitwise = parse_simple_expression("1 | 2 ^ 3 & 4").expect("bitwise expression");
+        let SimpleExpr::Binary {
+            op: ExprBinaryOp::BitOr,
+            lhs,
+            rhs,
+        } = bitwise
+        else {
+            panic!("bitwise-or binds loosest: {bitwise:?}");
+        };
+        assert!(matches!(*lhs, SimpleExpr::Int(1)));
+        let SimpleExpr::Binary {
+            op: ExprBinaryOp::BitXor,
+            lhs,
+            rhs,
+        } = *rhs
+        else {
+            panic!("xor binds inside or");
+        };
+        assert!(matches!(*lhs, SimpleExpr::Int(2)));
+        let SimpleExpr::Binary {
+            op: ExprBinaryOp::BitAnd,
+            lhs,
+            rhs,
+        } = *rhs
+        else {
+            panic!("and binds inside xor");
+        };
+        assert!(matches!(*lhs, SimpleExpr::Int(3)));
+        assert!(matches!(*rhs, SimpleExpr::Int(4)));
+
+        let shifted = parse_simple_expression("1 + 2 << 1").expect("addition before shift");
+        let SimpleExpr::Binary {
+            op: ExprBinaryOp::ShiftLeft,
+            lhs,
+            rhs,
+        } = shifted
+        else {
+            panic!("shift binds looser than addition");
+        };
+        assert!(matches!(*rhs, SimpleExpr::Int(1)));
+        assert!(matches!(
+            *lhs,
+            SimpleExpr::Binary {
+                op: ExprBinaryOp::Add,
+                ..
+            }
+        ));
+
+        let shifted = parse_simple_expression("8 >> 1 + 1").expect("addition in shift count");
+        assert!(matches!(
+            shifted,
+            SimpleExpr::Binary {
+                op: ExprBinaryOp::ShiftRight,
+                lhs,
+                rhs,
+            } if matches!(*lhs, SimpleExpr::Int(8))
+                && matches!(*rhs, SimpleExpr::Binary { op: ExprBinaryOp::Add, .. })
+        ));
+    }
+
+    #[test]
+    fn comparison_binding_and_parentheses_follow_c_precedence() {
+        let unparenthesized = parse_value_expression("a & b == c").expect("mixed expression");
+        assert!(matches!(
+            unparenthesized,
+            SimpleExpr::Binary {
+                op: ExprBinaryOp::BitAnd,
+                lhs,
+                rhs,
+            } if matches!(lhs.as_ref(), SimpleExpr::Identifier(name) if name == "a")
+                && matches!(rhs.as_ref(), SimpleExpr::Condition(condition)
+                    if matches!(condition.as_ref(), SimpleCondition::Comparison {
+                        lhs: SimpleExpr::Identifier(name),
+                        op: ComparisonOp::Eq,
+                        rhs: SimpleExpr::Identifier(other),
+                    } if name == "b" && other == "c"))
+        ));
+
+        let parenthesized = parse_simple_condition("(a & b) == c").expect("flags comparison");
+        assert!(matches!(
+            parenthesized,
+            SimpleCondition::Comparison {
+                lhs: SimpleExpr::Binary { op: ExprBinaryOp::BitAnd, .. },
+                op: ComparisonOp::Eq,
+                rhs: SimpleExpr::Identifier(ref name),
+            } if name == "c"
+        ));
+    }
+
+    #[test]
+    fn condition_and_value_contexts_share_tokens_and_keep_short_circuit_tree() {
+        let condition = parse_simple_condition("a && b || c").expect("logical condition");
+        assert!(matches!(
+            condition,
+            SimpleCondition::Or(lhs, rhs)
+                if matches!(*lhs, SimpleCondition::And(_, _))
+                    && matches!(*rhs, SimpleCondition::Expr(SimpleExpr::Identifier(ref name)) if name == "c")
+        ));
+
+        let call = parse_simple_expression("check(a == b)").expect("boolean call argument");
+        assert!(matches!(
+            call,
+            SimpleExpr::Call { args, .. }
+                if matches!(args.as_slice(), [SimpleExpr::Condition(condition)]
+                    if matches!(condition.as_ref(), SimpleCondition::Comparison { op: ComparisonOp::Eq, .. }))
+        ));
+
+        let complement = parse_simple_expression("~flags").expect("bitwise complement");
+        assert!(matches!(
+            complement,
+            SimpleExpr::Unary {
+                op: ExprUnaryOp::BitwiseNot,
+                operand,
+            } if matches!(*operand, SimpleExpr::Identifier(ref name) if name == "flags")
+        ));
+    }
+
+    #[test]
+    fn shift_tokens_do_not_break_nested_generic_angle_diagnostics() {
+        let error = parse_simple_expression("check::<Outer<Inner>>")
+            .expect_err("explicit generics remain unsupported");
+        assert!(
+            error.contains("explicit generic function calls are not supported"),
+            "{error}"
+        );
+        assert!(parse_simple_expression("1 << 2").is_ok());
+        assert!(parse_simple_expression("4 >> 1").is_ok());
     }
 }

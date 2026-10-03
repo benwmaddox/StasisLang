@@ -154,6 +154,9 @@ fn collect_expression_references(
                 collect_expression_references(argument, references, scopes);
             }
         }
+        SimpleExpr::Unary { operand, .. } => {
+            collect_expression_references(operand, references, scopes)
+        }
         SimpleExpr::Binary { lhs, rhs, .. } => {
             collect_expression_references(lhs, references, scopes);
             collect_expression_references(rhs, references, scopes);

@@ -24,7 +24,8 @@ use crate::frontend::types::{
 };
 use crate::ir::hir::FunctionHIR;
 use crate::ir::hir::{
-    AssignOp, AssignTarget, ComparisonOp, SimpleCondition, SimpleExpr, SimpleStmt,
+    AssignOp, AssignTarget, ComparisonOp, ExprBinaryOp, ExprUnaryOp, SimpleCondition, SimpleExpr,
+    SimpleStmt,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -2016,6 +2017,7 @@ fn collect_calls(statements: &[SimpleStmt], out: &mut BTreeSet<String>) {
                     expression(arg, out);
                 }
             }
+            SimpleExpr::Unary { operand, .. } => expression(operand, out),
             SimpleExpr::Binary { lhs, rhs, .. } => {
                 expression(lhs, out);
                 expression(rhs, out);
@@ -6116,6 +6118,228 @@ fn infer_struct_view_type(value: &SimpleExpr, context: &EncodeContext<'_>) -> Op
     }
 }
 
+fn validate_web_bitwise_literal_context(
+    expression: &SimpleExpr,
+    expected: Option<TypeId>,
+    operator: &str,
+    side: &str,
+    types: &TypeTable,
+) -> Result<(), String> {
+    let Some(type_id) = expected else {
+        return Ok(());
+    };
+    if let Some(value) = expression.contextual_integer_literal_value() {
+        return if types.integer_literal_fits(value, type_id) {
+            Ok(())
+        } else {
+            Err(format!(
+                "integer literal {value} does not fit the contextual web '{operator}' {side} type {type_id}"
+            ))
+        };
+    }
+    match expression {
+        SimpleExpr::Unary { operand, .. } if operand.is_contextual_integer_expression() => {
+            validate_web_bitwise_literal_context(operand, expected, operator, side, types)
+        }
+        SimpleExpr::Binary { lhs, op, rhs } if op.requires_integer_operands() => {
+            if lhs.is_contextual_integer_expression() {
+                validate_web_bitwise_literal_context(lhs, expected, operator, side, types)?;
+            }
+            if !op.is_shift() && rhs.is_contextual_integer_expression() {
+                validate_web_bitwise_literal_context(rhs, expected, operator, side, types)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn encode_contextual_bitwise_operand(
+    expression: &SimpleExpr,
+    expected: Option<TypeId>,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    if let (Some(value), Some(type_id)) = (
+        expression.contextual_integer_literal_value(),
+        expected.filter(|type_id| context.types.integer_width_bits(*type_id).is_some()),
+    ) {
+        if !context.types.integer_literal_fits(value, type_id) {
+            return Err(format!(
+                "integer literal {value} does not fit contextual web type {type_id}"
+            ));
+        }
+        out.push(0x41);
+        sleb(value as i32, out);
+        return Ok(type_id);
+    }
+    encode_expr_as(expression, expected, context, out)
+}
+
+fn encode_narrow_integer_normalization(type_id: TypeId, types: &TypeTable, out: &mut Vec<u8>) {
+    let mask = match types.unsigned_integer_bits(type_id) {
+        Some(8) => 0xff,
+        Some(16) => 0xffff,
+        _ => return,
+    };
+    out.push(0x41);
+    sleb(mask, out);
+    out.push(0x71);
+}
+
+fn bitwise_opcode(op: ExprBinaryOp, result_type: TypeId, types: &TypeTable) -> Result<u8, String> {
+    match op {
+        ExprBinaryOp::BitAnd => Ok(0x71),
+        ExprBinaryOp::BitOr => Ok(0x72),
+        ExprBinaryOp::BitXor => Ok(0x73),
+        ExprBinaryOp::ShiftLeft => Ok(0x74),
+        ExprBinaryOp::ShiftRight if types.unsigned_integer_bits(result_type).is_some() => Ok(0x76),
+        ExprBinaryOp::ShiftRight if result_type == TYPE_ID_I32 => Ok(0x75),
+        ExprBinaryOp::ShiftRight => Err(format!(
+            "unsupported web right-shift result type {result_type}"
+        )),
+        ExprBinaryOp::Add
+        | ExprBinaryOp::Subtract
+        | ExprBinaryOp::Multiply
+        | ExprBinaryOp::Divide
+        | ExprBinaryOp::Remainder => Err(format!(
+            "unsupported web integer bitwise operator '{}' for type {result_type}",
+            op.spelling(),
+        )),
+    }
+}
+
+fn encode_integer_bitwise_operands(
+    lhs: &SimpleExpr,
+    op: ExprBinaryOp,
+    rhs: &SimpleExpr,
+    expected: Option<TypeId>,
+    context: &EncodeContext<'_>,
+    out: &mut Vec<u8>,
+) -> Result<TypeId, String> {
+    let expected_integer =
+        expected.filter(|type_id| context.types.integer_width_bits(*type_id).is_some());
+    let mut lhs_bytes = Vec::new();
+    let mut rhs_bytes = Vec::new();
+    let (lhs_type, rhs_type) = if op.is_shift() {
+        let lhs_expected = lhs
+            .is_contextual_integer_expression()
+            .then_some(Some(expected_integer.unwrap_or(TYPE_ID_I32)))
+            .flatten();
+        validate_web_bitwise_literal_context(
+            lhs,
+            lhs_expected,
+            op.spelling(),
+            "lhs",
+            context.types,
+        )?;
+        let lhs_type =
+            encode_contextual_bitwise_operand(lhs, lhs_expected, context, &mut lhs_bytes)?;
+        let rhs_expected = rhs
+            .is_contextual_integer_expression()
+            .then_some(Some(TYPE_ID_I32))
+            .flatten();
+        validate_web_bitwise_literal_context(
+            rhs,
+            rhs_expected,
+            op.spelling(),
+            "rhs",
+            context.types,
+        )?;
+        let rhs_type =
+            encode_contextual_bitwise_operand(rhs, rhs_expected, context, &mut rhs_bytes)?;
+        (lhs_type, rhs_type)
+    } else if lhs.is_contextual_integer_expression() && rhs.is_contextual_integer_expression() {
+        let contextual_lane = Some(expected_integer.unwrap_or(TYPE_ID_I32));
+        validate_web_bitwise_literal_context(
+            lhs,
+            contextual_lane,
+            op.spelling(),
+            "lhs",
+            context.types,
+        )?;
+        validate_web_bitwise_literal_context(
+            rhs,
+            contextual_lane,
+            op.spelling(),
+            "rhs",
+            context.types,
+        )?;
+        let lhs_type =
+            encode_contextual_bitwise_operand(lhs, contextual_lane, context, &mut lhs_bytes)?;
+        let rhs_type =
+            encode_contextual_bitwise_operand(rhs, contextual_lane, context, &mut rhs_bytes)?;
+        (lhs_type, rhs_type)
+    } else if lhs.is_contextual_integer_expression() {
+        let rhs_type = encode_contextual_bitwise_operand(rhs, None, context, &mut rhs_bytes)?;
+        let lhs_expected = context
+            .types
+            .integer_width_bits(rhs_type)
+            .is_some()
+            .then_some(rhs_type);
+        validate_web_bitwise_literal_context(
+            lhs,
+            lhs_expected,
+            op.spelling(),
+            "lhs",
+            context.types,
+        )?;
+        let lhs_type =
+            encode_contextual_bitwise_operand(lhs, lhs_expected, context, &mut lhs_bytes)?;
+        (lhs_type, rhs_type)
+    } else {
+        let lhs_type = encode_contextual_bitwise_operand(lhs, None, context, &mut lhs_bytes)?;
+        let rhs_expected = rhs
+            .is_contextual_integer_expression()
+            .then(|| {
+                context
+                    .types
+                    .integer_width_bits(lhs_type)
+                    .is_some()
+                    .then_some(lhs_type)
+            })
+            .flatten();
+        validate_web_bitwise_literal_context(
+            rhs,
+            rhs_expected,
+            op.spelling(),
+            "rhs",
+            context.types,
+        )?;
+        let rhs_type =
+            encode_contextual_bitwise_operand(rhs, rhs_expected, context, &mut rhs_bytes)?;
+        (lhs_type, rhs_type)
+    };
+
+    let lhs_width = context.types.integer_width_bits(lhs_type).ok_or_else(|| {
+        format!(
+            "web '{}' requires an exact builtin integer lhs, found type {lhs_type}",
+            op.spelling(),
+        )
+    })?;
+    if context.types.integer_width_bits(rhs_type).is_none() {
+        return Err(format!(
+            "web '{}' requires an exact builtin integer rhs, found type {rhs_type}",
+            op.spelling(),
+        ));
+    }
+    if !op.is_shift() && lhs_type != rhs_type {
+        return Err(format!(
+            "web '{}' requires matching integer lanes, found {lhs_type} and {rhs_type}",
+            op.spelling(),
+        ));
+    }
+
+    out.extend(lhs_bytes);
+    out.extend(rhs_bytes);
+    if op.is_shift() {
+        out.push(0x41);
+        sleb(i32::from(lhs_width - 1), out);
+        out.push(0x71);
+    }
+    Ok(lhs_type)
+}
+
 fn encode_expr_as(
     value: &SimpleExpr,
     expected: Option<TypeId>,
@@ -6263,15 +6487,62 @@ fn encode_expr_as(
             uleb(index, out);
             Ok(signature.result)
         }
+        SimpleExpr::Unary {
+            op: ExprUnaryOp::BitwiseNot,
+            operand,
+        } => {
+            let operand_expected = operand
+                .is_contextual_integer_expression()
+                .then_some(Some(
+                    expected
+                        .filter(|type_id| context.types.integer_width_bits(*type_id).is_some())
+                        .unwrap_or(TYPE_ID_I32),
+                ))
+                .flatten();
+            validate_web_bitwise_literal_context(
+                operand,
+                operand_expected,
+                ExprUnaryOp::BitwiseNot.spelling(),
+                "operand",
+                context.types,
+            )?;
+            let operand_type =
+                encode_contextual_bitwise_operand(operand, operand_expected, context, out)?;
+            if context.types.integer_width_bits(operand_type).is_none() {
+                return Err(format!(
+                    "web '{}' requires an exact builtin integer operand, found type {operand_type}",
+                    ExprUnaryOp::BitwiseNot.spelling(),
+                ));
+            }
+            out.push(0x41);
+            sleb(-1, out);
+            out.push(0x73);
+            encode_narrow_integer_normalization(operand_type, context.types, out);
+            Ok(operand_type)
+        }
         SimpleExpr::Binary { lhs, op, rhs } => {
+            if op.requires_integer_operands() {
+                let result_type =
+                    encode_integer_bitwise_operands(lhs, *op, rhs, expected, context, out)?;
+                let opcode = bitwise_opcode(*op, result_type, context.types)?;
+                out.push(opcode);
+                encode_narrow_integer_normalization(result_type, context.types, out);
+                return Ok(result_type);
+            }
             let result_type = encode_binary_operands(lhs, rhs, expected, context, out)?;
             let assign_op = match op {
-                '+' => AssignOp::Add,
-                '-' => AssignOp::Sub,
-                '*' => AssignOp::Mul,
-                '/' => AssignOp::Div,
-                '%' => AssignOp::Mod,
-                other => return Err(format!("unsupported web binary operator '{other}'")),
+                ExprBinaryOp::Add => AssignOp::Add,
+                ExprBinaryOp::Subtract => AssignOp::Sub,
+                ExprBinaryOp::Multiply => AssignOp::Mul,
+                ExprBinaryOp::Divide => AssignOp::Div,
+                ExprBinaryOp::Remainder => AssignOp::Mod,
+                ExprBinaryOp::ShiftLeft
+                | ExprBinaryOp::ShiftRight
+                | ExprBinaryOp::BitAnd
+                | ExprBinaryOp::BitXor
+                | ExprBinaryOp::BitOr => {
+                    unreachable!("integer-only operators returned above")
+                }
             };
             out.push(arithmetic_opcode(assign_op, result_type)?);
             Ok(result_type)
@@ -6600,6 +6871,7 @@ fn collect_string_literals(
                     expression(arg, constants, out)?;
                 }
             }
+            SimpleExpr::Unary { operand, .. } => expression(operand, constants, out)?,
             SimpleExpr::Binary { lhs, rhs, .. } => {
                 expression(lhs, constants, out)?;
                 expression(rhs, constants, out)?;
@@ -6803,6 +7075,55 @@ mod tests {
         assert_eq!(arithmetic_opcode(AssignOp::Mod, TYPE_ID_I32), Ok(0x6f));
         assert_eq!(comparison_opcode(ComparisonOp::Lt, TYPE_ID_I32), Ok(0x48));
         assert_eq!(comparison_opcode(ComparisonOp::Ge, TYPE_ID_I32), Ok(0x4e));
+    }
+
+    #[test]
+    fn uses_language_signedness_for_wasm_bitwise_shift_opcodes() {
+        let types = TypeTable::new();
+        for type_id in [TYPE_ID_I32, TYPE_ID_U8, TYPE_ID_U16, TYPE_ID_U32] {
+            assert_eq!(
+                bitwise_opcode(ExprBinaryOp::BitAnd, type_id, &types),
+                Ok(0x71)
+            );
+            assert_eq!(
+                bitwise_opcode(ExprBinaryOp::BitOr, type_id, &types),
+                Ok(0x72)
+            );
+            assert_eq!(
+                bitwise_opcode(ExprBinaryOp::BitXor, type_id, &types),
+                Ok(0x73)
+            );
+            assert_eq!(
+                bitwise_opcode(ExprBinaryOp::ShiftLeft, type_id, &types),
+                Ok(0x74)
+            );
+        }
+        assert_eq!(
+            bitwise_opcode(ExprBinaryOp::ShiftRight, TYPE_ID_I32, &types),
+            Ok(0x75)
+        );
+        for type_id in [TYPE_ID_U8, TYPE_ID_U16, TYPE_ID_U32] {
+            assert_eq!(
+                bitwise_opcode(ExprBinaryOp::ShiftRight, type_id, &types),
+                Ok(0x76)
+            );
+        }
+    }
+
+    #[test]
+    fn normalizes_narrow_wasm_bitwise_results_with_lane_masks() {
+        let types = TypeTable::new();
+        let mut u8_bytes = Vec::new();
+        encode_narrow_integer_normalization(TYPE_ID_U8, &types, &mut u8_bytes);
+        assert_eq!(u8_bytes, [0x41, 0xff, 0x01, 0x71]);
+
+        let mut u16_bytes = Vec::new();
+        encode_narrow_integer_normalization(TYPE_ID_U16, &types, &mut u16_bytes);
+        assert_eq!(u16_bytes, [0x41, 0xff, 0xff, 0x03, 0x71]);
+
+        let mut i32_bytes = Vec::new();
+        encode_narrow_integer_normalization(TYPE_ID_I32, &types, &mut i32_bytes);
+        assert!(i32_bytes.is_empty());
     }
 
     #[test]

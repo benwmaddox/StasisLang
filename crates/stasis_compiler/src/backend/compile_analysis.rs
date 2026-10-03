@@ -549,6 +549,7 @@ pub(crate) fn validate_owned_local_fixed_array_contract(
                 }
                 Ok(())
             }
+            SimpleExpr::Unary { operand, .. } => validate_expr(operand, owned),
             SimpleExpr::Binary { lhs, rhs, .. } => {
                 validate_expr(lhs, owned)?;
                 validate_expr(rhs, owned)

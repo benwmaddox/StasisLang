@@ -19,6 +19,7 @@ use crate::frontend::parser::{
     ParsedGenericParameterKind, ParsedStructDefinitionRange,
 };
 use crate::frontend::types::TypedCollectionKind;
+use crate::ir::hir::{ExprBinaryOp, ExprUnaryOp};
 
 const MAX_SPECIALIZATIONS: usize = 4096;
 const MAX_INSTANTIATION_DEPTH: usize = 128;
@@ -5001,16 +5002,26 @@ fn split_top_level_arguments(source: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let mut start = 0usize;
     let mut angle = 0i32;
-    let mut paren = 0i32;
-    let mut bracket = 0i32;
-    for (index, byte) in source.as_bytes().iter().copied().enumerate() {
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut index = 0usize;
+    while index < source.len() {
+        if source.as_bytes()[index] == b'"' {
+            index = skip_string(source, index)?;
+            continue;
+        }
+        if starts_comment(source, index) {
+            index = skip_comment(source, index)?;
+            continue;
+        }
+        let byte = source.as_bytes()[index];
         match byte {
-            b'<' => angle += 1,
-            b'>' => angle -= 1,
+            b'<' if paren == 0 => angle += 1,
+            b'>' if paren == 0 => angle -= 1,
             b'(' => paren += 1,
-            b')' => paren -= 1,
+            b')' => paren = paren.saturating_sub(1),
             b'[' => bracket += 1,
-            b']' => bracket -= 1,
+            b']' => bracket = bracket.saturating_sub(1),
             b',' if angle == 0 && paren == 0 && bracket == 0 => {
                 let part = source[start..index].trim();
                 if part.is_empty() {
@@ -5021,6 +5032,7 @@ fn split_top_level_arguments(source: &str) -> Result<Vec<String>, String> {
             }
             _ => {}
         }
+        index += 1;
     }
     let part = source[start..].trim();
     if part.is_empty() {
@@ -5292,17 +5304,27 @@ fn matching_angle(source: &str, open: usize) -> Result<usize, String> {
         return Err("internal error: expected '<'".to_string());
     }
     let mut depth = 0i32;
+    let mut paren = 0usize;
     let mut cursor = open;
     while cursor < source.len() {
+        if source.as_bytes()[cursor] == b'"' {
+            cursor = skip_string(source, cursor)?;
+            continue;
+        }
+        if starts_comment(source, cursor) {
+            cursor = skip_comment(source, cursor)?;
+            continue;
+        }
         match source.as_bytes()[cursor] {
-            b'<' => depth += 1,
-            b'>' => {
+            b'(' => paren += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b'<' if paren == 0 => depth += 1,
+            b'>' if paren == 0 => {
                 depth -= 1;
                 if depth == 0 {
                     return Ok(cursor);
                 }
             }
-            b'"' => cursor = skip_string(source, cursor)?.saturating_sub(1),
             _ => {}
         }
         cursor += 1;
@@ -5638,7 +5660,8 @@ struct ConstantParser<'a> {
 enum ConstantToken {
     Integer(String),
     Identifier(String),
-    Operator(char),
+    Operator(ExprBinaryOp),
+    Unary(ExprUnaryOp),
     Open,
     Close,
 }
@@ -5669,11 +5692,7 @@ impl<'a> ConstantParser<'a> {
             let Some(ConstantToken::Operator(operator)) = self.peek() else {
                 break;
             };
-            let precedence = match operator {
-                '+' | '-' => 10,
-                '*' | '/' | '%' => 20,
-                _ => break,
-            };
+            let precedence = operator.precedence();
             if precedence < min_precedence {
                 break;
             }
@@ -5709,8 +5728,8 @@ impl<'a> ConstantParser<'a> {
                 .copied()
                 .or_else(|| self.constants.get(&name).copied())
                 .ok_or_else(|| format!("unknown compile-time value '{name}'")),
-            ConstantToken::Operator('+') => self.parse_prefix(),
-            ConstantToken::Operator('-') => {
+            ConstantToken::Operator(ExprBinaryOp::Add) => self.parse_prefix(),
+            ConstantToken::Operator(ExprBinaryOp::Subtract) => {
                 if let Some(ConstantToken::Integer(text)) = self.tokens.get(self.cursor).cloned() {
                     self.cursor += 1;
                     let value = text.parse::<i64>().map_err(|error| {
@@ -5728,6 +5747,7 @@ impl<'a> ConstantParser<'a> {
                     .checked_neg()
                     .ok_or_else(|| "compile-time negation overflowed i32".to_string())
             }
+            ConstantToken::Unary(ExprUnaryOp::BitwiseNot) => Ok(!self.parse_prefix()?),
             ConstantToken::Open => {
                 let value = self.parse_expression(0)?;
                 match self.tokens.get(self.cursor) {
@@ -5745,19 +5765,23 @@ impl<'a> ConstantParser<'a> {
     }
 }
 
-fn checked_binary(lhs: i32, operator: char, rhs: i32) -> Result<i32, String> {
-    match operator {
-        '+' => lhs.checked_add(rhs),
-        '-' => lhs.checked_sub(rhs),
-        '*' => lhs.checked_mul(rhs),
-        '/' => lhs.checked_div(rhs),
-        '%' => lhs.checked_rem(rhs),
-        _ => None,
-    }
-    .ok_or_else(|| {
+fn checked_binary(lhs: i32, operator: ExprBinaryOp, rhs: i32) -> Result<i32, String> {
+    let checked = match operator {
+        ExprBinaryOp::Add => lhs.checked_add(rhs),
+        ExprBinaryOp::Subtract => lhs.checked_sub(rhs),
+        ExprBinaryOp::Multiply => lhs.checked_mul(rhs),
+        ExprBinaryOp::Divide => lhs.checked_div(rhs),
+        ExprBinaryOp::Remainder => lhs.checked_rem(rhs),
+        ExprBinaryOp::ShiftLeft => Some(lhs.wrapping_shl((rhs as u32) & 31)),
+        ExprBinaryOp::ShiftRight => Some(lhs.wrapping_shr((rhs as u32) & 31)),
+        ExprBinaryOp::BitAnd => Some(lhs & rhs),
+        ExprBinaryOp::BitXor => Some(lhs ^ rhs),
+        ExprBinaryOp::BitOr => Some(lhs | rhs),
+    };
+    checked.ok_or_else(|| {
         format!(
             "checked compile-time operation '{}' overflowed or divided by zero",
-            operator
+            operator.spelling()
         )
     })
 }
@@ -5790,7 +5814,25 @@ fn tokenize_constant_expression(source: &str) -> Result<Vec<ConstantToken>, Stri
             continue;
         }
         let token = match bytes[cursor] {
-            b'+' | b'-' | b'*' | b'/' | b'%' => ConstantToken::Operator(bytes[cursor] as char),
+            b'<' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'<' => {
+                cursor += 2;
+                tokens.push(ConstantToken::Operator(ExprBinaryOp::ShiftLeft));
+                continue;
+            }
+            b'>' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'>' => {
+                cursor += 2;
+                tokens.push(ConstantToken::Operator(ExprBinaryOp::ShiftRight));
+                continue;
+            }
+            b'+' => ConstantToken::Operator(ExprBinaryOp::Add),
+            b'-' => ConstantToken::Operator(ExprBinaryOp::Subtract),
+            b'*' => ConstantToken::Operator(ExprBinaryOp::Multiply),
+            b'/' => ConstantToken::Operator(ExprBinaryOp::Divide),
+            b'%' => ConstantToken::Operator(ExprBinaryOp::Remainder),
+            b'&' => ConstantToken::Operator(ExprBinaryOp::BitAnd),
+            b'^' => ConstantToken::Operator(ExprBinaryOp::BitXor),
+            b'|' => ConstantToken::Operator(ExprBinaryOp::BitOr),
+            b'~' => ConstantToken::Unary(ExprUnaryOp::BitwiseNot),
             b'(' => ConstantToken::Open,
             b')' => ConstantToken::Close,
             other => {
@@ -6655,6 +6697,24 @@ mod tests {
     }
 
     #[test]
+    fn parenthesized_shift_expressions_specialize_generic_array_extents() {
+        let mut process = crate::backend::jit::JitProcess::new();
+        process.upsert_file(
+            "main.stasis",
+            "struct Bits<N: i32> { values: i32[N]; }\nglobal left: Bits<(1 << 3)>;\nglobal right: Bits<(8 >> 1)>;\nfunction capacity(buffer: Bits<N>): i32 { return N; }\nfunction main(): i32 { left.values[7] = 8; right.values[3] = 4; return left.values[7] + right.values[3] + capacity(left) + capacity(right) - 24; }\n",
+        );
+        process
+            .compile()
+            .expect("parenthesized shifts specialize generic extents and inferred value arguments");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("specialized arrays and inferred value arguments execute"),
+            0
+        );
+    }
+
+    #[test]
     fn keeps_multiple_receiver_value_specializations_distinct() {
         let mut process = crate::backend::jit::JitProcess::new();
         process.upsert_file(
@@ -7020,6 +7080,29 @@ mod tests {
         assert!(evaluate_i32_expression("2147483647 + 1", &environment, &constants).is_err());
         assert!(evaluate_i32_expression("1 / 0", &environment, &constants).is_err());
         assert!(evaluate_i32_expression("-2147483648 / -1", &environment, &constants).is_err());
+    }
+
+    #[test]
+    fn evaluates_i32_bitwise_constants_with_c_precedence_and_masked_shifts() {
+        let environment = GenericEnvironment::default();
+        let constants = BTreeMap::new();
+        for (source, expected) in [
+            ("1 << 3", 8),
+            ("~0 & 15", 15),
+            ("-8 >> 1", -4),
+            ("1 << 32", 1),
+            ("1 << 33", 2),
+            ("1 << -1", i32::MIN),
+            ("1 | 2 ^ 3 & 4", 3),
+            ("1 + 2 << 1", 6),
+        ] {
+            assert_eq!(
+                evaluate_i32_expression(source, &environment, &constants),
+                Ok(expected),
+                "{source}"
+            );
+        }
+        assert!(evaluate_i32_expression("2147483647 + 1", &environment, &constants).is_err());
     }
 
     #[test]

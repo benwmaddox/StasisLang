@@ -449,6 +449,7 @@ impl Analyzer<'_> {
                     self.unknown(function_id, "unresolved_indexed_text_call", target.clone());
                 }
             }
+            SimpleExpr::Unary { operand, .. } => self.visit_expr(function_id, operand, env, stack),
             SimpleExpr::Binary { lhs, rhs, .. } => {
                 self.visit_expr(function_id, lhs, env, stack);
                 self.visit_expr(function_id, rhs, env, stack);
@@ -716,6 +717,7 @@ impl Analyzer<'_> {
             SimpleExpr::Call { target, args } => self
                 .resolve_call(target, args, env)
                 .map(|signature| signature.return_type),
+            SimpleExpr::Unary { operand, .. } => self.infer_type(operand, env),
             SimpleExpr::Binary { lhs, rhs, .. } => self
                 .infer_type(lhs, env)
                 .or_else(|| self.infer_type(rhs, env)),
@@ -1008,6 +1010,7 @@ fn contains_indexed_expr(expression: &SimpleExpr) -> bool {
     match expression {
         SimpleExpr::IndexedPath { .. } => true,
         SimpleExpr::Call { args, .. } => args.iter().any(contains_indexed_expr),
+        SimpleExpr::Unary { operand, .. } => contains_indexed_expr(operand),
         SimpleExpr::Binary { lhs, rhs, .. } => {
             contains_indexed_expr(lhs) || contains_indexed_expr(rhs)
         }
