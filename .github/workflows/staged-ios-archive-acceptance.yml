@@ -27,8 +27,8 @@ jobs:
     env:
       STASIS_RELEASE_ID: ${{ inputs.release_id }}
       STASIS_SOURCE_COMMIT: ${{ inputs.source_commit }}
-      STASIS_CLI_EXECUTABLE: ${{ github.workspace }}/target/staged-macos/bin/stasis
-      STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/staged-macos/bin/libstasis_graphics.dylib
+      STASIS_CLI_EXECUTABLE: ${{ github.workspace }}/target/stasis-nightly-osx-arm64/bin/stasis
+      STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/stasis-nightly-osx-arm64/bin/libstasis_graphics.dylib
       STASIS_IOS_SIMULATOR_ACCEPTANCE: generics
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,15 +44,16 @@ jobs:
           path: target/macos-archive
 
       - name: Extract and qualify archive consumers
+        id: qualify
         shell: bash
         env:
           STASIS_ARTIFACT_FILE: ${{ github.workspace }}/target/macos-archive/stasis-nightly-osx-arm64.tar.gz
         run: |
           set -euo pipefail
-          mkdir -p target/staged-macos
-          tar -xf "$STASIS_ARTIFACT_FILE" -C target/staged-macos --strip-components=1
+          mkdir -p target
+          tar -xf "$STASIS_ARTIFACT_FILE" -C target
           python tools/ci/qualify_staged_archive.py \
-            --archive-root target/staged-macos \
+            --archive-root target/stasis-nightly-osx-arm64 \
             --archive-file "$STASIS_ARTIFACT_FILE" \
             --target ios \
             --artifact-name stasis-nightly-osx-arm64 \
@@ -63,6 +64,7 @@ jobs:
             --evidence-dir target/staged-ios-acceptance
 
       - name: Build and run bundled and generated consumers on iOS Simulator
+        id: simulator
         shell: bash
         env:
           STASIS_IOS_ACCEPTANCE_ROOT: ${{ github.workspace }}/target/staged-ios-acceptance/consumers
@@ -78,6 +80,7 @@ jobs:
           done
 
       - name: Bind iOS runtime evidence to the exact archive
+        id: record
         shell: bash
         run: |
           set -euo pipefail
@@ -88,6 +91,28 @@ jobs:
             --generated-root target/staged-ios-acceptance/consumers/generated-generics \
             --release-id "${STASIS_RELEASE_ID}" \
             --source-commit "${STASIS_SOURCE_COMMIT}"
+
+      - name: Collect staged iOS review evidence
+        if: always()
+        shell: bash
+        env:
+          STASIS_STAGED_LANE_PASSED: ${{ steps.qualify.outcome == 'success' && steps.simulator.outcome == 'success' && steps.record.outcome == 'success' }}
+        run: |
+          python tools/ci/collect_staged_archive_evidence.py \
+            --target ios \
+            --staged-root target/staged-ios-acceptance \
+            --archive-root target/stasis-nightly-osx-arm64 \
+            --output target/staged-release-evidence
+
+      - name: Upload staged iOS review evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: true
+          name: staged-release-evidence-ios
+          path: target/staged-release-evidence
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload staged iOS archive receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

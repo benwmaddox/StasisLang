@@ -40,10 +40,10 @@ def consumer(label: str, target: str) -> dict:
             "frame_sha256": "7" * 64,
             "frame": {"width": 640, "height": 360, "teal": 15000, "red": 0, "blue": 215000},
         }
-    if target == "windows":
+    if target in {"windows", "linux", "macos"}:
         item["web"] = {
             "result": "passed",
-            "project_name": "generics_collections" if label == "bundled" else "ArchiveFreshWindows",
+            "project_name": "generics_collections" if label == "bundled" else f"ArchiveFresh{target.title()}",
             "package_provenance_sha256": "5" * 64,
             "build_fingerprint": "a" * 64,
             "frame_sha256": "7" * 64,
@@ -221,12 +221,14 @@ class VerifyReceiptsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "generated consumer omitted native"):
             self.verify()
 
-    def test_rejects_missing_generated_web_consumer(self) -> None:
-        path, receipt = self.load("windows")
-        del receipt["consumers"]["generated"]["web"]
-        self.save(path, receipt)
-        with self.assertRaisesRegex(ValueError, "generated consumer omitted packaged Web"):
-            self.verify()
+    def test_rejects_missing_generated_web_consumer_on_each_desktop_target(self) -> None:
+        for target in ("windows", "linux", "macos"):
+            with self.subTest(target=target):
+                path, receipt = self.load(target)
+                del receipt["consumers"]["generated"]["web"]
+                self.save(path, receipt)
+                with self.assertRaisesRegex(ValueError, "generated consumer omitted packaged Web"):
+                    self.verify()
 
     def test_rejects_missing_mobile_consumer(self) -> None:
         path, receipt = self.load("android")

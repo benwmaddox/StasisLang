@@ -1,0 +1,21 @@
+allprojects {
+    plugins.withId('com.android.application') {
+        def keystorePath = System.getenv('STASIS_ANDROID_TEST_KEYSTORE_PATH')
+        def storePassword = System.getenv('STASIS_ANDROID_TEST_STORE_PASSWORD')
+        def keyPassword = System.getenv('STASIS_ANDROID_TEST_KEY_PASSWORD')
+        if (!keystorePath || !storePassword || !keyPassword) {
+            throw new GradleException('The staged Android test signing inputs are incomplete')
+        }
+        def keystore = new File(keystorePath)
+        if (!keystore.isFile()) {
+            throw new GradleException('The staged Android test keystore is missing from runner temp')
+        }
+        def androidExtension = extensions.getByName('android')
+        def signing = androidExtension.signingConfigs.maybeCreate('stasisCiTestDebug')
+        signing.storeFile = keystore
+        signing.storePassword = storePassword
+        signing.keyAlias = 'androiddebugkey'
+        signing.keyPassword = keyPassword
+        androidExtension.buildTypes.getByName('debug').signingConfig = signing
+    }
+}

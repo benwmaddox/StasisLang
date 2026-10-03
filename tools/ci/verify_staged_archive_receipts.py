@@ -341,7 +341,7 @@ def verify_receipts(
         for label, consumer in consumers.items():
             if target in {"windows", "linux", "macos"}:
                 verify_native(consumer.get("native"), label, toolchain["build_fingerprint"], target)
-            if target == "windows":
+            if target in {"windows", "linux", "macos"}:
                 verify_web(consumer.get("web"), label, target, toolchain["build_fingerprint"])
             if target in {"android", "ios"}:
                 verify_mobile(

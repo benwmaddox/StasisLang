@@ -2,6 +2,8 @@ import pathlib
 import re
 import unittest
 
+import yaml
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -40,30 +42,111 @@ class NightlyFreshnessContractTests(unittest.TestCase):
         self.assertEqual(1, self.release.count(".\\stasis.exe live --help"))
         self.assertEqual(1, self.release.count("./bin/stasis live --help"))
 
-    def test_windows_archive_stage_runs_both_packaged_web_consumers_in_chrome(self):
-        step = self.release.split(
+    def test_every_desktop_archive_uses_a_verified_real_chrome_for_web_consumers(self):
+        browser = self.release.split(
+            "- name: Locate and verify hosted Chrome", 1
+        )[1].split("- name: Setup MSVC dev environment", 1)[0]
+        for executable in (
+            "chrome=/usr/bin/google-chrome",
+            '"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"',
+            '"C:/Program Files/Google/Chrome/Application/chrome.exe"',
+        ):
+            with self.subTest(executable=executable):
+                self.assertIn(executable, browser)
+        self.assertIn("[System.Diagnostics.FileVersionInfo]::GetVersionInfo($chrome).ProductVersion", browser)
+        self.assertIn("^\\d+(?:\\.\\d+){2,3}$", browser)
+        self.assertIn("STASIS_BROWSER_EXECUTABLE=$chrome", browser)
+        self.assertIn("target/staged-acceptance/hosted-chrome-version.txt", browser)
+
+        qualify = self.release.split(
             "- name: Extract and qualify the exact staged archive", 1
+        )[1].split("- name: Collect staged archive review evidence", 1)[0]
+        self.assertIn('$arguments += "--browser"', qualify)
+        self.assertLess(qualify.index('$arguments += "--browser"'), qualify.index("python @arguments"))
+
+    def test_staged_review_evidence_is_uploaded_separately_from_receipts(self):
+        desktop = self.release.split(
+            "- name: Upload desktop staged archive review evidence", 1
         )[1].split("- name: Upload desktop staged archive receipt", 1)[0]
-        self.assertIn('"--browser"', step)
-        self.assertIn('$env:STASIS_BROWSER_EXECUTABLE = $chrome', step)
-        self.assertLess(step.index('$env:STASIS_BROWSER_EXECUTABLE = $chrome'), step.index("python @arguments"))
-        self.assertLess(step.index('$arguments += "--browser"'), step.index("python @arguments"))
+        self.assertIn("staged-release-evidence-${{ matrix.target }}", desktop)
+        self.assertIn("if: always()", desktop)
+        for filename in ("staged-android-archive-acceptance.yml", "staged-ios-archive-acceptance.yml"):
+            workflow = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+            self.assertIn("Collect staged Android review evidence" if "android" in filename else "Collect staged iOS review evidence", workflow)
+            self.assertIn("staged-release-evidence-android" if "android" in filename else "staged-release-evidence-ios", workflow)
+            self.assertIn("Upload staged Android review evidence" if "android" in filename else "Upload staged iOS review evidence", workflow)
+            self.assertIn("Upload staged Android archive receipt" if "android" in filename else "Upload staged iOS archive receipt", workflow)
+
+    def test_generics_release_docs_describe_supported_targets_signing_and_vendor_recovery(self):
+        generic_docs = (ROOT / "docs/generics.md").read_text(encoding="utf-8")
+        sample_readme = (ROOT / "samples/generics_collections/README.md").read_text(encoding="utf-8")
+        for required in (
+            "three sample tests",
+            "Windows, Linux, and macOS",
+            "staged-release-evidence-*",
+            "not Play-distribution signatures",
+            "not evidence of general public-PKI trust",
+            "does not establish signing or notarization",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, generic_docs)
+        for required in (
+            "stasis version",
+            "stasis env",
+            "stasis --json editor-info",
+            "vendor update",
+            "git restore --source=HEAD",
+            "--json vendor status",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, sample_readme)
 
     def test_mobile_archive_lanes_extract_exact_archive_roots(self):
-        self.assertIn(
-            "tar -xf $archiveFile -C $archiveRoot --strip-components=1",
-            self.release,
-        )
+        desktop = self.release.split(
+            "- name: Extract and qualify the exact staged archive", 1
+        )[1].split("- name: Upload desktop staged archive receipt", 1)[0]
+        self.assertIn("$archiveParent = Join-Path $env:GITHUB_WORKSPACE \"target\"", desktop)
+        self.assertIn("tar -xf $archiveFile -C $archiveParent", desktop)
+        self.assertIn("$archiveRoot = Join-Path $archiveParent $env:STASIS_ARTIFACT_NAME", desktop)
+        self.assertNotIn("--strip-components", desktop)
         android = (ROOT / ".github/workflows/staged-android-archive-acceptance.yml").read_text(encoding="utf-8")
         ios = (ROOT / ".github/workflows/staged-ios-archive-acceptance.yml").read_text(encoding="utf-8")
         self.assertIn(
-            'tar -xf "$STASIS_ARTIFACT_FILE" -C target/staged-linux --strip-components=1',
+            'tar -xf "$STASIS_ARTIFACT_FILE" -C target',
             android,
         )
         self.assertIn(
-            'tar -xf "$STASIS_ARTIFACT_FILE" -C target/staged-macos --strip-components=1',
+            "--archive-root target/stasis-nightly-linux-x64",
+            android,
+        )
+        self.assertIn(
+            'tar -xf "$STASIS_ARTIFACT_FILE" -C target',
             ios,
         )
+        self.assertIn(
+            "--archive-root target/stasis-nightly-osx-arm64",
+            ios,
+        )
+
+    def test_android_archive_lane_receives_the_exact_calling_run_id(self):
+        android = (ROOT / ".github/workflows/staged-android-archive-acceptance.yml").read_text(encoding="utf-8")
+        parsed_android = yaml.load(android, Loader=yaml.BaseLoader)
+        workflow_call = parsed_android["on"]["workflow_call"]
+        self.assertEqual(workflow_call["inputs"]["run_id"]["required"], "true")
+        self.assertEqual(workflow_call["inputs"]["run_id"]["type"], "string")
+        self.assertEqual(
+            set(workflow_call["secrets"]),
+            {
+                "android_test_keystore_base64",
+                "android_test_store_password",
+                "android_test_key_password",
+            },
+        )
+        self.assertIn('--run-id "${{ inputs.run_id }}"', android)
+        caller = self.release.split("  staged_android_archive_acceptance:\n", 1)[1].split(
+            "  staged_ios_archive_acceptance:\n", 1
+        )[0]
+        self.assertIn("run_id: ${{ format('{0}', github.run_id) }}", caller)
 
     def test_expensive_seams_wait_for_release_detection(self):
         for job in (

@@ -154,9 +154,41 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("STASIS_CLI_EXECUTABLE:", self.staged_android_workflow)
         self.assertIn("--target android-arm64", self.staged_android_workflow)
         self.assertIn(
-            'tar -xf "$STASIS_ARTIFACT_FILE" -C target/staged-linux --strip-components=1',
+            'tar -xf "$STASIS_ARTIFACT_FILE" -C target',
             self.staged_android_workflow,
         )
+        self.assertIn(
+            "--archive-root target/stasis-nightly-linux-x64",
+            self.staged_android_workflow,
+        )
+
+    def test_staged_generics_uses_the_documented_temporary_android_test_signer(self):
+        fingerprint = "f115a250a33dc3e49b3b7f939075f6db118ce95e139e8c2703c437b1b3f37cc0"
+        self.assertIn("android_test_keystore_base64:", self.staged_android_workflow)
+        self.assertIn("android_test_store_password:", self.staged_android_workflow)
+        self.assertIn("android_test_key_password:", self.staged_android_workflow)
+        self.assertIn("Materialize the documented Android test key in runner temp", self.staged_android_workflow)
+        self.assertIn("tools/ci/materialize_android_test_signing.py", self.staged_android_workflow)
+        self.assertIn("--init-script \"$STASIS_GRADLE_INIT_SCRIPT\"", self.staged_android_workflow)
+        self.assertIn("--print-certs", self.staged_android_workflow)
+        self.assertIn(f"--expected-sha256 \"$STASIS_EXPECTED_ANDROID_TEST_SIGNER_SHA256\"", self.staged_android_workflow)
+        self.assertGreaterEqual(self.staged_android_workflow.count(fingerprint), 2)
+        self.assertIn("Remove the temporary Android test keystore", self.staged_android_workflow)
+        self.assertIn("if: always()", self.staged_android_workflow)
+        self.assertIn("STASIS_ANDROID_TEST_KEY_PASSWORD", self.release_script)
+        self.assertIn("Assert-AndroidTestSigner", self.release_script)
+        init_script = read("tools/ci/android_test_debug_signing.init.gradle")
+        self.assertIn("androiddebugkey", init_script)
+        self.assertIn("buildTypes.getByName('debug').signingConfig", init_script)
+        nightly = self.nightly_workflow.split(
+            "  staged_android_archive_acceptance:", 1
+        )[1].split("  staged_ios_archive_acceptance:", 1)[0]
+        for secret in (
+            "STASIS_ANDROID_TEST_KEYSTORE_BASE64",
+            "STASIS_ANDROID_TEST_STORE_PASSWORD",
+            "STASIS_ANDROID_TEST_KEY_PASSWORD",
+        ):
+            self.assertIn(secret, nightly)
 
     def test_emulator_action_script_is_one_shell_command_with_loop_in_powershell_file(self):
         self.assertIn(

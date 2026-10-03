@@ -15,6 +15,13 @@ on:
         description: Calling nightly-release workflow run
         required: true
         type: string
+    secrets:
+      android_test_keystore_base64:
+        required: true
+      android_test_store_password:
+        required: true
+      android_test_key_password:
+        required: true
 
 permissions:
   actions: read
@@ -28,8 +35,8 @@ jobs:
       CARGO_INCREMENTAL: "0"
       STASIS_RELEASE_ID: ${{ inputs.release_id }}
       STASIS_SOURCE_COMMIT: ${{ inputs.source_commit }}
-      STASIS_CLI_EXECUTABLE: ${{ github.workspace }}/target/staged-linux/bin/stasis
-      STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/staged-linux/bin/libstasis_graphics.so
+      STASIS_CLI_EXECUTABLE: ${{ github.workspace }}/target/stasis-nightly-linux-x64/bin/stasis
+      STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/stasis-nightly-linux-x64/bin/libstasis_graphics.so
       STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
       STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
     steps:
@@ -54,6 +61,17 @@ jobs:
         run: |
           sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
 
+      - name: Materialize the documented Android test key in runner temp
+        shell: bash
+        env:
+          STASIS_ANDROID_TEST_KEYSTORE_BASE64: ${{ secrets.android_test_keystore_base64 }}
+        run: |
+          set -euo pipefail
+          python tools/ci/materialize_android_test_signing.py \
+            --runner-temp "$RUNNER_TEMP" \
+            --workspace "$GITHUB_WORKSPACE" \
+            --github-env "$GITHUB_ENV"
+
       - name: Checkout pinned SDL3
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -75,15 +93,16 @@ jobs:
           path: target/linux-archive
 
       - name: Extract and qualify archive consumers
+        id: qualify
         shell: bash
         env:
           STASIS_ARTIFACT_FILE: ${{ github.workspace }}/target/linux-archive/stasis-nightly-linux-x64.tar.gz
         run: |
           set -euo pipefail
-          mkdir -p target/staged-linux
-          tar -xf "$STASIS_ARTIFACT_FILE" -C target/staged-linux --strip-components=1
+          mkdir -p target
+          tar -xf "$STASIS_ARTIFACT_FILE" -C target
           python tools/ci/qualify_staged_archive.py \
-            --archive-root target/staged-linux \
+            --archive-root target/stasis-nightly-linux-x64 \
             --archive-file "$STASIS_ARTIFACT_FILE" \
             --target android \
             --artifact-name stasis-nightly-linux-x64 \
@@ -107,7 +126,12 @@ jobs:
           PY
 
       - name: Run shipped Android packages on the x86_64 emulator
+        id: emulator
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        env:
+          STASIS_ANDROID_TEST_STORE_PASSWORD: ${{ secrets.android_test_store_password }}
+          STASIS_ANDROID_TEST_KEY_PASSWORD: ${{ secrets.android_test_key_password }}
+          STASIS_EXPECTED_ANDROID_TEST_SIGNER_SHA256: f115a250a33dc3e49b3b7f939075f6db118ce95e139e8c2703c437b1b3f37cc0
         with:
           api-level: 35
           target: google_apis
@@ -124,9 +148,13 @@ jobs:
           script: pwsh -NoProfile -File tools/ci/run_staged_android_archive_acceptance.ps1
 
       - name: Package and link the shipping Android arm64 consumers
+        id: shipping
         shell: bash
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: "2"
+          STASIS_ANDROID_TEST_STORE_PASSWORD: ${{ secrets.android_test_store_password }}
+          STASIS_ANDROID_TEST_KEY_PASSWORD: ${{ secrets.android_test_key_password }}
+          STASIS_EXPECTED_ANDROID_TEST_SIGNER_SHA256: f115a250a33dc3e49b3b7f939075f6db118ce95e139e8c2703c437b1b3f37cc0
         run: |
           set -euo pipefail
           apksigner="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}/build-tools/35.0.0/apksigner"
@@ -179,7 +207,7 @@ jobs:
             "$STASIS_CLI_EXECUTABLE" --workspace "$project" package-mobile \
               --target android-arm64 --out dist/staged-android-arm64
             python tools/verify_package_provenance.py \
-              --release-root target/staged-linux \
+              --release-root target/stasis-nightly-linux-x64 \
               --package-root "$package" \
               --expect-runtime-sources 2>&1 | tee "$shipping/package-provenance.log"
             python - "$package/stasis_mobile_package.json" <<'PY'
@@ -193,19 +221,24 @@ jobs:
           if manifest.get("android_runtime", {}).get("mode") != "source":
               raise SystemExit("shipping package did not build its runtime from the accepted archive sources")
           PY
-            gradle -p "$package/android" :app:assembleDebug \
+            gradle --init-script "$STASIS_GRADLE_INIT_SCRIPT" -p "$package/android" :app:assembleDebug \
               --no-daemon --max-workers=2 --console=plain 2>&1 | tee "$shipping/gradle-link.log"
             apk="$package/android/app/build/outputs/apk/debug/app-debug.apk"
             test -s "$apk"
             python tools/ci/check_android_release_package.py \
               --abi arm64-v8a --required-asset "" "$apk" \
               2>&1 | tee "$shipping/android-apk-audit.log"
-            "$apksigner" verify --verbose "$apk" 2>&1 | tee "$shipping/apksigner.log"
+            "$apksigner" verify --verbose --print-certs "$apk" 2>&1 | tee "$shipping/apksigner.log"
+            python tools/ci/verify_android_test_signer.py \
+              --apk "$apk" --apksigner "$apksigner" \
+              --expected-sha256 "$STASIS_EXPECTED_ANDROID_TEST_SIGNER_SHA256" \
+              --output "$shipping/apksigner-receipt.json"
             cp -R "$package" "$shipping/package"
             cp "$apk" "$shipping/app-debug.apk"
           done
 
       - name: Bind Android runtime evidence to the exact archive
+        id: record
         shell: bash
         run: |
           set -euo pipefail
@@ -216,6 +249,40 @@ jobs:
             --generated-root target/android-runtime/generated \
             --release-id "${STASIS_RELEASE_ID}" \
             --source-commit "${STASIS_SOURCE_COMMIT}"
+
+      - name: Remove the temporary Android test keystore
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/stasis-android-test.keystore"
+          case "$key_path" in
+            "$RUNNER_TEMP"/*) rm -f -- "$key_path" ;;
+            *) echo "Refusing to remove a keystore outside runner temp" >&2; exit 1 ;;
+          esac
+
+      - name: Collect staged Android review evidence
+        if: always()
+        shell: bash
+        env:
+          STASIS_STAGED_LANE_PASSED: ${{ steps.qualify.outcome == 'success' && steps.emulator.outcome == 'success' && steps.shipping.outcome == 'success' && steps.record.outcome == 'success' }}
+        run: |
+          python tools/ci/collect_staged_archive_evidence.py \
+            --target android \
+            --staged-root target/staged-android-acceptance \
+            --archive-root target/stasis-nightly-linux-x64 \
+            --runtime-root target/android-runtime \
+            --output target/staged-release-evidence
+
+      - name: Upload staged Android review evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: true
+          name: staged-release-evidence-android
+          path: target/staged-release-evidence
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload staged Android archive receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

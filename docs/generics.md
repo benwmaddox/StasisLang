@@ -136,7 +136,7 @@ canonical `src/main.stasis` entry and use the same renderer lifecycle.
 
 | Surface | Executable coverage | Result required for a green run |
 | --- | --- | --- |
-| Syntax, receiver binding, free/dot calls, scalar storage, nesting, bounds | `generics_collections_jit_aot_wasm::generic_collection_sample_tests_pass_in_the_production_jit_shape`; the two sample tests | Both tests return true. |
+| Syntax, receiver binding, free/dot calls, scalar storage, nesting, bounds | `generics_collections_jit_aot_wasm::generic_collection_sample_tests_pass_in_the_production_jit_shape`; all three sample tests | All three tests return true. |
 | Generic expansion and graphics provenance | `generics_collections_jit_aot_wasm::generic_collection_aot_accepts_vendor_graphics_after_expansion` | Generic constant rewriting does not invalidate the compiler-owned vendor graphics module. |
 | Negative diagnostics | `generics_collections_jit_aot_wasm::negative_generic_collection_fixtures_keep_expected_diagnostics` | Runtime capacities, unresolved values, layout overflow, ambiguous receivers, and unsupported composite copies fail with stable diagnostics. |
 | JIT, AOT, and Wasm parity | `generics_collections_jit_aot_wasm::backend_neutral_generics_oracle_matches_jit_aot_and_wasm` | JIT and Node/Wasm observe the independent digest; Windows also links and executes the AOT object. Their program snapshots agree on concrete function identities, capacities, alignments, and SoA field planes. |
@@ -144,14 +144,45 @@ canonical `src/main.stasis` entry and use the same renderer lifecycle.
 | Incremental identity and code selection | `backend::jit::tests::generic_body_edits_rejit_specializations_and_callers_but_reuse_unrelated_code`; `generic_constant_and_helper_edits_invalidate_exact_dependency_closure`; `generic_signature_and_overload_edits_have_exact_identity_effects`; `removed_and_new_generic_specializations_preserve_unaffected_identity`; `equivalent_generic_argument_spelling_reuses_specialization_and_callers`; `alpha_renamed_qualified_receiver_generic_reuses_identity_and_layout` | Body, referenced constant/helper, signature, overload-set, and specialization-set edits rebuild exactly their affected closure. Equivalent constants, alpha-renamed receiver slots, qualified struct spellings, and unrelated artifacts retain identity and code. |
 | Nested and SoA state transactions | `generic_hot_swap_state` | Two differently sized owners plus a nested owner preserve every scalar and field plane through compatible growth; compile, type, effect, layout, and hook rejection preserve the active executable and state before a valid retry. Evidence includes artifact counters and deterministic state digests. |
 | Filesystem and editor transactions | `tests::notify_watch_service_reloads_imported_generic_source_through_real_jit_commit`; `live_workspace::tests::imported_generic_dirty_buffer_preview_apply_and_rejection_are_transactional` | A physical imported-file event and editor preview/apply both stage a real JIT candidate. Rejected editor candidates leave disk, code, and state unchanged. |
-| Packaged Web | `apps/stasis/tests/generics_collections_package.rs`; `tools/run_generics_collections_browser_acceptance.mjs` | The package selects `src/main.stasis`; Node observes the full workload result/digest and bounds traps; a real browser presents the authored frame without runtime errors. |
+| Packaged Web | `apps/stasis/tests/generics_collections_package.rs`; `tools/run_generics_collections_browser_acceptance.mjs` | The package selects `src/main.stasis`; Node observes the full workload result/digest and bounds traps; real Chrome on Windows, Linux, and macOS presents the authored frame without runtime errors. |
 | Android AOT link | The `android-package-link` slow CI lane and the generated `android` Gradle project | The generic arm64 package links `libmain.so`; its bundle and link map agree. The x86_64 development APK is the emulator lane and must present valid frames. |
-| Host coverage | `generics-cross-platform` CI matrix on Ubuntu and Windows; Windows bootstrap additionally runs the native AOT seam | The shared JIT/Wasm/diagnostic contract passes on both hosted desktop targets. |
+| Host coverage | `generics-cross-platform` CI matrix on Ubuntu and Windows; staged nightly archive qualification on Windows, Linux, and macOS | Shared JIT/Wasm/diagnostic tests pass in the PR matrix, and the exact release archives pass the native and browser checks on all three desktop hosts. |
 
 Hot swap is a development-JIT transaction only. Native AOT, Web, Android, and
 iOS release packages remain immutable; parity for those packages means they
 consume the same canonical specialization identities and concrete layouts at
 build time.
+
+## Staged nightly release qualification
+
+Before a nightly release can publish, the same workflow run qualifies the
+Windows, Linux, and macOS archives plus the Android and iOS consumers built
+from the exact Linux and macOS archive bytes. Each desktop lane runs formatting,
+`check`, `test`, JIT, fresh native AOT packaging and execution, then packages
+both the bundled sample and a newly generated project for a real Chrome browser
+run. Native and browser receipts record the `507` state digest, both bounds
+traps, package provenance, runtime fingerprint, and screenshot hashes.
+
+The Android emulator executes x86_64 development-only packages and iOS
+Simulator executes arm64 simulator development-only packages. Their compiler
+and runtime source files come from the accepted archive; those development
+packages do not replace the shipping `android-arm64` and `ios-arm64` package
+provenance and link audits. The physical iOS device ABI is link-checked but is
+not reported as physically installed or run. CI Android debug APKs use the
+existing vault-backed test certificate (SHA-256
+`f115a250a33dc3e49b3b7f939075f6db118ce95e139e8c2703c437b1b3f37cc0`), verify
+that fingerprint, and are not Play-distribution signatures.
+
+Publication verifies that every receipt has the same run ID, nightly tag, and
+source commit, and that the Android and iOS lanes consumed the exact Linux and
+macOS archive hashes. Missing or failed lanes block publication. Reviewable
+screenshots, logs, package provenance, and hashes are retained in separate
+`staged-release-evidence-*` artifacts for 14 days; the small receipt artifacts
+remain the publication inputs. The Windows archive is Authenticode-checked
+against the configured signing identity; the hosted verification log reports
+that its chain root is not trusted by the runner's machine trust store, so the
+pinned-identity check is not evidence of general public-PKI trust. Current
+macOS CI package evidence does not establish signing or notarization.
 
 ## Deliberate boundaries
 
