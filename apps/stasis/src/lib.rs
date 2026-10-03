@@ -7827,16 +7827,49 @@ function render(): void {{ {draws} return; }}
             .find("STASIS_EXPORT void stasis_set_window_size(int width, int height) {")
             .expect("graphics runtime should expose window resizing");
         let resize_end = graphics_source[resize_start..]
-            .find("STASIS_EXPORT int stasis_set_fullscreen(int fullscreen) {")
-            .expect("window resizing should precede fullscreen control")
+            .find("\nSTASIS_EXPORT int stasis_set_maximized(int maximized) {")
+            .expect("window resizing should end before maximized presentation control")
             + resize_start;
         let resize_source = &graphics_source[resize_start..resize_end];
         let restore = resize_source
-            .find("SDL_RestoreWindow(g_window);")
+            .find("if (!SDL_RestoreWindow(g_window)) {")
             .expect("an explicit size should restore a maximized or minimized window");
-        let resize = resize_source
+
+        let windows_restore_wait = resize_source[restore..]
+            .find("if (!stasis_wait_for_window_restore()) {")
+            .map(|offset| offset + restore)
+            .expect("Windows must wait for the restored state before resizing");
+        let windows_extent = resize_source
+            .find("if (!stasis_apply_windows_windowed_extent(width, height)) {")
+            .expect("Windows must verify the explicit physical window extent");
+        let retained_logical_size = resize_source[windows_extent..]
+            .find("stasis_set_logical_size(width, height);")
+            .map(|offset| offset + windows_extent)
+            .expect("successful physical resize should update the retained logical size");
+
+        let windows_extent_start = graphics_source
+            .find("static int stasis_apply_windows_windowed_extent(int width, int height) {")
+            .expect("Windows physical extent helper");
+        let windows_extent_end = graphics_source[windows_extent_start..]
+            .find("#endif")
+            .expect("Windows physical extent helper boundary")
+            + windows_extent_start;
+        let windows_extent_source = &graphics_source[windows_extent_start..windows_extent_end];
+        assert!(
+            windows_extent_source
+                .contains("SDL_GetWindowSize(g_window, &actual_width, &actual_height);")
+                && windows_extent_source
+                    .contains("actual_width == width && actual_height == height"),
+            "Windows must read back and verify the requested physical window extent"
+        );
+
+        let non_windows_restore_sync = resize_source[restore..]
+            .find("#else\n        SDL_SyncWindow(g_window);")
+            .map(|offset| offset + restore)
+            .expect("non-Windows restore should synchronize before resizing");
+        let x11_resize = resize_source
             .find("stasis_apply_x11_window_scale(1);")
-            .expect("an explicit size should apply the platform-owned window scale");
+            .expect("an explicit size should apply the platform-owned X11 window scale");
 
         let scaled_resize_start = graphics_source
             .find("static void stasis_apply_x11_window_scale(int explicit_window_request) {")
@@ -7865,9 +7898,14 @@ function render(): void {{ {draws} return; }}
         );
 
         assert!(
-            restore < resize
-                && resize_source[restore..resize].contains("SDL_SyncWindow(g_window);"),
-            "desktop restore must complete before applying an explicit window size"
+            restore < windows_restore_wait
+                && windows_restore_wait < windows_extent
+                && windows_extent < retained_logical_size,
+            "Windows must wait for restore and verify the physical extent before retaining the logical size"
+        );
+        assert!(
+            restore < non_windows_restore_sync && non_windows_restore_sync < x11_resize,
+            "non-Windows desktop restore must synchronize before applying an explicit X11 window size"
         );
     }
 

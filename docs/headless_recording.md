@@ -5,6 +5,23 @@ surface. It never opens or focuses a visible window. The requested `--width` and
 `--height` are physical output pixels; the guest's `init_window` remains the
 logical canvas and uses the same fit/letterbox presentation as desktop play.
 
+## Single screenshot
+
+Use a `.png` output to save the final rendered frame directly:
+
+```text
+stasis record --output artifacts/screenshot.png --width 640 --height 360 --fps 60 --frames 120
+```
+
+This runs 120 ticks and renders, then publishes frame 120 as one PNG file. Use
+`--frames 1` for the first post-`main()` tick/render. The same input-script,
+before-tick, and replay options apply; replay still requires its complete tick
+count. PNG output needs no FFmpeg, accepts odd dimensions, and refuses to
+replace an existing destination. Its JSON receipt reports `format: "png"`;
+`frames` is the number of ticks executed, not the number of output files.
+
+## PNG sequence
+
 Capture a PNG sequence:
 
 ```powershell
@@ -57,7 +74,7 @@ not rewrite consumer files, vendored stdlib files, or generated Web assets.
 Add `--record-replay artifacts/run.replay.json` to publish the sparse HostFrame-diff session
 alongside the image output. To render a prior session instead of using live or scripted input, pass
 `--replay artifacts/run.replay.json`; the requested frame count must equal the replay tick count.
-This works for both PNG sequences and MP4 output. See [Record and replay](record_replay.md).
+This works for PNG screenshots, PNG sequences, and MP4 output. See [Record and replay](record_replay.md).
 
 Use an `.mp4` output to encode the staged PNGs with FFmpeg:
 

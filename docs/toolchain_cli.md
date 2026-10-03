@@ -346,7 +346,9 @@ restore release assets.
   retaining the `audio_health` result in JSON.
 - `record [ENTRY] --output PATH --width PX --height PX --fps FPS (--frames N|--duration S) [--before-tick FUNCTION] [--audio-device-profile PATH]`:
   execute the normal desktop JIT/render path on a hidden fixed-size SDL software presentation.
-  An extensionless output path publishes an exact, numbered PNG sequence; an `.mp4` path stages
+  An extensionless output path publishes an exact, numbered PNG sequence; a `.png` path
+  publishes only the final rendered frame after the requested ticks, without requiring FFmpeg.
+  Its JSON format is `png`, and `frames` reports executed ticks. An `.mp4` path stages
   those PNGs and the existing mixed game audio, then invokes FFmpeg H.264/yuv420p plus AAC at
   the requested rate. An `.mp3` path stages only the existing mixed game audio and invokes
   FFmpeg `libmp3lame` for a 48 kHz stereo audio-only artifact. Audio is rendered offline as deterministic 48 kHz stereo PCM16 using

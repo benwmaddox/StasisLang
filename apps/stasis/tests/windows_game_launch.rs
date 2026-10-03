@@ -533,6 +533,102 @@ fn every_supported_windows_game_launch_path_loads_assets_and_renders() {
 }
 
 #[test]
+fn recording_single_png_matches_final_frame_and_preserves_existing_output() {
+    let root = repository_root();
+    if !std::env::var_os("STASIS_RUNTIME_DLL_PATH")
+        .as_deref()
+        .is_some_and(|path| Path::new(path).is_file())
+        && !root
+            .join("runtime/build/bin/Release/stasis_graphics.dll")
+            .is_file()
+    {
+        eprintln!("single PNG integration skipped: graphics runtime is unavailable");
+        return;
+    }
+    let test_tree = TestTree(temp_dir("single_png_recording"));
+    let project = test_tree.0.join("project");
+    copy_tree(&root.join("samples/windows_launch_smoke"), &project);
+    materialize_toolchain_stdlib(&project);
+    fs::write(
+        project.join("main.stasis"),
+        r#"import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
+global screenshot_tick: i32;
+function main(): i32 {
+    init_window(320, 180, "Single PNG");
+    screenshot_tick = 0;
+    return 0;
+}
+function tick(): i32 {
+    screenshot_tick += 1;
+    return 0;
+}
+function render(): i32 {
+    clear(i32_to_f32(screenshot_tick) / 4.0, 0.0, 0.0, 1.0);
+    return 0;
+}
+function on_code_swap(): void {
+}
+"#,
+    )
+    .expect("write changing screenshot scene");
+    let capture = |output: &Path| {
+        let mut command = stasis_command(&project);
+        command.args(["--json", "record", "main.stasis", "--output"]);
+        command.arg(output).args([
+            "--width", "321", "--height", "181", "--fps", "60", "--frames", "3",
+        ]);
+        launch(command, "single PNG recording")
+    };
+    let sequence = test_tree.0.join("sequence");
+    let sequence_run = capture(&sequence);
+    assert!(
+        sequence_run.status.success(),
+        "sequence failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&sequence_run.stdout),
+        String::from_utf8_lossy(&sequence_run.stderr)
+    );
+    let screenshot = test_tree.0.join("screenshot.PNG");
+    let screenshot_run = capture(&screenshot);
+    assert!(
+        screenshot_run.status.success(),
+        "screenshot failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&screenshot_run.stdout),
+        String::from_utf8_lossy(&screenshot_run.stderr)
+    );
+    let bytes = fs::read(&screenshot).expect("read direct PNG screenshot");
+    assert_eq!(bytes, fs::read(sequence.join("frame-000003.png")).unwrap());
+    assert_ne!(bytes, fs::read(sequence.join("frame-000001.png")).unwrap());
+    assert_eq!(
+        image::open(&screenshot).unwrap().to_rgba8().dimensions(),
+        (321, 181)
+    );
+    let stdout = String::from_utf8_lossy(&screenshot_run.stdout);
+    let receipt: serde_json::Value = serde_json::from_str(
+        stdout
+            .lines()
+            .rev()
+            .find(|line| line.starts_with("{\"command\":\"record\""))
+            .expect("record JSON receipt"),
+    )
+    .expect("parse screenshot receipt");
+    assert_eq!(receipt["result"]["format"], "png");
+    assert_eq!(receipt["result"]["frames"], 3);
+    let overwrite = capture(&screenshot);
+    assert!(!overwrite.status.success());
+    assert_eq!(fs::read(&screenshot).unwrap(), bytes);
+    assert!(!fs::read_dir(&test_tree.0).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".stasis-recording-")
+    }));
+    if let Some(evidence) = std::env::var_os("STASIS_SINGLE_PNG_EVIDENCE") {
+        fs::copy(&screenshot, evidence).expect("preserve screenshot evidence");
+    }
+}
+
+#[test]
 fn recording_matches_visible_play_letterbox_and_input_timeline() {
     let root = repository_root();
     let configured_runtime = std::env::var_os("STASIS_RUNTIME_DLL_PATH")
