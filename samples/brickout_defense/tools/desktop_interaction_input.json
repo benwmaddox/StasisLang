@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "frames": [
+    {"frame": 1400, "pointers": [{"id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 495, "y": 360}]},
+    {"frame": 1401, "pointers": [{"id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 495, "y": 360}]},
+    {"frame": 1420, "pointers": [{"id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 825, "y": 120}]},
+    {"frame": 1421, "pointers": [{"id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 825, "y": 120}]},
+    {"frame": 1440, "pointers": [{"id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 180, "y": 270}]},
+    {"frame": 1441, "pointers": [{"id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 180, "y": 270}]},
+    {"frame": 1480, "pointers": [{"id": 0, "isDown": true, "wentDown": true, "wentUp": false, "x": 878, "y": 667}]},
+    {"frame": 1481, "pointers": [{"id": 0, "isDown": false, "wentDown": false, "wentUp": true, "x": 878, "y": 667}]}
+  ]
+}

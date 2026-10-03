@@ -13,6 +13,12 @@ Make the next useful change, verify it, and leave the repository in a reviewable
 5. Run `tools/install_git_hooks.ps1` once per clone. This repository's pre-commit hook blocks noncanonical staged Stasis source. Run the Android Workshop JIT render-parity emulator gate explicitly for rendering changes; the arm64 release shell has its own package-content and device gates.
 6. Codex and other automation must invoke Cargo through `python tools/cargo_cache.py run -- cargo ...`. This shares one repository-owned cache across linked worktrees and disables incremental artifacts only for the child Cargo process. See `docs/cargo_cache_policy.md` for measurement and safe cleanup.
 
+## CI boundaries
+
+- Pull requests run three checks: preflight policy/runtime checks, the consolidated Linux Cargo core, and the `test` summary that fails if either required lane does not succeed.
+- The reusable `nightly-validation.yml` workflow keeps the full Rust shard set, browser compiler, cross-platform generics, Windows/VS Code/Android seams, and complete validation summary. Nightly release calls it before publication; contributors can also run it manually.
+- Performance benchmarks and full network/browser acceptance are manual or nightly-only workflows. Their results gate nightly publication. The package-time contract tests remain in PR preflight, so the benchmark workflow does not repeat them.
+
 ## Choose work
 
 1. Read `docs/bugs.md`; choose the highest-severity item in `READY`.

@@ -13,6 +13,7 @@ import android.content.SharedPreferences;
 import android.content.res.AssetManager;
 import android.content.res.Configuration;
 import android.content.pm.PackageManager;
+import android.graphics.Rect;
 import android.graphics.Color;
 import android.graphics.Bitmap;
 import android.opengl.GLSurfaceView;
@@ -779,7 +780,7 @@ public final class MainActivity extends Activity {
             @Override
             public void onFocusChange(View view, boolean hasFocus) {
                 if (hasFocus) {
-                    scrollEditorIntoView(editorPanel);
+                    scrollEditorIntoView(editorPanel, true);
                 }
             }
         });
@@ -1433,11 +1434,31 @@ public final class MainActivity extends Activity {
         return row;
     }
 
-    private void scrollEditorIntoView(final ScrollView scrollView) {
+    private void scrollEditorIntoView(final ScrollView scrollView,
+            final boolean requireSourceFocus) {
         scrollView.postDelayed(new Runnable() {
             @Override
             public void run() {
-                scrollView.smoothScrollTo(0, sourceEditor.getBottom());
+                if (sourceEditor == null || !sourceEditor.isShown()
+                        || sourceEditor.getWindowToken() == null
+                        || !WorkshopEditorScrollTarget.shouldScroll(requireSourceFocus,
+                                sourceEditor.isFocused())
+                        || scrollView.getHeight() <= 0 || scrollView.getChildCount() == 0) {
+                    return;
+                }
+
+                Rect focusedRect = new Rect();
+                if (sourceEditor.isFocused()) {
+                    sourceEditor.getFocusedRect(focusedRect);
+                } else {
+                    focusedRect.set(0, 0, Math.max(1, sourceEditor.getWidth()), 1);
+                }
+                scrollView.offsetDescendantRectToMyCoords(sourceEditor, focusedRect);
+                View content = scrollView.getChildAt(0);
+                int targetY = WorkshopEditorScrollTarget.forVisibleRect(
+                        focusedRect.top, focusedRect.bottom, scrollView.getScrollY(),
+                        scrollView.getHeight(), content.getHeight());
+                scrollView.smoothScrollTo(0, targetY);
             }
         }, 250L);
     }
@@ -2660,7 +2681,7 @@ public final class MainActivity extends Activity {
         }
         if (editorPanel != null && sourceEditor != null) {
             editorPanel.post(new Runnable() {
-                @Override public void run() { editorPanel.smoothScrollTo(0, sourceEditor.getTop()); }
+                @Override public void run() { scrollEditorIntoView(editorPanel, false); }
             });
         }
     }

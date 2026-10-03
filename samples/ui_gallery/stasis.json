@@ -6,8 +6,8 @@
   "output": "build",
   "vendor": {
     "stasis": {
-      "release_id": "nightly-20260923-344",
-      "sha256": "1c91faa3e6baac7f72faecd11da75c781d688be7f0e817f9ea23e16a44b29623",
+      "release_id": "nightly-20260929-369",
+      "sha256": "0c393e4cbbf95609aee9490bf10fe984cc23363f4180a18869409d6000befad8",
       "hash_version": 2
     }
   },
@@ -15,7 +15,8 @@
     "application_id": "com.stasislang.sample.uigallery",
     "label": "Stasis UI Gallery",
     "orientation": "sensorLandscape",
-    "version_code": 1,
-    "version_name": "1.0.0"
+    "version_code": 2,
+    "version_name": "1.0.1",
+    "launcher_resources": "branding/android/res"
   }
 }

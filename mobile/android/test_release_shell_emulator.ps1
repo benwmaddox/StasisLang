@@ -109,6 +109,12 @@ $seams = @(
         TestId = "ANDROID-GENERICS"
         Project = "samples/generics_collections"
         Output = "android_generics_collections"
+    },
+    @{
+        TestId = "ANDROID-NUMERIC-TEXT"
+        Project = "samples/android_numeric_text_seam"
+        Expectations = "samples/android_numeric_text_seam/android_seam_expectations.json"
+        Output = "android_numeric_text"
     }
 )
 
@@ -248,6 +254,8 @@ foreach ($seam in $selectedSeams) {
     $seamTimeout = if ($seam.TestId -eq "IT-022") {
         900
     } elseif ($seam.TestId -eq "ANDROID-GENERICS") {
+        900
+    } elseif ($seam.TestId -eq "ANDROID-NUMERIC-TEXT") {
         900
     } elseif ($seam.TestId -eq "IT-024") {
         360

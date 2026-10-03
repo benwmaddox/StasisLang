@@ -1,5 +1,9 @@
+import json
 import pathlib
+import tempfile
+import textwrap
 import unittest
+from unittest.mock import patch
 
 from tools.audit_release_bundle import required_files
 from tools.desktop_network_target import network_target
@@ -90,11 +94,11 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
                     self.assertIn("libstasis_network.dylib", workflow)
                     library_copy = 'cp "build/codex-cargo-target/release/libstasis_network.so" "${out}/desktop/network/${network_target}/"'
                 else:
-                    self.assertIn('mkdir -p "${out}/desktop/network/linux-x86_64"', workflow)
-                    self.assertNotIn("network_target=macos-arm64", workflow)
+                    self.assertIn('network_target=macos-arm64', workflow)
+                    self.assertIn('network_target=linux-x86_64', workflow)
                     library_copy = (
                         'cp "build/codex-cargo-target/' + target_directory
-                        + 'release/libstasis_network.so" "${out}/desktop/network/linux-x86_64/"'
+                        + 'release/${network_shared}" "${out}/desktop/network/${network_target}/"'
                     )
                 header_copy = 'cp crates/stasis_network/include/stasis_network.h "${out}/desktop/network/include/"'
                 provenance = workflow.index("generate_release_provenance.py")
@@ -144,7 +148,7 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             self.workflow,
         )
         self.assertIn("runs-on: ubuntu-latest", self.workflow)
-        self.assertNotIn("macos-15", self.workflow)
+        self.assertIn("macos-15", self.workflow)
         self.assertIn('ndk;27.0.12077973', self.workflow)
         self.assertIn("aarch64-linux-android", self.workflow)
         self.assertIn("x86_64-linux-android", self.workflow)
@@ -155,10 +159,8 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             "network-artifact/android-arm64/libstasis_network_v1.so",
             self.workflow,
         )
-        self.assertIn(
-            "network-artifact/android-arm64/libstasis_network.a",
-            self.workflow,
-        )
+        self.assertNotIn("libstasis_network.a", self.workflow)
+        self.assertNotIn("release/stasis_network.lib", self.workflow)
         self.assertIn("--network-enabled --readelf", self.workflow)
         self.assertNotIn("xcrun", self.workflow)
         self.assertNotIn("aarch64-apple-ios", self.workflow)
@@ -190,7 +192,7 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
                     self.assertIn("codesign --verify --strict", package_script)
                     self.assertNotIn("codesign --force --sign -", package_script)
                     self.assertIn("codesign --force --sign -", signer)
-                else:
+                elif path.name != "nightly-release.yml":
                     self.assertNotRegex(
                         workflow,
                         r"(?im)^\s*(?:runs-on|os):\s*[^\n]*\bmacos(?:-[\w]+)?\b",
@@ -198,12 +200,28 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
                 self.assertNotRegex(workflow, r"(?im)^\s*kind:\s*ios\b")
         for marker in ("ios-package-link:", "ios-generics-simulator:"):
             self.assertNotIn(marker, (ROOT / ".github/workflows/pr-ci.yml").read_text(encoding="utf-8"))
-        for archive in ("stasis-nightly-linux-x64", "stasis-nightly-win-x64"):
+        for archive in ("stasis-nightly-linux-x64", "stasis-nightly-win-x64", "stasis-nightly-osx-arm64"):
             self.assertIn(f"archive: {archive}", self.workflow)
+        self.assertIn("vsce_target: darwin-arm64", self.workflow)
+        self.assertIn("name: stasis-nightly-osx-arm64", self.workflow)
         self.assertIn("python3 tools/audit_release_bundle.py", self.workflow)
         self.assertIn("python tools/audit_release_bundle.py", self.workflow)
         self.assertIn("mobile/network/android-arm64/libstasis_network_v1.so", required_files("linux"))
         self.assertIn("mobile/network/android-x86_64/libstasis_network_v1.so", required_files("windows"))
+        self.assertIn("desktop/network/macos-arm64/libstasis_network.dylib", required_files("macos"))
+
+    def test_network_browser_acceptance_is_nightly_gated_and_not_a_pr_trigger(self):
+        acceptance = (ROOT / ".github/workflows/network-browser-acceptance.yml").read_text(encoding="utf-8")
+        self.assertNotIn("pull_request:", acceptance)
+        self.assertIn("workflow_dispatch:", acceptance)
+        self.assertIn("workflow_call:", acceptance)
+        self.assertRegex(
+            self.workflow,
+            r"(?ms)^  network_browser_acceptance:\n    needs: detect\n    if: needs\.detect\.outputs\.should_release == 'true'\n    uses: \.\/\.github\/workflows\/network-browser-acceptance\.yml",
+        )
+        release = self.workflow.split("  release:", 1)[1].split("  no_changes:", 1)[0]
+        self.assertIn("needs.network_browser_acceptance.result == 'success'", release)
+        self.assertIn("needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams, performance_benchmarks, network_browser_acceptance]", release)
 
     def test_archive_layout_is_copied_before_provenance(self):
         for path in (
@@ -248,6 +266,39 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
         self.assertIn("stasis-network-source-backup", self.workflow)
         self.assertIn("requires a macOS host with Xcode", self.workflow)
         self.assertIn("verify_package_provenance.py", self.workflow)
+
+    def test_legacy_android_acceptance_preserves_host_guest_entry(self):
+        legacy_loop = self.workflow.split(
+            "for legacy_variant in legacy-v1-host legacy-v2-client; do", 1
+        )[1]
+        script = textwrap.dedent(
+            legacy_loop.split("<<'PY'\n", 1)[1].split("          PY", 1)[0]
+        )
+        for variant, version, capability in (
+            ("legacy-v1-host", 1, "network"),
+            ("legacy-v2-client", 2, "network_client"),
+        ):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as directory:
+                manifest_path = pathlib.Path(directory) / "stasis.json"
+                manifest_path.write_text(
+                    json.dumps({
+                        "manifest_version": 3,
+                        "entry": "src/main.stasis",
+                        "libraries": {"selections": {}},
+                        "web": {"entry": "old.stasis"},
+                    }),
+                    encoding="utf-8",
+                )
+                with patch("sys.argv", ["fixture", str(manifest_path), variant]):
+                    exec(compile(script, "nightly legacy fixture", "exec"), {})
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                self.assertEqual(version, manifest["manifest_version"])
+                self.assertEqual({capability: True}, manifest["capabilities"])
+                self.assertNotIn("libraries", manifest)
+                if capability == "network":
+                    self.assertEqual({"entry": "src/main.stasis"}, manifest["web"])
+                else:
+                    self.assertNotIn("web", manifest)
 
     def test_relocated_smoke_hides_checkout_source_and_restores_it(self):
         windows_root = '$checkoutRoot = (Get-Location).Path'

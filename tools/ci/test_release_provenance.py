@@ -20,6 +20,7 @@ from tools.generate_release_provenance import (
 from tools.verify_package_provenance import (
     validate_desktop_package_receipt,
     validate_project_configuration,
+    validate_included_libraries,
     verify_asset_package_identities,
     verify_mobile_shells,
     verify_network_guest_bundles,
@@ -36,7 +37,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
     TOOLCHAIN_SHA256 = hashlib.sha256(b"toolchain").hexdigest()
 
     @staticmethod
-    def project_configuration(target="windows-x86_64", features=()):
+    def project_configuration(target="windows-x86_64", features=(), reason="test fixture"):
         features = sorted(features)
         libraries = {"stasis.network": features} if features else {}
         resolved_libraries = []
@@ -82,13 +83,15 @@ class ReleaseProvenanceTests(unittest.TestCase):
                     "sha256": hashlib.sha256(b"license").hexdigest(),
                 },
                 "load_policy": "normal-platform-dependency",
-                "reasons": ["test fixture"],
+                "reasons": [reason],
             })
         digest = hashlib.sha256(
             json.dumps(
                 {"target": target, "libraries": resolved_libraries},
+                ensure_ascii=False,
+                sort_keys=True,
                 separators=(",", ":"),
-            ).encode()
+            ).encode("utf-8")
         ).hexdigest()
         return {
             "target": target,
@@ -142,6 +145,46 @@ class ReleaseProvenanceTests(unittest.TestCase):
         extra_closure_field["included_libraries"]["unexpected"] = True
         with self.assertRaisesRegex(ValueError, "closure provenance is malformed"):
             validate_project_configuration(Parser(), extra_closure_field)
+
+    def test_included_library_digest_matches_canonical_unicode_struct_receipt(self):
+        class Parser:
+            @staticmethod
+            def error(message):
+                raise ValueError(message)
+
+        configuration = self.project_configuration(
+            target="linux-x86_64", features=("host",), reason="réseau fixture"
+        )
+        included_json = json.dumps(
+            configuration["included_libraries"],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        included = json.loads(included_json)
+        library_json = json.dumps(
+            included["libraries"][0], ensure_ascii=False, separators=(",", ":")
+        )
+        self.assertIn('"reasons":["réseau fixture"]', library_json)
+        self.assertLess(library_json.index('"id"'), library_json.index('"version"'))
+
+        canonical_json = json.dumps(
+            {"target": configuration["target"], "libraries": included["libraries"]},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+        self.assertEqual(
+            digest,
+            "2e57e41c9e2ea9f6348eb53ad45e77c32e8b896e78ef6175fa17d1e629260e79",
+        )
+        self.assertEqual(configuration["library_set_sha256"], digest)
+        self.assertEqual(
+            validate_included_libraries(
+                Parser(), included, configuration["target"], digest
+            ),
+            included,
+        )
 
     @staticmethod
     def desktop_package_receipt(manifest=b"{}\n"):
@@ -570,6 +613,21 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 desktop_network_artifact_hashes(root),
             )
 
+    def test_release_network_artifact_sets_match_the_compiler_contract(self):
+        source = (ROOT / "apps/stasis/src/toolchain_cli.rs").read_text(encoding="utf-8")
+
+        def paths_in_constant(name, prefix):
+            start = source.index(f"const {name}:")
+            end = source.index("];", start)
+            return set(re.findall(r'"(' + prefix + r'/[^"\n]+)"', source[start:end]))
+
+        desktop = set().union(*DESKTOP_NETWORK_ARTIFACT_SETS) | {DESKTOP_NETWORK_HEADER}
+        self.assertEqual(paths_in_constant("DESKTOP_NETWORK_ARTIFACTS", "desktop/network"), desktop)
+        self.assertEqual(
+            paths_in_constant("MOBILE_NETWORK_REQUIRED_ARTIFACTS", "mobile/network"),
+            set(MOBILE_NETWORK_REQUIRED),
+        )
+
     def test_desktop_network_shared_artifacts_require_exactly_one_target(self):
         for artifact_set in DESKTOP_NETWORK_ARTIFACT_SETS:
             with self.subTest(artifacts=artifact_set), tempfile.TemporaryDirectory() as temporary:
@@ -931,7 +989,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
             self.assertIn("cp -R runtime/third_party", workflow)
             self.assertIn('Copy-Item "runtime/third_party"', workflow)
 
-    def test_release_workflows_use_linux_smoke_executable(self):
+    def test_release_workflows_use_platform_smoke_executable(self):
         for workflow_name in (
             ".github/workflows/nightly-release.yml",
             ".github/workflows/bootstrap-artifacts.yml",
@@ -945,16 +1003,11 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 smoke_block,
                 workflow_name,
             )
-            self.assertNotIn(
-                'if [[ "${{ runner.os }}" == "macOS" ]]; then',
-                smoke_block,
-                workflow_name,
-            )
-            self.assertNotIn(
-                'smoke_executable="./cli-smoke/build/ci_smoke.app/Contents/MacOS/ci_smoke"',
-                smoke_block,
-                workflow_name,
-            )
+            mac_executable = 'smoke_executable="./cli-smoke/build/ci_smoke.app/Contents/MacOS/ci_smoke"'
+            if workflow_name.endswith("nightly-release.yml"):
+                self.assertIn(mac_executable, smoke_block, workflow_name)
+            else:
+                self.assertNotIn(mac_executable, smoke_block, workflow_name)
             self.assertIn('"${smoke_executable}"', smoke_block, workflow_name)
             self.assertNotRegex(
                 smoke_block,
@@ -1052,7 +1105,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/nightly-release.yml").read_text(
             encoding="utf-8"
         )
-        start = workflow.index("for variant in offline host client; do")
+        start = workflow.index("for variant in offline host client legacy-v1-host legacy-v2-client; do")
         end = workflow.index("\n          done", start)
         block = workflow[start:end]
         self.assertLess(

@@ -4,6 +4,7 @@ param(
     [switch]$Headless,
     [switch]$SkipBuild,
     [int]$RenderTimeoutSeconds = 45,
+    [int]$StartupReadinessTimeoutSeconds = 90,
     [int]$StepTimeoutSeconds = 300,
     [int]$TotalTimeoutSeconds = 900,
     [double]$MaxRenderP50Millis = 0,
@@ -18,6 +19,9 @@ $startedAt = [System.Diagnostics.Stopwatch]::StartNew()
 $serial = "emulator-$Port"
 $startedEmulator = $false
 $packages = @("com.stasislang.workshop")
+$script:workshopReadinessElapsedSeconds = 0
+$script:workshopCaptureElapsedSeconds = 0
+$script:workshopCaptureEffectiveTimeoutSeconds = 0
 
 $runningOnWindows = [System.IO.Path]::DirectorySeparatorChar -eq [char]'\'
 $androidHome = if ($env:ANDROID_HOME) {
@@ -309,6 +313,71 @@ function Read-SurfaceBounds([string]$Description, [string]$XmlPath, [string]$Pac
     return @($left, $top, ($right - $left), ($bottom - $top))
 }
 
+function Get-WorkshopIT032ReadinessState([string[]]$LogLines) {
+    $marker = "Stasis Workshop IT-032: "
+    foreach ($line in $LogLines) {
+        $markerIndex = $line.IndexOf($marker, [System.StringComparison]::Ordinal)
+        if ($markerIndex -lt 0) { continue }
+        $jsonText = $line.Substring($markerIndex + $marker.Length).Trim()
+        try {
+            $receipt = $jsonText | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            throw "IT-032 terminal receipt is malformed: $($_.Exception.Message)"
+        }
+        if ($receipt.schema -ne "stasis.workshop_soak.v1" -or
+            $receipt.test_id -ne "IT-032" -or $receipt.event -ne "bounded_soak") {
+            throw "IT-032 terminal receipt has an unexpected schema or identity"
+        }
+        if ($receipt.status -eq "failed") {
+            throw "IT-032 reported failure: $($receipt.error)"
+        }
+        if ($receipt.status -ne "passed") {
+            throw "IT-032 terminal receipt did not report passed status"
+        }
+        if ($receipt.cleanup_receipt.status -ne "Restored") {
+            throw "IT-032 terminal receipt did not confirm restored cleanup"
+        }
+        return "ready"
+    }
+    return "pending"
+}
+
+function Wait-ForWorkshopIT032Readiness(
+    [int]$TimeoutMilliseconds,
+    [int]$PollIntervalMilliseconds,
+    [scriptblock]$ReadProcessId,
+    [scriptblock]$ReadProcessLog,
+    [scriptblock]$OnPending = {}
+) {
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    do {
+        $processId = ([string](& $ReadProcessId | Select-Object -First 1)).Trim()
+        if ($processId) {
+            $logLines = @(& $ReadProcessLog $processId)
+            $state = Get-WorkshopIT032ReadinessState $logLines
+            if ($state -eq "ready") {
+                return [pscustomobject]@{
+                    ProcessId = $processId
+                    ElapsedSeconds = [math]::Round($timer.Elapsed.TotalSeconds, 3)
+                }
+            }
+            & $OnPending $processId
+        }
+        $remainingMilliseconds = $TimeoutMilliseconds - [int]$timer.ElapsedMilliseconds
+        if ($remainingMilliseconds -gt 0) {
+            Start-Sleep -Milliseconds ([math]::Min($PollIntervalMilliseconds, $remainingMilliseconds))
+        }
+    } while ($timer.ElapsedMilliseconds -lt $TimeoutMilliseconds)
+    throw "Workshop IT-032 terminal readiness receipt was not observed within ${TimeoutMilliseconds}ms"
+}
+
+function Take-WorkshopSurfaceProbe([hashtable]$State) {
+    $now = Get-Date
+    if ($now -lt $State.NextProbeAt) { return $false }
+    $State.NextProbeAt = $now.AddSeconds(5)
+    return $true
+}
+
 function Fit-LogicalViewport([int[]]$Surface) {
     $logicalWidth = 640
     $logicalHeight = 360
@@ -342,7 +411,10 @@ function Assert-RenderedVariant(
 
     $capture = Join-Path $artifactRoot "$Name.png"
     $uiTree = Join-Path $artifactRoot "$Name-window.xml"
-    $deadline = (Get-Date).AddSeconds($RenderTimeoutSeconds)
+    $readinessTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $captureTimer = $null
+    $lastAttemptCapture = ""
+    $captureAttempt = 0
     $lastFailure = "render did not become ready"
     $renderPassed = $false
     $stableCaptures = 0
@@ -352,6 +424,57 @@ function Assert-RenderedVariant(
     $logFile = Join-Path $artifactRoot "$Name-logcat.txt"
     $log = @()
     try {
+        $surfaceProbeState = @{ NextProbeAt = [DateTime]::MinValue }
+        $onReadinessPending = {
+            param($PendingProcessId)
+            if (-not (Take-WorkshopSurfaceProbe $surfaceProbeState)) { return }
+            Remove-Item -LiteralPath $uiTree -Force -ErrorAction SilentlyContinue
+            try {
+                # Probe only for bounded ANR recovery; discard these bounds and
+                # resolve the viewport again after IT-032 has restored the scene.
+                [void](Read-SurfaceBounds $SurfaceDescription $uiTree $Package)
+            } catch {
+                if ($_.Exception.Message -eq "unrelated emulator-system ANR was dismissed; waiting for the render surface") {
+                    Invoke-Adb @("shell", "am", "start", "-W", "-n",
+                        "$Package/com.stasislang.workshop.MainActivity") | Out-Null
+                }
+            }
+        }.GetNewClosure()
+        $remainingTotalMilliseconds = [int][math]::Floor(
+            ($TotalTimeoutSeconds - $startedAt.Elapsed.TotalSeconds) * 1000
+        )
+        if ($remainingTotalMilliseconds -le 0) {
+            throw "Android render E2E exceeded ${TotalTimeoutSeconds}s before IT-032 readiness"
+        }
+        $readinessTimeoutMilliseconds = [math]::Min(
+            ($StartupReadinessTimeoutSeconds * 1000), $remainingTotalMilliseconds
+        )
+        $readProcessId = { Find-PackageProcessId $Package }.GetNewClosure()
+        $readProcessLog = {
+            param($ReadyProcessId)
+            @(& $adb -s $serial logcat "--pid=$ReadyProcessId" -d 2>$null)
+        }.GetNewClosure()
+        $readiness = Wait-ForWorkshopIT032Readiness `
+            -TimeoutMilliseconds $readinessTimeoutMilliseconds `
+            -PollIntervalMilliseconds 1000 `
+            -ReadProcessId $readProcessId `
+            -ReadProcessLog $readProcessLog `
+            -OnPending $onReadinessPending
+        $readinessTimer.Stop()
+        $script:workshopReadinessElapsedSeconds = [math]::Round($readinessTimer.Elapsed.TotalSeconds, 3)
+        Write-Host "$Name IT-032 readiness elapsed $($script:workshopReadinessElapsedSeconds)s (limit ${StartupReadinessTimeoutSeconds}s)"
+        $processId = $readiness.ProcessId
+        Remove-Item -LiteralPath $uiTree -Force -ErrorAction SilentlyContinue
+        $remainingTotalSeconds = [math]::Floor(
+            $TotalTimeoutSeconds - $startedAt.Elapsed.TotalSeconds
+        )
+        if ($remainingTotalSeconds -le 0) {
+            throw "Android render E2E exceeded ${TotalTimeoutSeconds}s before pixel capture"
+        }
+        $captureEffectiveTimeoutSeconds = [math]::Min($RenderTimeoutSeconds, $remainingTotalSeconds)
+        $script:workshopCaptureEffectiveTimeoutSeconds = $captureEffectiveTimeoutSeconds
+        $captureTimer = [System.Diagnostics.Stopwatch]::StartNew()
+        $deadline = (Get-Date).AddSeconds($captureEffectiveTimeoutSeconds)
         do {
             Start-Sleep -Seconds 2
             $processId = Find-PackageProcessId $Package
@@ -367,9 +490,11 @@ function Assert-RenderedVariant(
                     $viewportResolved = $true
                 }
                 Write-Host "$Name viewport=$viewportArg"
-                Save-Screenshot $capture
+                $captureAttempt += 1
+                $lastAttemptCapture = Join-Path $artifactRoot ("{0}-attempt-{1:D3}-{2}.png" -f $Name, $captureAttempt, $stamp)
+                Save-Screenshot $lastAttemptCapture
                 & python (Join-Path $toolsCiRoot "verify_render_parity.py") `
-                    --capture $capture --capture-only --profile android_emulator `
+                    --capture $lastAttemptCapture --capture-only --profile android_emulator `
                     "--viewport=$viewportArg" --viewport-y-search-radius=32
                 if ($LASTEXITCODE -eq 0) {
                     $stableCaptures += 1
@@ -390,6 +515,9 @@ function Assert-RenderedVariant(
                 }
             }
         } while ((Get-Date) -lt $deadline)
+        $captureTimer.Stop()
+        $script:workshopCaptureElapsedSeconds = [math]::Round($captureTimer.Elapsed.TotalSeconds, 3)
+        Write-Host "$Name capture elapsed $($script:workshopCaptureElapsedSeconds)s (limit ${captureEffectiveTimeoutSeconds}s; completed=$renderPassed)"
         if ($renderPassed) {
             $observedAvdLine = Invoke-Adb @("emu", "avd", "name") | Select-Object -First 1
             $observedAvd = if ($null -eq $observedAvdLine) { "" } else { $observedAvdLine.Trim() }
@@ -489,6 +617,16 @@ function Assert-RenderedVariant(
             }
         }
     } finally {
+        if ($readinessTimer.IsRunning) { $readinessTimer.Stop() }
+        if ($captureTimer -and $captureTimer.IsRunning) { $captureTimer.Stop() }
+        $script:workshopReadinessElapsedSeconds = [math]::Round($readinessTimer.Elapsed.TotalSeconds, 3)
+        if ($captureTimer) {
+            $script:workshopCaptureElapsedSeconds = [math]::Round($captureTimer.Elapsed.TotalSeconds, 3)
+        }
+        if ($lastAttemptCapture -and (Test-Path -LiteralPath $lastAttemptCapture) -and
+            (Get-Item -LiteralPath $lastAttemptCapture).Length -gt 0) {
+            Copy-Item -LiteralPath $lastAttemptCapture -Destination $capture -Force
+        }
         if ($processId) { $log = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null) }
         if (-not $processId -or $LASTEXITCODE -ne 0) {
             $log = @(& $adb -s $serial logcat -d 2>$null)
@@ -625,6 +763,11 @@ try {
         @{
             phase = "render-acceptance"
             elapsed_seconds = $renderAcceptanceElapsed
+            startup_readiness_timeout_seconds = $StartupReadinessTimeoutSeconds
+            readiness_elapsed_seconds = $script:workshopReadinessElapsedSeconds
+            capture_timeout_seconds = $RenderTimeoutSeconds
+            capture_effective_timeout_seconds = $script:workshopCaptureEffectiveTimeoutSeconds
+            capture_elapsed_seconds = $script:workshopCaptureElapsedSeconds
             render_timeout_seconds = $RenderTimeoutSeconds
             total_elapsed_seconds = [math]::Round($startedAt.Elapsed.TotalSeconds, 3)
             total_timeout_seconds = $TotalTimeoutSeconds

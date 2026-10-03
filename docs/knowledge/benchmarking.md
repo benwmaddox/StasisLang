@@ -1,67 +1,50 @@
-# Benchmarking Stasis projects
+# Benchmarking ticks and functions
 
-<!-- tags: benchmarking, performance, inspect, hud, profiling -->
+<!-- tags: benchmarking, tick, functions, profiling -->
 
-First choose the cost you want to measure. Compilation, simulation, rendering,
-asset loading, recording/encoding, and package size have different paths.
-Keep the project revision, vendored toolchain pin, target, capacity settings,
-assets, machine, and run command with every result. Run `stasis vendor status`
-and `stasis env` before a comparison so the input identity is reviewable.
+In desktop development play, press **F3** to see `tick` time in the performance
+HUD. Annotate `tick` with `@tick_budget_us(1000)` for a run summary of average
+microseconds, p99, and overruns. Average covers the whole run; p99 uses the last
+4096 samples.
 
-## Establish correctness and storage cost
-
-```text
-stasis fmt --check
-stasis check
-stasis test
-stasis inspect
-stasis inspect --capacity state.enemies=512
-```
-
-`inspect` reports static state layout and projected capacity changes. It is
-not a timing benchmark. Read totals and largest pools before tuning an
-allocation policy. Compare the same named state paths across revisions.
-
-## Measure the intended runtime path
-
-For a headless simulation comparison, use a fixed tick count and identical
-initial state and inputs:
+To measure `tick` and selected functions, use the built-in profiler:
 
 ```text
-stasis run --headless --ticks 10000 --fast-forward
+stasis play --ticks 600 --profile-functions tick,update_enemies --profile-warmup 60 --profile-output build/profile.json
 ```
 
-This command runs `main` and 10,000 ticks without `render` or graphics. A
-wall-clock measurement of the whole CLI invocation includes startup and JIT
-compilation. Report that as end-to-end time, not isolated tick time. Use an
-external timer and repeat several runs; compare the median and the spread,
-not a single fastest run. Separate a cold invocation from warmed filesystem
-and OS cache runs. Do not change code, assets, capacity, or toolchain between
-the two sides of a timing comparison.
+Replace `update_enemies` with a reachable function in your game. The run skips
+the first 60 ticks of measurements, then reports separate `tick` and `render`
+roots. Function calls and inclusive/exclusive totals come only from committed
+post-warmup frame samples; inclusive time includes callees, while exclusive
+time subtracts nested calls to other profiled functions. JSON schema 2 also
+includes per-frame inclusive/exclusive cost distributions (median, p95, max,
+and total), whose samples are whole-frame function costs rather than individual
+call latencies. A function not called in a committed frame contributes zero to
+that frame's distribution. Times are nanoseconds; runtime phase times are
+microseconds.
 
-For example, time `stasis check` with `Measure-Command { stasis check }` in
-PowerShell or `/usr/bin/time -p stasis check` on Linux/macOS. Check the command's
-exit status for every trial. Time the headless run the same way, but report it
-as end-to-end compile-plus-simulation time.
+On desktop, `host_frames` contains only frames whose native performance-metrics
+snapshot was published for the current submission. Guest tick/render rows share
+those frame IDs. Headless runs can report committed guest tick/render samples
+without host frame IDs; unsupported phases remain `null` with a zero available
+sample count, never fabricated zero timings. `present_wait` is separate from
+`frame_work`. The 1,200-sample cap applies to the shared function and frame
+window. Missing rows warn about spelling, reachability, warmup, or inlining.
 
-For graphics and asset cost, measure the graphical `play` path on the same
-hardware and toggle the development performance HUD with **F3** on desktop
-or Web (three fingers on mobile). Compare `tick`, `guest render`, `host
-replay`, and `frame work`; available backends also show render preparation,
-GPU submission, and workload counts. `present wait` is separate from active
-frame work. An unavailable phase is not a measured zero, and the HUD's worst
-value covers only the recent five seconds. Release packages omit the HUD. A
-`stasis record` run is useful for reproducible rendered output, but its elapsed
-time includes capture, PNG work, and possibly FFmpeg encoding; do not label
-it game frame time. A replay can fix the input sequence for a rendering
-comparison only if that game stays within replay's supported observations.
+Repeat the same workload on the same machine and toolchain. Profiling adds
+overhead: each selected helper invocation records a monotonic start/end and
+updates per-frame counters, so very small hot helpers are perturbed most. The
+report avoids per-call logging and computes distributions from bounded
+per-frame aggregates. Compare like-for-like runs. CLI elapsed time also includes
+compilation and startup, so use the profiler or HUD for tick timing.
 
-## Make the result explainable
+`schema_version` identifies the current pre-1.0 export shape. Consumers should
+update with producer changes; historical readers and migration compatibility
+are not promised.
 
-Record the exact command, release ID, source revision, target, tick/frame
-count, first-run versus warmed-run status, machine, and median/range of
-measurements. Save correctness results beside the timing data. When the
-question is a regression, measure the same scenario before and after and
-state the percent change. A faster `check` can coexist with slower runtime;
-keep the metrics separate. For visible changes, attach and inspect a PNG or
-MP4 from the same scenario.
+When `--screenshot` is enabled, the native runtime captures the requested frame
+before the host-replay timer ends. Screenshot readback is therefore included in
+that frame's `host_replay` and `frame_work` values and remains in the reported
+window and distributions. Use matching screenshot settings when comparing
+runs.

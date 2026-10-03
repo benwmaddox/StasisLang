@@ -3,12 +3,14 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.ci.verify_render_parity import (
     ATLAS_SPRITE_HANDLES,
     DEFAULT_MANIFEST,
     _atlas_sprite_handles,
     _function_body,
+    _normalize_viewport,
     _parity_command_counts,
     read_capture,
     validate_fixture,
@@ -39,7 +41,7 @@ def write_bmp(path: Path, width: int, height: int, rgba: bytes) -> None:
 
 class RenderParityGateTest(unittest.TestCase):
     def test_windows_workflow_does_not_mask_parity_verifier_failure(self):
-        lines = (ROOT / ".github/workflows/pr-ci.yml").read_text(
+        lines = (ROOT / ".github/workflows/nightly-validation.yml").read_text(
             encoding="utf-8"
         ).splitlines()
         verifier = next(
@@ -168,6 +170,48 @@ function append_marker(missing_sprite: i32): void {
             }
             verify_capture(manifest, capture, "portable")
 
+    def test_background_histogram_is_lazy_after_an_earlier_region_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "device.bmp"
+            background = bytes((18, 30, 48, 255))
+            write_bmp(capture, 2, 4, background * 8)
+            manifest = {
+                "logical_size": [2, 1],
+                "capture_profiles": {
+                    "android": {
+                        "comparison": "regions",
+                        "regions": [
+                            {
+                                "name": "atlas_canvas_sprite",
+                                "rect": [0, 0, 2, 1],
+                                "predicate": "atlas_canvas",
+                                "min_coverage": 1.0,
+                            },
+                            {
+                                "name": "translucent_sprite",
+                                "rect": [0, 0, 2, 1],
+                                "non_background_fraction": 0.5,
+                            },
+                        ],
+                    }
+                },
+            }
+            viewport = [0, 1, 2, 1]
+            with self.assertRaisesRegex(ValueError, "no viewport matched") as base_failure:
+                verify_capture(manifest, capture, "android", viewport, 0)
+
+            with patch("tools.ci.verify_render_parity.Counter") as counter:
+                with self.assertRaisesRegex(
+                    ValueError, "no viewport matched"
+                ) as searched_failure:
+                    verify_capture(manifest, capture, "android", viewport, 1)
+                counter.assert_not_called()
+
+            self.assertEqual(
+                str(base_failure.exception).split("base failure: ", 1)[1],
+                str(searched_failure.exception).split("base failure: ", 1)[1],
+            )
+
     def test_letterboxed_capture_uses_explicit_viewport(self):
         with tempfile.TemporaryDirectory() as directory:
             capture = Path(directory) / "device.bmp"
@@ -219,6 +263,35 @@ function append_marker(missing_sprite: i32): void {
                 manifest, capture, "portable", [0, 1, 4, 2], 2
             )
             self.assertEqual(selected, [0, 3, 4, 2])
+
+    def test_cached_viewport_rows_match_reference_pixel_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "device.bmp"
+            pixels = bytes(
+                channel
+                for index in range(7 * 8)
+                for channel in (index, (index + 31) & 0xFF, (index + 79) & 0xFF, 255)
+            )
+            write_bmp(capture, 7, 8, pixels)
+            capture_width, capture_height, rgba = read_capture(capture)
+            row_cache: dict[tuple[int, int, int, int, int, int], bytes] = {}
+
+            for top in (1, 2, 3):
+                viewport = [1, top, 5, 5]
+                actual = _normalize_viewport(
+                    rgba, capture_width, capture_height, viewport, 3, 2, row_cache
+                )
+                expected = bytearray()
+                x, y, width, height = viewport
+                for output_y in range(2):
+                    source_y = y + min(height - 1, output_y * height // 2)
+                    for output_x in range(3):
+                        source_x = x + min(width - 1, output_x * width // 3)
+                        source = (source_y * capture_width + source_x) * 4
+                        expected.extend(rgba[source : source + 4])
+                self.assertEqual(actual, bytes(expected))
+
+            self.assertEqual(len(row_cache), 5)
 
     def test_bounded_vertical_search_rejects_out_of_radius_offset(self):
         with tempfile.TemporaryDirectory() as directory:

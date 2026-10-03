@@ -246,7 +246,7 @@ exchange.
 
 | Target | Development selective JIT | Production AOT | Required evidence |
 | --- | --- | --- | --- |
-| Windows x86_64 | Required | Required PE/COFF | Native PR CI and pinned edit-shape benchmark. |
+| Windows x86_64 | Required | Required PE/COFF | Nightly native validation and pinned edit-shape benchmark. |
 | Linux x86_64 | Required | Required ELF | Native CI selective patch execution. |
 | macOS x86_64 | Required for permitted local processes | Required Mach-O | Native x86_64 runner and hardened-process exclusion. |
 | macOS arm64 | Required for permitted local processes | Required Mach-O | Native arm64 runner; no translated JIT. |

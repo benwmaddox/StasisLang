@@ -18,8 +18,8 @@ android {
         applicationId 'com.stasislang.workshop'
         minSdk = (project.findProperty('stasis.minSdk') ?: '26').toString().toInteger()
         targetSdk = (project.findProperty('stasis.targetSdk') ?: '35').toString().toInteger()
-        versionCode 1
-        versionName '0.1.0'
+        versionCode 2
+        versionName '0.1.1'
         buildConfigField 'boolean', 'STASIS_RENDER_ACCEPTANCE', renderAcceptance.toString()
 
         externalNativeBuild {

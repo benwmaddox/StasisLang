@@ -1763,8 +1763,10 @@ its evidence cell. Implemented rows are not active work to select again; use a
 selected GitHub issue/review for any follow-up and update status/evidence here.
 The rollout stages above preserve dependency order for remaining or future work.
 
-Validation ownership: the [PR workflow](../.github/workflows/pr-ci.yml) runs the
-contract/compiler checks and native platform suites through the
+Validation ownership: [PR CI](../.github/workflows/pr-ci.yml) runs the
+preflight contracts and consolidated Linux Rust core. The reusable
+[nightly validation workflow](../.github/workflows/nightly-validation.yml) runs
+the complete compiler and native platform suites through the
 [Windows seam runner](../tools/ci/run_windows_platform_seams.py).
 The [Android seam workflow](../.github/workflows/android-device-seams.yml) runs
 the release-shell driver and Workshop acceptance/verifier linked below.

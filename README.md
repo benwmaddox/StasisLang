@@ -197,6 +197,20 @@ foreach (let enemy in enemies) {
 
 A `for` header always has all three clauses. Fixed extents and explicit traversal make loop cost easy to see.
 
+Prefer `foreach` for full-array traversal in ascending index order, using the element binding directly. This makes the array extent explicit and helps the compiler prove bounds, though emitted checks depend on the backend and access path. This is a recommendation, not a requirement: use `for` for a used prefix, reverse traversal, strides, or other explicit ranges. `foreach` visits the entire declared capacity.
+
+Stasis `foreach` can also provide the index directly, so needing an index alone does not require a `for` loop:
+
+```stasis
+foreach (let enemy, i in enemies) {
+    if (i == focusIndex) {
+        enemy.damage(10);
+    }
+}
+```
+
+The element binding comes first; the optional index binding comes second. Here, `enemy` is a writable view of `enemies[i]`, and `i` is its zero-based `i32` index, ranging from `0` to `enemies.max_length - 1`.
+
 ### Tests are part of the language
 
 Place tests in a `.test.stasis` file next to the code when practical:
@@ -229,17 +243,21 @@ stasis new my_game
 cd my_game
 ```
 
-Every `stasis new` project includes GitHub Actions for a pull-request check and a Friday/manual
-three-platform nightly compatibility run. The PR job checks the vendored snapshot and runs only
-`stasis check`. Both workflows resolve the newest complete published Stasis nightly at CI runtime;
-the PR job records its selection in the job summary. The `stasis.json` release ID continues to
-describe the checked-in `vendor/stasis` snapshot and does not select the CI toolchain. The weekly
-job updates the vendor snapshot,
-checks formatting and compilation, runs tests, packages desktop builds, and retains temporary
-workflow artifacts. It does not publish, tag, create releases, sign packages, or build mobile or
-web targets. Project generation remains offline, including from development builds. Network access
-occurs only when the generated workflows restore a GitHub release and verify its GitHub-published
-SHA-256 digest and toolchain identity.
+Every `stasis new` project includes GitHub Actions for pull-request checks, Friday/manual releases,
+and quarterly Stasis pin updates. PR and weekly workflows restore the exact release recorded in
+`stasis.json` and verify the checked-in vendor snapshot. PR checks run formatting and `stasis check`;
+weekly releases also run tests.
+
+The weekly build uses two jobs. Windows restore, vendor verification, desktop packaging, and ZIP
+creation share a 60-second budget. Android arm64 APK assembly and optimized web packaging share a
+180-second budget on Linux; Linux toolchain, Java, SDK, and optimizer setup run before that timer.
+Successful builds publish a prerelease with Windows ZIP, Android APK, web archive, checksums, and
+an immutable build manifest. Unchanged projects skip the build unless a release is forced.
+The Android APK is unsigned and requires a persistent app signing identity and Gradle signing
+configuration before it can be installed or used to upgrade an existing app.
+
+Project generation remains offline, including from development builds. Generated workflows download
+the pinned GitHub release and verify its published SHA-256 digest and toolchain identity.
 
 `stasis new` initializes Git and activates the generated formatting hook without pinning a
 line-ending style. An attempted commit with noncanonical Stasis source formats the files
@@ -405,7 +423,13 @@ guest code may still request its normal audio API. See
 
 Stasis is fast-moving and breaking changes are expected. Nightly release archives are published from `main` on the [GitHub Releases page](https://github.com/benwmaddox/StasisLang/releases).
 
-Download the archive for your platform, extract it, and put the `stasis` executable on `PATH`. On Windows, SmartScreen may warn because binaries are currently unsigned. The archive includes the compiler, native build tools, runtime libraries, standard library, samples, mobile shells, agent workflow guide, and Stasis knowledge library needed for offline use.
+Download the archive for your platform, extract it, and put the `stasis` executable on `PATH`. On Windows, SmartScreen may warn because binaries are currently unsigned. The archive includes the compiler, prebuilt runtime libraries, standard library, samples, mobile shells, agent workflow guide, and Stasis knowledge library needed for offline use. Native packaging uses host compiler/linker tools; Windows requires Visual Studio Build Tools with MSVC, the Windows SDK, and CMake.
+
+Release archives omit the large [Brickout Defense sample](samples/brickout_defense), which remains
+available in the source repository. Other samples, including Brickout Revenge and the Windows
+launch smoke project, remain bundled. Install [Binaryen's `wasm-opt`](https://github.com/WebAssembly/binaryen)
+for optimized web packages; the weekly release scaffold and nightly web qualification install it
+and require optimization to run.
 
 To build the repository from source:
 

@@ -26,9 +26,10 @@ the authoritative native application. Run `stasis package --target desktop`
 from the project, or add `--development-build` for a source-built toolchain.
 The guest is compiled through the existing web packaging pipeline. Its Wasm,
 JavaScript, HTML and reachable assets are encoded into `network_guest.bundle`
-and staged with the native assets. A manifest-v3 explicit library selection links the
-target-native reusable Rust `stasis_network` shared library. A manifest-v1/v2 capability keeps the
-legacy static monolithic link and unchanged package/receipt layout. Both use the same bounded native mailbox ABI.
+and staged with the native assets. Manifest-v1/v2 capabilities and manifest-v3 explicit library
+selections link the target-native reusable Rust `stasis_network` shared library. Legacy manifests
+retain their package receipt keys and omit v3 included-library provenance metadata. All versions use
+the same bounded native mailbox ABI.
 Non-network packages do not start a listener or stage a guest bundle.
 
 The native runtime starts the host after graphics initialization and AOT runtime
@@ -98,12 +99,11 @@ source-checkout builds validated by the macOS acceptance lane, not release-prove
 claims.
 Downstream Maddox and Friends application adoption is separate.
 
-Current nightly and bootstrap toolchain archives include one target-native shared-library set plus
-the prior static archive for manifest-v1/v2 compatibility:
+Current nightly and bootstrap toolchain archives include the target-native shared-library set:
 
 - `desktop/network/windows-x86_64/stasis_network.dll` and its
-  `stasis_network.dll.lib` import library, plus `stasis_network.lib`
-- `desktop/network/linux-x86_64/libstasis_network.so`, plus `libstasis_network.a`
+  `stasis_network.dll.lib` import library
+- `desktop/network/linux-x86_64/libstasis_network.so`
 - bootstrap archives on macOS use `libstasis_network.dylib` for the runner architecture
 
 The desktop network target helper still recognizes macOS and additional Unix
@@ -121,6 +121,16 @@ and their audit sidecars share the package root with game assets on Unix
 bundle; its asset root resolves back to that package directory. The network library is a normal
 package-local dependency: beside the executable on Windows/Linux and under the app loader path on
 macOS. Offline packages omit it completely.
+Windows monolith packages reuse the prebuilt SDL3, SDL3_image and ThorVG archives and headers from
+the toolchain's `runtime/prebuilt/windows-x64` bundle when that bundle is available. Offline packages can
+also reuse its matching `stasis_mobile_runtime.lib`; host and client packages compile that runtime
+from source so the selected network mode is applied to the runtime itself. When the graphics bundle
+is absent, CMake keeps the existing dependency source and fetch path.
+The nightly Windows release producer runs on `windows-2022` and builds these archives with the
+VS2022 v143 toolset, the minimum supported consumer toolset. This keeps the static ThorVG archive
+linkable from VS2022 installations: a newer-toolset archive can reference MSVC STL helpers such as
+`__std_rotate` that are absent from the VS2022 standard-library link libraries. Signing and
+editor-consumer jobs remain on `windows-latest` to validate the newer consumer toolset.
 macOS uses `@rpath/libstasis_network.dylib` with
 `@executable_path/../Frameworks`; production packaging signs the staged dylib before
 signing the enclosing `.app`. The acceptance lane configures the production signer hook,
@@ -168,14 +178,15 @@ For browser acceptance, build the `browser_acceptance_host` example from
 `node tools/run_network_browser_acceptance.mjs` with Chrome or Edge and FFmpeg
 available. The harness writes PNG, MP4 and JSON evidence under
 `target/network-browser-acceptance`. The MP4 records the asserted protocol
-stages; it is not a timing or animation benchmark. The focused
+stages; it is not a timing or animation benchmark. The manual/nightly
 `network-browser-acceptance.yml` workflow runs these gates plus package-content
 tests on Windows. Its Linux job runs the native link/lifecycle probe
 (`bash tools/ci/test_desktop_network_link.sh`), package contract tests, and
 provenance tests. Nightly packaging additionally builds a network-enabled
 desktop package from the relocated release archive with source inputs detached.
-PR CI also runs `bash tools/ci/test_unix_desktop_network_package.sh` on Linux
-to build a native host package and audit its staged browser guest. The test
+Nightly network acceptance also runs
+`bash tools/ci/test_unix_desktop_network_package.sh` on Linux to build a native
+host package and audit its staged browser guest. The test
 runs the HTTP and process-exit listener probes. The network acceptance workflow's
 macOS lane builds the dylib and both iOS static archives, exercises nested
 dylib-before-app signing, and runs the same package lifecycle probe.

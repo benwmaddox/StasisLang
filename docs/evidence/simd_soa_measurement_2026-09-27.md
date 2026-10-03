@@ -75,7 +75,12 @@ python tools/measure_simd_soa.py --output build/simd-soa-evidence-rerun --warmup
 
 The command runs the focused semantic/AOT test through `tools/cargo_cache.py`, writes source, CLIF, objects, disassembly, raw samples, device inventory, and `analysis.json`, then compiles the scratch-only scalar/NEON pair. Generated artifacts stay under the chosen ignored build directory. The checked-in JSON is the final 2026-09-27 run.
 
-The Rust characterization test is ignored by the normal compiler test suite because it performs repeated measurement compiles and records incidental code shape. The reproduction tool invokes it explicitly with `--ignored`; future vector lowering should be reported in new evidence rather than treated as a regression.
+The Rust characterization test runs in the normal compiler test suite with one
+compile repetition and a temporary output directory. That default lane checks
+the five-tick semantic oracle and keeps the compiler-owned JIT/AOT CLIF and
+object generation exercised. The reproduction tool raises the repetition count,
+keeps the generated files, and adds NDK disassembly; future vector lowering
+should be reported in new evidence rather than treated as a regression.
 
 Validation on the measured branch:
 

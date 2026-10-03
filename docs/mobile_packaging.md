@@ -128,10 +128,11 @@ From the generated `android/` directory run `gradle :app:assembleDebug` or
 shared runtime, links the generated AOT objects, and packages
 `assets/stasis_game`. No vcpkg installation is used.
 
-Manifest-v3 explicit `stasis.network` selections stage the versioned
-`libstasis_network_v1.so` as a normal Android dependency. Manifest-v1/v2 network capabilities keep
-the legacy `libstasis_network.a` static link and the exact pre-v3 package receipt schema; upgrading
-delivery format requires upgrading the manifest and adding an explicit library selection.
+Android network packaging stages the versioned `libstasis_network_v1.so` as a normal dependency for
+manifest-v1/v2 capabilities and manifest-v3 explicit `stasis.network` selections. This preserves
+the pre-v3 package receipt schema and keys while changing only the Android library path. Manifest v3
+also records the selected library's provenance metadata. iOS continues to stage and statically link
+`libstasis_network.a` for every manifest version.
 
 The SDL shell preserves the logical dimensions requested by the game while
 rendering into the device's native drawable surface. Original SVG files remain

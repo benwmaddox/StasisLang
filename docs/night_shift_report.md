@@ -598,3 +598,119 @@ source-development layout (temporarily unstaging that DLL after the build)
 passed; the original staged DLL was restored and its SHA-256 verified.
 
 Visual evidence: not applicable (documentation and executable-example coverage).
+
+## 2026-10-01 - Maddox #775 SIMD validator repair
+
+The bounded ARM64 SIMD characterization now runs in the default compiler test
+suite instead of being hidden behind `#[ignore]`. Its existing default remains
+one compile repetition across 12 cases, with five-tick JIT correctness checks,
+JIT/AOT CLIF capture, and AOT object inspection. The explicit measurement tool
+still raises repetitions, retains artifacts, and adds NDK disassembly.
+
+Validation: the focused compiler test passed 12 characterization cases in 1.08
+seconds; the exact ignored-test policy audit passed; the Python wrapper compiled;
+and a fresh one-repetition measurement produced
+`D:\code\.automation-evidence\nightly-20261001\775\simd-smoke\analysis.json`.
+Visual evidence: not applicable (compiler validation policy only).
+
+Theory gained: compiler-owned semantic and code-generation characterization can
+run as a bounded correctness test; only external NDK analysis and repeated
+sampling belong in the explicit wrapper. A future characterization can reuse
+this split without suppressing its correctness oracle.
+
+Good: the repair removed the policy mismatch without changing SIMD semantics or
+expanding the ignore allowlist. Bad: the measurement test had mixed required
+correctness with opt-in repetition, which hid both from normal validation.
+Adjustment: keep the one-repetition correctness core default-on and add sampling
+only in the artifact-producing wrapper.
+
+## 2026-10-01 - Maddox #773 allocation-free numeric text
+
+Added checked decimal formatting into caller-owned `ascii[N]` storage for the
+full `i32` range and every finite binary32 value at fixed precision `0..6`.
+Replace, append, and left-pad operations preflight capacity including the NUL,
+return the resulting length or `-1`, and leave the complete header and payload
+unchanged on rejection. Fixed formatting uses exact binary32 quantization,
+halfway-away-from-zero rounding, and unsigned output for rounded negative zero.
+The implementation has one fixed local digit array and no host formatter,
+allocator, runtime ABI, or `i64` surface.
+
+At the source freeze, the independent `BigUint` JIT corpus passed across every
+normal exponent with selected significands, signs, and precisions, plus numeric
+boundaries, tie neighbors, powers of ten, and deterministic raw-bit samples.
+Literal byte and NUL self-checks also passed in JIT, a linked native AOT
+executable, and executable Wasm. Native objects had no formatting or allocator
+imports, and the Wasm module had no imports. The checked-in Stasis behavior
+suite and 115 Android receipt/source-contract tests passed. Fresh exact-head
+API 35 x86_64 execution, arm64 package/link verification, and the complete
+bounded repository gate are recorded externally after the reviewed freeze
+commit because pre-freeze packaging correctly refuses an unverified build
+identity.
+
+Visual evidence: pending at the source freeze. The formatter itself is a byte
+contract; the exact-head API 35 run will capture the sample's green receipt
+frame alongside its literal 98-case device log. No desktop visual change is
+expected.
+
+Theory gained: exact decimal output does not require a host formatting ABI when
+the binary32 mantissa and exponent are reduced into a bounded decimal digit
+vector. Backend parity is strongest when each executable compares literal
+bytes and mobile reads the registered typed storage rather than inferring
+behavior from compilation.
+
+Good: one pure-stdlib implementation serves every backend, while independent
+oracles cover arithmetic, transactionality, capacity, and ownership. Bad:
+compile-only mobile evidence and a prefix-only log regex could hide byte
+differences or trailing corruption. Adjustment: execute literal checks on each
+backend, validate the typed Android header/NUL/full log line, and keep arm64
+link evidence distinct from x86_64 execution evidence.
+
+## 2026-10-01 - Maddox #787 stable LSP worker admission
+
+Replaced the deprecated atomic conditional update in LSP live-request worker
+admission with a private weak compare-exchange loop. The existing 64-worker cap,
+successful `AcqRel` publication, `Acquire` observations, backpressure response,
+and both `fetch_sub(AcqRel)` release paths remain unchanged.
+
+Validation at source freeze: the unchanged source reproduced the Rust 1.99.0
+warnings-denied deprecation in `cargo build -p stasis` while stable Rust 1.92.0
+passed the same command. After the repair, that exact build passed under both
+toolchains. Four boundary/contention admission tests passed, including one
+128-thread race with exactly 64 successful reservations, the existing real
+backpressure-path test passed, and all 35 `stasis_lsp` library tests passed
+serially under both Rust versions. The pre-edit repository validator exposed a
+stale native-runtime sibling; after building and verifying one matching source,
+release, and fingerprint tuple, its exact failed display-metrics target passed
+1/1. Final commit-head artifact identity and bounded full target coverage remained
+pending at this source-freeze checkpoint.
+
+Visual evidence: not applicable (private LSP concurrency and compiler-version
+compatibility only).
+
+Theory gained: a small explicit compare-exchange loop can preserve the exact
+linearization point and ordering of a convenience atomic update while spanning
+stable compiler versions on both sides of an API rename.
+
+Good: boundary, overfull, real-path, and concurrent-cap behavior now have direct
+oracles. Bad: the first broad baseline loaded a stale native DLL, obscuring an
+otherwise unrelated gate. Adjustment: verify one source/release/fingerprint
+tuple before native integration tests and keep compatibility checks explicit for
+both the existing local and current stable toolchains.
+
+## 2026-10-01 - Maddox #789 cross-thread launch-console minimization
+
+Changed the visible console root-owner request in runtime/stasis_graphics.c from SW_MINIMIZE to SW_FORCEMINIMIZE. The console frontend is owned by a different UI thread; the forced show state is the Win32 operation intended for minimizing a window owned by another thread. The one-time guard, STASIS_CONSOLE_START_MINIMIZED opt-out, visible-window condition, ConPTY iconify fallback, and SDL game-window path are unchanged. No ABI, test, CMake, workflow, signing, or global desktop configuration changed.
+
+Validation at the source-freeze checkpoint: a fresh build of accepted baseline 62bc5dc45f26abaedbfc52a6c1a3deecaaf7bd6c reproduced the default-mode stage-4 console failure. The direct console contract failed at stage 4; the configured pair passed sprite reservation and failed the console contract (1/2). After the one-call change, the direct four-mode contract passed. An unisolated local configured run also recorded a hidden stage-7 SW_RESTORE failure when a separate Windows Terminal root-owner stayed iconic through the existing one-second wait; that receipt is retained and does not establish a general product cause. A subsequent controlled configured run passed 2/2 under the independently reviewed owned-console isolation guard, which acted only on two proven test-owned frontend UUIDs and left no owned frontends or processes. This local isolation result is bounded evidence, not a claim about general Windows Terminal behavior.
+
+The render-parity play on the dirty candidate exited 0, and the portable second-frame verifier passed with frame 2 lifecycle evidence, three sprites, SDL backend, and trace 1523793427. The inspected 640x360 capture at [frame.png](D:/code/.automation-evidence/nightly-20261001/789/dirty-candidate/parity/frame.png) shows the full test scene: checked sprites, overlapping circles, central bar, both diagonal lines, text bands, and guide marks without cropping or blank output. This capture demonstrates that the game still renders; the existing four-mode HWND-state contract is the evidence for console minimization.
+
+Dirty-candidate provenance: source HEAD 62bc5dc45f26abaedbfc52a6c1a3deecaaf7bd6c; release candidate-789-dirty-62bc5dc45f26; fingerprint 451d5fd171815e48aa3476d2c5fe42e7b6f82d1305ce8d031782b80bd1f98971. Only runtime/stasis_graphics.c was dirty, SHA-256 A2F1C2DC6AF4A5998DEC9CA160DF30F809BE7988CCB16C7ABE2000C68DB15E83. The source and effective runtime hashes matched at A065AF6CF11662501E3FFC49FEA8BB3CF471AF7C5D0CDA15B74054180F218899; direct editor-info reported the same source, release, and fingerprint. The runner manifest contained both expected per-monitor DPI tags. See the [dirty-candidate parity receipt](D:/code/.automation-evidence/nightly-20261001/789/dirty-candidate/parity/dirty-candidate-parity-summary.md) and [post-implementation six-persona review](D:/code/.automation-evidence/nightly-20261001/789/postimplementation-review.md).
+
+The clean-baseline monolithic tools/validate_repo.sh attempt timed out with exit 124 after 1052.97 seconds because its wrapper exceeded the limit while draining after timeout; it is incomplete and receives no full-validation credit. Its pre-Cargo source/policy checks and Cargo metadata succeeded, identifying 68 target entries: 66 selectable and two custom-build targets. Final validation is pending on the immutable commit: use the exact pre-Cargo commands and complete metadata-mapped coverage through 20 bounded serial shards, then the planned platform and hosted gates. No literal whole-shell validator pass is claimed. The hosted Windows console/bootstrap gate must pass twice on fresh executions.
+
+Visual evidence: inspected the fresh parity frame described above. It is intentionally limited to the game rendering; it cannot prove the console state transition.
+
+Theory gained: the selected console root-owner belongs to an external frontend thread, so the ordinary minimize request was not reliable for this cross-thread target. The force-minimize request preserves the synchronous startup behavior while leaving the separate ConPTY request path intact.
+
+Good: the production patch changes one show-state constant and keeps the existing behavioral oracle unchanged. Bad: the accepted baseline reproduced the visible-console failure, and the unisolated local restore attempt exposed a separate frontend interaction; broad final validation and hosted repetitions are still pending. Adjustment: retain the one-time, opt-out, hidden, and ConPTY paths without retries or timeout changes; complete fresh exact-commit serial coverage and both hosted repetitions before treating the repair as accepted.

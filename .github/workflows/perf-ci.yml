@@ -4,17 +4,8 @@ env:
   CARGO_INCREMENTAL: "0"
 
 on:
-  pull_request:
-    types:
-      - opened
-      - reopened
-      - synchronize
-      - ready_for_review
-    paths:
-      - ".github/workflows/perf-ci.yml"
-      - "crates/stasis_compiler/**"
-      - "apps/stasis/examples/**"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

@@ -310,6 +310,7 @@ def validate_included_libraries(
         json.dumps(
             {"target": target, "libraries": libraries},
             ensure_ascii=False,
+            sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
@@ -756,9 +757,7 @@ def verify_mobile_shells(
                 {
                     (
                         "android",
-                        "app/src/main/cpp/network/libstasis_network_v1.so"
-                        if explicit_libraries
-                        else "app/src/main/cpp/network/libstasis_network.a",
+                        "app/src/main/cpp/network/libstasis_network_v1.so",
                     ),
                     ("android", "app/src/main/cpp/network/include/stasis_network.h"),
                 }

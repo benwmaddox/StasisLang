@@ -83,11 +83,13 @@ target for the extension host, not a CI runtime; it remains unchanged.
   default environment (`dirname` and `python3` unavailable). Focused commands
   above ran directly. No compiler/runtime source changed.
 
-Run PR CI with slow seams and nightly on the published revision, covering Linux
-x64, Windows x64, Android emulators and Android mobile support packaging. Confirm
-artifact downloads, provenance checks and release gates, and compare warning
-annotations against the bounded exceptions above. macOS and iOS CI lanes are
-disabled; their product paths and local validation tools remain available.
+Run PR CI and the reusable Nightly Validation workflow on the published
+revision, covering Linux x64, Windows x64, Android emulators and Android mobile
+support packaging. The nightly release workflow also builds and packages macOS
+arm64; its Network Browser Acceptance workflow checks macOS package evidence
+and iOS device/simulator network artifacts. Confirm artifact downloads,
+provenance checks and release gates, and compare warning annotations against
+the bounded exceptions above.
 Hosted lane success is **not claimed** by local source checks.
 
 Visual evidence: not applicable (workflow configuration only).

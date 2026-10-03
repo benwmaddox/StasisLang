@@ -177,7 +177,7 @@ jobs:
           cp README.md "${out}/"
           cp LICENSE "${out}/"
           cp -R src "${out}/"
-          cp -R samples "${out}/"
+          python3 tools/copy_release_samples.py --source samples --destination "${out}/samples"
           mkdir -p "${out}/mobile"
           cp -R mobile/shells "${out}/mobile/"
           cp -R mobile/android-runtime "${out}/mobile/"
@@ -220,17 +220,6 @@ jobs:
           Copy-Item "target/release/stasis.exe" "$out/" -Force
           Copy-Item "target/release/stasis_dynload.dll" "$out/" -Force
           Copy-Item "target/release/stasis_dynload.dll.lib" "$out/" -Force
-          $rustLld = Join-Path (rustc --print sysroot) "lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
-          Copy-Item $rustLld "$out/lld-link.exe" -Force
-          $clangCl = (Get-Command clang-cl.exe -ErrorAction Stop).Source
-          Copy-Item $clangCl "$out/clang-cl.exe" -Force
-          $rustCopyright = Join-Path (rustc --print sysroot) "share/doc/rust/COPYRIGHT.html"
-          Copy-Item $rustCopyright "$out/RUST-LLVM-COPYRIGHT.html" -Force
-          $vsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
-          $vsRoot = & $vsWhere -latest -property installationPath
-          $vsNotice = Get-ChildItem (Join-Path $vsRoot "Licenses") -Recurse -Filter "ThirdPartyNotices.txt" | Select-Object -First 1
-          if (-not $vsNotice) { throw "Visual Studio LLVM third-party notices not found" }
-          Copy-Item $vsNotice.FullName "$out/LLVM-THIRD-PARTY-NOTICES.txt" -Force
           # Keep the runtime DLL beside stasis.exe so `stasis.exe play ...` works from the archive root.
           Copy-Item "runtime/build_ci/bin/Release/*.dll" "$out/" -Force
           Copy-Item "runtime/build_ci/bin/Release/stasis_runner.exe" "$out/" -Force
@@ -240,7 +229,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$out/tools/windows" | Out-Null
           Copy-Item tools/windows/stasis-signing.ps1 "$out/tools/windows/" -Force
           Copy-Item src "$out/" -Recurse -Force
-          Copy-Item samples "$out/" -Recurse -Force
+          python tools/copy_release_samples.py --source samples --destination "$out/samples"
           New-Item -ItemType Directory -Force -Path "$out/mobile" | Out-Null
           Copy-Item mobile/shells "$out/mobile/" -Recurse -Force
           Copy-Item mobile/android-runtime "$out/mobile/" -Recurse -Force

@@ -51,7 +51,7 @@ Existing coverage already proves important pieces:
   renderer lifecycle state, and the mobile runtime against C fakes.
 - `apps/stasis/tests/toolchain_cli.rs` verifies mobile package assembly and
   generated paths/manifests.
-- PR CI builds and links a generated Android package.
+- Nightly validation builds and links a generated Android package.
 - Windows CI runs the desktop renderer and verifies a real capture.
 - `mobile/android/test_render_emulator.ps1` runs the Workshop JIT renderer and
   verifies stable frames.
@@ -189,6 +189,14 @@ confidence for OEM-specific surface, driver, and density behavior, but device
 availability does not block ordinary CI or task readiness. Production Android
 packaging remains ARM64; the x86_64 package target exists only for deterministic
 development/emulator tests.
+
+`ANDROID-NUMERIC-TEXT` is an executable byte-parity seam in the generated API
+35 x86_64 package. The guest formats its classified numeric corpus into one
+bounded `ascii` global; the test-only shell reads the registered `u8` storage,
+validates its header and NUL, and logs the literal receipt once. The runner
+compares every ordered case ID, return status, and text byte with checked-in
+expectations. The separate arm64 lane establishes package, link-map, and native
+library provenance only; it does not claim arm64 execution parity.
 
 ### CI placement rule
 

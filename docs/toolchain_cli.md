@@ -10,9 +10,10 @@ invoke Cargo and do not download dependencies.
 Extract a release archive and add its executable directory to `PATH`:
 
 - Windows: the archive root contains `stasis.exe`, `stasis_runner.exe`, `stasis_graphics.dll`,
-  `lld-link.exe`, `clang-cl.exe`, and the project-built `stasis_dynload.dll` /
-  `stasis_dynload.dll.lib` runtime bridge pair. The bundled LLVM tools compile/link generated game
-  bridges; no Windows SDK or MSVC import libraries are redistributed.
+  and the project-built `stasis_dynload.dll` / `stasis_dynload.dll.lib` runtime bridge pair.
+  Prebuilt runtime libraries avoid rebuilding SDL and graphics dependencies for offline games.
+  Native packaging uses the host Visual Studio Build Tools (MSVC and Windows SDK) and CMake;
+  LLVM compiler/linker executables are not redistributed in the archive.
 - Linux/macOS: use `bin/stasis`; the matching static runtime bridge is beside it. Native AOT
   linking currently uses the platform `cc` driver supplied by the supported host image.
 
@@ -409,7 +410,7 @@ restore release assets.
   offline packages omit it entirely.
   direct TCP/unicast does not require Bonjour discovery entitlements. Official archives resolve
   prebuilt network libraries from `mobile/network/<target>/` beside the installed executable;
-  Linux and Windows nightly archives contain Android arm64/x86_64 support libraries. They do not
+  Linux, Windows, and macOS nightly archives contain Android arm64/x86_64 support libraries. They do not
   contain iOS network archives; source checkouts may build those from the workspace on macOS.
   `ios-simulator-arm64` requires `--development-build`, emits simulator-native
   AOT/network objects, selects the SDL simulator slice, and never qualifies a

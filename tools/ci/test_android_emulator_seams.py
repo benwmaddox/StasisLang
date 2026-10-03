@@ -1,6 +1,8 @@
 from pathlib import Path
 import json
 import re
+import shutil
+import subprocess
 import unittest
 
 
@@ -16,6 +18,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
     def setUpClass(cls):
         cls.workflow = read(".github/workflows/android-device-seams.yml")
         cls.nightly_workflow = read(".github/workflows/nightly-release.yml")
+        cls.nightly_validation_workflow = read(".github/workflows/nightly-validation.yml")
         cls.pr_workflow = read(".github/workflows/pr-ci.yml")
         cls.release_script = read("mobile/android/test_release_shell.ps1")
         cls.release_runner = read("tools/ci/run_android_release_shell_seam.py")
@@ -55,6 +58,10 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
             read("samples/generics_collections/android_seam_expectations.json")
         )
         cls.generics_readme = read("samples/generics_collections/README.md")
+        cls.numeric_text_expectations = json.loads(
+            read("samples/android_numeric_text_seam/android_seam_expectations.json")
+        )
+        cls.numeric_text_sample = read("samples/android_numeric_text_seam/main.stasis")
         cls.shell_readme = read("mobile/shells/android/README.md")
         cls.workshop_resource_scope = read(
             "mobile/android/app/src/workshop/java/com/stasislang/workshop/"
@@ -85,13 +92,11 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", self.workflow)
         self.assertIn("uses: ./.github/workflows/android-device-seams.yml", self.nightly_workflow)
         self.assertIn(
-            "needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams]",
+            "needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams, performance_benchmarks, network_browser_acceptance]",
             self.nightly_workflow,
         )
         self.assertIn(
-            "uses: ./.github/workflows/pr-ci.yml\n"
-            "    with:\n"
-            "      run_slow_seams: true",
+            "uses: ./.github/workflows/nightly-validation.yml",
             self.nightly_workflow,
         )
         self.assertNotIn("self-hosted", self.workflow)
@@ -135,10 +140,64 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
     def test_generics_emulator_coverage_preserves_arm64_package_link_lane(self):
         self.assertIn(
             "--target android-arm64 --out dist/generics-android --development-build",
-            self.pr_workflow,
+            self.nightly_validation_workflow,
         )
-        self.assertIn("verify_android_native_library.py", self.pr_workflow)
-        self.assertIn("mobile_aot_bundle_manifest.json", self.pr_workflow)
+        self.assertIn("verify_android_native_library.py", self.nightly_validation_workflow)
+        self.assertIn("mobile_aot_bundle_manifest.json", self.nightly_validation_workflow)
+
+    def test_numeric_text_sample_uses_a_typed_bounded_actual_byte_receipt(self):
+        expectations = self.numeric_text_expectations
+        self.assertEqual("ANDROID-NUMERIC-TEXT", expectations["test_id"])
+        self.assertEqual(4096, expectations["numeric_text"]["capacity"])
+        self.assertGreaterEqual(len(expectations["numeric_text"]["cases"]), 90)
+        self.assertEqual(
+            list(range(1, len(expectations["numeric_text"]["cases"]) + 1)),
+            [case["id"] for case in expectations["numeric_text"]["cases"]],
+        )
+        self.assertIn("global numeric_text_receipt: ascii[4096]", self.numeric_text_sample)
+        self.assertIn('TestId = "ANDROID-NUMERIC-TEXT"', self.emulator_script)
+        self.assertIn(
+            'Project = "samples/android_numeric_text_seam"', self.emulator_script
+        )
+        self.assertIn("validate_android_numeric_text_acceptance", self.release_runner)
+        self.assertIn(
+            'stasis_jit_global_u8_array_ptr(\n        hash_global_path("numeric_text_receipt")',
+            self.mobile_main,
+        )
+        self.assertIn('seam_i32("numeric_text_receipt.length")', self.mobile_main)
+        self.assertIn('seam_i32("numeric_text_receipt.max_length")', self.mobile_main)
+        self.assertIn(
+            'seam_i32("numeric_text_negative_zero_verified") != 1',
+            self.mobile_main,
+        )
+        self.assertIn("1.0 / negative_zero < 0.0", self.numeric_text_sample)
+        self.assertIn("function numeric_text_seed_keep(dst: ascii[]): void", self.numeric_text_sample)
+        self.assertEqual(6, self.numeric_text_sample.count("numeric_text_seed_keep("))
+        self.assertNotIn('ascii_copy(numeric_text_scratch, "keep")', self.numeric_text_sample)
+        self.assertNotIn('ascii_copy(numeric_text_scratch, "score:")', self.numeric_text_sample)
+        self.assertNotIn('ascii_copy(numeric_text_scratch, "42")', self.numeric_text_sample)
+        self.assertNotIn('ascii_copy(numeric_text_i32_short, "keep")', self.numeric_text_sample)
+        self.assertNotIn('ascii_copy(numeric_text_f32_short, "keep")', self.numeric_text_sample)
+        for byte in (107, 101, 112, 115, 99, 111, 114, 58, 52, 50):
+            self.assertIn(f"to_u8_trunc({byte})", self.numeric_text_sample)
+        self.assertNotIn("(int32_t *)numeric_text_receipt", self.mobile_main)
+        self.assertIn(
+            "cp -R samples/android_numeric_text_seam/. \"$numeric_text_workspace/\"",
+            self.nightly_validation_workflow,
+        )
+        self.assertIn(
+            'cp -R src/stdlib "$numeric_text_workspace/vendor/stasis/src/stdlib"',
+            self.nightly_validation_workflow,
+        )
+        self.assertIn(
+            '--workspace "$numeric_text_workspace" package-mobile '
+            "--target android-arm64 --out dist/numeric-text-android",
+            self.nightly_validation_workflow,
+        )
+        self.assertIn(
+            "target/numeric-text-android-native-link-evidence.json",
+            self.nightly_validation_workflow,
+        )
 
     def test_release_shell_builds_cli_with_a_verified_toolchain_fingerprint(self):
         fingerprint = self.release_script.index("tools/compute_toolchain_fingerprint.py")
@@ -164,50 +223,44 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("$process.Kill($true)", self.emulator_script)
         self.assertIn("$runtimeBuildDirectory = Join-Path $repoRoot \"target/android-emulator-host-runtime\"", self.emulator_script)
 
-    def test_pr_ci_slow_seams_are_boolean_input_gated(self):
-        input_declaration = (
-            "    inputs:\n"
-            "      run_slow_seams:\n"
-            "        description: Run platform integration and packaging seams.\n"
-            "        required: false\n"
-            "        default: false\n"
-            "        type: boolean\n"
-        )
-        for event in ("workflow_dispatch", "workflow_call"):
-            match = re.search(
-                rf"(?ms)^  {event}:\n(?P<body>.*?)(?=^  [A-Za-z_][A-Za-z0-9_-]*:|\Z)",
-                self.pr_workflow,
-            )
-            self.assertIsNotNone(match, event)
-            self.assertIn(input_declaration, match.group("body"))
+    def test_full_platform_seams_live_in_unconditional_nightly_validation(self):
+        self.assertNotIn("run_slow_seams", self.pr_workflow)
+        self.assertNotIn("bootstrap-smoke-windows:", self.pr_workflow)
+        self.assertNotIn("vscode-extension-e2e:", self.pr_workflow)
+        self.assertNotIn("android-package-link:", self.pr_workflow)
+        self.assertNotIn("pull_request:", self.nightly_validation_workflow)
+        self.assertIn("workflow_dispatch:", self.nightly_validation_workflow)
+        self.assertIn("workflow_call:", self.nightly_validation_workflow)
+        self.assertNotIn("run_slow_seams", self.nightly_validation_workflow)
 
-        self.assertNotIn(
-            "github.event_name == 'workflow_call' && inputs.run_slow_seams",
-            self.pr_workflow,
-        )
-
-        slow_jobs = (
+        full_lanes = (
+            "pr-ci-browser-compiler",
+            "pr-ci-cargo-stasis-test-harness",
+            "pr-ci-cargo-stasis-provenance",
+            "pr-ci-cargo-stasis-integration",
+            "pr-ci-generics-cross-platform",
             "bootstrap-smoke-windows",
             "vscode-extension-e2e",
             "android-package-link",
         )
-        slow_gate = "if: ${{ inputs.run_slow_seams }}"
-        self.assertEqual(3, self.pr_workflow.count(slow_gate))
-        for job in slow_jobs:
-            match = re.search(
-                rf"(?ms)^  {re.escape(job)}:\n(?P<body>.*?)(?=^  [A-Za-z_][A-Za-z0-9_-]*:|\Z)",
-                self.pr_workflow,
-            )
-            self.assertIsNotNone(match, job)
-            self.assertEqual(1, match.group("body").count(slow_gate))
-            if job == "bootstrap-smoke-windows":
-                self.assertEqual(
-                    1,
-                    match.group("body").count(
-                        "run: python tools/cargo_cache.py run -- "
-                        "cargo test -p stasis_compiler -- --test-threads=1 --nocapture"
-                    ),
-                )
+        summary = self.nightly_validation_workflow.split("  test:\n", 1)[1].split(
+            "\n  pr-ci-preflight:", 1
+        )[0]
+        for lane in full_lanes:
+            with self.subTest(lane=lane):
+                self.assertRegex(summary, rf"(?m)^\s+- {lane}$")
+                self.assertIn(f"needs.{lane}.result", summary)
+        bootstrap = re.search(
+            r"(?ms)^  bootstrap-smoke-windows:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            self.nightly_validation_workflow,
+        ).group(1)
+        self.assertEqual(
+            1,
+            bootstrap.count(
+                "run: python tools/cargo_cache.py run -- "
+                "cargo test -p stasis_compiler -- --test-threads=1 --nocapture"
+            ),
+        )
 
     def test_workshop_benchmark_identity_tolerates_missing_console_avd_name(self):
         self.assertIn('Invoke-Adb @("emu", "avd", "name")', self.workshop_script)
@@ -799,6 +852,114 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertNotIn("--viewport-y-search-radius=0", self.workshop_script)
         self.assertNotIn("--viewport-y-search-radius=1080", self.workshop_script)
         self.assertNotIn("min_coverage", self.workshop_script)
+
+    def test_workshop_it032_readiness_helpers_execute_bounded_terminal_cases(self):
+        pwsh = shutil.which("pwsh")
+        if not pwsh:
+            self.skipTest("PowerShell is unavailable for executable readiness-helper checks")
+        start = self.workshop_script.index("function Get-WorkshopIT032ReadinessState(")
+        end = self.workshop_script.index("function Fit-LogicalViewport(", start)
+        helpers = self.workshop_script[start:end]
+        passed = json.dumps(
+            {
+                "schema": "stasis.workshop_soak.v1",
+                "test_id": "IT-032",
+                "event": "bounded_soak",
+                "status": "passed",
+                "frame_count": 300,
+                "cleanup_receipt": {"status": "Restored"},
+            },
+            separators=(",", ":"),
+        )
+        failed = json.dumps(
+            {
+                "schema": "stasis.workshop_soak.v1",
+                "test_id": "IT-032",
+                "event": "bounded_soak",
+                "status": "failed",
+                "cleanup_receipt": {"status": "Restored"},
+            },
+            separators=(",", ":"),
+        )
+        script = f"""
+$ErrorActionPreference = 'Stop'
+{helpers}
+function Assert-Throws([scriptblock]$Action, [string]$Expected) {{
+    try {{ & $Action | Out-Null }} catch {{
+        if ($_.Exception.Message -like "*$Expected*") {{ return }}
+        throw
+    }}
+    throw "Expected an exception containing '$Expected'"
+}}
+$passed = '{passed}'
+$failed = '{failed}'
+$milestone = 'I Stasis Workshop IT-032 milestone: ' + $passed
+if ((Get-WorkshopIT032ReadinessState @($milestone)) -ne 'pending') {{
+    throw 'An IT-032 milestone was accepted as terminal readiness'
+}}
+Assert-Throws {{ Get-WorkshopIT032ReadinessState @('I Stasis Workshop IT-032: {{broken') }} 'malformed'
+Assert-Throws {{ Get-WorkshopIT032ReadinessState @("I Stasis Workshop IT-032: $failed") }} 'reported failure'
+Assert-Throws {{
+    Get-WorkshopIT032ReadinessState @("I Stasis Workshop IT-032: $($passed.Replace('IT-032', 'IT-031'))")
+}} 'unexpected schema or identity'
+Assert-Throws {{
+    Get-WorkshopIT032ReadinessState @("I Stasis Workshop IT-032: $($passed.Replace('Restored', 'failed'))")
+}} 'restored cleanup'
+$logState = [pscustomobject]@{{ Count = 0 }}
+$readPid = {{ '4242' }}
+$readLog = {{
+    param($ProcessId)
+    $logState.Count += 1
+    if ($logState.Count -eq 1) {{ $milestone }} else {{ "I Stasis Workshop IT-032: $passed" }}
+}}.GetNewClosure()
+$ready = Wait-ForWorkshopIT032Readiness -TimeoutMilliseconds 500 -PollIntervalMilliseconds 1 `
+    -ReadProcessId $readPid -ReadProcessLog $readLog
+if ($ready.ProcessId -ne '4242' -or $logState.Count -ne 2) {{
+    throw 'Readiness did not wait through a milestone for the terminal receipt'
+}}
+$probeState = @{{ NextProbeAt = [DateTime]::MinValue }}
+$probes = [pscustomobject]@{{ Count = 0 }}
+$probe = {{ if (Take-WorkshopSurfaceProbe $probeState) {{ $probes.Count += 1 }} }}.GetNewClosure()
+& $probe
+& $probe
+if ($probes.Count -ne 1) {{ throw 'The readiness surface probe was not throttled across callback calls' }}
+$pendingLog = {{ param($ProcessId) $milestone }}
+Assert-Throws {{
+    Wait-ForWorkshopIT032Readiness -TimeoutMilliseconds 35 -PollIntervalMilliseconds 3 `
+        -ReadProcessId $readPid -ReadProcessLog $pendingLog
+}} 'not observed'
+$noPidState = [pscustomobject]@{{ LogCalls = 0 }}
+$noPidLog = {{ param($ProcessId) $noPidState.LogCalls += 1; $passed }}.GetNewClosure()
+Assert-Throws {{
+    Wait-ForWorkshopIT032Readiness -TimeoutMilliseconds 35 -PollIntervalMilliseconds 3 `
+        -ReadProcessId {{ '' }} -ReadProcessLog $noPidLog
+}} 'not observed'
+if ($noPidState.LogCalls -ne 0) {{ throw 'The log was read without a package process id' }}
+'readiness helper cases passed'
+"""
+        result = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-Command", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("readiness helper cases passed", result.stdout)
+
+    def test_workshop_waits_for_terminal_soak_before_resolving_capture_viewport(self):
+        readiness = self.workshop_script.index("Wait-ForWorkshopIT032Readiness `")
+        viewport = self.workshop_script.index("$surface = Read-SurfaceBounds", readiness)
+        self.assertLess(readiness, viewport)
+        self.assertIn("StartupReadinessTimeoutSeconds = 90", self.workshop_script)
+        self.assertIn("startup_readiness_timeout_seconds = $StartupReadinessTimeoutSeconds", self.workshop_script)
+        self.assertIn("readiness_elapsed_seconds = $script:workshopReadinessElapsedSeconds", self.workshop_script)
+        self.assertIn("capture_timeout_seconds = $RenderTimeoutSeconds", self.workshop_script)
+        self.assertIn("capture_elapsed_seconds = $script:workshopCaptureElapsedSeconds", self.workshop_script)
+        self.assertIn("render_timeout_seconds = $RenderTimeoutSeconds", self.workshop_script)
+        self.assertIn('"{0}-attempt-{1:D3}-{2}.png"', self.workshop_script)
+        self.assertIn('Destination $capture -Force', self.workshop_script)
+        self.assertIn("Take-WorkshopSurfaceProbe $surfaceProbeState", self.workshop_script)
 
     def test_observed_workshop_surface_maps_to_exact_crop_on_test_avd(self):
         app_window = (0, 136, 1080, 2337)

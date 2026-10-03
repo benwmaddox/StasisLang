@@ -23,7 +23,6 @@ $commonGitDir = (git -C $repoRoot rev-parse --path-format=absolute --git-common-
 if ($LASTEXITCODE -ne 0) { throw "Failed to resolve the shared Cargo target." }
 $cargoTarget = Join-Path (Split-Path -Parent $commonGitDir) "build/codex-cargo-target"
 $toolchainRoot = Join-Path $repoRoot "target/local-editor-toolchain-win32-x64"
-$toolchainArchive = Join-Path $repoRoot "target/stasis-local-toolchain-win32-x64.zip"
 $extensionRoot = Join-Path $repoRoot "vscode-stasis"
 $vsix = Join-Path $extensionRoot ".vsix/stasislang.stasis.vsix"
 
@@ -107,11 +106,9 @@ if (-not $SkipBuild) {
 
   & (Join-Path $toolchainRoot "stasis.exe") --json editor-info
   if ($LASTEXITCODE -ne 0) { throw "Local editor toolchain identity validation failed." }
-  if (Test-Path $toolchainArchive) { Remove-Item -LiteralPath $toolchainArchive -Force }
-  Compress-Archive -Path "$toolchainRoot/*" -DestinationPath $toolchainArchive -Force
 }
 
-if (-not (Test-Path $toolchainArchive) -or -not (Test-Path (Join-Path $toolchainRoot "stasis.exe"))) {
+if (-not (Test-Path (Join-Path $toolchainRoot "stasis.exe"))) {
   throw "Local editor toolchain outputs are missing; rerun without -SkipBuild."
 }
 
@@ -137,7 +134,6 @@ try {
 
 if (Test-Path $OutputRoot) { Remove-Item -LiteralPath $OutputRoot -Recurse -Force }
 node (Join-Path $repoRoot "tools/assemble_editor_release.mjs") `
-  --toolchain-archive $toolchainArchive `
   --vsix $vsix `
   --out $OutputRoot `
   --release-id $ReleaseId `
