@@ -1,39 +1,39 @@
 global bitwise_oracle_bump_count: i32;
 
 function bitwise_check_i32(left: i32, right: i32): bool {
-    return(left & right) == 16 && (left ^ right) == -145 && (left | right) == -129 && (~left) == 172;
+    return(left & right) == 16 &&(left ^ right) == -145 &&(left | right) == -129 &&(~left) == 172;
 }
 
 function bitwise_check_u8(left: u8, right: u8): bool {
-    return(left & right) == 36 && (left ^ right) == 153 && (left | right) == 189 && (~left) == 90 && ((~left) >> 4) == 5;
+    return(left & right) == 36 &&(left ^ right) == 153 &&(left | right) == 189 &&(~left) == 90 &&((~left) >> 4) == 5;
 }
 
 function bitwise_check_u16(left: u16, right: u16): bool {
-    return(left & right) == 1360 && (left ^ right) == 43690 && (left | right) == 45050 && (~left) == 23205 && ((~left) >> 4) == 1450;
+    return(left & right) == 1360 &&(left ^ right) == 43690 &&(left | right) == 45050 &&(~left) == 23205 &&((~left) >> 4) == 1450;
 }
 
 function bitwise_check_u32(left: u32, right: u32): bool {
-    return(left & right) == 89130320 && (left ^ right) == 2863311530 && (left | right) == 2952441850 && (~left) == 1520786085;
+    return(left & right) == 89130320 &&(left ^ right) == 2863311530 &&(left | right) == 2952441850 &&(~left) == 1520786085;
 }
 
 function bitwise_check_i32_shift(value: i32, one: i32, count: i32, expected_left: i32, expected_right: i32): bool {
-    return(one << count) == expected_left && (value >> count) == expected_right;
+    return(one << count) == expected_left &&(value >> count) == expected_right;
 }
 
 function bitwise_check_u8_shift(value: u8, one: u8, count: i32, expected_left: u8, expected_right: u8): bool {
-    return(one << count) == expected_left && (value >> count) == expected_right && ((value << 1) >> 1) == 0;
+    return(one << count) == expected_left &&(value >> count) == expected_right &&((value << 1) >> 1) == 0;
 }
 
 function bitwise_check_u8_u32_shift(value: u8, one: u8, count: u32, expected_left: u8, expected_right: u8): bool {
-    return(one << count) == expected_left && (value >> count) == expected_right;
+    return(one << count) == expected_left &&(value >> count) == expected_right;
 }
 
 function bitwise_check_u16_shift(value: u16, one: u16, count: i32, expected_left: u16, expected_right: u16): bool {
-    return(one << count) == expected_left && (value >> count) == expected_right && ((value << 1) >> 1) == 0;
+    return(one << count) == expected_left &&(value >> count) == expected_right &&((value << 1) >> 1) == 0;
 }
 
 function bitwise_check_u32_shift(value: u32, one: u32, count: i32, expected_left: u32, expected_right: u32): bool {
-    return(one << count) == expected_left && (value >> count) == expected_right;
+    return(one << count) == expected_left &&(value >> count) == expected_right;
 }
 
 function bitwise_check_u8_u16_count(one: u8, count: u16, expected: u8): bool {
@@ -41,7 +41,7 @@ function bitwise_check_u8_u16_count(one: u8, count: u16, expected: u8): bool {
 }
 
 function bitwise_check_u8_literal(left: u8): bool {
-    return(left | 3) == 167 && (3 | left) == 167;
+    return(left | 3) == 167 &&(3 | left) == 167;
 }
 
 function bitwise_check_literal_contexts(): bool {
@@ -49,7 +49,7 @@ function bitwise_check_literal_contexts(): bool {
     let complemented: u8 = ~0;
     let combined: u8 = 1 | 2;
     let chained: u8 = 1 | 2 | 4;
-    let nested_shift: u8 = (1 | 2) << 8;
+    let nested_shift: u8 =(1 | 2) << 8;
     let nested_complement: u8 = ~(1 | 2);
     let signed: i32 = -1 | 1;
     let signed_minimum: i32 = -2147483648 | 0;

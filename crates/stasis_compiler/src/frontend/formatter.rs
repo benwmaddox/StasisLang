@@ -1028,6 +1028,10 @@ fn is_operator(token: &Token) -> bool {
         )
 }
 
+fn is_bitwise_or_shift_operator(token: &Token) -> bool {
+    token.kind == TokenKind::Symbol && matches!(token.text.as_str(), "&" | "|" | "^" | "<<" | ">>")
+}
+
 fn needs_space_before(
     previous: Option<&Token>,
     current: &Token,
@@ -1041,7 +1045,7 @@ fn needs_space_before(
         return previous.is_word("if")
             || previous.is_word("for")
             || previous.is_word("foreach")
-            || (!previous_was_unary && is_operator(previous));
+            || (!previous_was_unary && is_bitwise_or_shift_operator(previous));
     }
     if matches!(current.text.as_str(), ")" | "]" | "," | ";" | ":" | ".") {
         return false;
@@ -1255,6 +1259,29 @@ mod tests {
         assert_eq!(
             format_source(&formatted).expect("reformat bitwise expression"),
             formatted
+        );
+
+        let parenthesized_operands = format_source(
+            "function main(): i32 { return value&(mask)^(bits)|(flags)<<(left)>>(right); }",
+        )
+        .expect("format bitwise operators before parenthesized operands");
+        assert!(
+            parenthesized_operands
+                .contains("value & (mask) ^ (bits) | (flags) << (left) >> (right)"),
+            "{parenthesized_operands}"
+        );
+
+        let existing_spacing = format_source(
+            "function main(): i32 { let value: i32 = 0; value=(1); return value+(1)-(2); }",
+        )
+        .expect("preserve arithmetic and assignment spacing");
+        assert!(
+            existing_spacing.contains("value =(1);"),
+            "{existing_spacing}"
+        );
+        assert!(
+            existing_spacing.contains("return value +(1) -(2);"),
+            "{existing_spacing}"
         );
     }
 
