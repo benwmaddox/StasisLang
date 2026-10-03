@@ -2093,20 +2093,29 @@ fn parse_type_name(
         .is_some_and(|token| token_is_other_char(source, token, b'<'))
     {
         let mut depth = 1i32;
+        let mut parenthesis_depth = 0usize;
         let mut scan = next + 1;
         while scan < tokens.len() {
             let token = tokens[scan];
-            if token_is_other_char(source, token, b'<') {
-                depth += 1;
-            } else if token_is_other_char(source, token, b'>') {
-                depth -= 1;
-                if depth == 0 {
-                    end = token.end;
-                    next = scan + 1;
-                    break;
+            match token.kind {
+                TokenKind::LParen => parenthesis_depth += 1,
+                TokenKind::RParen => parenthesis_depth = parenthesis_depth.saturating_sub(1),
+                TokenKind::Eof => {
+                    return Err("missing closing '>' in type application".to_string());
                 }
-            } else if token.kind == TokenKind::Eof {
-                return Err("missing closing '>' in type application".to_string());
+                _ if parenthesis_depth == 0 => {
+                    if token_is_other_char(source, token, b'<') {
+                        depth += 1;
+                    } else if token_is_other_char(source, token, b'>') {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = token.end;
+                            next = scan + 1;
+                            break;
+                        }
+                    }
+                }
+                _ => {}
             }
             scan += 1;
         }
@@ -2735,6 +2744,18 @@ function tick(): i32 {
         assert_eq!(functions[0].generic_parameters[0].name, "N");
         assert_eq!(functions[0].params[0].type_name, "Buffer<N>");
         assert_eq!(layout.globals[0].type_name, "Buffer<4>");
+    }
+
+    #[test]
+    fn keeps_parenthesized_shift_tokens_inside_generic_value_arguments() {
+        let source = concat!(
+            "struct Bits<N: i32> { values: i32[N]; }\n",
+            "global left: Bits<(1 << 3)>;\n",
+            "global right: Bits<(8 >> 1)>;\n",
+        );
+        let layout = parse_top_level_type_layout(source).expect("generic value arguments parse");
+        assert_eq!(layout.globals[0].type_name, "Bits<(1 << 3)>");
+        assert_eq!(layout.globals[1].type_name, "Bits<(8 >> 1)>");
     }
 
     #[test]

@@ -33,7 +33,18 @@ global scores: ScoreBuffer<i32, 4>;
 
 ## Expressions and calls
 
-Use infix arithmetic, comparison, and assignment. `&&` and `||` short-circuit.
+Use infix arithmetic, comparison, assignment, and integer `&`, `^`, `|`, `~`,
+`<<`, and `>>`. Bitwise operands must share a builtin integer lane (`u8`,
+`u16`, `u32`, or `i32`); a shift count may use any integer lane and is masked
+to the left operand's width. Right shift is arithmetic for `i32` and logical
+for unsigned lanes. Bitwise literals use a typed peer's lane; a literal-only
+expression, unary `~` literal, or literal shift-left operand may use an exact
+expected result lane. Other bare literals default to `i32`, including a bare
+shift count. Expected lanes propagate through literal-only bitwise and shift
+trees; contextual literals outside the selected lane are errors. These
+operators follow C-like precedence, so parenthesize before comparing:
+`(flags & mask) == expected`. Bitwise compound assignments are not supported.
+`&&` and `||` short-circuit.
 Receiver calls such as `buffer.capacity()` and `capacity(buffer)` select the
 same function when resolution agrees. Use `if`/`else`, complete three-part
 `for` loops, supported `foreach` sources, `continue`, and `return`.

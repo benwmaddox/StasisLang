@@ -2799,6 +2799,69 @@ mod tests {
     }
 
     #[test]
+    fn bitwise_type_error_clears_after_a_full_document_change() {
+        let (mut server, uri, _) = test_server("bitwise-diagnostic");
+        let (server_connection, client_connection) = Connection::memory();
+        server
+            .handle_notification(
+                &server_connection,
+                Notification::new(
+                    DidOpenTextDocument::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": "stasis",
+                            "version": 1,
+                            "text": "function main(): i32 { let flags: i32 = 3; return flags & true; }\n"
+                        }
+                    }),
+                ),
+            )
+            .expect("didOpen invalid bitwise expression");
+        let opened = client_connection
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("bitwise type diagnostic");
+        let Message::Notification(opened) = opened else {
+            panic!("expected diagnostics notification");
+        };
+        let opened: PublishDiagnosticsParams =
+            serde_json::from_value(opened.params).expect("diagnostic parameters");
+        assert_eq!(opened.version, Some(1));
+        assert_eq!(opened.diagnostics.len(), 1);
+        assert_eq!(
+            opened.diagnostics[0].severity,
+            Some(lsp_types::DiagnosticSeverity::ERROR)
+        );
+
+        server
+            .handle_notification(
+                &server_connection,
+                Notification::new(
+                    DidChangeTextDocument::METHOD.to_string(),
+                    serde_json::json!({
+                        "textDocument": { "uri": uri, "version": 2 },
+                        "contentChanges": [{
+                            "text": "function main(): i32 { let flags: i32 = 3; return flags & 1; }\n"
+                        }]
+                    }),
+                ),
+            )
+            .expect("didChange valid bitwise expression");
+        let fixed = client_connection
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("clear bitwise diagnostic");
+        let Message::Notification(fixed) = fixed else {
+            panic!("expected diagnostics notification");
+        };
+        let fixed: PublishDiagnosticsParams =
+            serde_json::from_value(fixed.params).expect("diagnostic parameters");
+        assert_eq!(fixed.version, Some(2));
+        assert!(fixed.diagnostics.is_empty());
+    }
+
+    #[test]
     fn incremental_change_ranges_use_utf16_positions() {
         let (mut server, _, key) = test_server("utf16");
         server.service.open_document(&key, 1, "a\u{1f600}b");

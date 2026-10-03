@@ -1652,6 +1652,9 @@ fn record_string_literals_in_expr(
             }
             Ok(())
         }
+        SimpleExpr::Unary { operand, .. } => {
+            record_string_literals_in_expr(operand, constant_values, out)
+        }
         SimpleExpr::Binary { lhs, rhs, .. } => {
             record_string_literals_in_expr(lhs, constant_values, out)?;
             record_string_literals_in_expr(rhs, constant_values, out)?;

@@ -148,9 +148,12 @@ impl Writer {
 
 pub fn format_source(source: &str) -> Result<String, String> {
     let generic_angles = generic_angle_ranges(source)?;
-    let tokens = canonicalize_enum_commas(&scan(source)?)?;
+    let scanned = canonicalize_enum_commas(&scan(source)?)?;
+    let tokens = split_generic_shift_closers(&scanned, &generic_angles);
     let formatted = apply_source_line_endings(&render(&tokens, &generic_angles)?, source);
-    let formatted_tokens = scan(&formatted)?;
+    let formatted_angles = generic_angle_ranges(&formatted)?;
+    let scanned_formatted = scan(&formatted)?;
+    let formatted_tokens = split_generic_shift_closers(&scanned_formatted, &formatted_angles);
     let original_significant = significant_tokens(&tokens);
     let formatted_significant = significant_tokens(&formatted_tokens);
     if original_significant != formatted_significant {
@@ -162,6 +165,35 @@ pub fn format_source(source: &str) -> Result<String, String> {
         return Err("formatter changed the compiler token stream".to_string());
     }
     Ok(formatted)
+}
+
+fn split_generic_shift_closers(tokens: &[Token], generic_angles: &[Range<usize>]) -> Vec<Token> {
+    let mut split = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        let middle = token.start + 1;
+        let is_nested_generic_close = token.is_symbol(">>")
+            && generic_angles
+                .iter()
+                .any(|range| range.start == token.start && range.end == middle)
+            && generic_angles
+                .iter()
+                .any(|range| range.start == middle && range.end == token.end);
+        if is_nested_generic_close {
+            let mut first = token.clone();
+            first.text = ">".to_string();
+            first.end = middle;
+            let mut second = token.clone();
+            second.text = ">".to_string();
+            second.start = middle;
+            second.newline_before = false;
+            second.blank_before = false;
+            split.push(first);
+            split.push(second);
+        } else {
+            split.push(token.clone());
+        }
+    }
+    split
 }
 
 fn apply_source_line_endings(formatted: &str, source: &str) -> String {
@@ -519,6 +551,8 @@ fn matched_operator_width(bytes: &[u8]) -> usize {
                 | b"!="
                 | b"<="
                 | b">="
+                | b"<<"
+                | b">>"
                 | b"&&"
                 | b"||"
                 | b"->"
@@ -948,7 +982,7 @@ fn keeps_top_level_group(tokens: &[Token], start: usize, current_kind: Option<&s
 }
 
 fn is_unary_operator(token: &Token, previous: Option<&Token>) -> bool {
-    if token.kind != TokenKind::Symbol || !matches!(token.text.as_str(), "!" | "-" | "+") {
+    if token.kind != TokenKind::Symbol || !matches!(token.text.as_str(), "!" | "-" | "+" | "~") {
         return false;
     }
     previous.is_none_or(|previous| {
@@ -975,8 +1009,10 @@ fn is_operator(token: &Token) -> bool {
                 | "!="
                 | "<"
                 | "<="
+                | "<<"
                 | ">"
                 | ">="
+                | ">>"
                 | "+"
                 | "-"
                 | "*"
@@ -986,6 +1022,8 @@ fn is_operator(token: &Token) -> bool {
                 | "||"
                 | "|"
                 | "&"
+                | "^"
+                | "~"
                 | "->"
         )
 }
@@ -1000,7 +1038,10 @@ fn needs_space_before(
         return false;
     };
     if current.is_symbol("(") {
-        return previous.is_word("if") || previous.is_word("for") || previous.is_word("foreach");
+        return previous.is_word("if")
+            || previous.is_word("for")
+            || previous.is_word("foreach")
+            || (!previous_was_unary && is_operator(previous));
     }
     if matches!(current.text.as_str(), ")" | "]" | "," | ";" | ":" | ".") {
         return false;
@@ -1204,6 +1245,17 @@ mod tests {
         let comparisons = "function reserve(): void { if (run < 0 || run >= limit) { return; } }";
         let formatted_comparisons = format_source(comparisons).expect("format comparisons");
         assert!(formatted_comparisons.contains("run < 0 || run >= limit"));
+    }
+
+    #[test]
+    fn keeps_shift_tokens_whole_while_formatting_bitwise_expressions() {
+        let source = "function main(): i32 { return (1<<3) | (8>>1); }";
+        let formatted = format_source(source).expect("format bitwise expression");
+        assert!(formatted.contains("(1 << 3) | (8 >> 1)"), "{formatted}");
+        assert_eq!(
+            format_source(&formatted).expect("reformat bitwise expression"),
+            formatted
+        );
     }
 
     #[test]

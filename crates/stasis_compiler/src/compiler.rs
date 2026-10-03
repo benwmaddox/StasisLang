@@ -2181,6 +2181,15 @@ fn qualify_module_calls(
                     Err(error) => Err(module_call_resolution_message(error, target, caller_path)),
                 }
             }
+            SimpleExpr::Unary { operand, .. } => expression(
+                operand,
+                caller_path,
+                graph,
+                files,
+                functions,
+                resolution,
+                qualify_bare_calls,
+            ),
             SimpleExpr::Binary { lhs, rhs, .. } => {
                 expression(
                     lhs,
@@ -2561,6 +2570,7 @@ fn first_unexpanded_mandatory_call(
             SimpleExpr::Binary { lhs, rhs, .. } => {
                 expression(lhs, candidates).or_else(|| expression(rhs, candidates))
             }
+            SimpleExpr::Unary { operand, .. } => expression(operand, candidates),
             SimpleExpr::Condition(condition) => condition_value(condition, candidates),
             SimpleExpr::DefaultValue(_)
             | SimpleExpr::Int(_)
@@ -2706,6 +2716,7 @@ fn inline_expression_calls(
                 nested_index,
                 ..
             } => is_safe_argument(index) && nested_index.as_deref().is_none_or(is_safe_argument),
+            SimpleExpr::Unary { operand, .. } => is_safe_argument(operand),
             SimpleExpr::Binary { lhs, rhs, .. } => is_safe_argument(lhs) && is_safe_argument(rhs),
             SimpleExpr::Condition(condition) => is_safe_condition(condition),
             SimpleExpr::Call { .. } => false,
@@ -2820,6 +2831,9 @@ fn inline_expression_calls(
             SimpleExpr::Binary { lhs, rhs, .. } => {
                 expression(lhs, candidates, caller_id, arguments, stack);
                 expression(rhs, candidates, caller_id, arguments, stack);
+            }
+            SimpleExpr::Unary { operand, .. } => {
+                expression(operand, candidates, caller_id, arguments, stack);
             }
             SimpleExpr::Condition(value) => {
                 condition(value, candidates, caller_id, arguments, stack)

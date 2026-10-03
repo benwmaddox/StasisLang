@@ -13,7 +13,8 @@ use crate::frontend::types::{
     TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_VOID,
 };
 use crate::ir::hir::{
-    eval_const_i64, AssignOp, AssignTarget, ComparisonOp, SimpleCondition, SimpleExpr, SimpleStmt,
+    eval_const_i64, AssignOp, AssignTarget, ComparisonOp, ExprBinaryOp, ExprUnaryOp,
+    SimpleCondition, SimpleExpr, SimpleStmt,
 };
 
 mod effect_contracts;
@@ -395,7 +396,12 @@ fn validate_statements(
                 if local_types.contains_key(name) {
                     return Err(format!("let binding '{name}' shadows existing variable"));
                 }
-                validate_expression_access(expression, context, local_types)?;
+                validate_expression_access_with_expected(
+                    expression,
+                    *type_id,
+                    context,
+                    local_types,
+                )?;
                 if type_id.is_some_and(|type_id| context.types.is_typed_collection_type(type_id)) {
                     return Err(format!(
                         "let binding '{name}' cannot store a typed collection value"
@@ -431,11 +437,15 @@ fn validate_statements(
             SimpleStmt::Assign {
                 target, expression, ..
             } => {
-                validate_expression_access(expression, context, local_types)?;
+                let target_type = semantic_assignment_target_type(target, context, local_types);
+                validate_expression_access_with_expected(
+                    expression,
+                    target_type,
+                    context,
+                    local_types,
+                )?;
                 validate_assignment_target_access(target, context, local_types)?;
-                if let Some(target_type) =
-                    semantic_assignment_target_type(target, context, local_types)
-                {
+                if let Some(target_type) = target_type {
                     if context.types.is_typed_collection_type(target_type) {
                         return Err(
                             "typed collection values cannot be assignment targets".to_string()
@@ -612,7 +622,12 @@ fn validate_statements(
             }
             SimpleStmt::Continue => {}
             SimpleStmt::Return(expression) => {
-                validate_expression_access(expression, context, local_types)?;
+                validate_expression_access_with_expected(
+                    expression,
+                    Some(return_type),
+                    context,
+                    local_types,
+                )?;
                 if let Some(expression_type) = semantic_expression_type_with_expected(
                     expression,
                     Some(return_type),
@@ -1411,6 +1426,15 @@ fn collect_internal_calls_in_expression(
                 );
             }
         }
+        SimpleExpr::Unary { operand, .. } => collect_internal_calls_in_expression(
+            operand,
+            caller,
+            context,
+            local_types,
+            aliases,
+            edges,
+            callers,
+        ),
         SimpleExpr::Binary { lhs, rhs, .. } => {
             collect_internal_calls_in_expression(
                 lhs,
@@ -1968,6 +1992,9 @@ fn validate_guarded_expression(
             state.invalidate();
             Ok(())
         }
+        SimpleExpr::Unary { operand, .. } => {
+            validate_guarded_expression(operand, context, required_proofs, local_types, state)
+        }
         SimpleExpr::Binary { lhs, rhs, .. } => {
             validate_guarded_expression(lhs, context, required_proofs, local_types, state)?;
             validate_guarded_expression(rhs, context, required_proofs, local_types, state)
@@ -1985,6 +2012,7 @@ fn safe_requires_expansion_argument(expression: &SimpleExpr) -> bool {
     match expression {
         SimpleExpr::Call { .. } => false,
         SimpleExpr::Condition(condition) => safe_requires_expansion_condition(condition),
+        SimpleExpr::Unary { operand, .. } => safe_requires_expansion_argument(operand),
         SimpleExpr::IndexedPath {
             index,
             nested_index,
@@ -2074,6 +2102,10 @@ fn substitute_required_expression(
             lhs: Box::new(substitute_required_expression(lhs, substitutions)),
             op: *op,
             rhs: Box::new(substitute_required_expression(rhs, substitutions)),
+        },
+        SimpleExpr::Unary { op, operand } => SimpleExpr::Unary {
+            op: *op,
+            operand: Box::new(substitute_required_expression(operand, substitutions)),
         },
         SimpleExpr::Condition(condition) => SimpleExpr::Condition(Box::new(
             substitute_required_condition(condition, substitutions),
@@ -2172,11 +2204,33 @@ fn semantic_expression_type_with_expected(
     context: &AnalysisContext<'_>,
     local_types: &BTreeMap<String, TypeId>,
 ) -> Option<TypeId> {
+    if let Some(expected) = expected.filter(|type_id| {
+        context.types.integer_width_bits(*type_id).is_some()
+            && is_contextual_bitwise_expression(expression)
+            && expression.is_contextual_integer_expression()
+    }) {
+        return Some(expected);
+    }
     let inferred = semantic_expression_type(expression, context, local_types);
     if expected == Some(TYPE_ID_F64) && inferred == Some(TYPE_ID_F32) {
         return Some(TYPE_ID_F64);
     }
     inferred
+}
+
+fn is_contextual_bitwise_expression(expression: &SimpleExpr) -> bool {
+    matches!(
+        expression,
+        SimpleExpr::Unary { .. }
+            | SimpleExpr::Binary {
+                op: ExprBinaryOp::ShiftLeft
+                    | ExprBinaryOp::ShiftRight
+                    | ExprBinaryOp::BitAnd
+                    | ExprBinaryOp::BitXor
+                    | ExprBinaryOp::BitOr,
+                ..
+            }
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2998,6 +3052,29 @@ fn validate_expression_access(
     context: &AnalysisContext<'_>,
     local_types: &BTreeMap<String, TypeId>,
 ) -> Result<(), String> {
+    validate_expression_access_with_expected(expression, None, context, local_types)
+}
+
+fn validate_expression_access_with_expected(
+    expression: &SimpleExpr,
+    expected: Option<TypeId>,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Result<(), String> {
+    let expected_integer_lane = expected.filter(|type_id| {
+        context.types.integer_width_bits(*type_id).is_some()
+            && is_contextual_bitwise_expression(expression)
+            && expression.is_contextual_integer_expression()
+    });
+    if let Some(expected_integer_lane) = expected_integer_lane {
+        return validate_contextual_integer_expression_lane(
+            expression,
+            expected_integer_lane,
+            context,
+            local_types,
+        );
+    }
+
     match expression {
         SimpleExpr::Condition(condition) => {
             validate_condition_access(condition, context, local_types)
@@ -3076,15 +3153,210 @@ fn validate_expression_access(
                 }
             }
         }
-        SimpleExpr::Binary { lhs, rhs, .. } => {
-            validate_expression_access(lhs, context, local_types)?;
-            validate_expression_access(rhs, context, local_types)
+        SimpleExpr::Unary { op, operand } => {
+            if expression.is_contextual_integer_expression() {
+                return validate_contextual_integer_expression_lane(
+                    expression,
+                    TYPE_ID_I32,
+                    context,
+                    local_types,
+                );
+            }
+            validate_expression_access(operand, context, local_types)?;
+            integer_unary_result_type(*op, operand, context, local_types, &BTreeMap::new())
+                .map(|_| ())
+        }
+        SimpleExpr::Binary { lhs, op, rhs } => {
+            if !op.requires_integer_operands() {
+                validate_expression_access(lhs, context, local_types)?;
+                validate_expression_access(rhs, context, local_types)?;
+                return Ok(());
+            }
+
+            let lhs_contextual = lhs.is_contextual_integer_expression();
+            let rhs_contextual = rhs.is_contextual_integer_expression();
+            if op.is_shift() {
+                if lhs_contextual {
+                    validate_contextual_integer_expression_lane(
+                        lhs,
+                        TYPE_ID_I32,
+                        context,
+                        local_types,
+                    )?;
+                } else {
+                    validate_expression_access(lhs, context, local_types)?;
+                }
+                if rhs_contextual {
+                    validate_contextual_integer_expression_lane(
+                        rhs,
+                        TYPE_ID_I32,
+                        context,
+                        local_types,
+                    )?;
+                } else {
+                    validate_expression_access(rhs, context, local_types)?;
+                }
+                let lhs_type = if lhs_contextual {
+                    TYPE_ID_I32
+                } else {
+                    expression_type(lhs, context, local_types, &BTreeMap::new()).ok_or_else(
+                        || format!("cannot determine left operand type for '{}'", op.spelling()),
+                    )?
+                };
+                let rhs_type = expression_type(rhs, context, local_types, &BTreeMap::new())
+                    .ok_or_else(|| {
+                        format!(
+                            "cannot determine right operand type for '{}'",
+                            op.spelling()
+                        )
+                    })?;
+                if !context.types.is_integer(lhs_type) || !context.types.is_integer(rhs_type) {
+                    return Err(format!(
+                        "operator '{}' requires integer operands; found {} and {}",
+                        op.spelling(),
+                        type_name(lhs_type, context.types),
+                        type_name(rhs_type, context.types)
+                    ));
+                }
+                return Ok(());
+            }
+
+            match (lhs_contextual, rhs_contextual) {
+                (true, true) => {
+                    validate_contextual_integer_expression_lane(
+                        lhs,
+                        TYPE_ID_I32,
+                        context,
+                        local_types,
+                    )?;
+                    validate_contextual_integer_expression_lane(
+                        rhs,
+                        TYPE_ID_I32,
+                        context,
+                        local_types,
+                    )
+                }
+                (true, false) => {
+                    validate_expression_access(rhs, context, local_types)?;
+                    let lane = expression_type(rhs, context, local_types, &BTreeMap::new())
+                        .ok_or_else(|| {
+                            format!(
+                                "cannot determine right operand type for '{}'",
+                                op.spelling()
+                            )
+                        })?;
+                    if !context.types.is_integer(lane) {
+                        return Err(format!(
+                            "operator '{}' requires integer operands; found {} and {}",
+                            op.spelling(),
+                            "contextual integer literal",
+                            type_name(lane, context.types)
+                        ));
+                    }
+                    validate_contextual_integer_expression_lane(lhs, lane, context, local_types)
+                }
+                (false, true) => {
+                    validate_expression_access(lhs, context, local_types)?;
+                    let lane = expression_type(lhs, context, local_types, &BTreeMap::new())
+                        .ok_or_else(|| {
+                            format!("cannot determine left operand type for '{}'", op.spelling())
+                        })?;
+                    if !context.types.is_integer(lane) {
+                        return Err(format!(
+                            "operator '{}' requires integer operands; found {} and {}",
+                            op.spelling(),
+                            type_name(lane, context.types),
+                            "contextual integer literal"
+                        ));
+                    }
+                    validate_contextual_integer_expression_lane(rhs, lane, context, local_types)
+                }
+                (false, false) => {
+                    validate_expression_access(lhs, context, local_types)?;
+                    validate_expression_access(rhs, context, local_types)?;
+                    integer_operator_result_type(
+                        *op,
+                        lhs,
+                        rhs,
+                        context,
+                        local_types,
+                        &BTreeMap::new(),
+                    )
+                    .map(|_| ())
+                }
+            }
         }
         SimpleExpr::DefaultValue(_)
         | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_) => Ok(()),
+    }
+}
+
+fn validate_contextual_integer_expression_lane(
+    expression: &SimpleExpr,
+    lane: TypeId,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Result<(), String> {
+    if let Some(value) = expression.contextual_integer_literal_value() {
+        if context.types.integer_literal_fits(value, lane) {
+            return Ok(());
+        }
+        return Err(format!(
+            "integer literal {value} is not representable in contextual lane {}",
+            type_name(lane, context.types)
+        ));
+    }
+
+    match expression {
+        SimpleExpr::Unary {
+            op: ExprUnaryOp::BitwiseNot,
+            operand,
+        } if operand.is_contextual_integer_expression() => {
+            validate_contextual_integer_expression_lane(operand, lane, context, local_types)
+        }
+        SimpleExpr::Binary {
+            lhs,
+            op: ExprBinaryOp::BitAnd | ExprBinaryOp::BitXor | ExprBinaryOp::BitOr,
+            rhs,
+        } if lhs.is_contextual_integer_expression() && rhs.is_contextual_integer_expression() => {
+            validate_contextual_integer_expression_lane(lhs, lane, context, local_types)?;
+            validate_contextual_integer_expression_lane(rhs, lane, context, local_types)
+        }
+        SimpleExpr::Binary {
+            lhs,
+            op: op @ (ExprBinaryOp::ShiftLeft | ExprBinaryOp::ShiftRight),
+            rhs,
+        } if lhs.is_contextual_integer_expression() => {
+            validate_contextual_integer_expression_lane(lhs, lane, context, local_types)?;
+            if rhs.is_contextual_integer_expression() {
+                validate_contextual_integer_expression_lane(
+                    rhs,
+                    TYPE_ID_I32,
+                    context,
+                    local_types,
+                )?;
+            } else {
+                validate_expression_access(rhs, context, local_types)?;
+            }
+            let rhs_type = expression_type(rhs, context, local_types, &BTreeMap::new())
+                .ok_or_else(|| "cannot determine shift count type".to_string())?;
+            if !context.types.is_integer(rhs_type) {
+                return Err(format!(
+                    "operator '{}' requires integer operands; found {} and {}",
+                    op.spelling(),
+                    type_name(lane, context.types),
+                    type_name(rhs_type, context.types)
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(format!(
+            "expression cannot adopt contextual integer lane {}",
+            type_name(lane, context.types)
+        )),
     }
 }
 
@@ -3684,6 +3956,10 @@ fn hash_expression_shape(expression: &SimpleExpr, hasher: &mut DefaultHasher) {
             for argument in args {
                 hash_expression_shape(argument, hasher);
             }
+        }
+        SimpleExpr::Unary { op, operand } => {
+            op.hash(hasher);
+            hash_expression_shape(operand, hasher);
         }
         SimpleExpr::Binary { lhs, op, rhs } => {
             op.hash(hasher);
@@ -4790,6 +5066,9 @@ fn analyze_expression(
                 }
             }
         }
+        SimpleExpr::Unary { operand, .. } => {
+            analyze_expression(operand, context, locals, local_types, aliases, effects);
+        }
         SimpleExpr::Binary { lhs, rhs, .. } => {
             analyze_expression(lhs, context, locals, local_types, aliases, effects);
             analyze_expression(rhs, context, locals, local_types, aliases, effects);
@@ -4974,7 +5253,18 @@ fn expression_type(
                 }
             }
         }
-        SimpleExpr::Binary { lhs, rhs, .. } => {
+        SimpleExpr::Unary { operand, .. } => {
+            let operand_type = expression_type(operand, context, local_types, aliases)?;
+            context
+                .types
+                .is_integer(operand_type)
+                .then_some(operand_type)
+        }
+        SimpleExpr::Binary { lhs, op, rhs } => {
+            if op.requires_integer_operands() {
+                return integer_operator_result_type(*op, lhs, rhs, context, local_types, aliases)
+                    .ok();
+            }
             let lhs = expression_type(lhs, context, local_types, aliases)?;
             let rhs = expression_type(rhs, context, local_types, aliases)?;
             if lhs == TYPE_ID_F64 || rhs == TYPE_ID_F64 {
@@ -4985,6 +5275,113 @@ fn expression_type(
                 Some(lhs)
             }
         }
+    }
+}
+
+fn integer_operator_result_type(
+    operator: ExprBinaryOp,
+    lhs_expression: &SimpleExpr,
+    rhs_expression: &SimpleExpr,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+    aliases: &BTreeMap<String, String>,
+) -> Result<TypeId, String> {
+    let lhs_type =
+        expression_type(lhs_expression, context, local_types, aliases).ok_or_else(|| {
+            format!(
+                "cannot determine left operand type for '{}'",
+                operator.spelling()
+            )
+        })?;
+    let rhs_type =
+        expression_type(rhs_expression, context, local_types, aliases).ok_or_else(|| {
+            format!(
+                "cannot determine right operand type for '{}'",
+                operator.spelling()
+            )
+        })?;
+    if !context.types.is_integer(lhs_type) || !context.types.is_integer(rhs_type) {
+        return Err(format!(
+            "operator '{}' requires integer operands; found {} and {}",
+            operator.spelling(),
+            type_name(lhs_type, context.types),
+            type_name(rhs_type, context.types)
+        ));
+    }
+    if operator.is_shift() {
+        return Ok(lhs_type);
+    }
+    let lhs_contextual = lhs_expression.is_contextual_integer_expression();
+    let rhs_contextual = rhs_expression.is_contextual_integer_expression();
+    if lhs_contextual && !rhs_contextual {
+        validate_contextual_integer_expression_lane(
+            lhs_expression,
+            rhs_type,
+            context,
+            local_types,
+        )?;
+        return Ok(rhs_type);
+    }
+    if rhs_contextual && !lhs_contextual {
+        validate_contextual_integer_expression_lane(
+            rhs_expression,
+            lhs_type,
+            context,
+            local_types,
+        )?;
+        return Ok(lhs_type);
+    }
+    if lhs_type == rhs_type {
+        return Ok(lhs_type);
+    }
+    if let Some(value) = lhs_expression.contextual_integer_literal_value() {
+        if context.types.integer_literal_fits(value, rhs_type) {
+            return Ok(rhs_type);
+        }
+        return Err(format!(
+            "integer literal {value} is not representable in contextual lane {}",
+            type_name(rhs_type, context.types)
+        ));
+    }
+    if let Some(value) = rhs_expression.contextual_integer_literal_value() {
+        if context.types.integer_literal_fits(value, lhs_type) {
+            return Ok(lhs_type);
+        }
+        return Err(format!(
+            "integer literal {value} is not representable in contextual lane {}",
+            type_name(lhs_type, context.types)
+        ));
+    }
+    Err(format!(
+        "operator '{}' requires operands in the same integer lane; found {} and {}",
+        operator.spelling(),
+        type_name(lhs_type, context.types),
+        type_name(rhs_type, context.types)
+    ))
+}
+
+fn integer_unary_result_type(
+    operator: ExprUnaryOp,
+    operand: &SimpleExpr,
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+    aliases: &BTreeMap<String, String>,
+) -> Result<TypeId, String> {
+    let operand_type =
+        expression_type(operand, context, local_types, aliases).ok_or_else(|| {
+            format!(
+                "cannot determine operand type for '{}'",
+                operator.spelling()
+            )
+        })?;
+    if context.types.is_integer(operand_type) {
+        Ok(operand_type)
+    } else {
+        Err(format!(
+            "operator '{}' requires integer operands; found {}",
+            operator.spelling(),
+            type_name(operand_type, context.types)
+        ))
     }
 }
 
@@ -5423,7 +5820,12 @@ fn static_for_max_iterations(
         SimpleStmt::Assign {
             target: AssignTarget::Local(name),
             op: AssignOp::Set,
-            expression: SimpleExpr::Binary { lhs, op: '+', rhs },
+            expression:
+                SimpleExpr::Binary {
+                    lhs,
+                    op: ExprBinaryOp::Add,
+                    rhs,
+                },
         } if name == variable
             && matches!(lhs.as_ref(), SimpleExpr::Identifier(value) if value == variable) =>
         {
@@ -5548,10 +5950,13 @@ fn display_expression(expression: &SimpleExpr) -> String {
                 .unwrap_or_default()
         ),
         SimpleExpr::Call { target, .. } => format!("{target}(...)"),
+        SimpleExpr::Unary { op, operand } => {
+            format!("{}{}", op.spelling(), display_expression(operand))
+        }
         SimpleExpr::Binary { lhs, op, rhs } => format!(
             "{} {} {}",
             display_expression(lhs),
-            op,
+            op.spelling(),
             display_expression(rhs)
         ),
     }
@@ -5567,6 +5972,140 @@ mod tests {
     use crate::ir::hir::{AssignTarget, SimpleStmt};
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
+
+    #[test]
+    fn bitwise_semantics_require_exact_integer_lanes_and_contextual_literal_ranges() {
+        let mut types = TypeTable::new();
+        let nominal = types.resolve_or_intern("NominalI32").expect("nominal type");
+        let context = build_context(&[], &[], &types).expect("empty semantic context");
+        let local_types = BTreeMap::from([
+            ("byte".to_string(), crate::frontend::types::TYPE_ID_U8),
+            ("other_byte".to_string(), crate::frontend::types::TYPE_ID_U8),
+            ("half".to_string(), crate::frontend::types::TYPE_ID_U16),
+            ("word".to_string(), crate::frontend::types::TYPE_ID_U32),
+            ("signed".to_string(), TYPE_ID_I32),
+            ("flag".to_string(), TYPE_ID_BOOL),
+            ("fraction".to_string(), TYPE_ID_F32),
+            ("nominal".to_string(), nominal),
+        ]);
+        let parse = |source: &str| {
+            crate::frontend::body_parser::parse_value_expression(source)
+                .unwrap_or_else(|error| panic!("parse {source}: {error}"))
+        };
+
+        for source in [
+            "byte | 3",
+            "3 ^ byte",
+            "byte & other_byte",
+            "signed ^ 1",
+            "byte << word",
+            "~byte",
+            "1 << 8",
+            "~0",
+        ] {
+            validate_expression_access(&parse(source), &context, &local_types)
+                .unwrap_or_else(|error| panic!("valid {source}: {error}"));
+        }
+        assert_eq!(
+            expression_type(&parse("byte | 3"), &context, &local_types, &BTreeMap::new()),
+            Some(crate::frontend::types::TYPE_ID_U8)
+        );
+        assert_eq!(
+            expression_type(
+                &parse("byte << word"),
+                &context,
+                &local_types,
+                &BTreeMap::new()
+            ),
+            Some(crate::frontend::types::TYPE_ID_U8)
+        );
+
+        for (source, expected) in [
+            ("byte & half", "requires operands in the same integer lane"),
+            ("byte & 256", "not representable in contextual lane u8"),
+            ("byte | -1", "not representable in contextual lane u8"),
+            ("flag | 1", "operator '|' requires integer operands"),
+            ("fraction << 1", "operator '<<' requires integer operands"),
+            ("byte << flag", "operator '<<' requires integer operands"),
+            ("nominal ^ 1", "operator '^' requires integer operands"),
+            ("~flag", "operator '~' requires integer operands"),
+            (
+                "byte & other_byte == 0",
+                "operator '&' requires integer operands",
+            ),
+        ] {
+            let error = validate_expression_access(&parse(source), &context, &local_types)
+                .expect_err(source);
+            assert!(error.contains(expected), "{source}: {error}");
+        }
+
+        for source in ["1 | 2 | 4", "(1 | 2) << 8", "~(1 | 2)"] {
+            let expression = parse(source);
+            validate_expression_access_with_expected(
+                &expression,
+                Some(crate::frontend::types::TYPE_ID_U8),
+                &context,
+                &local_types,
+            )
+            .unwrap_or_else(|error| panic!("valid u8-context expression {source}: {error}"));
+            assert_eq!(
+                semantic_expression_type_with_expected(
+                    &expression,
+                    Some(crate::frontend::types::TYPE_ID_U8),
+                    &context,
+                    &local_types,
+                ),
+                Some(crate::frontend::types::TYPE_ID_U8),
+                "{source} adopts the expected u8 lane"
+            );
+        }
+        let u32_max = parse("4294967295 | 0");
+        validate_expression_access_with_expected(
+            &u32_max,
+            Some(crate::frontend::types::TYPE_ID_U32),
+            &context,
+            &local_types,
+        )
+        .expect("u32 context preserves the unsigned maximum literal");
+
+        for source in ["1 | -1", "-1 | 1", "~(-1)", "1 | 256 | 0"] {
+            let expression = parse(source);
+            let error = validate_expression_access_with_expected(
+                &expression,
+                Some(crate::frontend::types::TYPE_ID_U8),
+                &context,
+                &local_types,
+            )
+            .expect_err(source);
+            assert!(
+                error.contains("not representable in contextual lane u8"),
+                "{source}: {error}"
+            );
+        }
+        let signed_negative = parse("-1 | 1");
+        validate_expression_access_with_expected(
+            &signed_negative,
+            Some(TYPE_ID_I32),
+            &context,
+            &local_types,
+        )
+        .expect("i32 context accepts a representable negative literal");
+
+        let anchored_subtree = parse("byte | (1 | 2)");
+        validate_expression_access(&anchored_subtree, &context, &local_types)
+            .expect("typed u8 operand anchors a contextual subtree");
+        assert_eq!(
+            expression_type(&anchored_subtree, &context, &local_types, &BTreeMap::new()),
+            Some(crate::frontend::types::TYPE_ID_U8)
+        );
+        let out_of_range_subtree = parse("byte | (1 | 256)");
+        let error = validate_expression_access(&out_of_range_subtree, &context, &local_types)
+            .expect_err("typed u8 lane rejects an out-of-range nested literal");
+        assert!(
+            error.contains("integer literal 256 is not representable in contextual lane u8"),
+            "{error}"
+        );
+    }
 
     fn typed_pool_fixture(extra: &str) -> (TypeTable, Vec<SourceFile>) {
         let source = format!(
@@ -7606,7 +8145,7 @@ mod tests {
         let arithmetic = validate_expression_access(
             &SimpleExpr::Binary {
                 lhs: Box::new(SimpleExpr::Identifier("actors".to_string())),
-                op: '+',
+                op: ExprBinaryOp::Add,
                 rhs: Box::new(SimpleExpr::Int(1)),
             },
             &context,
