@@ -29,7 +29,7 @@ def write(root: Path, relative: str, content: bytes = b"review evidence\n") -> P
     return path
 
 
-def base_tree(root: Path) -> tuple[Path, Path]:
+def base_tree(root: Path, *, target: str = "linux") -> tuple[Path, Path]:
     staged = root / "staged"
     archive = root / "archive"
     for name in SHARED_LOGS:
@@ -40,7 +40,7 @@ def base_tree(root: Path) -> tuple[Path, Path]:
         "staged-archive-receipt.json",
         json.dumps(
             {
-                "target": "linux",
+                "target": target,
                 "workflow_run_id": "123",
                 "artifact_name": "stasis-nightly-linux-x64",
                 "archive_sha256": "a" * 64,
@@ -90,7 +90,7 @@ class CollectStagedArchiveEvidenceTests(unittest.TestCase):
     def test_android_evidence_retains_frames_signers_manifests_and_skips_apks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            staged, archive = base_tree(root)
+            staged, archive = base_tree(root, target="android")
             runtime = add_android(root, staged)
             output = root / "evidence"
             manifest = collect_evidence(
@@ -112,10 +112,29 @@ class CollectStagedArchiveEvidenceTests(unittest.TestCase):
                 retained = output / item["path"]
                 self.assertEqual(item["sha256"], hashlib.sha256(retained.read_bytes()).hexdigest())
 
+    def test_passed_lane_rejects_receipt_for_a_different_target(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            staged, archive = base_tree(root, target="linux")
+            runtime = add_android(root, staged)
+            manifest = collect_evidence(
+                target="android",
+                staged_root=staged,
+                archive_root=archive,
+                runtime_root=runtime,
+                output=root / "evidence",
+                lane_passed=True,
+            )
+            self.assertEqual(manifest["status"], "incomplete")
+            self.assertIn(
+                "staged/staged-archive-receipt.json (target 'linux' does not match expected 'android')",
+                manifest["missing_required"],
+            )
+
     def test_ios_evidence_retains_simulator_frame_and_both_bounds_crash_reports(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            staged, archive = base_tree(root)
+            staged, archive = base_tree(root, target="ios")
             for consumer in ("bundled-generics", "generated-generics"):
                 build_root = Path("consumers") / consumer / "target/ios-archive-acceptance"
                 for name in (

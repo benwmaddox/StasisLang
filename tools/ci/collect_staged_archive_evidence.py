@@ -152,7 +152,12 @@ class EvidenceCollector:
                 self.missing.append(marker)
 
 
-def _receipt_summary(collector: EvidenceCollector, staged_root: Path, lane_passed: bool) -> dict[str, Any] | None:
+def _receipt_summary(
+    collector: EvidenceCollector,
+    staged_root: Path,
+    lane_passed: bool,
+    expected_target: str,
+) -> dict[str, Any] | None:
     receipt_path = staged_root / "staged-archive-receipt.json"
     if not receipt_path.is_file() or receipt_path.is_symlink():
         if lane_passed:
@@ -168,6 +173,12 @@ def _receipt_summary(collector: EvidenceCollector, staged_root: Path, lane_passe
         if lane_passed:
             collector.missing.append("staged/staged-archive-receipt.json (root is not an object)")
         return {"sha256": sha256(receipt_path), "parse_error": "receipt root is not an object"}
+    receipt_target = receipt.get("target")
+    if lane_passed and receipt_target != expected_target:
+        collector.missing.append(
+            "staged/staged-archive-receipt.json "
+            f"(target {receipt_target!r} does not match expected {expected_target!r})"
+        )
     toolchain = receipt.get("toolchain", {})
     if not isinstance(toolchain, dict):
         toolchain = {}
@@ -204,6 +215,7 @@ def _collect_shared_qualification(
     staged_root: Path,
     archive_root: Path,
     lane_passed: bool,
+    expected_target: str,
 ) -> dict[str, Any] | None:
     collector.add_direct(
         staged_root,
@@ -227,7 +239,7 @@ def _collect_shared_qualification(
                 f"manifests/{consumer}/{relative.as_posix()}",
                 f"staged/consumers/{consumer}/{relative.as_posix()}",
             )
-    return _receipt_summary(collector, staged_root, lane_passed)
+    return _receipt_summary(collector, staged_root, lane_passed, expected_target)
 
 
 def collect_desktop(
@@ -237,7 +249,7 @@ def collect_desktop(
     archive_root: Path,
     lane_passed: bool,
 ) -> dict[str, Any] | None:
-    receipt = _collect_shared_qualification(collector, staged_root, archive_root, lane_passed)
+    receipt = _collect_shared_qualification(collector, staged_root, archive_root, lane_passed, target)
     if lane_passed:
         collector.require(staged_root / "hosted-chrome-version.txt", "staged/hosted-chrome-version.txt")
     shared_files = (
@@ -294,7 +306,7 @@ def collect_android(
     runtime_root: Path,
     lane_passed: bool,
 ) -> dict[str, Any] | None:
-    receipt = _collect_shared_qualification(collector, staged_root, archive_root, lane_passed)
+    receipt = _collect_shared_qualification(collector, staged_root, archive_root, lane_passed, "android")
     for name in (
         "bundle-audit.json",
         "bundle-audit.log",
@@ -356,7 +368,7 @@ def collect_ios(
     archive_root: Path,
     lane_passed: bool,
 ) -> dict[str, Any] | None:
-    receipt = _collect_shared_qualification(collector, staged_root, archive_root, lane_passed)
+    receipt = _collect_shared_qualification(collector, staged_root, archive_root, lane_passed, "ios")
     for name in (
         "bundle-audit.json",
         "bundle-audit.log",
