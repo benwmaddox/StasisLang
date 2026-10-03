@@ -40,6 +40,31 @@ class NightlyFreshnessContractTests(unittest.TestCase):
         self.assertEqual(1, self.release.count(".\\stasis.exe live --help"))
         self.assertEqual(1, self.release.count("./bin/stasis live --help"))
 
+    def test_windows_archive_stage_runs_both_packaged_web_consumers_in_chrome(self):
+        step = self.release.split(
+            "- name: Extract and qualify the exact staged archive", 1
+        )[1].split("- name: Upload desktop staged archive receipt", 1)[0]
+        self.assertIn('"--browser"', step)
+        self.assertIn('$env:STASIS_BROWSER_EXECUTABLE = $chrome', step)
+        self.assertLess(step.index('$env:STASIS_BROWSER_EXECUTABLE = $chrome'), step.index("python @arguments"))
+        self.assertLess(step.index('$arguments += "--browser"'), step.index("python @arguments"))
+
+    def test_mobile_archive_lanes_extract_exact_archive_roots(self):
+        self.assertIn(
+            "tar -xf $archiveFile -C $archiveRoot --strip-components=1",
+            self.release,
+        )
+        android = (ROOT / ".github/workflows/staged-android-archive-acceptance.yml").read_text(encoding="utf-8")
+        ios = (ROOT / ".github/workflows/staged-ios-archive-acceptance.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            'tar -xf "$STASIS_ARTIFACT_FILE" -C target/staged-linux --strip-components=1',
+            android,
+        )
+        self.assertIn(
+            'tar -xf "$STASIS_ARTIFACT_FILE" -C target/staged-macos --strip-components=1',
+            ios,
+        )
+
     def test_expensive_seams_wait_for_release_detection(self):
         for job in (
             "integration_seams",
@@ -53,10 +78,26 @@ class NightlyFreshnessContractTests(unittest.TestCase):
                     self.release,
                     rf"(?ms)^  {job}:\n    needs: detect\n    if: needs\.detect\.outputs\.should_release == 'true'",
                 )
+        release = self.release.split("  release:\n", 1)[1].split("  no_changes:\n", 1)[0]
         self.assertIn(
-            "if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.windows_signing.result == 'success' && needs.android_prebuilt_acceptance.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' && needs.performance_benchmarks.result == 'success' && needs.network_browser_acceptance.result == 'success' }}",
-            self.release,
+            "if: ${{ always() && needs.detect.outputs.should_release == 'true' && github.ref == 'refs/heads/main' }}",
+            release,
         )
+        for lane in (
+            "build",
+            "windows_signing",
+            "android_prebuilt_acceptance",
+            "vscode_extension",
+            "integration_seams",
+            "android_device_seams",
+            "performance_benchmarks",
+            "network_browser_acceptance",
+            "staged_archive_desktop_acceptance",
+            "staged_android_archive_acceptance",
+            "staged_ios_archive_acceptance",
+        ):
+            self.assertIn(f"{lane}=${{{{ needs.{lane}.result }}}}", release)
+        self.assertIn("--require-signed-windows", release)
 
     def test_nightly_calls_performance_and_network_validation(self):
         for job, workflow in (

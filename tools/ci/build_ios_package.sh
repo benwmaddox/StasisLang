@@ -20,6 +20,30 @@ simulator_acceptance="${STASIS_IOS_SIMULATOR_ACCEPTANCE:-aspect-fit}"
 simulator_output=""
 simulator_package_created=0
 
+package_mobile() {
+  local target="$1"
+  local output="$2"
+  if [[ -n "${STASIS_CLI_EXECUTABLE:-}" ]]; then
+    [[ -x "${STASIS_CLI_EXECUTABLE}" ]] || {
+      echo "configured staged archive CLI is not executable: ${STASIS_CLI_EXECUTABLE}" >&2
+      return 1
+    }
+    local development_flag=()
+    if [[ "${target}" == "ios-simulator-arm64" ]]; then
+      development_flag=(--development-build)
+    fi
+    "${STASIS_CLI_EXECUTABLE}" --workspace "${workspace}" package-mobile \
+      --target "${target}" --out "${output}" "${development_flag[@]}"
+  else
+    python tools/cargo_cache.py run -- cargo run -p stasis -- \
+      --workspace "${workspace}" \
+      package-mobile \
+      --target "${target}" \
+      --out "${output}" \
+      --development-build
+  fi
+}
+
 if [[ "${package_output}" = /* || "${package_output}" = *..* ]]; then
   echo "package output must be a confined workspace-relative path" >&2
   exit 1
@@ -146,12 +170,7 @@ install_xcframework \
   SDL_image
 
 cd "${repo_root}"
-python tools/cargo_cache.py run -- cargo run -p stasis -- \
-  --workspace "${workspace}" \
-  package-mobile \
-  --target ios-arm64 \
-  --out "${package_output}" \
-  --development-build
+package_mobile ios-arm64 "${package_output}"
 package_created=1
 
 package_root="${workspace}/${package_output}"
@@ -247,16 +266,11 @@ cat "${build_root}/evidence.txt"
 if [[ "${simulator_acceptance}" = "generics" ]]; then
   simulator_output="${package_output}-simulator"
   cd "${repo_root}"
-  python tools/cargo_cache.py run -- cargo run -p stasis -- \
-    --workspace "${workspace}" \
-    package-mobile \
-    --target ios-simulator-arm64 \
-    --out "${simulator_output}" \
-    --development-build
+  package_mobile ios-simulator-arm64 "${simulator_output}"
   simulator_package_created=1
   simulator_package="${workspace}/${simulator_output}"
   simulator_project="${simulator_package}/ios"
-  python3 - "${simulator_package}/stasis_mobile_package.json" <<'PY'
+python3 - "${simulator_package}/stasis_mobile_package.json" <<'PY'
 import json
 import sys
 
@@ -264,8 +278,12 @@ with open(sys.argv[1], encoding="utf-8") as source:
     manifest = json.load(source)
 if manifest.get("target") != "ios-simulator-arm64":
     raise SystemExit(f"unexpected simulator package target: {manifest.get('target')!r}")
-if manifest.get("development_build") is not True:
-    raise SystemExit("simulator package is not marked as a development build")
+expected_development = True
+if manifest.get("development_build") is not expected_development:
+    raise SystemExit(
+        f"simulator package development_build={manifest.get('development_build')!r}; "
+        f"expected {expected_development!r} for the selected compiler"
+    )
 PY
   xcodebuild \
     -project "${simulator_project}/StasisMobile.xcodeproj" \

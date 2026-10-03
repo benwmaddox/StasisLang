@@ -76,10 +76,12 @@ $packageRoot = Join-Path $workspaceRoot "d"
 $evidenceRoot = Join-Path $artifactRoot "e"
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
 Copy-Item -LiteralPath $projectRoot -Destination $workspaceRoot -Recurse
-$vendorRoot = [System.IO.Path]::Combine($workspaceRoot, "vendor", "stasis", "src")
-New-Item -ItemType Directory -Force -Path $vendorRoot | Out-Null
-Copy-Item -LiteralPath (Join-Path $repoRoot "src\stdlib") `
-    -Destination (Join-Path $vendorRoot "stdlib") -Recurse
+if (-not $env:STASIS_CLI_EXECUTABLE) {
+    $vendorRoot = [System.IO.Path]::Combine($workspaceRoot, "vendor", "stasis", "src")
+    New-Item -ItemType Directory -Force -Path $vendorRoot | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoRoot "src\stdlib") `
+        -Destination (Join-Path $vendorRoot "stdlib") -Recurse
+}
 
 function Assert-In-Time([string]$Step) {
     if ($startedAt.Elapsed.TotalSeconds -gt $TotalTimeoutSeconds) {
@@ -117,20 +119,34 @@ if (-not $env:STASIS_SDL3_SOURCE -or -not $env:STASIS_SDL3_IMAGE_SOURCE) {
 
 Push-Location $repoRoot
 try {
-    python tools/cargo_cache.py run -- cargo build -p stasis
-    if ($LASTEXITCODE -ne 0) { throw "$testId compiler build failed with exit code $LASTEXITCODE" }
-    $commonGit = (& git rev-parse --path-format=absolute --git-common-dir).Trim()
-    if ($LASTEXITCODE -ne 0) { throw "Unable to resolve the shared Cargo target" }
-    $compiler = [System.IO.Path]::Combine(
-        (Split-Path -Parent $commonGit),
-        "build",
-        "codex-cargo-target",
-        "debug",
-        "stasis$executableSuffix"
-    )
-    if (-not (Test-Path $compiler)) { throw "Built Stasis compiler is missing: $compiler" }
-    & $compiler --workspace $workspaceRoot package-mobile `
-        --target $Target --out d --development-build
+    $isStagedArchive = -not [string]::IsNullOrWhiteSpace($env:STASIS_CLI_EXECUTABLE)
+    if ($isStagedArchive) {
+        $compiler = [System.IO.Path]::GetFullPath($env:STASIS_CLI_EXECUTABLE)
+        if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+            throw "Configured staged archive compiler is missing: $compiler"
+        }
+        if (-not $env:STASIS_RUNTIME_LIBRARY_PATH -or
+                -not (Test-Path -LiteralPath $env:STASIS_RUNTIME_LIBRARY_PATH -PathType Leaf)) {
+            throw "Staged archive mode requires its matching STASIS_RUNTIME_LIBRARY_PATH"
+        }
+        & $compiler --workspace $workspaceRoot package-mobile `
+            --target $Target --out d --development-build
+    } else {
+        python tools/cargo_cache.py run -- cargo build -p stasis
+        if ($LASTEXITCODE -ne 0) { throw "$testId compiler build failed with exit code $LASTEXITCODE" }
+        $commonGit = (& git rev-parse --path-format=absolute --git-common-dir).Trim()
+        if ($LASTEXITCODE -ne 0) { throw "Unable to resolve the shared Cargo target" }
+        $compiler = [System.IO.Path]::Combine(
+            (Split-Path -Parent $commonGit),
+            "build",
+            "codex-cargo-target",
+            "debug",
+            "stasis$executableSuffix"
+        )
+        if (-not (Test-Path $compiler)) { throw "Built Stasis compiler is missing: $compiler" }
+        & $compiler --workspace $workspaceRoot package-mobile `
+            --target $Target --out d --development-build
+    }
     if ($LASTEXITCODE -ne 0) { throw "$testId package-mobile failed with exit code $LASTEXITCODE" }
     Assert-In-Time "package-mobile"
 

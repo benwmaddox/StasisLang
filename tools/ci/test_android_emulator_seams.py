@@ -23,6 +23,12 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.release_script = read("mobile/android/test_release_shell.ps1")
         cls.release_runner = read("tools/ci/run_android_release_shell_seam.py")
         cls.emulator_script = read("mobile/android/test_release_shell_emulator.ps1")
+        cls.staged_android_workflow = read(
+            ".github/workflows/staged-android-archive-acceptance.yml"
+        )
+        cls.staged_android_script = read(
+            "tools/ci/run_staged_android_archive_acceptance.ps1"
+        )
         cls.strategy = read("docs/integration_seam_testing_strategy.md")
         cls.checklist = read("docs/build_checklist.md")
         cls.android_readme = read("mobile/android/README.md")
@@ -92,7 +98,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", self.workflow)
         self.assertIn("uses: ./.github/workflows/android-device-seams.yml", self.nightly_workflow)
         self.assertIn(
-            "needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams, performance_benchmarks, network_browser_acceptance]",
+            "needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams, performance_benchmarks, network_browser_acceptance, staged_archive_desktop_acceptance, staged_android_archive_acceptance, staged_ios_archive_acceptance]",
             self.nightly_workflow,
         )
         self.assertIn(
@@ -136,6 +142,31 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("android-generics-collections-evidence", self.workflow)
         self.assertIn("x86_64 emulator", self.generics_readme)
         self.assertIn("ANDROID-GENERICS", self.shell_readme)
+
+    def test_staged_generics_lane_uses_the_sample_fixture_from_each_archive_consumer(self):
+        self.assertIn("[string]$GenericsExpectationsPath = \"\"", self.emulator_script)
+        self.assertIn("$seam.Expectations = $GenericsExpectationsPath", self.emulator_script)
+        self.assertIn(
+            "-GenericsExpectationsPath $expectations",
+            self.staged_android_script,
+        )
+        self.assertIn('Join-Path $project "android_seam_expectations.json"', self.staged_android_script)
+        self.assertIn("STASIS_CLI_EXECUTABLE:", self.staged_android_workflow)
+        self.assertIn("--target android-arm64", self.staged_android_workflow)
+        self.assertIn(
+            'tar -xf "$STASIS_ARTIFACT_FILE" -C target/staged-linux --strip-components=1',
+            self.staged_android_workflow,
+        )
+
+    def test_emulator_action_script_is_one_shell_command_with_loop_in_powershell_file(self):
+        self.assertIn(
+            "script: pwsh -NoProfile -File tools/ci/run_staged_android_archive_acceptance.ps1",
+            self.staged_android_workflow,
+        )
+        script_lines = self.staged_android_workflow.split("script:", 1)[1].splitlines()
+        command = next(line.strip() for line in script_lines if line.strip())
+        self.assertEqual(command, "pwsh -NoProfile -File tools/ci/run_staged_android_archive_acceptance.ps1")
+        self.assertIn('foreach ($consumer in @("bundled-generics", "generated-generics"))', self.staged_android_script)
 
     def test_generics_emulator_coverage_preserves_arm64_package_link_lane(self):
         self.assertIn(
@@ -517,7 +548,8 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
 
     def test_release_wrapper_defaults_to_all_seams_in_stable_order(self):
         self.assertIn('[string]$TestId = ""', self.emulator_script)
-        self.assertIn('$selectedSeams = if ($TestId)', self.emulator_script)
+        self.assertIn('$selectedSeams = if ($ProjectPath)', self.emulator_script)
+        self.assertIn('} elseif ($TestId) {', self.emulator_script)
         ordered_ids = [
             self.emulator_script.index(f'TestId = "{test_id}"')
             for test_id in ("IT-020", "IT-017", "IT-018", "IT-019", "IT-021", "IT-022", "IT-023", "IT-024")

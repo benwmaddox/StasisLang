@@ -1,4 +1,4 @@
-// Run against a freshly packaged development samples/generics_collections Web bundle.
+// Run against a freshly packaged samples/generics_collections Web bundle.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -128,12 +128,28 @@ try {
   assert.deepEqual(protocolFailures, []);
   assert.equal(await evaluate("genericsProof.guest.tick()"), 0);
   assert.equal(await evaluate(`(() => {
-    const hash = STASIS_GAME.globals.generics_collections_digest_value.hash;
+    const globalHash = path => {
+      let hash = 2166136261;
+      for (const byte of new TextEncoder().encode(path)) {
+        hash = Math.imul(hash ^ byte, 16777619) >>> 0;
+      }
+      return hash | 0;
+    };
+    const hash = STASIS_GAME.globals.generics_collections_digest_value?.hash
+      ?? globalHash("generics_collections_digest_value");
     return genericsProof.guest.__stasis_global_get_i32(hash);
   })()`), 507);
   const bounds = await evaluate(`(() => {
     const e = genericsProof.guest;
-    const hash = STASIS_GAME.globals.web_bounds_probe_index.hash;
+    const globalHash = path => {
+      let hash = 2166136261;
+      for (const byte of new TextEncoder().encode(path)) {
+        hash = Math.imul(hash ^ byte, 16777619) >>> 0;
+      }
+      return hash | 0;
+    };
+    const hash = STASIS_GAME.globals.web_bounds_probe_index?.hash
+      ?? globalHash("web_bounds_probe_index");
     const trapped = index => {
       e.__stasis_global_set_i32(hash, index);
       try { e.tick(); return false; }

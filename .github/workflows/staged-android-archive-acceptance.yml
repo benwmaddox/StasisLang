@@ -1,0 +1,227 @@
+name: Staged Android Archive Acceptance
+
+on:
+  workflow_call:
+    inputs:
+      release_id:
+        description: Exact release identity stamped into the staged archive
+        required: true
+        type: string
+      source_commit:
+        description: Exact source commit stamped into the staged archive
+        required: true
+        type: string
+      run_id:
+        description: Calling nightly-release workflow run
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_INCREMENTAL: "0"
+      STASIS_RELEASE_ID: ${{ inputs.release_id }}
+      STASIS_SOURCE_COMMIT: ${{ inputs.source_commit }}
+      STASIS_CLI_EXECUTABLE: ${{ github.workspace }}/target/staged-linux/bin/stasis
+      STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/staged-linux/bin/libstasis_graphics.so
+      STASIS_SDL3_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL
+      STASIS_SDL3_IMAGE_SOURCE: ${{ github.workspace }}/target/android-link-deps/SDL_image
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+        with:
+          gradle-version: "8.9"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          packages: platform-tools
+
+      - name: Install Android production package toolchain
+        shell: bash
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+
+      - name: Checkout pinned SDL3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: libsdl-org/SDL
+          ref: 8e37db5e797b6167f3a00d697d816a684bd259c7
+          path: target/android-link-deps/SDL
+
+      - name: Checkout pinned SDL3_image
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: libsdl-org/SDL_image
+          ref: bec9134a26c7d0f31b36d6083c25296e04cabff5
+          path: target/android-link-deps/SDL_image
+
+      - name: Download exact Linux archive bytes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stasis-nightly-linux-x64
+          path: target/linux-archive
+
+      - name: Extract and qualify archive consumers
+        shell: bash
+        env:
+          STASIS_ARTIFACT_FILE: ${{ github.workspace }}/target/linux-archive/stasis-nightly-linux-x64.tar.gz
+        run: |
+          set -euo pipefail
+          mkdir -p target/staged-linux
+          tar -xf "$STASIS_ARTIFACT_FILE" -C target/staged-linux --strip-components=1
+          python tools/ci/qualify_staged_archive.py \
+            --archive-root target/staged-linux \
+            --archive-file "$STASIS_ARTIFACT_FILE" \
+            --target android \
+            --artifact-name stasis-nightly-linux-x64 \
+            --release-id "${STASIS_RELEASE_ID}" \
+            --source-commit "${STASIS_SOURCE_COMMIT}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --run-id "${{ inputs.run_id }}" \
+            --evidence-dir target/staged-android-acceptance
+
+      - name: Export the accepted archive runtime fingerprint
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import json
+          from pathlib import Path
+          receipt = json.loads(Path("target/staged-android-acceptance/staged-archive-receipt.json").read_text())
+          fingerprint = receipt["toolchain"]["build_fingerprint"]
+          if len(fingerprint) != 64 or any(char not in "0123456789abcdef" for char in fingerprint):
+              raise SystemExit("archive runtime fingerprint is malformed")
+          print(f"STASIS_BUILD_FINGERPRINT={fingerprint}")
+          PY
+
+      - name: Run shipped Android packages on the x86_64 emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          cores: 2
+          ram-size: 4096M
+          ndk: 27.0.12077973
+          cmake: 3.22.1
+          emulator-boot-timeout: 900
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -no-snapshot -noaudio
+            -no-boot-anim -camera-back none
+          script: pwsh -NoProfile -File tools/ci/run_staged_android_archive_acceptance.ps1
+
+      - name: Package and link the shipping Android arm64 consumers
+        shell: bash
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
+        run: |
+          set -euo pipefail
+          apksigner="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}/build-tools/35.0.0/apksigner"
+          test -x "$apksigner"
+          for label in bundled generated; do
+            project="target/staged-android-acceptance/consumers/${label}-generics"
+            shipping="target/android-runtime/${label}/shipping"
+            package="${project}/dist/staged-android-arm64"
+            mkdir -p "${project}/branding/android/res" "$shipping"
+            python - "$project" "$label" <<'PY'
+          import base64
+          import json
+          from pathlib import Path
+          import sys
+
+          root = Path(sys.argv[1])
+          label = sys.argv[2]
+          manifest_path = root / "stasis.json"
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          manifest["android"] = {
+              "application_id": f"com.stasislang.archiveacceptance.{label}",
+              "label": f"Staged {label.title()} acceptance",
+              "orientation": "sensorLandscape",
+              "version_code": 1,
+              "version_name": "1.0",
+              "launcher_resources": "branding/android/res",
+          }
+          manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          resources = root / "branding/android/res"
+          png = base64.b64decode(
+              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+          )
+          for density in ("mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"):
+              destination = resources / f"mipmap-{density}/ic_launcher.png"
+              destination.parent.mkdir(parents=True, exist_ok=True)
+              destination.write_bytes(png)
+          foreground = resources / "drawable/icon_foreground.png"
+          foreground.parent.mkdir(parents=True, exist_ok=True)
+          foreground.write_bytes(png)
+          adaptive = resources / "mipmap-anydpi-v26/ic_launcher.xml"
+          adaptive.parent.mkdir(parents=True, exist_ok=True)
+          adaptive.write_text(
+              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+              '  <background android:drawable="@android:color/black" />\n'
+              '  <foreground android:drawable="@drawable/icon_foreground" />\n'
+              '</adaptive-icon>\n',
+              encoding="utf-8",
+          )
+          PY
+            "$STASIS_CLI_EXECUTABLE" --workspace "$project" package-mobile \
+              --target android-arm64 --out dist/staged-android-arm64
+            python tools/verify_package_provenance.py \
+              --release-root target/staged-linux \
+              --package-root "$package" \
+              --expect-runtime-sources 2>&1 | tee "$shipping/package-provenance.log"
+            python - "$package/stasis_mobile_package.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if manifest.get("target") != "android-arm64" or manifest.get("development_build") is not False:
+              raise SystemExit("shipping package is not the official android-arm64 release target")
+          if manifest.get("android_runtime", {}).get("mode") != "source":
+              raise SystemExit("shipping package did not build its runtime from the accepted archive sources")
+          PY
+            gradle -p "$package/android" :app:assembleDebug \
+              --no-daemon --max-workers=2 --console=plain 2>&1 | tee "$shipping/gradle-link.log"
+            apk="$package/android/app/build/outputs/apk/debug/app-debug.apk"
+            test -s "$apk"
+            python tools/ci/check_android_release_package.py \
+              --abi arm64-v8a --required-asset "" "$apk" \
+              2>&1 | tee "$shipping/android-apk-audit.log"
+            "$apksigner" verify --verbose "$apk" 2>&1 | tee "$shipping/apksigner.log"
+            cp -R "$package" "$shipping/package"
+            cp "$apk" "$shipping/app-debug.apk"
+          done
+
+      - name: Bind Android runtime evidence to the exact archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/ci/record_staged_archive_runtime.py \
+            --receipt target/staged-android-acceptance/staged-archive-receipt.json \
+            --target android \
+            --bundled-root target/android-runtime/bundled \
+            --generated-root target/android-runtime/generated \
+            --release-id "${STASIS_RELEASE_ID}" \
+            --source-commit "${STASIS_SOURCE_COMMIT}"
+
+      - name: Upload staged Android archive receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: true
+          name: staged-release-receipt-android
+          path: target/staged-android-acceptance/staged-archive-receipt.json
+          if-no-files-found: error
+          retention-days: 14
