@@ -52,7 +52,31 @@ metadata refresh. This migration has no viewport or resolution-cap effect.
 
 `PresentationList` owns 256 typed, painter-ordered sprite or solid-rectangle slots. Build it with `append_sprite` and `append_solid_rect`, update a sprite slot with `patch_sprite`, then `replay`; replay clamps a corrupted count to owned storage and preserves exact insertion order. This is persistent logical input, not an atlas page, backend record, or view of the frame arrays. The host may privately coalesce compatible A/B/A/B sprites and rectangles after validating the frame, but application code must not sort transparent work or encode batching/atlas decisions.
 
-`SpriteRunWriter` remains the bounded streaming option. Reserve, write typed `SpriteRef` instances, and finalize or cancel it in the same frame. Its token is not a public command-buffer offset.
+`SpriteRunWriter` is the bounded streaming option. Reserve capacity, write typed
+`SpriteRef` instances, then finalize with the number actually written or cancel
+the reservation, all in the same frame. A failed write must cancel; an
+unfinished reservation aborts the frame construction. Its token is not a
+public command-buffer offset.
+
+`write` takes a destination top-left and size, followed by a source rectangle
+in logical image pixels, then a destination-local pivot, independent x/y
+scales, and clockwise rotation in `f32` degrees. The packed RGBA8 tint is an
+`i32` bit pattern (`0xRRGGBBAA`); negative values are valid, and `-1` means
+opaque white. The pivot is measured in destination-local units, so its world
+anchor is `(x + pivot_x, y + pivot_y)`. To pin a rig joint `(joint_x, joint_y)`
+to that pivot, pass `x = joint_x - pivot_x` and
+`y = joint_y - pivot_y`. If the source-authored pivot is in source pixels,
+scale it into destination-local units with
+`pivot_x = source_pivot_x * destination_width / source_width` (and likewise
+for y).
+
+`SpriteSheet.load_sprite_sheet_from(path, cols, rows, cell_w, cell_h)` declares
+the sheet's logical extent as `cols * cell_w` by `rows * cell_h`; source
+rectangles use that logical pixel space. `draw_frame_scaled` is a convenience
+for a row-major sheet frame: it uses a centered pivot and unit scale, takes an
+`i32` alpha clamped to 0-255, and an integer `i32` rotation in degrees. Use the
+writer when an attachment needs an explicit pivot, nonuniform scale, or an
+`f32` angle.
 
 `load_font(path, size)` returns an opaque, generation-safe font handle. Call
 `release_font(handle)` when that logical size is superseded. Each successful

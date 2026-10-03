@@ -1,5 +1,12 @@
 # Night Shift Report
 
+## 2026-10-03
+
+- Documented the public `SpriteRunWriter` frame contract and a compilable Rig2D-to-sprite attachment recipe with an explicit destination-local pivot.
+- Added Rig2D to the knowledge index and linked its example from the graphics and assets guide.
+- Verification: fresh current-branch CLI fixture `format --check` and `check`; `cargo fmt -- --check`; `generated_knowledge_examples_compile_and_test`; `git diff --check`.
+- Visual evidence: not applicable.
+
 ## 2026-03-27
 
 - Completed issue #263 by replacing the fixed OpenGL sprite atlas model with pageable atlas textures and reusable free-rect allocation in [runtime/stasis_graphics.c](/home/ben/StasisLang/runtime/stasis_graphics.c).
