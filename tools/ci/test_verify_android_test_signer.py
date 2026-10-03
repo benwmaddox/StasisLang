@@ -13,14 +13,20 @@ EXPECTED = "f115a250a33dc3e49b3b7f939075f6db118ce95e139e8c2703c437b1b3f37cc0"
 
 
 class VerifyAndroidTestSignerTests(unittest.TestCase):
-    def test_writes_public_signer_and_apk_hash_evidence(self) -> None:
+    def test_normalizes_uppercase_tool_digest_and_separated_expected_digest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             apk = root / "app-debug.apk"
             apk.write_bytes(b"test APK bytes")
             output = root / "evidence" / "signer.json"
-            with patch.object(verifier, "verify_apk_signer", return_value=EXPECTED) as verify_signer:
-                result = verifier.verify(apk, "apksigner", EXPECTED.upper(), output)
+            with patch.object(
+                verifier, "verify_apk_signer", return_value=EXPECTED.upper()
+            ) as verify_signer:
+                colon_separated = ":".join(
+                    EXPECTED[index:index + 2]
+                    for index in range(0, len(EXPECTED), 2)
+                )
+                result = verifier.verify(apk, "apksigner", colon_separated.upper(), output)
             verify_signer.assert_called_once_with(apk, "apksigner")
             saved = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(saved, result)

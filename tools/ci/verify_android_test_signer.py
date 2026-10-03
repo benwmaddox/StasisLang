@@ -14,16 +14,23 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from tools.android_release import ReleaseError, verify_apk_signer  # noqa: E402
+from tools.android_release import (  # noqa: E402
+    ReleaseError,
+    normalize_digest,
+    verify_apk_signer,
+)
 
 
 def verify(apk: Path, apksigner: str, expected_sha256: str, output: Path) -> dict[str, Any]:
-    expected = expected_sha256.replace(":", "").replace(" ", "").lower()
-    if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
-        raise ValueError("expected test signer SHA-256 must contain 64 hexadecimal digits")
+    try:
+        expected = normalize_digest(expected_sha256).lower()
+    except ReleaseError as error:
+        raise ValueError(
+            "expected test signer SHA-256 must contain 64 hexadecimal digits"
+        ) from error
     if not apk.is_file() or apk.is_symlink():
         raise ValueError("staged Android test APK is missing or is a symbolic link")
-    actual = verify_apk_signer(apk, apksigner)
+    actual = normalize_digest(verify_apk_signer(apk, apksigner)).lower()
     if actual != expected:
         raise ValueError(f"Android test APK signer differs from the documented test certificate: {actual}")
     result = {
