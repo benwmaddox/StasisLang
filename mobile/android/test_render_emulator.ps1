@@ -824,6 +824,8 @@ function Assert-PresentationBaselineMatrix(
         captures = [System.Collections.Generic.List[object]]::new()
         stages = [System.Collections.Generic.List[object]]::new()
         raw_logs = [System.Collections.Generic.List[string]]::new()
+        diagnostic_files = [System.Collections.Generic.List[string]]::new()
+        diagnostic_errors = [System.Collections.Generic.List[string]]::new()
         restore_errors = [System.Collections.Generic.List[string]]::new()
     }
     $displaySizeState = $null
@@ -833,6 +835,10 @@ function Assert-PresentationBaselineMatrix(
     $status = "failed"
     try {
         Invoke-Adb @("shell", "am", "force-stop", $Package) | Out-Null
+        $clearOutput = @(Invoke-Adb @("shell", "pm", "clear", $Package))
+        if (-not (@($clearOutput | ForEach-Object { $_.ToString().Trim() }) -contains "Success")) {
+            throw "Android package data clear did not report Success before baseline fixture launch"
+        }
         Invoke-Adb @("logcat", "-c") | Out-Null
         Invoke-Adb @("shell", "am", "start", "-W", "-n", "$Package/com.stasislang.workshop.MainActivity", "--ez", "stasis_presentation_baseline", "true", "--ez", "stasis_presentation_poison", "true") | Out-Null
 
@@ -1066,12 +1072,37 @@ function Assert-PresentationBaselineMatrix(
         }
         $status = "passed"
     } finally {
+        if (-not $processId) { $processId = Find-PackageProcessId $Package }
         if ($processId) {
             $finalLogPath = Join-Path $artifactRoot "presentation-baseline-process-$processId-logcat.txt"
             $finalLog = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null)
             if ($LASTEXITCODE -eq 0) {
                 $finalLog | Set-Content -LiteralPath $finalLogPath -Encoding UTF8
                 if (-not $matrix.raw_logs.Contains($finalLogPath)) { $matrix.raw_logs.Add($finalLogPath) }
+            }
+        }
+        if ($status -ne "passed") {
+            try {
+                $failureLogPath = Join-Path $artifactRoot "presentation-baseline-failure-logcat.txt"
+                $failureLog = @(& $adb -s $serial logcat -d 2>$null)
+                if ($LASTEXITCODE -ne 0) { throw "full logcat snapshot failed before emulator teardown" }
+                $failureLog | Set-Content -LiteralPath $failureLogPath -Encoding UTF8
+                $matrix.raw_logs.Add($failureLogPath)
+            } catch {
+                $matrix.diagnostic_errors.Add("full logcat: $($_.Exception.Message)")
+            }
+            try {
+                $diagnosticState = Read-PresentationBaselineReceipts $Package
+                $receiptStatePath = Join-Path $artifactRoot "presentation-baseline-failure-receipts.json"
+                @{
+                    schema = "stasis.workshop_present_only_android_failure_receipts.v1"
+                    process_id = $diagnosticState.process_id
+                    receipt_count = $diagnosticState.receipts.Count
+                    receipts = $diagnosticState.receipts
+                } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $receiptStatePath -Encoding UTF8
+                $matrix.diagnostic_files.Add($receiptStatePath)
+            } catch {
+                $matrix.diagnostic_errors.Add("parsed receipts: $($_.Exception.Message)")
             }
         }
         if ($originalRotation -match '^\d+$') {
