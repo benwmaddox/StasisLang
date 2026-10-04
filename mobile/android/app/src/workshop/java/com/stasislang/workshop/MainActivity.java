@@ -379,10 +379,15 @@ public final class MainActivity extends Activity {
             return;
         }
         if ("resume".equals(phase)) {
+            if (gamePreview == null
+                    || !gamePreview.rearmPresentationBaselineEvidenceForAcceptance()) {
+                logPresentationBaselineTestFailure(phase, "baseline_evidence_not_rearmed");
+                return;
+            }
             presentationBaselinePausedForAcceptance = false;
             android.util.Log.i("StasisWorkshop", "Stasis Workshop presentation-baseline control: "
                     + "{\"schema\":\"stasis.workshop_present_only.v1\",\"phase\":\"resume\","
-                    + "\"status\":\"ready\"}");
+                    + "\"status\":\"ready\",\"evidence_sequence_rearmed\":true}");
             return;
         }
         if (gamePreview == null || !presentationBaselinePausedForAcceptance) {
@@ -6881,6 +6886,15 @@ public final class MainActivity extends Activity {
                                 + ",\"flags\":" + renderer.frameFlags() + "}");
             }
             requestRender();
+        }
+
+        boolean rearmPresentationBaselineEvidenceForAcceptance() {
+            if (!BuildConfig.STASIS_RENDER_ACCEPTANCE
+                    || !activity.presentationBaselineAcceptance
+                    || !activity.presentationBaselinePoisonAcceptance) {
+                return false;
+            }
+            return renderer.rearmPresentationBaselineEvidenceForAcceptance();
         }
 
         void submitPresentationBaselineTestFrame(String phase, String projectRoot) {

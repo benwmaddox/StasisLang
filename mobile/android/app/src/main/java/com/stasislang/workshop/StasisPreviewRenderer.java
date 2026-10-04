@@ -993,6 +993,14 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return presentation.serial();
     }
 
+    synchronized boolean rearmPresentationBaselineEvidenceForAcceptance() {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || !presentationBaselinePoisonAcceptance) {
+            return false;
+        }
+        presentationBaselineEvidenceCount = 0;
+        return true;
+    }
+
     synchronized boolean frameRequestsPresentation() {
         return shouldPresent(frameI32, frameF32);
     }
