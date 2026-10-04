@@ -22,6 +22,7 @@ const PARITY_ORACLE_MODULE: &str =
     include_str!("../../../tests/stasis/seams/generics_parity_module.stasis");
 const RIG2D_IMPORT: &str = "/vendor/stasis/stdlib/rig2d.stasis";
 const GRAPHICS_IMPORT: &str = "/vendor/stasis/stdlib/graphics.stasis";
+const MATH_IMPORT: &str = "/vendor/stasis/stdlib/math.stasis";
 const WASM_ROOT: &str = "main";
 const EXPECTED_MATH_ORACLE_RAW_DIGEST: i32 = -1430176193;
 
@@ -234,6 +235,7 @@ fn repository_entry() -> String {
     ENTRY
         .replace(RIG2D_IMPORT, "../../../src/stdlib/rig2d.stasis")
         .replace(GRAPHICS_IMPORT, "../../../src/stdlib/graphics.stasis")
+        .replace(MATH_IMPORT, "../../../src/stdlib/math.stasis")
 }
 
 fn compile_wasm_fixture(
