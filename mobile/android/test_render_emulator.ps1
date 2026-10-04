@@ -199,6 +199,289 @@ function Read-AdbLogcat([string[]]$Arguments, [string]$DiagnosticName) {
     return $output
 }
 
+function Find-Ffprobe {
+    $command = Get-Command ffprobe.exe, ffprobe -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($command) { return $command.Source }
+    $codeRoot = Split-Path -Parent $repoRoot
+    foreach ($directory in @(Get-ChildItem -LiteralPath $codeRoot -Directory -Filter "ffmpeg*" -ErrorAction SilentlyContinue)) {
+        $candidate = Join-Path (Join-Path $directory.FullName "bin") "ffprobe.exe"
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+        $nestedCandidate = Join-Path (Join-Path (Join-Path $directory.FullName "ffmpeg-9.0.1-essentials_build") "bin") "ffprobe.exe"
+        if (Test-Path -LiteralPath $nestedCandidate) { return $nestedCandidate }
+    }
+    return ""
+}
+
+function Start-PresentationLifecycleVideo([string]$Stage, [int]$DurationSeconds) {
+    if ($Stage -notmatch '^[A-Za-z0-9._-]+$' -or $DurationSeconds -lt 1 -or $DurationSeconds -gt 165) {
+        throw "presentation lifecycle recording arguments are invalid"
+    }
+    Assert-In-Time ("before " + $Stage + " lifecycle video")
+
+    $runToken = [guid]::NewGuid().ToString("N")
+    $remoteDirectory = "/sdcard/Movies/stasis-present-only-$runToken"
+    $remoteVideo = "$remoteDirectory/$Stage.mp4"
+    $remoteStderr = "$remoteDirectory/$Stage-screenrecord-stderr.txt"
+    $remotePidFile = "$remoteDirectory/$Stage-screenrecord.pid"
+    Invoke-Adb @("shell", "mkdir", "-p", $remoteDirectory) | Out-Null
+
+    $localVideo = Join-Path $artifactRoot "presentation-baseline-$Stage-$runToken.mp4"
+    $localScreenrecordStderr = "$localVideo.screenrecord-stderr.txt"
+    $adbStdout = "$localVideo-adb-stdout.log"
+    $adbStderr = "$localVideo-adb-stderr.log"
+    $remoteCommand = "screenrecord --size 720x1280 --time-limit $DurationSeconds $remoteVideo >/dev/null 2>$remoteStderr </dev/null & recorder_pid=`$!; printf '%s\n' `$recorder_pid > $remotePidFile; wait `$recorder_pid"
+    $quotedArguments = @("-s", $serial, "shell", $remoteCommand) | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    }
+    try {
+        $process = Start-Process -FilePath $adb -ArgumentList ($quotedArguments -join ' ') `
+            -PassThru -WindowStyle Hidden -RedirectStandardOutput $adbStdout -RedirectStandardError $adbStderr
+    } catch {
+        try {
+            Invoke-Adb @("shell", "rm", "-f", $remoteVideo, $remoteStderr, $remotePidFile) | Out-Null
+            Invoke-Adb @("shell", "rmdir", $remoteDirectory) | Out-Null
+        } catch { }
+        throw "$Stage lifecycle video host process could not start: $($_.Exception.Message)"
+    }
+    $session = [pscustomobject]@{
+        stage = $Stage
+        process = $process
+        remote_directory = $remoteDirectory
+        remote_video = $remoteVideo
+        remote_stderr = $remoteStderr
+        remote_pid_file = $remotePidFile
+        remote_pid = ""
+        local_video = $localVideo
+        local_screenrecord_stderr = $localScreenrecordStderr
+        adb_stdout = $adbStdout
+        adb_stderr = $adbStderr
+        started_utc = (Get-Date).ToUniversalTime().ToString("o")
+        record = [ordered]@{
+            stage = $Stage
+            duration_limit_seconds = $DurationSeconds
+            output_size = "720x1280"
+            avd = $AvdName
+            serial = $serial
+            status = "starting"
+            remote_video = $remoteVideo
+            local_video = $localVideo
+            adb_stdout = $adbStdout
+            adb_stderr = $adbStderr
+            started_utc = (Get-Date).ToUniversalTime().ToString("o")
+        }
+    }
+    $session | Add-Member -NotePropertyName completed -NotePropertyValue $false
+
+    try {
+        $pidDeadline = [System.Diagnostics.Stopwatch]::StartNew()
+        do {
+            Assert-In-Time ("starting " + $Stage + " lifecycle video")
+            $process.Refresh()
+            if ($process.HasExited) {
+                $stderrText = if (Test-Path -LiteralPath $adbStderr) { Get-Content -Raw -LiteralPath $adbStderr } else { "" }
+                throw "$Stage lifecycle recorder command exited before publishing its device PID (exit $($process.ExitCode)): $stderrText"
+            }
+            $pidOutput = @(Invoke-Adb @("shell", "if [ -s $remotePidFile ]; then cat $remotePidFile; fi"))
+            $remotePid = ($pidOutput -join "").Trim()
+            if ($remotePid -match '^[1-9][0-9]*$') {
+                $session.remote_pid = $remotePid
+                break
+            }
+            Start-Sleep -Milliseconds 200
+        } while ($pidDeadline.Elapsed.TotalSeconds -lt 12)
+        if (-not $session.remote_pid) {
+            throw "$Stage lifecycle recorder did not publish a valid device PID within 12 seconds"
+        }
+    } catch {
+        $startFailure = $_.Exception.Message
+        try {
+            $cleanupCommand = 'if [ -s ' + $remotePidFile + ' ]; then kill -INT $(cat ' + $remotePidFile + '); fi'
+            Invoke-Adb @("shell", $cleanupCommand) | Out-Null
+        } catch { }
+        if (-not $process.WaitForExit(6000)) {
+            foreach ($signal in @("TERM", "KILL")) {
+                try {
+                    $cleanupCommand = 'if [ -s ' + $remotePidFile + ' ]; then kill -' + $signal + ' $(cat ' + $remotePidFile + '); fi'
+                    Invoke-Adb @("shell", $cleanupCommand) | Out-Null
+                } catch { }
+                if ($process.WaitForExit(3000)) { break }
+            }
+        }
+        if (-not $process.HasExited) {
+            try {
+                $process.Kill()
+                $process.WaitForExit(3000)
+            } catch { }
+        }
+        try {
+            Invoke-Adb @("shell", "rm", "-f", $remoteVideo, $remoteStderr, $remotePidFile) | Out-Null
+            Invoke-Adb @("shell", "rmdir", $remoteDirectory) | Out-Null
+        } catch { }
+        $session.completed = $true
+        throw "$Stage lifecycle video startup failed: $startFailure; ADB diagnostics: $adbStderr"
+    }
+    $session.record.status = "recording"
+    $session.record.host_adb_pid = $process.Id
+    $session.record.device_screenrecord_pid = [int]$session.remote_pid
+    return $session
+}
+
+function Invoke-VideoProbe([string]$ProbeExecutable, [string]$VideoPath, [string]$OutputPath, [string]$ErrorPath) {
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $ProbeExecutable
+    $startInfo.Arguments = '-v error -select_streams v:0 -show_entries stream=codec_name,width,height -show_entries format=duration -of json "' + $VideoPath.Replace('"', '\"') + '"'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw "ffprobe could not start for $VideoPath" }
+    $outputTask = $process.StandardOutput.ReadToEndAsync()
+    $errorTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit(15000)) {
+        $process.Kill()
+        $process.WaitForExit()
+        throw "ffprobe exceeded 15 seconds for $VideoPath"
+    }
+    $outputTask.Result | Set-Content -LiteralPath $OutputPath -Encoding UTF8
+    $errorTask.Result | Set-Content -LiteralPath $ErrorPath -Encoding UTF8
+    if ($process.ExitCode -ne 0) {
+        throw "ffprobe failed with exit code $($process.ExitCode): $((Get-Content -Raw -LiteralPath $ErrorPath).Trim())"
+    }
+    $metadata = Get-Content -Raw -LiteralPath $OutputPath | ConvertFrom-Json -ErrorAction Stop
+    $stream = @($metadata.streams | Select-Object -First 1)
+    if ($stream.Count -ne 1 -or [int]$stream[0].width -le 0 -or [int]$stream[0].height -le 0 -or
+        [string]::IsNullOrEmpty([string]$stream[0].codec_name) -or [double]$metadata.format.duration -le 0) {
+        throw "ffprobe did not identify a nonempty video stream in $VideoPath"
+    }
+    return $metadata
+}
+
+function Complete-PresentationLifecycleVideo([object]$Session, [string]$StopReason) {
+    if (-not $Session -or $Session.completed) { return }
+    $record = $Session.record
+    $process = $Session.process
+    $elapsedAtStageEnd = ((Get-Date).ToUniversalTime() - [datetime]$Session.started_utc).TotalSeconds
+    $process.Refresh()
+    $recorderAlreadyExited = $process.HasExited
+    $record.elapsed_seconds_at_stage_end = [math]::Round($elapsedAtStageEnd, 3)
+    $record.recorder_exited_before_stage_end = $recorderAlreadyExited
+    $record.stop_reason = $StopReason
+    $record.stopped_utc = (Get-Date).ToUniversalTime().ToString("o")
+    $errors = [System.Collections.Generic.List[string]]::new()
+    $signal = ""
+
+    if (-not $process.HasExited -and $Session.remote_pid) {
+        try {
+            Invoke-Adb @("shell", "kill", "-INT", $Session.remote_pid) | Out-Null
+            $signal = "SIGINT"
+        } catch {
+            if (-not $process.WaitForExit(1000)) { $errors.Add("SIGINT: $($_.Exception.Message)") }
+        }
+    }
+    if (-not $process.WaitForExit(10000) -and $Session.remote_pid) {
+        try {
+            Invoke-Adb @("shell", "kill", "-TERM", $Session.remote_pid) | Out-Null
+            if (-not $signal) { $signal = "SIGTERM fallback" } else { $signal += "; SIGTERM fallback" }
+        } catch {
+            $errors.Add("SIGTERM fallback: $($_.Exception.Message)")
+        }
+        if (-not $process.WaitForExit(4000)) {
+            try {
+                Invoke-Adb @("shell", "kill", "-KILL", $Session.remote_pid) | Out-Null
+                if (-not $signal) { $signal = "SIGKILL fallback" } else { $signal += "; SIGKILL fallback" }
+            } catch {
+                $errors.Add("SIGKILL fallback: $($_.Exception.Message)")
+            }
+        }
+    }
+    if (-not $process.WaitForExit(4000)) {
+        try {
+            $process.Kill()
+            $process.WaitForExit(3000)
+            $errors.Add("host adb process required exact-PID kill fallback")
+        } catch {
+            $errors.Add("host adb process cleanup: $($_.Exception.Message)")
+        }
+    }
+    $record.stop_signal = if ($signal) { $signal } else { "duration limit or process already stopped" }
+    $process.Refresh()
+    if (-not $process.HasExited) { $errors.Add("owned host adb process remained alive after bounded exact-PID cleanup") }
+    $record.host_adb_exit_code = if ($process.HasExited) { [int]$process.ExitCode } else { $null }
+    if ($recorderAlreadyExited) {
+        $errors.Add("screenrecord exited before the matrix reached the video stage boundary; the requested lifecycle range may be truncated")
+    }
+    if ($record.host_adb_exit_code -ne 0) {
+        $errors.Add("ADB/screenrecord host command exited with unexpected code $($record.host_adb_exit_code)")
+    }
+    if ($signal -match "SIGTERM|SIGKILL") {
+        $errors.Add("screenrecord required a forced termination fallback; the clip may be incomplete")
+    }
+    if ($StopReason -eq "matrix cleanup after failure") {
+        $errors.Add("the requested video stage range did not complete before matrix cleanup")
+    }
+
+    try {
+        Invoke-Adb @("pull", $Session.remote_video, $Session.local_video) | Out-Null
+    } catch {
+        $errors.Add("video pull: $($_.Exception.Message)")
+    }
+    try {
+        Invoke-Adb @("pull", $Session.remote_stderr, $Session.local_screenrecord_stderr) | Out-Null
+    } catch {
+        $errors.Add("screenrecord stderr pull: $($_.Exception.Message)")
+    }
+    try {
+        Invoke-Adb @("shell", "rm", "-f", $Session.remote_video, $Session.remote_stderr, $Session.remote_pid_file) | Out-Null
+        Invoke-Adb @("shell", "rmdir", $Session.remote_directory) | Out-Null
+    } catch {
+        $errors.Add("remote recording cleanup: $($_.Exception.Message)")
+    }
+
+    $record.device_screenrecord_stderr = $Session.local_screenrecord_stderr
+    if (-not (Test-Path -LiteralPath $Session.local_video) -or (Get-Item -LiteralPath $Session.local_video).Length -lt 12) {
+        $errors.Add("recorded MP4 is missing or too small: $($Session.local_video)")
+    } else {
+        $stream = [System.IO.File]::OpenRead($Session.local_video)
+        try {
+            $header = [byte[]]::new(8)
+            if ($stream.Read($header, 0, $header.Length) -ne $header.Length -or
+                [System.Text.Encoding]::ASCII.GetString($header, 4, 4) -ne "ftyp") {
+                $errors.Add("recording is not an ISO-BMFF/MP4 file: $($Session.local_video)")
+            }
+        } finally {
+            $stream.Dispose()
+        }
+    }
+    if (Test-Path -LiteralPath $Session.local_video) {
+        $record.bytes = (Get-Item -LiteralPath $Session.local_video).Length
+        $record.sha256 = (Get-FileHash -LiteralPath $Session.local_video -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $probeExecutable = Find-Ffprobe
+    if ($probeExecutable -and (Test-Path -LiteralPath $Session.local_video)) {
+        $probeOutput = "$($Session.local_video).ffprobe.json"
+        $probeError = "$($Session.local_video).ffprobe-stderr.txt"
+        try {
+            $metadata = Invoke-VideoProbe $probeExecutable $Session.local_video $probeOutput $probeError
+            $record.ffprobe = $probeExecutable
+            $record.ffprobe_metadata = $metadata
+            $record.ffprobe_output = $probeOutput
+            $record.ffprobe_stderr = $probeError
+        } catch {
+            $errors.Add("ffprobe: $($_.Exception.Message)")
+        }
+    } else {
+        $record.ffprobe = "unavailable"
+    }
+    $record.errors = @($errors.ToArray())
+    $record.status = if ($errors.Count -eq 0) { "complete" } else { "failed" }
+    $record.stage_range_completed = $errors.Count -eq 0
+    $Session.completed = $true
+    if ($errors.Count -gt 0) { throw "$($Session.stage) lifecycle video failed: $($errors -join '; ')" }
+}
+
 function Resolve-Gradle {
     $wrapperName = if ($runningOnWindows) { "gradlew.bat" } else { "gradlew" }
     $wrapper = Join-Path $scriptRoot $wrapperName
@@ -521,6 +804,8 @@ function Wait-PresentationBaselineReceipt(
                     receipt = $receipt
                     receipts = $state.receipts
                     marker_count = $state.receipts.Count
+                    receipt_index = $index
+                    next_receipt_index = $index + 1
                     elapsed_seconds = [math]::Round($timer.Elapsed.TotalSeconds, 3)
                 }
             }
@@ -795,6 +1080,121 @@ function Assert-PresentationSnapshotReplay(
     }
 }
 
+function Assert-PresentationCandidateCopyFailure([object]$Receipt, [object]$LastPresent) {
+    $candidateRgba = @($Receipt.candidate_rect_rgba8 | ForEach-Object { [int]$_ })
+    if ($Receipt.receipt_kind -ne "renderer" -or
+        $Receipt.event -ne "accepted_snapshot_candidate_copy_failed" -or
+        $Receipt.phase -ne "candidate_copy_failure" -or
+        [string]::IsNullOrEmpty([string]$Receipt.candidate_frame_token) -or
+        [string]$Receipt.candidate_frame_token -eq [string]$LastPresent.frame_token -or
+        ($candidateRgba -join ",") -ne "0,255,0,255" -or
+        $Receipt.copy_failure -ne "acceptance_injected" -or
+        $Receipt.snapshot_retained -ne $true -or
+        [string]$Receipt.snapshot_frame_token -ne [string]$LastPresent.frame_token -or
+        $null -eq $Receipt.snapshot_presentation_serial -or
+        $null -eq $Receipt.presentation_serial -or
+        [long]$Receipt.snapshot_presentation_serial -ne [long]$LastPresent.presentation_serial -or
+        [long]$Receipt.presentation_serial -ne [long]$LastPresent.presentation_serial) {
+        throw "candidate-copy failure receipt did not prove the visibly different candidate was rejected while retaining the accepted snapshot"
+    }
+}
+
+function Assert-PresentationCandidateSnapshotReplay([object]$Receipt, [object]$CandidateFailure, [object]$LastPresent) {
+    $expectedSurface = @($LastPresent.surface_size | ForEach-Object { [int]$_ })
+    $actualSurface = @($Receipt.surface_size | ForEach-Object { [int]$_ })
+    if ($Receipt.receipt_kind -ne "renderer" -or
+        $Receipt.event -ne "accepted_snapshot_replayed" -or
+        $Receipt.phase -ne "candidate_copy_failure" -or
+        $Receipt.frame_valid -ne $true -or $Receipt.requests_present -ne $true -or
+        [int]$Receipt.flags -ne 2 -or
+        [string]$Receipt.frame_token -ne [string]$CandidateFailure.candidate_frame_token -or
+        [string]$Receipt.snapshot_frame_token -ne [string]$LastPresent.frame_token -or
+        $null -eq $Receipt.snapshot_presentation_serial -or
+        $null -eq $Receipt.presentation_serial -or
+        [long]$Receipt.snapshot_presentation_serial -ne [long]$LastPresent.presentation_serial -or
+        [long]$Receipt.presentation_serial -ne [long]$LastPresent.presentation_serial -or
+        $expectedSurface.Count -ne 2 -or $actualSurface.Count -ne 2 -or
+        ($expectedSurface -join ",") -ne ($actualSurface -join ",") -or
+        [long]$Receipt.surface_generation -ne [long]$LastPresent.surface_generation -or
+        [long]$Receipt.renderer_generation -ne [long]$LastPresent.renderer_generation) {
+        throw "candidate-copy failure did not replay the prior accepted snapshot without advancing presentation identity"
+    }
+}
+
+function Assert-PresentationReplayFailureSubmission([object]$Receipt) {
+    if ($Receipt.receipt_kind -ne "submission" -or
+        $Receipt.phase -ne "snapshot_replay_failure" -or
+        [int]$Receipt.status -ne 0 -or [int]$Receipt.magic -ne 0 -or [int]$Receipt.flags -ne 2 -or
+        $Receipt.frame_valid -ne $false -or $Receipt.requests_present -ne $false -or
+        $Receipt.fault_applied -ne $true -or $Receipt.draw_scheduled -ne $false -or
+        [string]::IsNullOrEmpty([string]$Receipt.frame_token)) {
+        throw "snapshot replay failure did not submit the frozen invalid magic/flags frame without scheduling a draw"
+    }
+}
+
+function Assert-PresentationReplayFailure([object]$Receipt, [object]$FaultReceipt, [object]$LastPresent) {
+    if ($Receipt.receipt_kind -ne "renderer" -or
+        $Receipt.event -ne "accepted_snapshot_replay_failed" -or
+        $Receipt.phase -ne "snapshot_replay_failure" -or
+        [string]$Receipt.frame_token -ne [string]$FaultReceipt.frame_token -or
+        [int]$Receipt.magic -ne 0 -or [int]$Receipt.flags -ne 2 -or
+        $Receipt.failure -ne "acceptance_injected" -or
+        $Receipt.snapshot_retained -ne $true -or
+        [string]$Receipt.snapshot_frame_token -ne [string]$LastPresent.frame_token -or
+        $null -eq $Receipt.snapshot_presentation_serial -or
+        $null -eq $Receipt.presentation_serial -or
+        [long]$Receipt.snapshot_presentation_serial -ne [long]$LastPresent.presentation_serial -or
+        [long]$Receipt.presentation_serial -ne [long]$LastPresent.presentation_serial -or
+        [long]$Receipt.surface_generation -ne [long]$LastPresent.surface_generation -or
+        [long]$Receipt.renderer_generation -ne [long]$LastPresent.renderer_generation) {
+        throw "snapshot replay failure receipt did not retain the last accepted frame identity and serial"
+    }
+}
+
+function Assert-PresentationRestoreFailurePlaceholder([object]$Receipt, [object]$LastPresent) {
+    $size = @($Receipt.surface_size | ForEach-Object { [int]$_ })
+    $background = @($Receipt.background_rgba8 | ForEach-Object { [int]$_ })
+    $label = @($Receipt.restore_label_rgba8 | ForEach-Object { [int]$_ })
+    if ($Receipt.receipt_kind -ne "renderer" -or
+        $Receipt.event -ne "accepted_snapshot_restore_placeholder" -or
+        $Receipt.phase -ne "snapshot_replay_failure" -or
+        $Receipt.resource_state -ne "RESTORE_FAILED" -or
+        $Receipt.placeholder_initialized -ne $true -or
+        $Receipt.snapshot_retained -ne $true -or
+        [string]$Receipt.snapshot_frame_token -ne [string]$LastPresent.frame_token -or
+        $null -eq $Receipt.snapshot_presentation_serial -or
+        $null -eq $Receipt.presentation_serial -or
+        [long]$Receipt.snapshot_presentation_serial -ne [long]$LastPresent.presentation_serial -or
+        [long]$Receipt.presentation_serial -ne [long]$LastPresent.presentation_serial -or
+        $size.Count -ne 2 -or $size[0] -le 0 -or $size[1] -le 0 -or
+        ($background -join ",") -ne "15,20,28,255" -or
+        ($label -join ",") -ne "66,153,225,255" -or
+        [long]$Receipt.surface_generation -ne [long]$LastPresent.surface_generation -or
+        [long]$Receipt.renderer_generation -ne [long]$LastPresent.renderer_generation) {
+        throw "snapshot replay failure did not enter RESTORE_FAILED with the retained frame identity and initialized placeholder"
+    }
+    if ($null -eq $Receipt.restore_attempts -or $null -eq $Receipt.restore_failures -or
+        [int]$Receipt.restore_attempts -lt 1 -or [int]$Receipt.restore_failures -lt 1) {
+        throw "snapshot replay failure placeholder omitted positive restore attempt/failure counts"
+    }
+}
+
+function Assert-PresentationRecoveryPresentPair([object]$Pair, [object]$LastPresent) {
+    $expectedSize = @($LastPresent.surface_size | ForEach-Object { [int]$_ })
+    foreach ($receipt in @($Pair.first, $Pair.second)) {
+        Assert-PresentationPresentReceipt $receipt
+        $actualSize = @($receipt.surface_size | ForEach-Object { [int]$_ })
+        if ([string]$receipt.frame_token -eq [string]$LastPresent.frame_token -or
+            [long]$receipt.presentation_serial -le [long]$LastPresent.presentation_serial -or
+            $expectedSize.Count -ne 2 -or ($expectedSize -join ",") -ne ($actualSize -join ",") -or
+            [long]$receipt.surface_generation -ne [long]$LastPresent.surface_generation -or
+            [long]$receipt.renderer_generation -ne [long]$LastPresent.renderer_generation -or
+            [long]$receipt.display_generation -ne [long]$LastPresent.display_generation) {
+            throw "RESTORE_FAILED recovery did not publish a fresh frame on the original surface and renderer generations"
+        }
+    }
+}
+
 function Assert-PresentationAlphaProbeReceipt([object]$Receipt, [object]$LastPresent) {
     $probeLogical = @($Receipt.probe.logical | ForEach-Object { [int]$_ })
     $expectedRgba = @($Receipt.probe.expected_rgba8 | ForEach-Object { [int]$_ })
@@ -866,6 +1266,7 @@ function Assert-PresentationBaselineMatrix(
         build_fingerprint = ((Invoke-Adb @("shell", "getprop", "ro.build.fingerprint") | Select-Object -First 1).ToString().Trim())
         captures = [System.Collections.Generic.List[object]]::new()
         stages = [System.Collections.Generic.List[object]]::new()
+        videos = [System.Collections.Generic.List[object]]::new()
         raw_logs = [System.Collections.Generic.List[string]]::new()
         diagnostic_files = [System.Collections.Generic.List[string]]::new()
         diagnostic_errors = [System.Collections.Generic.List[string]]::new()
@@ -876,6 +1277,7 @@ function Assert-PresentationBaselineMatrix(
     $originalAutoRotation = ""
     $processId = ""
     $status = "failed"
+    $activeVideo = $null
     try {
         Invoke-Adb @("shell", "am", "force-stop", $Package) | Out-Null
         $clearOutput = @(Invoke-Adb @("shell", "pm", "clear", $Package))
@@ -883,6 +1285,10 @@ function Assert-PresentationBaselineMatrix(
             throw "Android package data clear did not report Success before baseline fixture launch"
         }
         Invoke-Adb @("logcat", "-c") | Out-Null
+        $coldVideo = Start-PresentationLifecycleVideo "cold-through-replay-failure" 165
+        $coldVideo.record.stage_range = "cold/repeat PRESENT through replay-failure recovery on the original surface"
+        $matrix.videos.Add($coldVideo.record)
+        $activeVideo = $coldVideo
         Invoke-Adb @("shell", "am", "start", "-W", "-n", "$Package/com.stasislang.workshop.MainActivity", "--ez", "stasis_presentation_baseline", "true", "--ez", "stasis_presentation_poison", "true") | Out-Null
 
         $coldPredicate = {
@@ -923,6 +1329,42 @@ function Assert-PresentationBaselineMatrix(
             last_accepted_present = $lastPresent
         })
 
+        $beforeCandidatePoison = (Read-PresentationBaselineReceipts $Package).receipts.Count
+        Send-PresentationBaselineControl $Package "poison"
+        $candidatePoisonPredicate = {
+            param($receipt)
+            $receipt.receipt_kind -eq "poison" -and $receipt.event -eq "backbuffer_poison"
+        }
+        $candidatePoison = Wait-PresentationBaselineReceipt $Package $candidatePoisonPredicate $beforeCandidatePoison $RenderTimeoutSeconds "candidate-copy failure physical-target poison" $processId
+        Assert-PresentationPoisonReceipt $candidatePoison.receipt @($currentSurface[2], $currentSurface[3])
+        $beforeCandidateFailure = $candidatePoison.marker_count
+        Send-PresentationBaselineControl $Package "candidate_copy_failure"
+        $candidateFailurePredicate = {
+            param($receipt)
+            $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_candidate_copy_failed"
+        }
+        $candidateFailure = Wait-PresentationBaselineReceipt $Package $candidateFailurePredicate $beforeCandidateFailure $RenderTimeoutSeconds "injected candidate snapshot-copy failure" $processId
+        Assert-PresentationCandidateCopyFailure $candidateFailure.receipt $lastPresent
+        $candidateReplayPredicate = {
+            param($receipt)
+            $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_replayed"
+        }
+        $candidateReplay = Wait-PresentationBaselineReceipt $Package $candidateReplayPredicate $candidateFailure.next_receipt_index $RenderTimeoutSeconds "candidate-copy failure snapshot rollback" $processId
+        Assert-PresentationCandidateSnapshotReplay $candidateReplay.receipt $candidateFailure.receipt $lastPresent
+        $candidateUnexpectedPresents = @($candidateReplay.receipts | Select-Object -Skip $beforeCandidateFailure | Where-Object {
+            $_.receipt_kind -eq "renderer" -and $_.event -eq "present"
+        })
+        if ($candidateUnexpectedPresents.Count -gt 0) {
+            throw "failed candidate snapshot copy advanced the accepted PRESENT stream"
+        }
+        $matrix.stages.Add([pscustomobject]@{
+            name = "candidate-copy-failure"
+            poison = $candidatePoison.receipt
+            candidate_copy_failure = $candidateFailure.receipt
+            rollback_replay = $candidateReplay.receipt
+        })
+        $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "candidate-copy-failure-retained-red" "present" $lastPresent))
+
         foreach ($faultPhase in @("no_present", "reject")) {
             $beforePoison = (Read-PresentationBaselineReceipts $Package).receipts.Count
             Send-PresentationBaselineControl $Package "poison"
@@ -954,7 +1396,7 @@ function Assert-PresentationBaselineMatrix(
                 param($receipt)
                 $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_replayed"
             }
-            $replay = Wait-PresentationBaselineReceipt $Package $replayPredicate $forcedRedraw.marker_count $RenderTimeoutSeconds ($faultPhase + " accepted snapshot replay") $processId
+            $replay = Wait-PresentationBaselineReceipt $Package $replayPredicate $forcedRedraw.next_receipt_index $RenderTimeoutSeconds ($faultPhase + " accepted snapshot replay") $processId
             Assert-PresentationSnapshotReplay $replay.receipt $fault.receipt $lastPresent $faultPhase
             $unexpectedPresents = @($replay.receipts | Select-Object -Skip $beforeRedraw | Where-Object {
                 $_.receipt_kind -eq "renderer" -and $_.event -eq "present"
@@ -986,8 +1428,112 @@ function Assert-PresentationBaselineMatrix(
                     elapsed_seconds = $alphaProbe.elapsed_seconds
                 })
                 $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "alpha-probe-after-replay" "present-alpha-probe" $alphaProbe.receipt))
+                $lastPresent = $alphaProbe.receipt
             }
         }
+
+        $beforeReplayFailurePoison = (Read-PresentationBaselineReceipts $Package).receipts.Count
+        Send-PresentationBaselineControl $Package "poison"
+        $replayFailurePoisonPredicate = {
+            param($receipt)
+            $receipt.receipt_kind -eq "poison" -and $receipt.event -eq "backbuffer_poison"
+        }
+        $replayFailurePoison = Wait-PresentationBaselineReceipt $Package $replayFailurePoisonPredicate $beforeReplayFailurePoison $RenderTimeoutSeconds "snapshot replay failure physical-target poison" $processId
+        Assert-PresentationPoisonReceipt $replayFailurePoison.receipt @($currentSurface[2], $currentSurface[3])
+        $beforeReplayFailureSubmission = $replayFailurePoison.marker_count
+        Send-PresentationBaselineControl $Package "snapshot_replay_failure"
+        $replayFailureSubmissionPredicate = {
+            param($receipt)
+            $receipt.receipt_kind -eq "submission" -and $receipt.phase -eq "snapshot_replay_failure"
+        }
+        $replayFailureSubmission = Wait-PresentationBaselineReceipt $Package $replayFailureSubmissionPredicate $beforeReplayFailureSubmission $RenderTimeoutSeconds "snapshot replay failure invalid submission" $processId
+        Assert-PresentationReplayFailureSubmission $replayFailureSubmission.receipt
+        $beforeReplayFailureRedraw = $replayFailureSubmission.marker_count
+        Send-PresentationBaselineControl $Package "redraw"
+        $replayFailureRedrawPredicate = {
+            param($receipt)
+            $receipt.receipt_kind -eq "control" -and $receipt.phase -eq "forced_redraw"
+        }
+        $replayFailureRedraw = Wait-PresentationBaselineReceipt $Package $replayFailureRedrawPredicate $beforeReplayFailureRedraw $RenderTimeoutSeconds "snapshot replay failure forced redraw acknowledgement" $processId
+        Assert-PresentationForcedRedrawControl $replayFailureRedraw.receipt $replayFailureSubmission.receipt "reject"
+        $replayFailedPredicate = {
+            param($receipt)
+            $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_replay_failed"
+        }
+        $replayFailed = Wait-PresentationBaselineReceipt $Package $replayFailedPredicate $replayFailureRedraw.next_receipt_index $RenderTimeoutSeconds "injected accepted-snapshot replay failure" $processId
+        Assert-PresentationReplayFailure $replayFailed.receipt $replayFailureSubmission.receipt $lastPresent
+        $replayFailurePresents = @($replayFailed.receipts | Select-Object -Skip $beforeReplayFailureRedraw | Where-Object {
+            $_.receipt_kind -eq "renderer" -and $_.event -eq "present"
+        })
+        if ($replayFailurePresents.Count -gt 0) {
+            throw "failed accepted-snapshot replay advanced the accepted PRESENT stream"
+        }
+        $restorePlaceholderPredicate = {
+            param($receipt)
+            $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_restore_placeholder"
+        }
+        $restorePlaceholder = Wait-PresentationBaselineReceipt $Package $restorePlaceholderPredicate $replayFailed.next_receipt_index $RenderTimeoutSeconds "RESTORE_FAILED initialized placeholder" $processId
+        Assert-PresentationRestoreFailurePlaceholder $restorePlaceholder.receipt $lastPresent
+        $matrix.stages.Add([pscustomobject]@{
+            name = "snapshot-replay-failure"
+            poison = $replayFailurePoison.receipt
+            submission = $replayFailureSubmission.receipt
+            forced_redraw = $replayFailureRedraw.receipt
+            replay_failure = $replayFailed.receipt
+            restore_placeholder = $restorePlaceholder.receipt
+        })
+        $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "snapshot-replay-failure-restore-placeholder" "reset-placeholder" $restorePlaceholder.receipt))
+
+        $beforeRestoreRecovery = $restorePlaceholder.marker_count
+        Send-PresentationBaselineControl $Package "resume"
+        $restoreRecoveryResume = Wait-PresentationBaselineControl $Package "resume" $beforeRestoreRecovery $processId
+        if ($restoreRecoveryResume.receipt.evidence_sequence_rearmed -ne $true) {
+            throw "RESTORE_FAILED recovery resume did not rearm the bounded PRESENT evidence sequence"
+        }
+        $restoreRecoveryPair = Wait-PresentationBaselinePresentPair $Package $restoreRecoveryResume.next_receipt_index $RenderTimeoutSeconds "same-surface RESTORE_FAILED recovery PRESENT pair" $processId
+        Assert-PresentationRecoveryPresentPair $restoreRecoveryPair $lastPresent
+        $matrix.stages.Add([pscustomobject]@{
+            name = "snapshot-replay-failure-same-surface-recovery"
+            resume_ack = $restoreRecoveryResume.receipt
+            first = $restoreRecoveryPair.first
+            second = $restoreRecoveryPair.second
+            elapsed_seconds = $restoreRecoveryPair.elapsed_seconds
+        })
+        $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "snapshot-replay-failure-recovered-present" "present" $restoreRecoveryPair.second))
+        $lastPresent = $restoreRecoveryPair.second
+
+        $beforeRecoveryPause = (Read-PresentationBaselineReceipts $Package).receipts.Count
+        Send-PresentationBaselineControl $Package "pause"
+        $recoveryPause = Wait-PresentationBaselineControl $Package "pause" $beforeRecoveryPause $processId
+        $recoveryPausedPresents = @($recoveryPause.receipts | Select-Object -Skip $beforeRecoveryPause | Where-Object {
+            $_.receipt_kind -eq "renderer" -and $_.event -eq "present"
+        })
+        if ($recoveryPausedPresents.Count -gt 0) {
+            $lastPausedPresent = $recoveryPausedPresents[$recoveryPausedPresents.Count - 1]
+            Assert-PresentationPresentReceipt $lastPausedPresent
+            $lastPausedSize = @($lastPausedPresent.surface_size | ForEach-Object { [int]$_ })
+            $recoveredSize = @($restoreRecoveryPair.second.surface_size | ForEach-Object { [int]$_ })
+            if ([long]$lastPausedPresent.presentation_serial -lt [long]$restoreRecoveryPair.second.presentation_serial -or
+                ($lastPausedSize -join ",") -ne ($recoveredSize -join ",") -or
+                [long]$lastPausedPresent.surface_generation -ne [long]$restoreRecoveryPair.second.surface_generation -or
+                [long]$lastPausedPresent.renderer_generation -ne [long]$restoreRecoveryPair.second.renderer_generation -or
+                [long]$lastPausedPresent.display_generation -ne [long]$restoreRecoveryPair.second.display_generation) {
+                throw "pause-after-recovery observed a PRESENT outside the restored surface generation"
+            }
+            $lastPresent = $lastPausedPresent
+        }
+        $matrix.stages.Add([pscustomobject]@{
+            name = "pause-after-snapshot-replay-recovery"
+            receipt = $recoveryPause.receipt
+            last_accepted_present = $lastPresent
+        })
+
+        Complete-PresentationLifecycleVideo $coldVideo "transactional replay-failure recovery and pause observed"
+        $activeVideo = $null
+        $lifecycleVideo = Start-PresentationLifecycleVideo "resize-background-surface-rotation" 100
+        $lifecycleVideo.record.stage_range = "resize reset/recovery through HOME, surface-loss relaunch, and both landscape rotations"
+        $matrix.videos.Add($lifecycleVideo.record)
+        $activeVideo = $lifecycleVideo
 
         $displaySizeState = Get-AndroidWindowSizeState
         if ($displaySizeState.effective[0] -lt 800 -or $displaySizeState.effective[1] -lt 1000) {
@@ -1017,7 +1563,10 @@ function Assert-PresentationBaselineMatrix(
         $beforeResume = (Read-PresentationBaselineReceipts $Package).receipts.Count
         Send-PresentationBaselineControl $Package "resume"
         $resume = Wait-PresentationBaselineControl $Package "resume" $beforeResume $processId
-        $resizedPair = Wait-PresentationBaselinePresentPair $Package $beforeResume $RenderTimeoutSeconds "post-resize PRESENT pair" $processId
+        if ($resume.receipt.evidence_sequence_rearmed -ne $true) {
+            throw "post-resize resume did not rearm the bounded PRESENT evidence sequence"
+        }
+        $resizedPair = Wait-PresentationBaselinePresentPair $Package $resume.next_receipt_index $RenderTimeoutSeconds "post-resize PRESENT pair" $processId
         $lastPresent = $resizedPair.second
         $matrix.stages.Add([pscustomobject]@{
             name = "post-resize-present"
@@ -1114,8 +1663,17 @@ function Assert-PresentationBaselineMatrix(
             })
             $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "landscape-rotation-$rotation" "present" $lastPresent))
         }
+        Complete-PresentationLifecycleVideo $lifecycleVideo "lifecycle matrix complete"
+        $activeVideo = $null
         $status = "passed"
     } finally {
+        if ($activeVideo -and -not $activeVideo.completed) {
+            try {
+                Complete-PresentationLifecycleVideo $activeVideo "matrix cleanup after failure"
+            } catch {
+                $matrix.diagnostic_errors.Add("lifecycle video cleanup: $($_.Exception.Message)")
+            }
+        }
         if (-not $processId) { $processId = Find-PackageProcessId $Package }
         if ($processId) {
             $finalLogPath = Join-Path $artifactRoot "presentation-baseline-process-$processId-logcat.txt"
