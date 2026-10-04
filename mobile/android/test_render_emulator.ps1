@@ -154,6 +154,51 @@ function Find-PackageProcessId([string]$Package) {
     return $result[0].ToString().Trim()
 }
 
+function Read-AdbLogcat([string[]]$Arguments, [string]$DiagnosticName) {
+    if ($DiagnosticName -notmatch '^[A-Za-z0-9._-]+$') {
+        throw "ADB logcat diagnostic name is invalid: $DiagnosticName"
+    }
+    $diagnosticPath = Join-Path $artifactRoot (
+        "$DiagnosticName-adb-logcat-stderr-$([guid]::NewGuid().ToString('N')).txt")
+    $previousPreference = $ErrorActionPreference
+    $output = @()
+    $exitCode = $null
+    $invocationFailure = ""
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = @(& $adb -s $serial logcat @Arguments 2> $diagnosticPath)
+        $exitCode = $LASTEXITCODE
+    } catch {
+        $invocationFailure = $_.Exception.Message
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+
+    $stderrLines = @()
+    if (Test-Path -LiteralPath $diagnosticPath) {
+        try {
+            $stderrLines = @(Get-Content -LiteralPath $diagnosticPath -ErrorAction Stop)
+        } catch {
+            $stderrLines = @("Could not read captured stderr: $($_.Exception.Message)")
+        }
+    }
+    $stderrText = $stderrLines -join "`n"
+    if ($invocationFailure -or $null -eq $exitCode -or $exitCode -ne 0) {
+        $reason = if ($invocationFailure) {
+            "invocation error: $invocationFailure"
+        } elseif ($null -eq $exitCode) {
+            "adb did not report an exit code"
+        } else {
+            "exit code $exitCode"
+        }
+        if (-not $stderrText) { $stderrText = "(no stderr text captured)" }
+        throw "adb logcat failed for '$($Arguments -join ' ')': $reason; stderr: $stderrText; full stderr: $diagnosticPath"
+    }
+    if (-not $stderrText) { Remove-Item -LiteralPath $diagnosticPath -Force -ErrorAction SilentlyContinue }
+    return $output
+}
+
 function Resolve-Gradle {
     $wrapperName = if ($runningOnWindows) { "gradlew.bat" } else { "gradlew" }
     $wrapper = Join-Path $scriptRoot $wrapperName
@@ -413,8 +458,7 @@ $script:presentationBaselinePrefixes = @(
 function Read-PresentationBaselineReceipts([string]$Package) {
     $processId = Find-PackageProcessId $Package
     if (-not $processId) { return [pscustomobject]@{ process_id = ""; receipts = @() } }
-    $lines = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null)
-    if ($LASTEXITCODE -ne 0) { throw "presentation-baseline logcat read failed" }
+    $lines = @(Read-AdbLogcat @("--pid=$processId", "-d") "presentation-baseline-receipts")
     $receipts = [System.Collections.Generic.List[object]]::new()
     foreach ($line in $lines) {
         foreach ($spec in $script:presentationBaselinePrefixes) {
@@ -1005,7 +1049,8 @@ function Assert-PresentationBaselineMatrix(
 
         $oldProcessId = $processId
         $oldLogPath = Join-Path $artifactRoot "presentation-baseline-process-$oldProcessId-logcat.txt"
-        @(Invoke-Adb @("logcat", "--pid=$oldProcessId", "-d")) | Set-Content -LiteralPath $oldLogPath -Encoding UTF8
+        @(Read-AdbLogcat @("--pid=$oldProcessId", "-d") "presentation-baseline-old-process") |
+            Set-Content -LiteralPath $oldLogPath -Encoding UTF8
         $matrix.raw_logs.Add($oldLogPath)
         Invoke-Adb @("shell", "am", "force-stop", $Package) | Out-Null
         $stopDeadline = (Get-Date).AddSeconds(10)
@@ -1074,17 +1119,18 @@ function Assert-PresentationBaselineMatrix(
         if (-not $processId) { $processId = Find-PackageProcessId $Package }
         if ($processId) {
             $finalLogPath = Join-Path $artifactRoot "presentation-baseline-process-$processId-logcat.txt"
-            $finalLog = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null)
-            if ($LASTEXITCODE -eq 0) {
+            try {
+                $finalLog = @(Read-AdbLogcat @("--pid=$processId", "-d") "presentation-baseline-final-process")
                 $finalLog | Set-Content -LiteralPath $finalLogPath -Encoding UTF8
                 if (-not $matrix.raw_logs.Contains($finalLogPath)) { $matrix.raw_logs.Add($finalLogPath) }
+            } catch {
+                $matrix.diagnostic_errors.Add("process logcat: $($_.Exception.Message)")
             }
         }
         if ($status -ne "passed") {
             try {
                 $failureLogPath = Join-Path $artifactRoot "presentation-baseline-failure-logcat.txt"
-                $failureLog = @(& $adb -s $serial logcat -d 2>$null)
-                if ($LASTEXITCODE -ne 0) { throw "full logcat snapshot failed before emulator teardown" }
+                $failureLog = @(Read-AdbLogcat @("-d") "presentation-baseline-failure")
                 $failureLog | Set-Content -LiteralPath $failureLogPath -Encoding UTF8
                 $matrix.raw_logs.Add($failureLogPath)
             } catch {
@@ -1203,7 +1249,7 @@ function Assert-RenderedVariant(
         $readProcessId = { Find-PackageProcessId $Package }.GetNewClosure()
         $readProcessLog = {
             param($ReadyProcessId)
-            @(& $adb -s $serial logcat "--pid=$ReadyProcessId" -d 2>$null)
+            @(Read-AdbLogcat @("--pid=$ReadyProcessId", "-d") "workshop-readiness")
         }.GetNewClosure()
         $readiness = Wait-ForWorkshopIT032Readiness `
             -TimeoutMilliseconds $readinessTimeoutMilliseconds `
@@ -1312,7 +1358,7 @@ function Assert-RenderedVariant(
 
             $performancePassed = $false
             for ($attempt = 1; $attempt -le 2; $attempt += 1) {
-                $beforeAttemptLog = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null)
+                $beforeAttemptLog = @(Read-AdbLogcat @("--pid=$processId", "-d") "workshop-performance")
                 $reportCountBeforeAttempt = @($beforeAttemptLog |
                     Where-Object { $_ -match 'RenderPerformance:' }).Count
                 Invoke-Adb @(
@@ -1325,7 +1371,7 @@ function Assert-RenderedVariant(
                 $attemptReport = $null
                 do {
                     Start-Sleep -Milliseconds 500
-                    $attemptDeviceLog = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null)
+                    $attemptDeviceLog = @(Read-AdbLogcat @("--pid=$processId", "-d") "workshop-performance")
                     $attemptReports = @($attemptDeviceLog |
                         Where-Object { $_ -match 'RenderPerformance:' })
                     if ($attemptReports.Count -gt $reportCountBeforeAttempt) {
@@ -1378,12 +1424,30 @@ function Assert-RenderedVariant(
             (Get-Item -LiteralPath $lastAttemptCapture).Length -gt 0) {
             Copy-Item -LiteralPath $lastAttemptCapture -Destination $capture -Force
         }
-        if ($processId) { $log = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null) }
-        if (-not $processId -or $LASTEXITCODE -ne 0) {
-            $log = @(& $adb -s $serial logcat -d 2>$null)
+        $logCaptured = $false
+        $processLogFailure = ""
+        $fullLogFailure = ""
+        if ($processId) {
+            try {
+                $log = @(Read-AdbLogcat @("--pid=$processId", "-d") "${Name}-final-process")
+                $logCaptured = $true
+            } catch {
+                $processLogFailure = $_.Exception.Message
+            }
         }
-        $log | Set-Content -LiteralPath $logFile -Encoding UTF8
+        if (-not $logCaptured) {
+            try {
+                $log = @(Read-AdbLogcat @("-d") "${Name}-final-full")
+                $logCaptured = $true
+            } catch {
+                $fullLogFailure = $_.Exception.Message
+            }
+        }
+        if ($logCaptured) { $log | Set-Content -LiteralPath $logFile -Encoding UTF8 }
         & $adb -s $serial shell am force-stop $Package 2>$null | Out-Null
+        if (-not $logCaptured) {
+            throw "Workshop logcat capture failed; process logcat: $processLogFailure; full logcat: $fullLogFailure"
+        }
     }
     if (-not $renderPassed) {
         throw "$Name render acceptance timed out: $lastFailure; see $artifactRoot"
