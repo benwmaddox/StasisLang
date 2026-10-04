@@ -50,6 +50,16 @@ order before canonical commands after the canonical frame has passed its
 publication gate; `clearPhysicalTarget` and `beginLogicalFrame` are distinct
 backend operations.
 
+On Workshop GLES, copying the rendered candidate into a scratch snapshot is
+part of publication. The renderer adopts that texture and advances the
+presentation token/serial only after the copy succeeds. If candidate copying
+fails, it keeps the prior snapshot and identity and attempts to redraw that
+image before the surface swaps; an outstanding capture remains pending. If
+replaying the prior image fails, the renderer enters `RESTORE_FAILED`, draws
+the initialized restore placeholder, and retries resource restoration on a
+later valid frame. Ordinary no-PRESENT and rejected frames do not enter
+restoration.
+
 ## Evidence and current call graph
 
 Paths and named functions below identify the audited code; the companion

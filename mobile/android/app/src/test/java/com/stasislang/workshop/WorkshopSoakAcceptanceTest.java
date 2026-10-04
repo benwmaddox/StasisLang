@@ -83,4 +83,45 @@ public final class WorkshopSoakAcceptanceTest {
         assertTrue(presentation.matches(17, -1, beforeNormalSubmission));
         assertFalse(presentation.matches(17, 202, presentation.serial()));
     }
+
+    @Test
+    public void failedSnapshotCopyRetainsCommittedTextureAndPresentationIdentity() {
+        StasisPreviewRenderer.AcceptedSnapshotState snapshot =
+                new StasisPreviewRenderer.AcceptedSnapshotState();
+        StasisPreviewRenderer.PresentationState presentation =
+                new StasisPreviewRenderer.PresentationState();
+        snapshot.initializeTextures(11, 22);
+
+        assertTrue(snapshot.adoptCandidate(true, 624, 962, 3, 4,
+                100, 7, 1L, presentation));
+        assertTrue(presentation.matches(100, 7, 0L));
+        int acceptedTexture = snapshot.acceptedTexture();
+        int candidateTexture = snapshot.candidateTexture();
+        long committedSerial = presentation.serial();
+
+        assertFalse(snapshot.adoptCandidate(false, 624, 962, 3, 4,
+                101, 8, 2L, presentation));
+
+        assertTrue(snapshot.isAvailableFor(624, 962, 3, 4));
+        assertEquals(acceptedTexture, snapshot.acceptedTexture());
+        assertEquals(candidateTexture, snapshot.candidateTexture());
+        assertEquals(624, snapshot.width());
+        assertEquals(962, snapshot.height());
+        assertEquals(3, snapshot.surfaceGeneration());
+        assertEquals(4, snapshot.rendererGeneration());
+        assertEquals(100, snapshot.frameToken());
+        assertEquals(1L, snapshot.presentationSerial());
+        assertEquals(committedSerial, presentation.serial());
+        assertEquals(100, presentation.token());
+        assertTrue(presentation.matches(100, 7, 0L));
+        assertFalse(presentation.matches(101, 8, committedSerial));
+
+        assertTrue(snapshot.adoptCandidate(true, 624, 962, 3, 4,
+                102, 9, 2L, presentation));
+        assertEquals(candidateTexture, snapshot.acceptedTexture());
+        assertEquals(102, snapshot.frameToken());
+        assertEquals(2L, presentation.serial());
+        assertEquals(102, presentation.token());
+        assertTrue(presentation.matches(102, 9, committedSerial));
+    }
 }

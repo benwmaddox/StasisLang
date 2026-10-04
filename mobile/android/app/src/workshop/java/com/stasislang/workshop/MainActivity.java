@@ -402,7 +402,9 @@ public final class MainActivity extends Activity {
             return;
         }
         if ("no_present".equals(phase) || "reject".equals(phase)
-                || "alpha_after_replay".equals(phase)) {
+                || "alpha_after_replay".equals(phase)
+                || "candidate_copy_failure".equals(phase)
+                || "snapshot_replay_failure".equals(phase)) {
             gamePreview.submitPresentationBaselineTestFrame(phase, projectRootPath());
             return;
         }
