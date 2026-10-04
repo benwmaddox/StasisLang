@@ -1431,6 +1431,11 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         if (copyFailure == null && drawError != GLES20.GL_NO_ERROR) {
             copyFailure = "candidate_draw_gl_error_" + drawError;
         }
+        if (BuildConfig.STASIS_RENDER_ACCEPTANCE
+                && failNextSnapshotCandidateCopyForAcceptance
+                && "candidate_copy_failure".equals(presentationBaselineReplayPhase)) {
+            logCandidateCopyPixelProbe(frameToken);
+        }
         int[] previousActiveTexture = new int[1];
         int[] previousTextureBinding = new int[1];
         boolean activeTextureCaptured = false;
@@ -1581,6 +1586,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     + (replayError != GLES20.GL_NO_ERROR ? replayError : cleanupError));
             return SnapshotReplayResult.FAILED;
         }
+        if (BuildConfig.STASIS_RENDER_ACCEPTANCE
+                && "candidate_copy_failure".equals(presentationBaselineReplayPhase)) {
+            logCandidateRollbackPixelProbe(frameI32.get(I_FRAME_TOKEN));
+        }
         if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
             Log.i(LOG_TAG, "Stasis Workshop presentation-baseline: {\"schema\":"
                     + "\"stasis.workshop_present_only.v1\",\"event\":"
@@ -1605,6 +1614,180 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         }
         presentationBaselineReplayPhase = null;
         return SnapshotReplayResult.REPLAYED;
+    }
+
+    private void logCandidateCopyPixelProbe(int candidateFrameToken) {
+        int[] point = candidateFailureProbePoint();
+        PixelProbeResult drawable = point == null ? PixelProbeResult.failure("invalid_sample_point")
+                : readRgba8Pixel(0, point[0], point[1], "candidate_drawable_before_copy");
+        int snapshotTexture = acceptedSnapshot.acceptedTexture();
+        PixelProbeResult snapshot = point == null ? PixelProbeResult.failure("invalid_sample_point")
+                : snapshotTexture == 0 ? PixelProbeResult.failure("accepted_texture_unavailable")
+                : readRgba8Pixel(snapshotTexture, point[0], point[1],
+                        "accepted_snapshot_before_copy");
+        Log.i(LOG_TAG, "Stasis Workshop presentation pixel-probe: {\"schema\":"
+                + "\"stasis.workshop_snapshot_probe.v1\",\"event\":\"candidate_before_copy\","
+                + "\"phase\":\"candidate_copy_failure\",\"candidate_frame_token\":"
+                + candidateFrameToken + ",\"snapshot_frame_token\":"
+                + acceptedSnapshot.frameToken() + ",\"snapshot_presentation_serial\":"
+                + acceptedSnapshot.presentationSerial() + ",\"snapshot_texture_id\":"
+                + snapshotTexture + ",\"sample_logical\":[160,90]"
+                + ",\"sample_gles\":" + pointJson(point)
+                + ",\"surface_size\":[" + surfaceWidth + "," + surfaceHeight
+                + "],\"surface_generation\":" + resourceLifecycle.surfaceGeneration()
+                + ",\"renderer_generation\":" + resourceLifecycle.rendererGeneration()
+                + ",\"display_generation\":" + displayGeneration
+                + ",\"drawable_probe\":" + drawable.toJson()
+                + ",\"accepted_texture_probe\":" + snapshot.toJson() + "}");
+    }
+
+    private void logCandidateRollbackPixelProbe(int candidateFrameToken) {
+        int[] point = candidateFailureProbePoint();
+        PixelProbeResult drawable = point == null ? PixelProbeResult.failure("invalid_sample_point")
+                : readRgba8Pixel(0, point[0], point[1], "candidate_rollback_drawable");
+        Log.i(LOG_TAG, "Stasis Workshop presentation pixel-probe: {\"schema\":"
+                + "\"stasis.workshop_snapshot_probe.v1\",\"event\":\"candidate_after_rollback\","
+                + "\"phase\":\"candidate_copy_failure\",\"candidate_frame_token\":"
+                + candidateFrameToken + ",\"snapshot_frame_token\":"
+                + acceptedSnapshot.frameToken() + ",\"snapshot_presentation_serial\":"
+                + acceptedSnapshot.presentationSerial() + ",\"snapshot_texture_id\":"
+                + acceptedSnapshot.acceptedTexture() + ",\"sample_logical\":[160,90]"
+                + ",\"sample_gles\":" + pointJson(point)
+                + ",\"surface_size\":[" + surfaceWidth + "," + surfaceHeight
+                + "],\"surface_generation\":" + resourceLifecycle.surfaceGeneration()
+                + ",\"renderer_generation\":" + resourceLifecycle.rendererGeneration()
+                + ",\"display_generation\":" + displayGeneration
+                + ",\"drawable_probe\":" + drawable.toJson() + "}");
+    }
+
+    private int[] candidateFailureProbePoint() {
+        if (logicalWidth <= 0 || logicalHeight <= 0 || displayViewport.width <= 0
+                || displayViewport.height <= 0 || surfaceWidth <= 0 || surfaceHeight <= 0) {
+            return null;
+        }
+        int x = displayViewport.x + (int)Math.floor(160.5d * displayViewport.width / logicalWidth);
+        int topY = displayViewport.y
+                + (int)Math.floor(90.5d * displayViewport.height / logicalHeight);
+        int y = surfaceHeight - 1 - topY;
+        return x >= 0 && x < surfaceWidth && y >= 0 && y < surfaceHeight
+                ? new int[] {x, y} : null;
+    }
+
+    private static String pointJson(int[] point) {
+        return point == null ? "null" : "[" + point[0] + "," + point[1] + "]";
+    }
+
+    private PixelProbeResult readRgba8Pixel(int texture, int x, int y, String operation) {
+        PixelProbeResult result = new PixelProbeResult();
+        int[] previousFramebuffer = new int[1];
+        int[] probeFramebuffer = new int[1];
+        ByteBuffer pixel = ByteBuffer.allocateDirect(4);
+        boolean previousFramebufferKnown = false;
+        boolean temporaryFramebufferBound = false;
+        String failure = probeError(operation + "_preexisting_errors");
+        try {
+            if (failure == null) {
+                GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, previousFramebuffer, 0);
+                failure = probeError(operation + "_framebuffer_query");
+                previousFramebufferKnown = failure == null;
+                if (previousFramebufferKnown) result.previousFramebufferId = previousFramebuffer[0];
+            }
+            if (failure == null && texture != 0) {
+                GLES20.glGenFramebuffers(1, probeFramebuffer, 0);
+                failure = probeError(operation + "_framebuffer_create");
+                if (failure == null && probeFramebuffer[0] == 0) {
+                    failure = "framebuffer_create_returned_zero";
+                }
+                if (failure == null) {
+                    result.probeFramebufferId = probeFramebuffer[0];
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probeFramebuffer[0]);
+                    temporaryFramebufferBound = true;
+                    failure = probeError(operation + "_framebuffer_bind");
+                }
+                if (failure == null) {
+                    GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER,
+                            GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, texture, 0);
+                    failure = probeError(operation + "_texture_attach");
+                }
+                if (failure == null) {
+                    result.framebufferStatus = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER);
+                    failure = probeError(operation + "_framebuffer_status");
+                    if (failure == null
+                            && result.framebufferStatus != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+                        failure = "framebuffer_incomplete_" + result.framebufferStatus;
+                    }
+                }
+            }
+            if (failure == null) {
+                result.framebufferId = texture == 0
+                        ? previousFramebuffer[0] : probeFramebuffer[0];
+                GLES20.glReadPixels(x, y, 1, 1, GLES20.GL_RGBA,
+                        GLES20.GL_UNSIGNED_BYTE, pixel);
+                failure = probeError(operation + "_read_pixels");
+                if (failure == null) {
+                    result.rgba = new int[] {pixel.get(0) & 0xff, pixel.get(1) & 0xff,
+                            pixel.get(2) & 0xff, pixel.get(3) & 0xff};
+                }
+            }
+        } catch (RuntimeException exception) {
+            failure = "probe_exception_" + exception.getClass().getSimpleName();
+        } finally {
+            if (temporaryFramebufferBound && previousFramebufferKnown) {
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, previousFramebuffer[0]);
+                String restoreFailure = probeError(operation + "_framebuffer_restore");
+                if (failure == null) failure = restoreFailure;
+                int[] restoredFramebuffer = new int[1];
+                GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, restoredFramebuffer, 0);
+                String verifyFailure = probeError(operation + "_framebuffer_restore_verify");
+                if (failure == null) failure = verifyFailure;
+                if (verifyFailure == null && restoredFramebuffer[0] != previousFramebuffer[0]
+                        && failure == null) {
+                    failure = "framebuffer_restore_mismatch_" + restoredFramebuffer[0];
+                }
+            }
+            if (probeFramebuffer[0] != 0) {
+                GLES20.glDeleteFramebuffers(1, probeFramebuffer, 0);
+                String deleteFailure = probeError(operation + "_framebuffer_delete");
+                if (failure == null) failure = deleteFailure;
+            }
+        }
+        result.error = failure;
+        return result;
+    }
+
+    private String probeError(String operation) {
+        int error = drainGlesErrors("presentation_pixel_probe_" + operation);
+        return error == GLES20.GL_NO_ERROR ? null : "gles_error_" + error;
+    }
+
+    private static final class PixelProbeResult {
+        int framebufferId = -1;
+        int previousFramebufferId = -1;
+        int probeFramebufferId;
+        int framebufferStatus = -1;
+        int[] rgba;
+        String error;
+
+        static PixelProbeResult failure(String error) {
+            PixelProbeResult result = new PixelProbeResult();
+            result.error = error;
+            return result;
+        }
+
+        String toJson() {
+            return "{\"ok\":" + (error == null)
+                    + ",\"framebuffer_id\":" + nullableInteger(framebufferId)
+                    + ",\"previous_framebuffer_id\":" + nullableInteger(previousFramebufferId)
+                    + ",\"probe_framebuffer_id\":" + probeFramebufferId
+                    + ",\"framebuffer_status\":" + nullableInteger(framebufferStatus)
+                    + ",\"rgba8\":" + (rgba == null ? "null"
+                            : "[" + rgba[0] + "," + rgba[1] + "," + rgba[2] + "," + rgba[3] + "]")
+                    + ",\"error\":" + (error == null ? "null" : JSONObject.quote(error)) + "}";
+        }
+
+        private static String nullableInteger(int value) {
+            return value < 0 ? "null" : Integer.toString(value);
+        }
     }
 
     private int drainGlesErrors(String operation) {
