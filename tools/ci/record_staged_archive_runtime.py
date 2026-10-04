@@ -249,7 +249,11 @@ def find_runtime_evidence(consumer_root: Path, target: str) -> tuple[Path, Path,
         path for path in evidence_path.parent.rglob("*")
         if path.is_file() and path.suffix.lower() in {".json", ".png", ".log", ".txt"}
     )
-    if evidence_path not in evidence_files or frame_path not in evidence_files:
+    resolved_evidence_files = {path.resolve(strict=True) for path in evidence_files}
+    if (
+        evidence_path.resolve(strict=True) not in resolved_evidence_files
+        or frame_path.resolve(strict=True) not in resolved_evidence_files
+    ):
         raise ValueError(f"{target} runtime evidence does not contain its receipt and frame")
     return evidence_path, frame_path, evidence_files
 

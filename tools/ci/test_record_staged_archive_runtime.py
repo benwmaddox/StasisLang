@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -169,6 +170,49 @@ class RecordRuntimeTests(unittest.TestCase):
             self.assertFalse(mobile["shipping_package"]["development_build"])
             self.assertEqual(mobile["shipping_package"]["linked_artifact_sha256"], sha256(roots[label] / "shipping/app-debug.apk"))
             self.assertEqual(receipt["consumers"][label]["mobile_runtime"]["frame_sha256"], sha256(roots[label] / "artifacts/frame.png"))
+
+    def test_accepts_android_producer_absolute_frame_with_relative_consumer_roots(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
+            workspace = Path(temporary)
+            for label in ("bundled", "generated"):
+                with self.subTest(consumer=label):
+                    consumer_root = workspace / label
+                    evidence_path = self.add_android_runtime_evidence(consumer_root)
+                    relative_root = Path(os.path.relpath(consumer_root, Path.cwd()))
+
+                    recorded_evidence, frame_path, files = recorder.find_runtime_evidence(
+                        relative_root, "android"
+                    )
+
+                    self.assertFalse(recorded_evidence.is_absolute())
+                    self.assertTrue(frame_path.is_absolute())
+                    self.assertIn(recorded_evidence, files)
+                    self.assertEqual(recorded_evidence.resolve(), evidence_path.resolve())
+                    self.assertEqual(frame_path.resolve(), (consumer_root / "artifacts/frame.png").resolve())
+
+    def test_rejects_android_frame_outside_evidence_tree(self) -> None:
+        consumer_root = self.root / "consumer"
+        evidence_path = self.add_android_runtime_evidence(consumer_root)
+        external_frame = consumer_root / "outside-frame.png"
+        external_frame.write_bytes(b"frame outside evidence tree")
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["android_generics"]["frame_capture"] = str(external_frame)
+        write_json(evidence_path, evidence)
+
+        with self.assertRaisesRegex(ValueError, "does not contain its receipt and frame"):
+            recorder.find_runtime_evidence(consumer_root, "android")
+
+    def test_rejects_missing_android_frame(self) -> None:
+        consumer_root = self.root / "consumer"
+        evidence_path = self.add_android_runtime_evidence(consumer_root)
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["android_generics"]["frame_capture"] = str(
+            consumer_root / "artifacts" / "missing-frame.png"
+        )
+        write_json(evidence_path, evidence)
+
+        with self.assertRaisesRegex(ValueError, "Android generics screenshot is missing"):
+            recorder.find_runtime_evidence(consumer_root, "android")
 
     def test_rejects_invalid_android_bounds_probe_receipts(self) -> None:
         consumer = self.root / "consumer"
