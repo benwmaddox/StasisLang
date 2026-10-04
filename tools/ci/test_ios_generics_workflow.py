@@ -1,4 +1,7 @@
+import os
 import re
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -10,6 +13,9 @@ class IosGenericsWorkflowPolicyTest(unittest.TestCase):
         cls.workflow = (
             cls.repo / ".github/workflows/ios-generics-simulator.yml"
         ).read_text(encoding="utf-8")
+        cls.package_script = (cls.repo / "tools/ci/build_ios_package.sh").read_text(
+            encoding="utf-8"
+        )
 
     def test_manual_lane_is_arm64_and_separate_from_required_ci(self) -> None:
         triggers = self.workflow.split("on:\n", 1)[1].split("\n\n", 1)[0]
@@ -96,6 +102,62 @@ class IosGenericsWorkflowPolicyTest(unittest.TestCase):
         self.assertIn("if: always()", self.workflow)
         self.assertIn("actions/upload-artifact@", self.workflow)
         self.assertIn("archive: true", self.workflow)
+
+    def test_archive_cli_arguments_omit_empty_production_flag_and_keep_simulator_flag(self) -> None:
+        function = re.search(
+            r"(?ms)^package_mobile\(\) \{.*?^\}", self.package_script
+        )
+        self.assertIsNotNone(function, "package_mobile function must remain testable")
+        bash = shutil.which("bash")
+        if os.name == "nt":
+            for candidate in (
+                r"C:\Program Files\Git\bin\bash.exe",
+                r"C:\Program Files\Git\usr\bin\bash.exe",
+            ):
+                if Path(candidate).is_file():
+                    bash = candidate
+                    break
+        self.assertIsNotNone(bash, "a real Bash executable is required for argv regression")
+
+        harness = r'''set -euo pipefail
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT
+mock_cli="$tmp_dir/stasis"
+cat > "$mock_cli" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$CAPTURE_FILE"
+MOCK
+chmod +x "$mock_cli"
+STASIS_CLI_EXECUTABLE="$mock_cli"
+workspace="$tmp_dir/project with spaces"
+__PACKAGE_FUNCTION__
+CAPTURE_FILE="$tmp_dir/production.args" package_mobile ios-arm64 "dist/ios release"
+printf '%s\n' '---production---'
+cat "$tmp_dir/production.args"
+CAPTURE_FILE="$tmp_dir/simulator.args" package_mobile ios-simulator-arm64 "dist/ios simulator"
+printf '%s\n' '---simulator---'
+cat "$tmp_dir/simulator.args"
+'''.replace("__PACKAGE_FUNCTION__", function.group(0))
+        result = subprocess.run(
+            [bash, "-c", harness],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        production, simulator = result.stdout.split("---simulator---\n", 1)
+        production = production.split("---production---\n", 1)[1].splitlines()
+        simulator = simulator.splitlines()
+        workspace = production[1]
+        self.assertEqual(
+            ["--workspace", workspace, "package-mobile", "--target", "ios-arm64", "--out", "dist/ios release"],
+            production,
+        )
+        self.assertEqual(
+            ["--workspace", workspace, "package-mobile", "--target", "ios-simulator-arm64", "--out", "dist/ios simulator", "--development-build"],
+            simulator,
+        )
 
 
 if __name__ == "__main__":

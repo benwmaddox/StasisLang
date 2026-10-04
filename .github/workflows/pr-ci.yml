@@ -68,7 +68,7 @@ jobs:
           python tools/ci/check_host_runtime_contract.py
           python -m unittest tools.ci.test_cargo_cache
           python -m unittest tools.ci.test_pr_ci_cargo_policy
-          python -m unittest tools.ci.test_android_emulator_seams
+          python -m unittest tools.ci.test_android_emulator_seams tools.ci.test_materialize_android_test_signing tools.ci.test_verify_android_test_signer
           python -m unittest tools.ci.test_generate_asset_load_fixture
           python -m unittest tools.ci.test_runtime_abi_contract
           python -m unittest tools.ci.test_host_runtime_contract
@@ -81,6 +81,7 @@ jobs:
           python -m unittest tools.ci.test_windows_signing_provision
           python -m unittest tools.ci.test_nightly_network_support
           python -m unittest tools.ci.test_build_android_runtime
+          python -m unittest tools.ci.test_qualify_staged_archive tools.ci.test_verify_staged_archive_receipts tools.ci.test_record_staged_archive_runtime tools.ci.test_collect_staged_archive_evidence
           python -m unittest tools.ci.test_nightly_freshness tools.ci.test_removed_ai_surface
           python -m unittest tools.ci.test_pr_ci_seam_placement tools.ci.test_ios_generics_workflow
 

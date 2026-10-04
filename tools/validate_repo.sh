@@ -49,6 +49,8 @@ fi
 "$PYTHON" -m unittest tools.ci.test_desktop_network_diagnostics
 "$PYTHON" -m unittest tools.ci.test_nightly_network_support
 "$PYTHON" -m unittest tools.ci.test_build_android_runtime
+"$PYTHON" -m unittest tools.ci.test_android_emulator_seams tools.ci.test_materialize_android_test_signing tools.ci.test_verify_android_test_signer
+"$PYTHON" -m unittest tools.ci.test_qualify_staged_archive tools.ci.test_verify_staged_archive_receipts tools.ci.test_record_staged_archive_runtime tools.ci.test_collect_staged_archive_evidence
 "$PYTHON" -m unittest tools.ci.test_nightly_freshness tools.ci.test_removed_ai_surface
 "$PYTHON" -m unittest tools.ci.test_release_provenance
 "$PYTHON" -m unittest tools.ci.test_audio_stream_native_acceptance

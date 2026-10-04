@@ -2,6 +2,8 @@ param(
     [string]$Serial = $env:ANDROID_SERIAL,
     [string]$ArtifactRoot = "artifacts",
     [string]$TestId = "",
+    [string]$ProjectPath = "",
+    [string]$GenericsExpectationsPath = "",
     [int]$PerSeamTimeoutSeconds = 660,
     [int]$HostRuntimeBuildTimeoutSeconds = 900
 )
@@ -122,7 +124,19 @@ $validTestIds = @($seams | ForEach-Object { $_.TestId })
 if ($TestId -and $TestId -notin $validTestIds) {
     throw "Unknown Android release-shell seam test ID '$TestId'; expected one of $($validTestIds -join ', ')"
 }
-$selectedSeams = if ($TestId) {
+$selectedSeams = if ($ProjectPath) {
+    if ($TestId -and $TestId -ne "ANDROID-GENERICS") {
+        throw "ProjectPath override is supported only for ANDROID-GENERICS"
+    }
+    @($seams | Where-Object { $_.TestId -eq "ANDROID-GENERICS" } | ForEach-Object {
+        $seam = $_.Clone()
+        $seam.Project = $ProjectPath
+        if ($GenericsExpectationsPath) {
+            $seam.Expectations = $GenericsExpectationsPath
+        }
+        $seam
+    })
+} elseif ($TestId) {
     @($seams | Where-Object { $_.TestId -eq $TestId })
 } else {
     $seams

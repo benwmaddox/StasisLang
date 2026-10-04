@@ -3276,6 +3276,15 @@ fn update_vendor_snapshot(
     migrate_legacy_hash: bool,
 ) -> Result<bool, String> {
     let status = inspect_project_vendor(workspace_root, manifest)?;
+    update_vendor_snapshot_with_status(workspace_root, manifest, migrate_legacy_hash, status)
+}
+
+fn update_vendor_snapshot_with_status(
+    workspace_root: &Path,
+    manifest: &mut ProjectManifest,
+    migrate_legacy_hash: bool,
+    status: VendorStatus,
+) -> Result<bool, String> {
     if !status.update_available
         && !status.local_changes
         && !status.legacy_pin_unverified
@@ -14490,6 +14499,53 @@ mod tests {
         assert_eq!(
             serialized_manifest(&workspace.manifest).unwrap(),
             before_manifest
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn vendor_hash_mismatch_keeps_consumer_tree_and_manifest_unchanged() {
+        let root = temp_dir("vendor_hash_mismatch_rollback");
+        create_project(root.clone(), "vendor_hash_mismatch_rollback".to_string())
+            .expect("create project");
+        let mut workspace = load_workspace(Some(&root)).expect("load project");
+        let before_package =
+            vendor_directory_sha256(&root.join("vendor/stasis")).expect("hash consumer package");
+        let before_manifest = fs::read(root.join(MANIFEST_NAME)).expect("read manifest");
+        let before_in_memory =
+            serialized_manifest(&workspace.manifest).expect("serialize manifest");
+        let mut status = inspect_project_vendor(&root, &workspace.manifest)
+            .expect("inspect current vendor snapshot");
+        status.installed.sha256 = "f".repeat(64);
+
+        let error =
+            update_vendor_snapshot_with_status(&root, &mut workspace.manifest, false, status)
+                .expect_err("reject a staged package with the wrong release hash");
+        assert!(
+            error.contains("staged Stasis vendor fingerprint does not match the toolchain"),
+            "unexpected update error: {error}"
+        );
+        assert_eq!(
+            vendor_directory_sha256(&root.join("vendor/stasis")).expect("rehash consumer"),
+            before_package
+        );
+        assert_eq!(
+            fs::read(root.join(MANIFEST_NAME)).expect("reread manifest"),
+            before_manifest
+        );
+        assert_eq!(
+            serialized_manifest(&workspace.manifest).expect("serialize unchanged manifest"),
+            before_in_memory
+        );
+        let vendor_root = root.join("vendor");
+        assert!(
+            fs::read_dir(&vendor_root)
+                .expect("read vendor root")
+                .all(|entry| {
+                    let name = entry.expect("read vendor entry").file_name();
+                    !name.to_string_lossy().starts_with(".stasis.")
+                }),
+            "hash rejection left staged vendor transaction files"
         );
         remove_temp(&root);
     }
