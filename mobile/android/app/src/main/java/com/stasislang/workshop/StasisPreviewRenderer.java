@@ -1346,7 +1346,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     + "\"probe\":{\"logical\":[100,65],\"expected_rgba8\":[115,147,10,255]},"
                     + "\"surface_size\":[" + surfaceWidth + "," + surfaceHeight + "],"
                     + "\"surface_generation\":" + resourceLifecycle.surfaceGeneration()
-                    + ",\"renderer_generation\":" + resourceLifecycle.rendererGeneration() + "}");
+                    + ",\"renderer_generation\":" + resourceLifecycle.rendererGeneration()
+                    + ",\"display_generation\":" + displayGeneration + "}");
             return;
         }
         if (presentationBaselineEvidenceCount >= 2 || rectCount != 1) return;
