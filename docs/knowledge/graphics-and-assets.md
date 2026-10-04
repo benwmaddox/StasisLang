@@ -15,8 +15,9 @@ Every valid presented frame starts with opaque black across the physical target,
 including letterbox margins. Use `clear(r, g, b, a)` to choose a different RGBA
 background for the logical canvas; margins remain black. A render that does not
 publish `PRESENT`, or a rejected render, leaves the prior accepted image alone.
-Workshop adopts a rendered candidate only after its GPU snapshot copy succeeds;
-if that copy fails, it keeps the prior snapshot and frame identity and attempts
+Workshop renders a candidate into its own framebuffer and publishes it only
+after the full physical-target composite succeeds. If candidate rendering or
+compositing fails, it keeps the prior snapshot and frame identity and attempts
 to redraw that image before swapping. If rollback replay fails, Workshop enters
 resource restoration and shows its initialized restore screen; a later valid
 frame retries that restoration.

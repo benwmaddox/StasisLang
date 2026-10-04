@@ -743,7 +743,7 @@ function Resolve-PresentationBaselineReceiptKind([string]$PrefixKind, [string]$E
     if ($Event -eq "backbuffer_poison") { return "poison" }
     if ($Event -in @(
         "accepted_snapshot_captured",
-        "accepted_snapshot_candidate_copy_failed",
+        "accepted_snapshot_candidate_publication_failed",
         "accepted_snapshot_replayed",
         "accepted_snapshot_replay_failed",
         "accepted_snapshot_restore_placeholder"
@@ -1138,34 +1138,34 @@ function Assert-PresentationSnapshotReplay(
     }
 }
 
-function Assert-PresentationCandidateCopyFailure([object]$Receipt, [object]$Checkpoint) {
+function Assert-PresentationCandidatePublicationFailure([object]$Receipt, [object]$Checkpoint) {
     $candidateRgba = @($Receipt.candidate_rect_rgba8 | ForEach-Object { [int]$_ })
-    Assert-PresentationSnapshotReference $Receipt $Checkpoint "candidate-copy failure"
+    Assert-PresentationSnapshotReference $Receipt $Checkpoint "candidate-publication failure"
     if ($Receipt.receipt_kind -ne "renderer" -or
-        $Receipt.event -ne "accepted_snapshot_candidate_copy_failed" -or
-        $Receipt.phase -ne "candidate_copy_failure" -or
+        $Receipt.event -ne "accepted_snapshot_candidate_publication_failed" -or
+        $Receipt.phase -ne "candidate_publication_failure" -or
         [string]::IsNullOrEmpty([string]$Receipt.candidate_frame_token) -or
         [string]$Receipt.candidate_frame_token -eq [string]$Checkpoint.snapshot_frame_token -or
         ($candidateRgba -join ",") -ne "0,255,0,255" -or
-        $Receipt.copy_failure -ne "acceptance_injected" -or
+        $Receipt.publication_failure -ne "acceptance_injected" -or
         $Receipt.snapshot_retained -ne $true) {
-        throw "candidate-copy failure receipt did not prove the visibly different candidate was rejected while retaining the accepted snapshot"
+        throw "candidate-publication failure receipt did not prove the visibly different candidate was rejected while retaining the accepted snapshot"
     }
 }
 
-function Assert-PresentationCandidateSnapshotReplay([object]$Receipt, [object]$CandidateFailure, [object]$Checkpoint) {
-    Assert-PresentationSnapshotReference $Receipt $Checkpoint "candidate-copy rollback replay"
+function Assert-PresentationCandidatePublicationReplay([object]$Receipt, [object]$CandidatePublicationFailure, [object]$Checkpoint) {
+    Assert-PresentationSnapshotReference $Receipt $Checkpoint "candidate-publication rollback replay"
     $expectedSurface = @($Checkpoint.surface_size | ForEach-Object { [int]$_ })
     $actualSurface = @($Receipt.surface_size | ForEach-Object { [int]$_ })
     if ($Receipt.receipt_kind -ne "renderer" -or
         $Receipt.event -ne "accepted_snapshot_replayed" -or
-        $Receipt.phase -ne "candidate_copy_failure" -or
+        $Receipt.phase -ne "candidate_publication_failure" -or
         $Receipt.frame_valid -ne $true -or $Receipt.requests_present -ne $true -or
         [int]$Receipt.flags -ne 2 -or
-        [string]$Receipt.frame_token -ne [string]$CandidateFailure.candidate_frame_token -or
+        [string]$Receipt.frame_token -ne [string]$CandidatePublicationFailure.candidate_frame_token -or
         $expectedSurface.Count -ne 2 -or $actualSurface.Count -ne 2 -or
         ($expectedSurface -join ",") -ne ($actualSurface -join ",")) {
-        throw "candidate-copy failure did not replay the prior accepted snapshot without advancing presentation identity"
+        throw "candidate-publication failure did not replay the prior accepted snapshot without advancing presentation identity"
     }
 }
 
@@ -1362,38 +1362,38 @@ function Assert-PresentationBaselineMatrix(
             param($receipt)
             $receipt.receipt_kind -eq "poison" -and $receipt.event -eq "backbuffer_poison"
         }
-        $candidatePoison = Wait-PresentationBaselineReceipt $Package $candidatePoisonPredicate $beforeCandidatePoison $RenderTimeoutSeconds "candidate-copy failure physical-target poison" $processId
+        $candidatePoison = Wait-PresentationBaselineReceipt $Package $candidatePoisonPredicate $beforeCandidatePoison $RenderTimeoutSeconds "candidate-publication failure physical-target poison" $processId
         Assert-PresentationPoisonReceipt $candidatePoison.receipt @($currentSurface[2], $currentSurface[3])
         $candidateCheckpoint = $candidatePoison.receipt
-        $beforeCandidateFailure = $candidatePoison.marker_count
-        Send-PresentationBaselineControl $Package "candidate_copy_failure"
-        $candidateFailurePredicate = {
+        $beforeCandidatePublicationFailure = $candidatePoison.marker_count
+        Send-PresentationBaselineControl $Package "candidate_publication_failure"
+        $candidatePublicationFailurePredicate = {
             param($receipt)
-            $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_candidate_copy_failed"
+            $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_candidate_publication_failed"
         }
-        $candidateFailure = Wait-PresentationBaselineReceipt $Package $candidateFailurePredicate $beforeCandidateFailure $RenderTimeoutSeconds "injected candidate snapshot-copy failure" $processId
-        Assert-PresentationCandidateCopyFailure $candidateFailure.receipt $candidateCheckpoint
-        $candidateReplayPredicate = {
+        $candidatePublicationFailure = Wait-PresentationBaselineReceipt $Package $candidatePublicationFailurePredicate $beforeCandidatePublicationFailure $RenderTimeoutSeconds "injected candidate snapshot publication failure" $processId
+        Assert-PresentationCandidatePublicationFailure $candidatePublicationFailure.receipt $candidateCheckpoint
+        $candidatePublicationReplayPredicate = {
             param($receipt)
             $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_replayed"
         }
-        $candidateReplay = Wait-PresentationBaselineReceipt $Package $candidateReplayPredicate $candidateFailure.next_receipt_index $RenderTimeoutSeconds "candidate-copy failure snapshot rollback" $processId
-        Assert-NoAcceptedSnapshotCapturedSince $candidateReplay $candidatePoison.next_receipt_index "candidate-copy rollback"
-        Assert-PresentationCandidateSnapshotReplay $candidateReplay.receipt $candidateFailure.receipt $candidateCheckpoint
-        $candidateUnexpectedPresents = @($candidateReplay.receipts | Select-Object -Skip $beforeCandidateFailure | Where-Object {
+        $candidatePublicationReplay = Wait-PresentationBaselineReceipt $Package $candidatePublicationReplayPredicate $candidatePublicationFailure.next_receipt_index $RenderTimeoutSeconds "candidate-publication failure snapshot rollback" $processId
+        Assert-NoAcceptedSnapshotCapturedSince $candidatePublicationReplay $candidatePoison.next_receipt_index "candidate-publication rollback"
+        Assert-PresentationCandidatePublicationReplay $candidatePublicationReplay.receipt $candidatePublicationFailure.receipt $candidateCheckpoint
+        $candidateUnexpectedPresents = @($candidatePublicationReplay.receipts | Select-Object -Skip $beforeCandidatePublicationFailure | Where-Object {
             $_.receipt_kind -eq "renderer" -and $_.event -eq "present"
         })
         if ($candidateUnexpectedPresents.Count -gt 0) {
-            throw "failed candidate snapshot copy advanced the accepted PRESENT stream"
+            throw "failed candidate publication advanced the accepted PRESENT stream"
         }
         $matrix.stages.Add([pscustomobject]@{
-            name = "candidate-copy-failure"
+            name = "candidate-publication-failure"
             poison = $candidatePoison.receipt
             accepted_snapshot_checkpoint = $candidateCheckpoint
-            candidate_copy_failure = $candidateFailure.receipt
-            rollback_replay = $candidateReplay.receipt
+            candidate_publication_failure = $candidatePublicationFailure.receipt
+            rollback_replay = $candidatePublicationReplay.receipt
         })
-        $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "candidate-copy-failure-retained-red" "present" $candidateReplay.receipt))
+        $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "candidate-publication-failure-retained-red" "present" $candidatePublicationReplay.receipt))
 
         foreach ($faultPhase in @("no_present", "reject")) {
             $beforePoison = (Read-PresentationBaselineReceipts $Package).receipts.Count

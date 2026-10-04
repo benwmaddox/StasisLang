@@ -423,8 +423,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private int textureResolution;
     private int textureSampler;
     private final AcceptedSnapshotState acceptedSnapshot = new AcceptedSnapshotState();
-    private boolean failNextSnapshotCandidateCopyForAcceptance;
+    private boolean failNextSnapshotCandidatePublicationForAcceptance;
     private boolean failNextSnapshotReplayForAcceptance;
+    private boolean snapshotTargetsReady;
     private int surfaceWidth = 1;
     private int surfaceHeight = 1;
     private int logicalWidth = 1;
@@ -657,8 +658,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         textureResolution = GLES20.glGetUniformLocation(textureProgram, "uResolution");
         textureSampler = GLES20.glGetUniformLocation(textureProgram, "uTexture");
         int[] snapshotTextures = new int[2];
+        int[] snapshotFramebuffers = new int[2];
         GLES20.glGenTextures(snapshotTextures.length, snapshotTextures, 0);
-        acceptedSnapshot.initializeTextures(snapshotTextures[0], snapshotTextures[1]);
+        GLES20.glGenFramebuffers(snapshotFramebuffers.length, snapshotFramebuffers, 0);
+        acceptedSnapshot.initializeTargets(snapshotTextures[0], snapshotTextures[1],
+                snapshotFramebuffers[0], snapshotFramebuffers[1]);
+        snapshotTargetsReady = false;
         for (int snapshotTexture : snapshotTextures) {
             if (snapshotTexture == 0) continue;
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, snapshotTexture);
@@ -689,7 +694,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         presentationTargetReady = true;
         surfaceWidth = Math.max(1, width);
         surfaceHeight = Math.max(1, height);
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         invalidateAcceptedSnapshot();
+        snapshotTargetsReady = configureSnapshotTargets();
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
         restorePlaceholderPending = true;
         restorePlaceholderUntilNanos = System.nanoTime() + MIN_RESTORE_LABEL_NANOS;
@@ -769,6 +776,16 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 timing.onRendered(System.nanoTime() - started);
                 return;
             }
+            if (!snapshotTargetsReady) {
+                snapshotTargetsReady = configureSnapshotTargets();
+            }
+            if (!snapshotTargetsReady) {
+                Log.e(LOG_TAG, "presentation framebuffer targets are unavailable");
+                drawRestorePlaceholder();
+                finishPendingSpriteReleases(hasFrame, false);
+                timing.onRendered(System.nanoTime() - started);
+                return;
+            }
             restorePlaceholderPending = false;
             long resourceStarted = frameSamples == null ? 0L : System.nanoTime();
             if (frameSamples != null) preResourceNanos = resourceStarted - lockAcquiredAt;
@@ -828,20 +845,20 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 frameTextureBinds = 0;
                 frameMixedRuns = 0;
                 frameSubmittedQuads = 0;
-                drainGlesErrors("before_guest_draw");
-                drawFrame();
                 int frameToken = frameI32.get(I_FRAME_TOKEN);
                 int presentedTrace = acceptanceTraceToken == frameToken
                         ? acceptanceTrace : -1;
                 long candidatePresentationSerial = presentation.serial() + 1L;
-                if (captureAcceptedSnapshot(frameToken, presentedTrace,
-                        candidatePresentationSerial)) {
+                String publicationFailure = renderAndPublishCandidate(frameToken,
+                        presentedTrace, candidatePresentationSerial);
+                if (publicationFailure == null) {
                     presented = true;
                     logPresentOnlyBaselineEvidence(frameToken);
                     if (workshopSoakAcceptanceActive) {
                         workshopSoakPresentations.observe(frameToken);
                     }
                 } else {
+                    logCandidatePublicationFailure(frameToken, publicationFailure);
                     SnapshotReplayResult replay = drawAcceptedSnapshot();
                     if (replay == SnapshotReplayResult.UNAVAILABLE) {
                         drawRestorePlaceholder();
@@ -1026,7 +1043,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             frameI32.put(I_MAGIC, 0);
             return true;
         }
-        if ("candidate_copy_failure".equals(phase)) {
+        if ("candidate_publication_failure".equals(phase)) {
             if (!presentationBaselinePoisonAcceptance || !isBaselineRedFrame()) {
                 return false;
             }
@@ -1039,7 +1056,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             frameF32.put(rectBase + 6, 0.0f);
             frameF32.put(rectBase + 7, 1.0f);
             presentationBaselineReplayPhase = phase;
-            failNextSnapshotCandidateCopyForAcceptance = true;
+            failNextSnapshotCandidatePublicationForAcceptance = true;
             return true;
         }
         if ("snapshot_replay_failure".equals(phase)) {
@@ -1100,12 +1117,16 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             return;
         }
         int[] probePoint = candidateFailureProbePoint();
-        logSnapshotPhysicalPoisonProbe("before_physical_clear", probePoint, false);
+        if (!bindWindowFramebuffer("presentation_poison_window_bind")) {
+            Log.e(LOG_TAG, "could not bind the physical target for presentation poison");
+            return;
+        }
+        logSnapshotPhysicalPoisonProbe("before_physical_clear", probePoint);
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
         GLES20.glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-        logSnapshotPhysicalPoisonProbe("after_physical_clear", probePoint, true);
+        logSnapshotPhysicalPoisonProbe("after_physical_clear", probePoint);
         Log.i(LOG_TAG, "Stasis Workshop presentation-baseline: {\"schema\":"
                 + "\"stasis.workshop_present_only.v1\",\"event\":\"backbuffer_poison\","
                 + "\"physical_target_poisoned\":true,\"snapshot_current\":"
@@ -1123,149 +1144,29 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 + ",\"surface_size\":[" + surfaceWidth + "," + surfaceHeight + "]}");
     }
 
-    private void logSnapshotPhysicalPoisonProbe(String stage, int[] point,
-            boolean includePhysicalPixel) {
-        int snapshotTexture = acceptedSnapshot.acceptedTexture();
-        int candidateTexture = acceptedSnapshot.candidateTexture();
-        PixelProbeResult snapshot = point == null
+    private void logSnapshotPhysicalPoisonProbe(String stage, int[] point) {
+        PixelProbeResult accepted = point == null
                 ? PixelProbeResult.failure("invalid_sample_point")
-                : snapshotTexture == 0 ? PixelProbeResult.failure("accepted_texture_unavailable")
-                : readRgba8Pixel(snapshotTexture, point[0], point[1],
-                        "poison_checkpoint_" + stage + "_accepted_texture");
-        PixelProbeResult physical = !includePhysicalPixel ? null
-                : point == null ? PixelProbeResult.failure("invalid_sample_point")
-                : readRgba8Pixel(0, point[0], point[1],
-                        "poison_checkpoint_" + stage + "_physical_target");
-        String version = GLES20.glGetString(GLES20.GL_VERSION);
-        String renderer = GLES20.glGetString(GLES20.GL_RENDERER);
-        String stringError = probeError("poison_checkpoint_gl_strings");
-        String textureState = snapshotTextureStateJson(snapshotTexture,
-                "poison_checkpoint_" + stage + "_texture_state");
-        String candidateState = snapshotTextureStateJson(candidateTexture,
-                "poison_checkpoint_" + stage + "_candidate_state");
-        Log.i(LOG_TAG, "Stasis Workshop snapshot-cache probe: {\"schema\":"
-                + "\"stasis.workshop_snapshot_cache_probe.v1\",\"event\":"
-                + "\"physical_poison_checkpoint\",\"stage\":"
-                + JSONObject.quote(stage) + ",\"snapshot_frame_token\":"
-                + acceptedSnapshot.frameToken() + ",\"snapshot_presentation_serial\":"
-                + acceptedSnapshot.presentationSerial() + ",\"snapshot_display_generation\":"
-                + acceptedSnapshot.displayGeneration() + ",\"surface_generation\":"
-                + resourceLifecycle.surfaceGeneration() + ",\"renderer_generation\":"
-                + resourceLifecycle.rendererGeneration() + ",\"surface_size\":["
-                + surfaceWidth + "," + surfaceHeight + "],\"sample_logical\":[160,90]"
+                : readRgba8Pixel(acceptedSnapshot.acceptedFramebuffer(), point[0], point[1],
+                        "poison_accepted_" + stage);
+        PixelProbeResult physical = point == null
+                ? PixelProbeResult.failure("invalid_sample_point")
+                : readRgba8Pixel(0, point[0], point[1], "poison_physical_" + stage);
+        Log.i(LOG_TAG, "Stasis Workshop presentation pixel-probe: {\"schema\":"
+                + "\"stasis.workshop_snapshot_probe.v2\",\"event\":\"physical_poison_checkpoint\","
+                + "\"stage\":" + JSONObject.quote(stage)
+                + ",\"snapshot_frame_token\":" + acceptedSnapshot.frameToken()
+                + ",\"snapshot_presentation_serial\":"
+                + acceptedSnapshot.presentationSerial()
+                + ",\"presentation_serial\":" + presentation.serial()
+                + ",\"snapshot_texture_id\":" + acceptedSnapshot.acceptedTexture()
+                + ",\"snapshot_framebuffer_id\":" + acceptedSnapshot.acceptedFramebuffer()
+                + ",\"candidate_texture_id\":" + acceptedSnapshot.candidateTexture()
                 + ",\"sample_gles\":" + pointJson(point)
-                + ",\"accepted_texture_id\":" + snapshotTexture
-                + ",\"candidate_texture_id\":" + candidateTexture
-                + ",\"texture_ids_distinct\":" + (snapshotTexture != candidateTexture)
-                + ",\"accepted_texture_state\":" + textureState
-                + ",\"candidate_texture_state\":" + candidateState
-                + ",\"accepted_texture_pixel\":" + snapshot.toJson()
-                + ",\"physical_target_pixel\":"
-                + (physical == null ? "null" : physical.toJson())
-                + ",\"gl_version\":"
-                + (version == null ? "null" : JSONObject.quote(version))
-                + ",\"gl_renderer\":"
-                + (renderer == null ? "null" : JSONObject.quote(renderer))
-                + ",\"gl_string_error\":"
-                + (stringError == null ? "null" : JSONObject.quote(stringError)) + "}");
+                + ",\"accepted_texture_pixel\":" + accepted.toJson()
+                + ",\"physical_target_pixel\":" + physical.toJson()
+                + ",\"surface_size\":[" + surfaceWidth + "," + surfaceHeight + "]}");
     }
-
-    private String snapshotTextureStateJson(int texture, String operation) {
-        int[] previousActiveTexture = new int[1];
-        int[] previousTextureBinding = new int[1];
-        int[] minFilter = {-1};
-        int[] magFilter = {-1};
-        int[] wrapS = {-1};
-        int[] wrapT = {-1};
-        boolean activeTextureCaptured = false;
-        boolean bindingCaptured = false;
-        boolean isTexture = false;
-        String failure = probeError(operation + "_preexisting_errors");
-        try {
-            if (failure == null) {
-                GLES20.glGetIntegerv(GLES20.GL_ACTIVE_TEXTURE, previousActiveTexture, 0);
-                failure = probeError(operation + "_active_texture_query");
-                activeTextureCaptured = failure == null;
-            }
-            if (failure == null) {
-                GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-                failure = probeError(operation + "_activate_texture0");
-            }
-            if (failure == null) {
-                GLES20.glGetIntegerv(GLES20.GL_TEXTURE_BINDING_2D,
-                        previousTextureBinding, 0);
-                failure = probeError(operation + "_binding_query");
-                bindingCaptured = failure == null;
-            }
-            if (failure == null && texture <= 0) failure = "invalid_snapshot_texture_name";
-            if (failure == null) {
-                isTexture = GLES20.glIsTexture(texture);
-                failure = probeError(operation + "_is_texture");
-                if (failure == null && !isTexture) failure = "snapshot_name_is_not_texture";
-            }
-            if (failure == null) {
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
-                failure = probeError(operation + "_bind_snapshot_texture");
-            }
-            if (failure == null) {
-                GLES20.glGetTexParameteriv(GLES20.GL_TEXTURE_2D,
-                        GLES20.GL_TEXTURE_MIN_FILTER, minFilter, 0);
-                GLES20.glGetTexParameteriv(GLES20.GL_TEXTURE_2D,
-                        GLES20.GL_TEXTURE_MAG_FILTER, magFilter, 0);
-                GLES20.glGetTexParameteriv(GLES20.GL_TEXTURE_2D,
-                        GLES20.GL_TEXTURE_WRAP_S, wrapS, 0);
-                GLES20.glGetTexParameteriv(GLES20.GL_TEXTURE_2D,
-                        GLES20.GL_TEXTURE_WRAP_T, wrapT, 0);
-                failure = probeError(operation + "_parameter_queries");
-            }
-        } catch (RuntimeException exception) {
-            failure = "texture_state_probe_exception_" + exception.getClass().getSimpleName();
-        } finally {
-            if (bindingCaptured) {
-                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousTextureBinding[0]);
-            }
-            if (activeTextureCaptured) {
-                GLES20.glActiveTexture(previousActiveTexture[0]);
-            }
-            String restoreError = probeError(operation + "_state_restore");
-            failure = appendProbeFailure(failure, restoreError);
-            if (activeTextureCaptured && bindingCaptured) {
-                int[] restoredActiveTexture = new int[1];
-                int[] restoredTextureBinding = new int[1];
-                GLES20.glGetIntegerv(GLES20.GL_ACTIVE_TEXTURE, restoredActiveTexture, 0);
-                String activeVerifyError = probeError(
-                        operation + "_active_texture_restore_verify");
-                failure = appendProbeFailure(failure, activeVerifyError);
-                if (activeVerifyError == null
-                        && restoredActiveTexture[0] != previousActiveTexture[0]) {
-                    failure = appendProbeFailure(failure,
-                            "active_texture_restore_mismatch_" + restoredActiveTexture[0]);
-                }
-                if (activeVerifyError == null) {
-                    GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-                    GLES20.glGetIntegerv(GLES20.GL_TEXTURE_BINDING_2D,
-                            restoredTextureBinding, 0);
-                    GLES20.glActiveTexture(previousActiveTexture[0]);
-                    String bindingVerifyError = probeError(
-                            operation + "_texture_binding_restore_verify");
-                    failure = appendProbeFailure(failure, bindingVerifyError);
-                    if (bindingVerifyError == null
-                            && restoredTextureBinding[0] != previousTextureBinding[0]) {
-                        failure = appendProbeFailure(failure,
-                                "texture_binding_restore_mismatch_"
-                                        + restoredTextureBinding[0]);
-                    }
-                }
-            }
-        }
-        return "{\"texture_id\":" + texture + ",\"is_texture\":" + isTexture
-                + ",\"min_filter\":" + PixelProbeResult.nullableInteger(minFilter[0])
-                + ",\"mag_filter\":" + PixelProbeResult.nullableInteger(magFilter[0])
-                + ",\"wrap_s\":" + PixelProbeResult.nullableInteger(wrapS[0])
-                + ",\"wrap_t\":" + PixelProbeResult.nullableInteger(wrapT[0])
-                + ",\"error\":" + (failure == null ? "null" : JSONObject.quote(failure)) + "}";
-    }
-
     private void logPresentationBaselineSurfaceInitialization(String event,
             boolean restoreLabelDrawn) {
         if (!BuildConfig.STASIS_RENDER_ACCEPTANCE
@@ -1368,6 +1269,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     static final class AcceptedSnapshotState {
         private int acceptedTexture;
         private int candidateTexture;
+        private int acceptedFramebuffer;
+        private int candidateFramebuffer;
         private int acceptedStorageWidth;
         private int acceptedStorageHeight;
         private int candidateStorageWidth;
@@ -1381,14 +1284,24 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         private int frameToken = -1;
         private long presentationSerial = -1L;
 
-        void initializeTextures(int accepted, int candidate) {
+        void initializeTargets(int accepted, int candidate,
+                int acceptedTarget, int candidateTarget) {
             acceptedTexture = accepted;
             candidateTexture = candidate;
+            acceptedFramebuffer = acceptedTarget;
+            candidateFramebuffer = candidateTarget;
             acceptedStorageWidth = 0;
             acceptedStorageHeight = 0;
             candidateStorageWidth = 0;
             candidateStorageHeight = 0;
             invalidate();
+        }
+
+        void setTargetStorage(int targetWidth, int targetHeight) {
+            acceptedStorageWidth = targetWidth;
+            acceptedStorageHeight = targetHeight;
+            candidateStorageWidth = targetWidth;
+            candidateStorageHeight = targetHeight;
         }
 
         void invalidate() {
@@ -1402,27 +1315,31 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             presentationSerial = -1L;
         }
 
-        void candidateCopyFailed() {
-            candidateStorageWidth = 0;
-            candidateStorageHeight = 0;
+        boolean canAdoptCandidate(int candidateWidth, int candidateHeight,
+                long candidateSerial, PresentationState presentation) {
+            return candidateTexture != 0 && candidateFramebuffer != 0
+                    && candidateWidth > 0 && candidateHeight > 0
+                    && candidateStorageWidth == candidateWidth
+                    && candidateStorageHeight == candidateHeight
+                    && presentation != null
+                    && presentation.canObserveSnapshot(candidateSerial);
         }
 
-        boolean adoptCandidate(boolean copied, int candidateWidth, int candidateHeight,
+        boolean adoptCandidate(boolean rendered, boolean composited,
+                int candidateWidth, int candidateHeight,
                 int candidateSurfaceGeneration, int candidateRendererGeneration,
                 int candidateDisplayGeneration, int candidateFrameToken, int candidateTrace,
                 long candidateSerial, PresentationState presentation) {
-            if (!copied || candidateTexture == 0 || candidateWidth <= 0
-                    || candidateHeight <= 0 || presentation == null
-                    || !presentation.canObserveSnapshot(candidateSerial)) {
-                candidateCopyFailed();
-                return false;
-            }
-            candidateStorageWidth = candidateWidth;
-            candidateStorageHeight = candidateHeight;
+            if (!rendered || !composited
+                    || !canAdoptCandidate(candidateWidth, candidateHeight,
+                            candidateSerial, presentation)) return false;
 
             int previousAcceptedTexture = acceptedTexture;
             acceptedTexture = candidateTexture;
             candidateTexture = previousAcceptedTexture;
+            int previousAcceptedFramebuffer = acceptedFramebuffer;
+            acceptedFramebuffer = candidateFramebuffer;
+            candidateFramebuffer = previousAcceptedFramebuffer;
             int previousAcceptedWidth = acceptedStorageWidth;
             int previousAcceptedHeight = acceptedStorageHeight;
             acceptedStorageWidth = candidateStorageWidth;
@@ -1444,18 +1361,18 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
         boolean isAvailableFor(int expectedWidth, int expectedHeight,
                 int expectedSurfaceGeneration, int expectedRendererGeneration) {
-            return available && acceptedTexture != 0
+            return available && acceptedTexture != 0 && acceptedFramebuffer != 0
                     && width == expectedWidth && height == expectedHeight
+                    && acceptedStorageWidth == expectedWidth
+                    && acceptedStorageHeight == expectedHeight
                     && surfaceGeneration == expectedSurfaceGeneration
                     && rendererGeneration == expectedRendererGeneration;
         }
 
         int acceptedTexture() { return acceptedTexture; }
         int candidateTexture() { return candidateTexture; }
-        boolean candidateStorageMatches(int expectedWidth, int expectedHeight) {
-            return candidateStorageWidth == expectedWidth
-                    && candidateStorageHeight == expectedHeight;
-        }
+        int acceptedFramebuffer() { return acceptedFramebuffer; }
+        int candidateFramebuffer() { return candidateFramebuffer; }
         boolean available() { return available; }
         int width() { return width; }
         int height() { return height; }
@@ -1540,6 +1457,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     }
 
     private void drawRestorePlaceholder() {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
         GLES20.glClearColor(15.0f / 255.0f, 20.0f / 255.0f, 28.0f / 255.0f, 1.0f);
@@ -1568,100 +1486,155 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         acceptedSnapshot.invalidate();
     }
 
-    private boolean captureAcceptedSnapshot(int frameToken, int trace, long presentationSerial) {
-        String copyFailure = null;
+    private boolean configureSnapshotTargets() {
         if (surfaceWidth <= 0 || surfaceHeight <= 0
-                || acceptedSnapshot.candidateTexture() == 0) {
-            copyFailure = "texture_or_surface_unavailable";
+                || acceptedSnapshot.acceptedTexture() == 0
+                || acceptedSnapshot.candidateTexture() == 0
+                || acceptedSnapshot.acceptedFramebuffer() == 0
+                || acceptedSnapshot.candidateFramebuffer() == 0) {
+            Log.e(LOG_TAG, "snapshot framebuffer names or surface dimensions are unavailable");
+            return false;
         }
-        int drawError = drainGlesErrors("candidate_draw_before_snapshot_copy");
-        if (copyFailure == null && drawError != GLES20.GL_NO_ERROR) {
-            copyFailure = "candidate_draw_gl_error_" + drawError;
-        }
-        if (BuildConfig.STASIS_RENDER_ACCEPTANCE
-                && failNextSnapshotCandidateCopyForAcceptance
-                && "candidate_copy_failure".equals(presentationBaselineReplayPhase)) {
-            logCandidateCopyPixelProbe(frameToken);
+        if (drainGlesErrors("before_snapshot_target_setup") != GLES20.GL_NO_ERROR) {
+            return false;
         }
         int[] previousActiveTexture = new int[1];
         int[] previousTextureBinding = new int[1];
         boolean activeTextureCaptured = false;
-        boolean bindingCaptured = false;
-        if (copyFailure == null) {
+        boolean textureBindingCaptured = false;
+        String failure = null;
+        try {
             GLES20.glGetIntegerv(GLES20.GL_ACTIVE_TEXTURE, previousActiveTexture, 0);
-            activeTextureCaptured = drainGlesErrors("snapshot_copy_active_texture_query")
+            activeTextureCaptured = drainGlesErrors("snapshot_target_active_texture_query")
                     == GLES20.GL_NO_ERROR;
-            if (!activeTextureCaptured) {
-                copyFailure = "active_texture_query_failed";
+            if (!activeTextureCaptured) failure = "active_texture_query_failed";
+            if (failure == null) {
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+                GLES20.glGetIntegerv(GLES20.GL_TEXTURE_BINDING_2D,
+                        previousTextureBinding, 0);
+                textureBindingCaptured = drainGlesErrors(
+                        "snapshot_target_texture_binding_query") == GLES20.GL_NO_ERROR;
+                if (!textureBindingCaptured) failure = "texture_binding_query_failed";
+            }
+            int[] snapshotTextures = {acceptedSnapshot.acceptedTexture(),
+                    acceptedSnapshot.candidateTexture()};
+            int[] snapshotFramebuffers = {acceptedSnapshot.acceptedFramebuffer(),
+                    acceptedSnapshot.candidateFramebuffer()};
+            for (int index = 0; failure == null && index < snapshotTextures.length; index += 1) {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, snapshotTextures[index]);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER,
+                        GLES20.GL_NEAREST);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER,
+                        GLES20.GL_NEAREST);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S,
+                        GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T,
+                        GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                        surfaceWidth, surfaceHeight, 0, GLES20.GL_RGBA,
+                        GLES20.GL_UNSIGNED_BYTE, null);
+                if (drainGlesErrors("snapshot_target_texture_storage") != GLES20.GL_NO_ERROR) {
+                    failure = "texture_storage_failed_" + index;
+                    break;
+                }
+                GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, snapshotFramebuffers[index]);
+                GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER,
+                        GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D,
+                        snapshotTextures[index], 0);
+                if (drainGlesErrors("snapshot_target_framebuffer_attach")
+                        != GLES20.GL_NO_ERROR) {
+                    failure = "framebuffer_attach_failed_" + index;
+                    break;
+                }
+                int status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER);
+                int statusError = drainGlesErrors("snapshot_target_framebuffer_status");
+                if (statusError != GLES20.GL_NO_ERROR) {
+                    failure = "framebuffer_status_query_failed_" + index;
+                } else if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
+                    failure = "framebuffer_incomplete_" + status;
+                }
+            }
+        } catch (RuntimeException exception) {
+            failure = "snapshot_target_setup_exception_" + exception.getClass().getSimpleName();
+        } finally {
+            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+            int framebufferRestoreError = drainGlesErrors("snapshot_target_window_restore");
+            if (framebufferRestoreError != GLES20.GL_NO_ERROR && failure == null) {
+                failure = "window_framebuffer_restore_failed";
+            }
+            if (textureBindingCaptured) {
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousTextureBinding[0]);
+            }
+            if (activeTextureCaptured) {
+                GLES20.glActiveTexture(previousActiveTexture[0]);
+            }
+            int textureRestoreError = drainGlesErrors("snapshot_target_texture_state_restore");
+            if (textureRestoreError != GLES20.GL_NO_ERROR && failure == null) {
+                failure = "texture_state_restore_failed";
             }
         }
-        if (copyFailure == null) {
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-            GLES20.glGetIntegerv(GLES20.GL_TEXTURE_BINDING_2D, previousTextureBinding, 0);
-            bindingCaptured = drainGlesErrors("snapshot_copy_binding_query")
-                    == GLES20.GL_NO_ERROR;
-            if (!bindingCaptured) copyFailure = "texture_binding_query_failed";
+        if (failure != null) {
+            Log.e(LOG_TAG, "snapshot framebuffer setup failed: " + failure);
+            return false;
         }
-        if (copyFailure == null) {
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, acceptedSnapshot.candidateTexture());
-            if (acceptedSnapshot.candidateStorageMatches(surfaceWidth, surfaceHeight)) {
-                GLES20.glCopyTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0,
-                        0, 0, surfaceWidth, surfaceHeight);
-            } else {
-                GLES20.glCopyTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
-                        0, 0, surfaceWidth, surfaceHeight, 0);
+        acceptedSnapshot.setTargetStorage(surfaceWidth, surfaceHeight);
+        return true;
+    }
+
+    private String renderAndPublishCandidate(int frameToken, int trace,
+            long presentationSerial) {
+        boolean injectPublicationFailure = BuildConfig.STASIS_RENDER_ACCEPTANCE
+                && failNextSnapshotCandidatePublicationForAcceptance
+                && "candidate_publication_failure".equals(presentationBaselineReplayPhase);
+        if (injectPublicationFailure) {
+            failNextSnapshotCandidatePublicationForAcceptance = false;
+        }
+        if (presentationBaselinePoisonAcceptance) {
+            if (!bindWindowFramebuffer("presentation_baseline_physical_poison_bind")) {
+                return "physical_poison_framebuffer_bind_failed";
             }
-            int copyError = drainGlesErrors("snapshot_candidate_copy");
-            if (copyError != GLES20.GL_NO_ERROR) {
-                copyFailure = "gles_copy_error_" + copyError;
+            GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+            GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
+            GLES20.glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+            if (drainGlesErrors("presentation_baseline_physical_poison_clear")
+                    != GLES20.GL_NO_ERROR) {
+                return "physical_poison_clear_failed";
             }
         }
-        if (bindingCaptured) {
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousTextureBinding[0]);
+        if (!acceptedSnapshot.canAdoptCandidate(surfaceWidth, surfaceHeight,
+                presentationSerial, presentation)) {
+            return "candidate_target_or_presentation_unavailable";
         }
-        if (activeTextureCaptured) {
-            GLES20.glActiveTexture(previousActiveTexture[0]);
+        if (drainGlesErrors("before_candidate_frame_draw") != GLES20.GL_NO_ERROR) {
+            return "preexisting_candidate_draw_gl_error";
         }
-        int restoreError = drainGlesErrors("snapshot_copy_state_restore");
-        if (restoreError != GLES20.GL_NO_ERROR && copyFailure == null) {
-            copyFailure = "gles_state_restore_error_" + restoreError;
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER,
+                acceptedSnapshot.candidateFramebuffer());
+        int bindError = drainGlesErrors("candidate_framebuffer_bind");
+        if (bindError != GLES20.GL_NO_ERROR) {
+            return "candidate_framebuffer_bind_gl_error_" + bindError;
         }
-        if (failNextSnapshotCandidateCopyForAcceptance) {
-            failNextSnapshotCandidateCopyForAcceptance = false;
-            if (copyFailure == null) copyFailure = "acceptance_injected";
+        drawFrame();
+        int drawError = drainGlesErrors("candidate_frame_draw");
+        if (drawError != GLES20.GL_NO_ERROR) {
+            return "candidate_frame_draw_gl_error_" + drawError;
         }
 
-        boolean copied = copyFailure == null;
-        if (!acceptedSnapshot.adoptCandidate(copied, surfaceWidth, surfaceHeight,
+        if (injectPublicationFailure) {
+            logCandidatePublicationPixelProbe("before_publication", frameToken);
+            return "acceptance_injected";
+        }
+
+        SnapshotReplayResult composite = drawSnapshotTextureToWindow(
+                acceptedSnapshot.candidateTexture(), "candidate_publication");
+        if (composite != SnapshotReplayResult.REPLAYED) {
+            return "candidate_composite_failed";
+        }
+        if (!acceptedSnapshot.adoptCandidate(true, true, surfaceWidth, surfaceHeight,
                 resourceLifecycle.surfaceGeneration(), resourceLifecycle.rendererGeneration(),
                 displayGeneration, frameToken, trace, presentationSerial, presentation)) {
-            if (copyFailure == null) copyFailure = "publication_serial_mismatch";
-            Log.w(LOG_TAG, "accepted frame candidate snapshot rejected: " + copyFailure);
-            if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
-                boolean candidateFault = "candidate_copy_failure"
-                        .equals(presentationBaselineReplayPhase);
-                Log.i(LOG_TAG, "Stasis Workshop presentation-baseline: {\"schema\":"
-                        + "\"stasis.workshop_present_only.v1\",\"event\":"
-                        + "\"accepted_snapshot_candidate_copy_failed\",\"phase\":"
-                        + JSONObject.quote(presentationBaselineReplayPhase == null
-                                ? "unspecified" : presentationBaselineReplayPhase)
-                        + ",\"candidate_frame_token\":" + frameToken
-                        + (candidateFault
-                                ? ",\"candidate_rect_rgba8\":[0,255,0,255]" : "")
-                        + ",\"copy_failure\":" + JSONObject.quote(copyFailure)
-                        + ",\"snapshot_retained\":" + acceptedSnapshot.available()
-                        + ",\"snapshot_frame_token\":" + acceptedSnapshot.frameToken()
-                        + ",\"snapshot_presentation_serial\":"
-                        + acceptedSnapshot.presentationSerial()
-                        + ",\"snapshot_display_generation\":"
-                        + acceptedSnapshot.displayGeneration()
-                        + ",\"presentation_serial\":" + presentation.serial()
-                        + ",\"surface_generation\":"
-                        + resourceLifecycle.surfaceGeneration()
-                        + ",\"renderer_generation\":"
-                        + resourceLifecycle.rendererGeneration() + "}");
-            }
-            return false;
+            return "candidate_adoption_rejected";
         }
         if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
             Log.i(LOG_TAG, "Stasis Workshop presentation-baseline: {\"schema\":"
@@ -1676,7 +1649,33 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     + ",\"snapshot_display_generation\":"
                     + acceptedSnapshot.displayGeneration() + "}");
         }
-        return true;
+        return null;
+    }
+
+    private void logCandidatePublicationFailure(int frameToken, String failure) {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE
+                || !"candidate_publication_failure".equals(presentationBaselineReplayPhase)) {
+            Log.w(LOG_TAG, "accepted frame candidate not published: " + failure);
+            return;
+        }
+        Log.i(LOG_TAG, "Stasis Workshop presentation-baseline: {\"schema\":"
+                + "\"stasis.workshop_present_only.v1\",\"event\":"
+                + "\"accepted_snapshot_candidate_publication_failed\",\"phase\":"
+                + JSONObject.quote(presentationBaselineReplayPhase)
+                + ",\"candidate_frame_token\":" + frameToken
+                + ("acceptance_injected".equals(failure)
+                        ? ",\"candidate_rect_rgba8\":[0,255,0,255]" : "")
+                + ",\"publication_failure\":" + JSONObject.quote(failure)
+                + ",\"snapshot_retained\":" + acceptedSnapshot.available()
+                + ",\"snapshot_frame_token\":" + acceptedSnapshot.frameToken()
+                + ",\"snapshot_presentation_serial\":"
+                + acceptedSnapshot.presentationSerial()
+                + ",\"snapshot_display_generation\":"
+                + acceptedSnapshot.displayGeneration()
+                + ",\"presentation_serial\":" + presentation.serial()
+                + ",\"surface_generation\":" + resourceLifecycle.surfaceGeneration()
+                + ",\"renderer_generation\":"
+                + resourceLifecycle.rendererGeneration() + "}");
     }
 
     private SnapshotReplayResult drawAcceptedSnapshot() {
@@ -1684,58 +1683,30 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 resourceLifecycle.surfaceGeneration(), resourceLifecycle.rendererGeneration())) {
             return SnapshotReplayResult.UNAVAILABLE;
         }
-        drainGlesErrors("before_snapshot_replay");
+        if (drainGlesErrors("before_snapshot_replay") != GLES20.GL_NO_ERROR) {
+            logAcceptedSnapshotReplayFailure("preexisting_replay_gl_error");
+            return SnapshotReplayResult.FAILED;
+        }
+        if (!bindWindowFramebuffer("snapshot_replay_window_bind")) {
+            logAcceptedSnapshotReplayFailure("window_framebuffer_bind_failed");
+            return SnapshotReplayResult.FAILED;
+        }
         if (failNextSnapshotReplayForAcceptance) {
             failNextSnapshotReplayForAcceptance = false;
             logAcceptedSnapshotReplayFailure("acceptance_injected");
             return SnapshotReplayResult.FAILED;
         }
-        finishPipeline();
-        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
-        GLES20.glDisable(GLES20.GL_BLEND);
-        GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
-        GLES20.glUseProgram(textureProgram);
-        GLES20.glUniform2f(textureResolution, surfaceWidth, surfaceHeight);
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, acceptedSnapshot.acceptedTexture());
-        GLES20.glUniform1i(textureSampler, 0);
-        GLES20.glEnableVertexAttribArray(texturePosition);
-        GLES20.glEnableVertexAttribArray(textureCoordinate);
-        GLES20.glEnableVertexAttribArray(textureColor);
-        acceptedSnapshotVertices.clear();
-        putAcceptedSnapshotVertex(0.0f, 0.0f, 0.0f, 1.0f);
-        putAcceptedSnapshotVertex(0.0f, surfaceHeight, 0.0f, 0.0f);
-        putAcceptedSnapshotVertex(surfaceWidth, 0.0f, 1.0f, 1.0f);
-        putAcceptedSnapshotVertex(surfaceWidth, 0.0f, 1.0f, 1.0f);
-        putAcceptedSnapshotVertex(0.0f, surfaceHeight, 0.0f, 0.0f);
-        putAcceptedSnapshotVertex(surfaceWidth, surfaceHeight, 1.0f, 0.0f);
-        acceptedSnapshotVertices.position(0);
-        GLES20.glVertexAttribPointer(texturePosition, 2, GLES20.GL_FLOAT, false,
-                TEXTURE_VERTEX_BYTES, acceptedSnapshotVertices);
-        acceptedSnapshotVertices.position(2);
-        GLES20.glVertexAttribPointer(textureCoordinate, 2, GLES20.GL_FLOAT, false,
-                TEXTURE_VERTEX_BYTES, acceptedSnapshotVertices);
-        acceptedSnapshotVertices.position(4);
-        GLES20.glVertexAttribPointer(textureColor, 4, GLES20.GL_FLOAT, false,
-                TEXTURE_VERTEX_BYTES, acceptedSnapshotVertices);
-        acceptedSnapshotVertices.position(0);
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, VERTICES_PER_QUAD);
-        int replayError = drainGlesErrors("accepted_snapshot_replay_draw");
-        GLES20.glDisableVertexAttribArray(textureColor);
-        GLES20.glDisableVertexAttribArray(textureCoordinate);
-        GLES20.glDisableVertexAttribArray(texturePosition);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
-        GLES20.glEnable(GLES20.GL_BLEND);
-        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-        int cleanupError = drainGlesErrors("accepted_snapshot_replay_cleanup");
-        if (replayError != GLES20.GL_NO_ERROR || cleanupError != GLES20.GL_NO_ERROR) {
-            logAcceptedSnapshotReplayFailure("gles_error_"
-                    + (replayError != GLES20.GL_NO_ERROR ? replayError : cleanupError));
+        SnapshotReplayResult replay = drawSnapshotTextureToWindow(
+                acceptedSnapshot.acceptedTexture(), "accepted_snapshot_replay");
+        if (replay != SnapshotReplayResult.REPLAYED) {
+            logAcceptedSnapshotReplayFailure("snapshot_texture_composite_failed");
             return SnapshotReplayResult.FAILED;
         }
         if (BuildConfig.STASIS_RENDER_ACCEPTANCE
-                && "candidate_copy_failure".equals(presentationBaselineReplayPhase)) {
-            logCandidateRollbackPixelProbe(frameI32.get(I_FRAME_TOKEN));
+                && ("candidate_publication_failure".equals(presentationBaselineReplayPhase)
+                        || "no_present".equals(presentationBaselineReplayPhase)
+                        || "reject".equals(presentationBaselineReplayPhase))) {
+            logAcceptedSnapshotPixelProbe("after_replay", frameI32.get(I_FRAME_TOKEN));
         }
         if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
             Log.i(LOG_TAG, "Stasis Workshop presentation-baseline: {\"schema\":"
@@ -1763,48 +1734,103 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return SnapshotReplayResult.REPLAYED;
     }
 
-    private void logCandidateCopyPixelProbe(int candidateFrameToken) {
-        int[] point = candidateFailureProbePoint();
-        PixelProbeResult drawable = point == null ? PixelProbeResult.failure("invalid_sample_point")
-                : readRgba8Pixel(0, point[0], point[1], "candidate_drawable_before_copy");
-        int snapshotTexture = acceptedSnapshot.acceptedTexture();
-        PixelProbeResult snapshot = point == null ? PixelProbeResult.failure("invalid_sample_point")
-                : snapshotTexture == 0 ? PixelProbeResult.failure("accepted_texture_unavailable")
-                : readRgba8Pixel(snapshotTexture, point[0], point[1],
-                        "accepted_snapshot_before_copy");
-        Log.i(LOG_TAG, "Stasis Workshop presentation pixel-probe: {\"schema\":"
-                + "\"stasis.workshop_snapshot_probe.v1\",\"event\":\"candidate_before_copy\","
-                + "\"phase\":\"candidate_copy_failure\",\"candidate_frame_token\":"
-                + candidateFrameToken + ",\"snapshot_frame_token\":"
-                + acceptedSnapshot.frameToken() + ",\"snapshot_presentation_serial\":"
-                + acceptedSnapshot.presentationSerial() + ",\"snapshot_texture_id\":"
-                + snapshotTexture + ",\"sample_logical\":[160,90]"
-                + ",\"sample_gles\":" + pointJson(point)
-                + ",\"surface_size\":[" + surfaceWidth + "," + surfaceHeight
-                + "],\"surface_generation\":" + resourceLifecycle.surfaceGeneration()
-                + ",\"renderer_generation\":" + resourceLifecycle.rendererGeneration()
-                + ",\"display_generation\":" + displayGeneration
-                + ",\"drawable_probe\":" + drawable.toJson()
-                + ",\"accepted_texture_probe\":" + snapshot.toJson() + "}");
+    private SnapshotReplayResult drawSnapshotTextureToWindow(int texture, String operation) {
+        finishPipeline();
+        if (!bindWindowFramebuffer(operation + "_window_bind")) {
+            return SnapshotReplayResult.FAILED;
+        }
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
+        GLES20.glUseProgram(textureProgram);
+        GLES20.glUniform2f(textureResolution, surfaceWidth, surfaceHeight);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
+        GLES20.glUniform1i(textureSampler, 0);
+        GLES20.glEnableVertexAttribArray(texturePosition);
+        GLES20.glEnableVertexAttribArray(textureCoordinate);
+        GLES20.glEnableVertexAttribArray(textureColor);
+        acceptedSnapshotVertices.clear();
+        putAcceptedSnapshotVertex(0.0f, 0.0f, 0.0f, 1.0f);
+        putAcceptedSnapshotVertex(0.0f, surfaceHeight, 0.0f, 0.0f);
+        putAcceptedSnapshotVertex(surfaceWidth, 0.0f, 1.0f, 1.0f);
+        putAcceptedSnapshotVertex(surfaceWidth, 0.0f, 1.0f, 1.0f);
+        putAcceptedSnapshotVertex(0.0f, surfaceHeight, 0.0f, 0.0f);
+        putAcceptedSnapshotVertex(surfaceWidth, surfaceHeight, 1.0f, 0.0f);
+        acceptedSnapshotVertices.position(0);
+        GLES20.glVertexAttribPointer(texturePosition, 2, GLES20.GL_FLOAT, false,
+                TEXTURE_VERTEX_BYTES, acceptedSnapshotVertices);
+        acceptedSnapshotVertices.position(2);
+        GLES20.glVertexAttribPointer(textureCoordinate, 2, GLES20.GL_FLOAT, false,
+                TEXTURE_VERTEX_BYTES, acceptedSnapshotVertices);
+        acceptedSnapshotVertices.position(4);
+        GLES20.glVertexAttribPointer(textureColor, 4, GLES20.GL_FLOAT, false,
+                TEXTURE_VERTEX_BYTES, acceptedSnapshotVertices);
+        acceptedSnapshotVertices.position(0);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, VERTICES_PER_QUAD);
+        int drawError = drainGlesErrors(operation + "_draw");
+        GLES20.glDisableVertexAttribArray(textureColor);
+        GLES20.glDisableVertexAttribArray(textureCoordinate);
+        GLES20.glDisableVertexAttribArray(texturePosition);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        int cleanupError = drainGlesErrors(operation + "_cleanup");
+        if (drawError != GLES20.GL_NO_ERROR || cleanupError != GLES20.GL_NO_ERROR) {
+            return SnapshotReplayResult.FAILED;
+        }
+        frameDrawCalls += 1;
+        frameTextureBinds += 1;
+        frameSubmittedQuads += 1;
+        return SnapshotReplayResult.REPLAYED;
     }
 
-    private void logCandidateRollbackPixelProbe(int candidateFrameToken) {
+    private boolean bindWindowFramebuffer(String operation) {
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
+        return drainGlesErrors(operation) == GLES20.GL_NO_ERROR;
+    }
+
+    private void logCandidatePublicationPixelProbe(String event, int candidateFrameToken) {
         int[] point = candidateFailureProbePoint();
-        PixelProbeResult drawable = point == null ? PixelProbeResult.failure("invalid_sample_point")
-                : readRgba8Pixel(0, point[0], point[1], "candidate_rollback_drawable");
+        PixelProbeResult accepted = point == null ? PixelProbeResult.failure("invalid_sample_point")
+                : readRgba8Pixel(acceptedSnapshot.acceptedFramebuffer(), point[0], point[1],
+                        "candidate_publication_accepted");
+        PixelProbeResult candidate = point == null ? PixelProbeResult.failure("invalid_sample_point")
+                : readRgba8Pixel(acceptedSnapshot.candidateFramebuffer(), point[0], point[1],
+                        "candidate_publication_candidate");
+        PixelProbeResult physical = point == null ? PixelProbeResult.failure("invalid_sample_point")
+                : readRgba8Pixel(0, point[0], point[1], "candidate_publication_window");
         Log.i(LOG_TAG, "Stasis Workshop presentation pixel-probe: {\"schema\":"
-                + "\"stasis.workshop_snapshot_probe.v1\",\"event\":\"candidate_after_rollback\","
-                + "\"phase\":\"candidate_copy_failure\",\"candidate_frame_token\":"
-                + candidateFrameToken + ",\"snapshot_frame_token\":"
-                + acceptedSnapshot.frameToken() + ",\"snapshot_presentation_serial\":"
-                + acceptedSnapshot.presentationSerial() + ",\"snapshot_texture_id\":"
-                + acceptedSnapshot.acceptedTexture() + ",\"sample_logical\":[160,90]"
-                + ",\"sample_gles\":" + pointJson(point)
-                + ",\"surface_size\":[" + surfaceWidth + "," + surfaceHeight
-                + "],\"surface_generation\":" + resourceLifecycle.surfaceGeneration()
-                + ",\"renderer_generation\":" + resourceLifecycle.rendererGeneration()
-                + ",\"display_generation\":" + displayGeneration
-                + ",\"drawable_probe\":" + drawable.toJson() + "}");
+                + "\"stasis.workshop_snapshot_probe.v2\",\"event\":"
+                + JSONObject.quote(event) + ",\"phase\":\"candidate_publication_failure\""
+                + ",\"candidate_frame_token\":" + candidateFrameToken
+                + ",\"snapshot_frame_token\":" + acceptedSnapshot.frameToken()
+                + ",\"snapshot_presentation_serial\":"
+                + acceptedSnapshot.presentationSerial() + ",\"presentation_serial\":"
+                + presentation.serial() + ",\"sample_gles\":" + pointJson(point)
+                + ",\"accepted_texture_pixel\":" + accepted.toJson()
+                + ",\"candidate_texture_pixel\":" + candidate.toJson()
+                + ",\"physical_target_pixel\":" + physical.toJson() + "}");
+    }
+
+    private void logAcceptedSnapshotPixelProbe(String event, int frameToken) {
+        int[] point = candidateFailureProbePoint();
+        PixelProbeResult accepted = point == null ? PixelProbeResult.failure("invalid_sample_point")
+                : readRgba8Pixel(acceptedSnapshot.acceptedFramebuffer(), point[0], point[1],
+                        "accepted_replay_snapshot");
+        PixelProbeResult physical = point == null ? PixelProbeResult.failure("invalid_sample_point")
+                : readRgba8Pixel(0, point[0], point[1], "accepted_replay_window");
+        Log.i(LOG_TAG, "Stasis Workshop presentation pixel-probe: {\"schema\":"
+                + "\"stasis.workshop_snapshot_probe.v2\",\"event\":"
+                + JSONObject.quote(event) + ",\"phase\":"
+                + JSONObject.quote(presentationBaselineReplayPhase)
+                + ",\"frame_token\":" + frameToken
+                + ",\"snapshot_frame_token\":" + acceptedSnapshot.frameToken()
+                + ",\"snapshot_presentation_serial\":"
+                + acceptedSnapshot.presentationSerial() + ",\"presentation_serial\":"
+                + presentation.serial() + ",\"sample_gles\":" + pointJson(point)
+                + ",\"accepted_texture_pixel\":" + accepted.toJson()
+                + ",\"physical_target_pixel\":" + physical.toJson() + "}");
     }
 
     private int[] candidateFailureProbePoint() {
@@ -1824,25 +1850,28 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return point == null ? "null" : "[" + point[0] + "," + point[1] + "]";
     }
 
-    private PixelProbeResult readRgba8Pixel(int texture, int x, int y, String operation) {
+    private PixelProbeResult readRgba8Pixel(int framebuffer, int x, int y, String operation) {
         PixelProbeResult result = new PixelProbeResult();
         int[] previousFramebuffer = new int[1];
         int[] previousReadFramebuffer = new int[1];
-        int[] probeFramebuffer = new int[1];
         ByteBuffer pixel = ByteBuffer.allocateDirect(4);
-        boolean previousFramebufferKnown = false;
-        boolean temporaryFramebufferBound = false;
+        boolean separateReadFramebuffer = false;
+        boolean framebufferSaved = false;
+        boolean framebufferChanged = false;
         String failure = probeError(operation + "_preexisting_errors");
-        String glVersion = GLES20.glGetString(GLES20.GL_VERSION);
-        boolean separateReadFramebuffer = supportsSeparateReadFramebuffer(glVersion);
-        result.readFramebufferSupported = separateReadFramebuffer;
-        String versionError = probeError(operation + "_version_query");
-        if (failure == null) failure = versionError;
+        String version = GLES20.glGetString(GLES20.GL_VERSION);
+        if (failure == null) failure = probeError(operation + "_version_query");
+        separateReadFramebuffer = failure == null && supportsSeparateReadFramebuffer(version);
+        result.separateReadFramebuffer = separateReadFramebuffer;
         try {
+            if (failure == null && framebuffer < 0) failure = "invalid_framebuffer_name";
             if (failure == null) {
                 GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, previousFramebuffer, 0);
-                failure = probeError(operation + "_framebuffer_query");
-                if (failure == null) result.previousFramebufferId = previousFramebuffer[0];
+                failure = probeError(operation + "_draw_framebuffer_query");
+                if (failure == null) {
+                    result.previousFramebufferId = previousFramebuffer[0];
+                    framebufferSaved = true;
+                }
             }
             if (failure == null && separateReadFramebuffer) {
                 GLES30.glGetIntegerv(GLES30.GL_READ_FRAMEBUFFER_BINDING,
@@ -1856,56 +1885,16 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 result.previousReadFramebufferId = previousFramebuffer[0];
             }
             if (failure == null) {
-                previousFramebufferKnown = true;
-            }
-            if (failure == null && texture != 0) {
-                GLES20.glGenFramebuffers(1, probeFramebuffer, 0);
-                failure = probeError(operation + "_framebuffer_create");
-                if (failure == null && probeFramebuffer[0] == 0) {
-                    failure = "framebuffer_create_returned_zero";
-                }
-                if (failure == null) {
-                    result.probeFramebufferId = probeFramebuffer[0];
-                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, probeFramebuffer[0]);
-                    temporaryFramebufferBound = true;
-                    failure = probeError(operation + "_framebuffer_bind");
-                }
-                if (failure == null) {
-                    GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER,
-                            GLES20.GL_COLOR_ATTACHMENT0, GLES20.GL_TEXTURE_2D, texture, 0);
-                    failure = probeError(operation + "_texture_attach");
-                }
-                if (failure == null) {
-                    int[] attachmentObjectName = new int[1];
-                    GLES20.glGetFramebufferAttachmentParameteriv(GLES20.GL_FRAMEBUFFER,
-                            GLES20.GL_COLOR_ATTACHMENT0,
-                            GLES20.GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,
-                            attachmentObjectName, 0);
-                    failure = probeError(operation + "_attachment_object_query");
-                    if (failure == null) result.attachmentObjectName = attachmentObjectName[0];
-                }
-                if (failure == null) {
-                    result.framebufferStatus = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER);
-                    failure = probeError(operation + "_framebuffer_status");
-                    if (failure == null
-                            && result.framebufferStatus != GLES20.GL_FRAMEBUFFER_COMPLETE) {
-                        failure = "framebuffer_incomplete_" + result.framebufferStatus;
-                    }
-                }
-            }
-            if (failure == null) {
                 if (separateReadFramebuffer) {
-                    int[] readFramebuffer = new int[1];
-                    GLES30.glGetIntegerv(GLES30.GL_READ_FRAMEBUFFER_BINDING, readFramebuffer, 0);
-                    failure = probeError(operation + "_read_framebuffer_at_read");
-                    if (failure == null) result.readFramebufferIdAtRead = readFramebuffer[0];
+                    GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER, framebuffer);
                 } else {
-                    result.readFramebufferIdAtRead = texture == 0
-                            ? previousFramebuffer[0] : probeFramebuffer[0];
+                    GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, framebuffer);
                 }
+                failure = probeError(operation + "_framebuffer_bind");
+                framebufferChanged = failure == null;
             }
             if (failure == null) {
-                result.framebufferId = result.readFramebufferIdAtRead;
+                result.framebufferIdAtRead = framebuffer;
                 GLES20.glReadPixels(x, y, 1, 1, GLES20.GL_RGBA,
                         GLES20.GL_UNSIGNED_BYTE, pixel);
                 failure = probeError(operation + "_read_pixels");
@@ -1915,51 +1904,32 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 }
             }
         } catch (RuntimeException exception) {
-            failure = "probe_exception_" + exception.getClass().getSimpleName();
+            failure = "pixel_probe_exception_" + exception.getClass().getSimpleName();
         } finally {
-            if (temporaryFramebufferBound && previousFramebufferKnown) {
+            if (framebufferChanged && framebufferSaved) {
                 if (separateReadFramebuffer) {
-                    GLES30.glBindFramebuffer(GLES30.GL_DRAW_FRAMEBUFFER, previousFramebuffer[0]);
-                    String drawRestoreFailure = probeError(
-                            operation + "_draw_framebuffer_restore");
-                    failure = appendProbeFailure(failure, drawRestoreFailure);
                     GLES30.glBindFramebuffer(GLES30.GL_READ_FRAMEBUFFER,
                             previousReadFramebuffer[0]);
-                    String readRestoreFailure = probeError(
-                            operation + "_read_framebuffer_restore");
-                    failure = appendProbeFailure(failure, readRestoreFailure);
                 } else {
                     GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, previousFramebuffer[0]);
-                    String restoreFailure = probeError(operation + "_framebuffer_restore");
-                    failure = appendProbeFailure(failure, restoreFailure);
                 }
-                int[] restoredFramebuffer = new int[1];
-                GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, restoredFramebuffer, 0);
-                String verifyFailure = probeError(operation + "_framebuffer_restore_verify");
-                failure = appendProbeFailure(failure, verifyFailure);
-                if (verifyFailure == null && restoredFramebuffer[0] != previousFramebuffer[0]) {
-                    failure = appendProbeFailure(failure,
-                            "framebuffer_restore_mismatch_" + restoredFramebuffer[0]);
-                }
-                if (separateReadFramebuffer) {
-                    int[] restoredReadFramebuffer = new int[1];
-                    GLES30.glGetIntegerv(GLES30.GL_READ_FRAMEBUFFER_BINDING,
-                            restoredReadFramebuffer, 0);
-                    String readVerifyFailure = probeError(
-                            operation + "_read_framebuffer_restore_verify");
-                    failure = appendProbeFailure(failure, readVerifyFailure);
-                    if (readVerifyFailure == null
-                            && restoredReadFramebuffer[0] != previousReadFramebuffer[0]) {
-                        failure = appendProbeFailure(failure,
-                                "read_framebuffer_restore_mismatch_"
-                                        + restoredReadFramebuffer[0]);
+                failure = appendProbeFailure(failure, probeError(operation + "_framebuffer_restore"));
+                if (failure == null) {
+                    int[] restored = new int[1];
+                    if (separateReadFramebuffer) {
+                        GLES30.glGetIntegerv(GLES30.GL_READ_FRAMEBUFFER_BINDING, restored, 0);
+                        failure = probeError(operation + "_read_framebuffer_restore_verify");
+                        if (failure == null && restored[0] != previousReadFramebuffer[0]) {
+                            failure = "read_framebuffer_restore_mismatch_" + restored[0];
+                        }
+                    } else {
+                        GLES20.glGetIntegerv(GLES20.GL_FRAMEBUFFER_BINDING, restored, 0);
+                        failure = probeError(operation + "_framebuffer_restore_verify");
+                        if (failure == null && restored[0] != previousFramebuffer[0]) {
+                            failure = "framebuffer_restore_mismatch_" + restored[0];
+                        }
                     }
                 }
-            }
-            if (probeFramebuffer[0] != 0) {
-                GLES20.glDeleteFramebuffers(1, probeFramebuffer, 0);
-                String deleteFailure = probeError(operation + "_framebuffer_delete");
-                failure = appendProbeFailure(failure, deleteFailure);
             }
         }
         result.error = failure;
@@ -1991,14 +1961,10 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     }
 
     private static final class PixelProbeResult {
-        int framebufferId = -1;
+        int framebufferIdAtRead = -1;
         int previousFramebufferId = -1;
         int previousReadFramebufferId = -1;
-        int probeFramebufferId;
-        int readFramebufferIdAtRead = -1;
-        int attachmentObjectName = -1;
-        int framebufferStatus = -1;
-        boolean readFramebufferSupported;
+        boolean separateReadFramebuffer;
         int[] rgba;
         String error;
 
@@ -2010,17 +1976,11 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
         String toJson() {
             return "{\"ok\":" + (error == null)
-                    + ",\"framebuffer_id\":" + nullableInteger(framebufferId)
+                    + ",\"framebuffer_id\":" + nullableInteger(framebufferIdAtRead)
                     + ",\"previous_framebuffer_id\":" + nullableInteger(previousFramebufferId)
                     + ",\"previous_read_framebuffer_id\":"
                     + nullableInteger(previousReadFramebufferId)
-                    + ",\"probe_framebuffer_id\":" + probeFramebufferId
-                    + ",\"read_framebuffer_supported\":" + readFramebufferSupported
-                    + ",\"read_framebuffer_id_at_read\":"
-                    + nullableInteger(readFramebufferIdAtRead)
-                    + ",\"attachment_object_name\":"
-                    + nullableInteger(attachmentObjectName)
-                    + ",\"framebuffer_status\":" + nullableInteger(framebufferStatus)
+                    + ",\"separate_read_framebuffer\":" + separateReadFramebuffer
                     + ",\"rgba8\":" + (rgba == null ? "null"
                             : "[" + rgba[0] + "," + rgba[1] + "," + rgba[2] + "," + rgba[3] + "]")
                     + ",\"error\":" + (error == null ? "null" : JSONObject.quote(error)) + "}";
@@ -2030,7 +1990,6 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             return value < 0 ? "null" : Integer.toString(value);
         }
     }
-
     private int drainGlesErrors(String operation) {
         int firstError = GLES20.GL_NO_ERROR;
         for (int count = 0; count < 32; count += 1) {
@@ -2191,10 +2150,6 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         activePipeline = PIPELINE_NONE;
         resetClipState();
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
-        if (presentationBaselinePoisonAcceptance) {
-            GLES20.glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-        }
         GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
         GLES20.glViewport(displayViewport.x,

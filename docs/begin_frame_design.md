@@ -50,15 +50,15 @@ order before canonical commands after the canonical frame has passed its
 publication gate; `clearPhysicalTarget` and `beginLogicalFrame` are distinct
 backend operations.
 
-On Workshop GLES, copying the rendered candidate into a scratch snapshot is
-part of publication. The renderer adopts that texture and advances the
-presentation token/serial only after the copy succeeds. If candidate copying
-fails, it keeps the prior snapshot and identity and attempts to redraw that
-image before the surface swaps; an outstanding capture remains pending. If
-replaying the prior image fails, the renderer enters `RESTORE_FAILED`, draws
-the initialized restore placeholder, and retries resource restoration on a
-later valid frame. Ordinary no-PRESENT and rejected frames do not enter
-restoration.
+On Workshop GLES, the renderer draws a valid candidate into its own framebuffer,
+then composites it to the physical target. It adopts the candidate target and
+advances the presentation token/serial only after both rendering and compositing
+succeed. If either step fails, it retains the prior target and identity and
+replays that image before the surface swaps; an outstanding capture remains
+pending. If replaying the prior image fails, the renderer enters
+`RESTORE_FAILED`, draws the initialized restore placeholder, and retries
+resource restoration on a later valid frame. Ordinary no-PRESENT and rejected
+frames do not enter restoration.
 
 ## Evidence and current call graph
 
@@ -179,7 +179,7 @@ snapshot or persistent render-target API is introduced here.
 | Desktop SDL JIT and native runner | Validation precedes native begin; begin owns event/resource setup. Negotiated `STASIS_RENDER_VERSION` (v8) no-PRESENT frames call `stasis_begin_frame` for maintenance, then return before target writes. The v7 compatibility path may draw into an unpublished target, while `stasis_end_frame` remains present-only. Rejected frames return before begin and target drawing. Reset events may publish the host loading frame. Submission counters and actual successful display are not interchangeable (`stasis_end_frame` can withhold for restore). | Keep event/resource setup on no-present frames, and keep all fallible resource preparation before the physical clear. Preserve screenshot-before-present and event pumping on withheld frames. |
 | Generated SDL mobile AOT | Runtime binds/initializes arrays, invokes lifecycle entries, skips submission on nonzero entry result and while paused. Same SDL consumer. [Mobile runtime test](../runtime/tests/stasis_mobile_runtime_test.c) counts begin/end/submit and checks early-stop paths. | Generated wrapper must be retained/exported and used on device; resetting only desktop JIT would leave stale mobile commands. Pause/resume and renderer restore remain host-owned. |
 | Web Wasm/WebGL2 | Canonical replay validates and gates on PRESENT before batcher preparation or target writes. It clears the physical buffer black, preserves supported legacy-command replay before canonical commands, and applies guest CLEAR only to the logical canvas. Context loss is a separate lifecycle. | Preserve legacy command order while keeping writes behind the publication gate. Do not claim existing error handling is atomic. Context loss cannot be repaired by guest begin. Tests use mocked GL unless paired with browser pixel evidence. |
-| Android Workshop / preview GLES2 | Java validates before guest resource preparation or drawing. PRESENT gates resource preparation and the request from `MainActivity`; GL cleanup uses the render thread without requesting a swap. An unavoidable same-surface callback replays the accepted same-generation GPU snapshot. After that replay or an initialized reset placeholder, `onDrawFrame` drains deferred sprite releases because the visible image no longer depends on guest textures. Surface callbacks initialize the dark restore screen and discard the old snapshot. Frame tokens, synchronization, captures and release queues are host mechanisms. | Reset before bridge render and keep host snapshot/copy ownership; never reset arrays while GL consumes them. Preserve token/capture rejection behavior, bounded restore and releases after successful presentation. Test invalid/no-present frames against the last accepted image on a live surface and test reset callbacks against the initialized restore screen. |
+| Android Workshop / preview GLES2 | Java validates before guest resource preparation or drawing. PRESENT gates resource preparation and the request from `MainActivity`; GL cleanup uses the render thread without requesting a swap. An unavoidable same-surface callback replays the accepted same-generation GPU snapshot. After that replay or an initialized reset placeholder, `onDrawFrame` drains deferred sprite releases because the visible image no longer depends on guest textures. Surface callbacks initialize the dark restore screen and discard the old snapshot. Frame tokens, synchronization, captures and release queues are host mechanisms. | Reset before bridge render and keep host framebuffer/snapshot ownership; never reset arrays while GL consumes them. Preserve token/capture rejection behavior, bounded restore and releases after successful presentation. Test invalid/no-present frames against the last accepted image on a live surface and test reset callbacks against the initialized restore screen. |
 | Legacy/conformance adapters | `stasis_begin_frame` remains a native exported symbol in [stasis_graphics.def](../runtime/stasis_graphics.def). Two web smoke samples import `web_begin_frame`; Web executes their commands through the same WebGL2 renderer. [Resource docs](renderer_resource_lifecycle.md) mention historical desktop GL, but the audited production C begin/submit is SDL. | Do not infer a separate shipping GL lifecycle from historical prose. Preserve exported C compatibility until explicitly retired; rename private Web method independently of its legacy import. |
 
 Neither the canonical order kinds nor v7 run metadata define multiple passes:
