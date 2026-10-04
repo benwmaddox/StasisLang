@@ -92,14 +92,14 @@ public final class WorkshopSoakAcceptanceTest {
                 new StasisPreviewRenderer.PresentationState();
         snapshot.initializeTextures(11, 22);
 
-        assertTrue(snapshot.adoptCandidate(true, 624, 962, 3, 4,
+        assertTrue(snapshot.adoptCandidate(true, 624, 962, 3, 4, 5,
                 100, 7, 1L, presentation));
         assertTrue(presentation.matches(100, 7, 0L));
         int acceptedTexture = snapshot.acceptedTexture();
         int candidateTexture = snapshot.candidateTexture();
         long committedSerial = presentation.serial();
 
-        assertFalse(snapshot.adoptCandidate(false, 624, 962, 3, 4,
+        assertFalse(snapshot.adoptCandidate(false, 624, 962, 3, 4, 6,
                 101, 8, 2L, presentation));
 
         assertTrue(snapshot.isAvailableFor(624, 962, 3, 4));
@@ -109,6 +109,7 @@ public final class WorkshopSoakAcceptanceTest {
         assertEquals(962, snapshot.height());
         assertEquals(3, snapshot.surfaceGeneration());
         assertEquals(4, snapshot.rendererGeneration());
+        assertEquals(5, snapshot.displayGeneration());
         assertEquals(100, snapshot.frameToken());
         assertEquals(1L, snapshot.presentationSerial());
         assertEquals(committedSerial, presentation.serial());
@@ -116,10 +117,11 @@ public final class WorkshopSoakAcceptanceTest {
         assertTrue(presentation.matches(100, 7, 0L));
         assertFalse(presentation.matches(101, 8, committedSerial));
 
-        assertTrue(snapshot.adoptCandidate(true, 624, 962, 3, 4,
+        assertTrue(snapshot.adoptCandidate(true, 624, 962, 3, 4, 7,
                 102, 9, 2L, presentation));
         assertEquals(candidateTexture, snapshot.acceptedTexture());
         assertEquals(102, snapshot.frameToken());
+        assertEquals(7, snapshot.displayGeneration());
         assertEquals(2L, presentation.serial());
         assertEquals(102, presentation.token());
         assertTrue(presentation.matches(102, 9, committedSerial));

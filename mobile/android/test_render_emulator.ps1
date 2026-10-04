@@ -738,6 +738,21 @@ $script:presentationBaselinePrefixes = @(
     @{ kind = "renderer"; prefix = "Stasis Workshop present-only baseline: " }
 )
 
+function Resolve-PresentationBaselineReceiptKind([string]$PrefixKind, [string]$Event) {
+    if ($PrefixKind -ne "poison") { return $PrefixKind }
+    if ($Event -eq "backbuffer_poison") { return "poison" }
+    if ($Event -in @(
+        "accepted_snapshot_captured",
+        "accepted_snapshot_candidate_copy_failed",
+        "accepted_snapshot_replayed",
+        "accepted_snapshot_replay_failed",
+        "accepted_snapshot_restore_placeholder"
+    )) {
+        return "renderer"
+    }
+    throw "presentation-baseline shared-prefix event '$Event' is not recognized"
+}
+
 function Read-PresentationBaselineReceipts([string]$Package) {
     $processId = Find-PackageProcessId $Package
     if (-not $processId) { return [pscustomobject]@{ process_id = ""; receipts = @() } }
@@ -756,11 +771,7 @@ function Read-PresentationBaselineReceipts([string]$Package) {
             if ($receipt.schema -ne "stasis.workshop_present_only.v1") {
                 throw "presentation-baseline $($spec.kind) receipt has an unexpected schema"
             }
-            $receiptKind = if ($spec.kind -eq "poison" -and $receipt.event -eq "accepted_snapshot_replayed") {
-                "renderer"
-            } else {
-                $spec.kind
-            }
+            $receiptKind = Resolve-PresentationBaselineReceiptKind $spec.kind ([string]$receipt.event)
             $receipt | Add-Member -NotePropertyName receipt_kind -NotePropertyValue $receiptKind -Force
             [void]$receipts.Add($receipt)
             break
@@ -1015,12 +1026,65 @@ function Save-AndVerifyPresentationBaselineCapture(
     }
 }
 
+function Assert-NoAcceptedSnapshotCapturedSince(
+    [object]$WaitResult,
+    [int]$AfterReceiptCount,
+    [string]$Description
+) {
+    $receipts = @($WaitResult.receipts)
+    $start = [math]::Max(0, [math]::Min($AfterReceiptCount, $receipts.Count))
+    $end = [math]::Max($start, [math]::Min([int]$WaitResult.receipt_index, $receipts.Count))
+    for ($index = $start; $index -lt $end; $index += 1) {
+        $receipt = $receipts[$index]
+        if ($receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_captured") {
+            throw "$Description was not quiescent: a new accepted snapshot was captured after physical-target poison"
+        }
+    }
+}
+
 function Assert-PresentationPoisonReceipt([object]$Receipt, [int[]]$ExpectedSurfaceSize) {
     $size = @($Receipt.surface_size | ForEach-Object { [int]$_ })
     if ($Receipt.receipt_kind -ne "poison" -or $Receipt.event -ne "backbuffer_poison" -or
-        $Receipt.physical_target_poisoned -ne $true -or $size.Count -ne 2 -or
-        $size[0] -ne $ExpectedSurfaceSize[0] -or $size[1] -ne $ExpectedSurfaceSize[1]) {
-        throw "presentation-baseline poison receipt did not cover the current physical surface"
+        $Receipt.physical_target_poisoned -ne $true -or $Receipt.snapshot_current -ne $true -or
+        [string]::IsNullOrEmpty([string]$Receipt.snapshot_frame_token) -or
+        $null -eq $Receipt.snapshot_presentation_serial -or $null -eq $Receipt.presentation_serial -or
+        [long]$Receipt.snapshot_presentation_serial -ne [long]$Receipt.presentation_serial -or
+        $size.Count -ne 2 -or $size[0] -le 0 -or $size[1] -le 0 -or
+        $size[0] -ne $ExpectedSurfaceSize[0] -or $size[1] -ne $ExpectedSurfaceSize[1] -or
+        $null -eq $Receipt.surface_generation -or [long]$Receipt.surface_generation -lt 0 -or
+        $null -eq $Receipt.renderer_generation -or [long]$Receipt.renderer_generation -lt 0 -or
+        $null -eq $Receipt.snapshot_display_generation -or [long]$Receipt.snapshot_display_generation -lt 0) {
+        throw "presentation-baseline poison receipt did not identify the current accepted snapshot on the physical surface"
+    }
+}
+
+function Assert-PresentationSnapshotReference([object]$Receipt, [object]$Checkpoint, [string]$Description) {
+    if ([string]$Receipt.snapshot_frame_token -ne [string]$Checkpoint.snapshot_frame_token -or
+        $null -eq $Receipt.snapshot_presentation_serial -or
+        $null -eq $Receipt.presentation_serial -or
+        [long]$Receipt.snapshot_presentation_serial -ne [long]$Checkpoint.snapshot_presentation_serial -or
+        [long]$Receipt.presentation_serial -ne [long]$Checkpoint.presentation_serial -or
+        $null -eq $Receipt.snapshot_display_generation -or
+        [long]$Receipt.snapshot_display_generation -ne [long]$Checkpoint.snapshot_display_generation -or
+        $null -eq $Receipt.surface_generation -or
+        [long]$Receipt.surface_generation -ne [long]$Checkpoint.surface_generation -or
+        $null -eq $Receipt.renderer_generation -or
+        [long]$Receipt.renderer_generation -ne [long]$Checkpoint.renderer_generation) {
+        throw "$Description did not retain the accepted snapshot token, serial, or generations from the poison checkpoint"
+    }
+}
+
+function Assert-PresentationPublishedOnSnapshotGeneration([object]$Receipt, [object]$Checkpoint, [string]$Description) {
+    $expectedSurface = @($Checkpoint.surface_size | ForEach-Object { [int]$_ })
+    $actualSurface = @($Receipt.surface_size | ForEach-Object { [int]$_ })
+    if ($null -eq $Receipt.display_generation -or $null -eq $Receipt.surface_generation -or
+        $null -eq $Receipt.renderer_generation -or
+        [long]$Receipt.display_generation -ne [long]$Checkpoint.snapshot_display_generation -or
+        [long]$Receipt.surface_generation -ne [long]$Checkpoint.surface_generation -or
+        [long]$Receipt.renderer_generation -ne [long]$Checkpoint.renderer_generation -or
+        $expectedSurface.Count -ne 2 -or $actualSurface.Count -ne 2 -or
+        ($expectedSurface -join ",") -ne ($actualSurface -join ",")) {
+        throw "$Description did not publish on the accepted snapshot's surface, renderer, and display generations"
     }
 }
 
@@ -1054,53 +1118,44 @@ function Assert-PresentationForcedRedrawControl([object]$Receipt, [object]$Fault
 function Assert-PresentationSnapshotReplay(
     [object]$Receipt,
     [object]$FaultReceipt,
-    [object]$LastPresent,
+    [object]$Checkpoint,
     [string]$FaultPhase
 ) {
     $expectedFrameValid = $FaultPhase -eq "no_present"
     $expectedFlags = if ($FaultPhase -eq "no_present") { 0 } else { 2 }
-    $expectedSurface = @($LastPresent.surface_size | ForEach-Object { [int]$_ })
+    Assert-PresentationSnapshotReference $Receipt $Checkpoint ("presentation-baseline " + $FaultPhase + " snapshot replay")
+    $expectedSurface = @($Checkpoint.surface_size | ForEach-Object { [int]$_ })
     $actualSurface = @($Receipt.surface_size | ForEach-Object { [int]$_ })
     if ($Receipt.receipt_kind -ne "renderer" -or $Receipt.event -ne "accepted_snapshot_replayed" -or
         $Receipt.phase -ne $FaultPhase -or $Receipt.frame_valid -ne $expectedFrameValid -or
         $Receipt.requests_present -ne $false -or [int]$Receipt.flags -ne $expectedFlags -or
         [string]$Receipt.frame_token -ne [string]$FaultReceipt.frame_token -or
         [int]$Receipt.magic -ne [int]$FaultReceipt.magic -or
-        [string]$Receipt.snapshot_frame_token -ne [string]$LastPresent.frame_token -or
-        $null -eq $Receipt.snapshot_presentation_serial -or
-        $null -eq $Receipt.presentation_serial -or
-        [long]$Receipt.snapshot_presentation_serial -ne [long]$LastPresent.presentation_serial -or
-        [long]$Receipt.presentation_serial -ne [long]$LastPresent.presentation_serial -or
         $expectedSurface.Count -ne 2 -or $actualSurface.Count -ne 2 -or
-        ($expectedSurface -join ",") -ne ($actualSurface -join ",") -or
-        [long]$Receipt.surface_generation -ne [long]$LastPresent.surface_generation -or
-        [long]$Receipt.renderer_generation -ne [long]$LastPresent.renderer_generation) {
+        ($expectedSurface -join ",") -ne ($actualSurface -join ",")) {
         throw ("presentation-baseline " + $FaultPhase +
             " forced redraw did not replay the last accepted snapshot with the rejected frame state")
     }
 }
 
-function Assert-PresentationCandidateCopyFailure([object]$Receipt, [object]$LastPresent) {
+function Assert-PresentationCandidateCopyFailure([object]$Receipt, [object]$Checkpoint) {
     $candidateRgba = @($Receipt.candidate_rect_rgba8 | ForEach-Object { [int]$_ })
+    Assert-PresentationSnapshotReference $Receipt $Checkpoint "candidate-copy failure"
     if ($Receipt.receipt_kind -ne "renderer" -or
         $Receipt.event -ne "accepted_snapshot_candidate_copy_failed" -or
         $Receipt.phase -ne "candidate_copy_failure" -or
         [string]::IsNullOrEmpty([string]$Receipt.candidate_frame_token) -or
-        [string]$Receipt.candidate_frame_token -eq [string]$LastPresent.frame_token -or
+        [string]$Receipt.candidate_frame_token -eq [string]$Checkpoint.snapshot_frame_token -or
         ($candidateRgba -join ",") -ne "0,255,0,255" -or
         $Receipt.copy_failure -ne "acceptance_injected" -or
-        $Receipt.snapshot_retained -ne $true -or
-        [string]$Receipt.snapshot_frame_token -ne [string]$LastPresent.frame_token -or
-        $null -eq $Receipt.snapshot_presentation_serial -or
-        $null -eq $Receipt.presentation_serial -or
-        [long]$Receipt.snapshot_presentation_serial -ne [long]$LastPresent.presentation_serial -or
-        [long]$Receipt.presentation_serial -ne [long]$LastPresent.presentation_serial) {
+        $Receipt.snapshot_retained -ne $true) {
         throw "candidate-copy failure receipt did not prove the visibly different candidate was rejected while retaining the accepted snapshot"
     }
 }
 
-function Assert-PresentationCandidateSnapshotReplay([object]$Receipt, [object]$CandidateFailure, [object]$LastPresent) {
-    $expectedSurface = @($LastPresent.surface_size | ForEach-Object { [int]$_ })
+function Assert-PresentationCandidateSnapshotReplay([object]$Receipt, [object]$CandidateFailure, [object]$Checkpoint) {
+    Assert-PresentationSnapshotReference $Receipt $Checkpoint "candidate-copy rollback replay"
+    $expectedSurface = @($Checkpoint.surface_size | ForEach-Object { [int]$_ })
     $actualSurface = @($Receipt.surface_size | ForEach-Object { [int]$_ })
     if ($Receipt.receipt_kind -ne "renderer" -or
         $Receipt.event -ne "accepted_snapshot_replayed" -or
@@ -1108,15 +1163,8 @@ function Assert-PresentationCandidateSnapshotReplay([object]$Receipt, [object]$C
         $Receipt.frame_valid -ne $true -or $Receipt.requests_present -ne $true -or
         [int]$Receipt.flags -ne 2 -or
         [string]$Receipt.frame_token -ne [string]$CandidateFailure.candidate_frame_token -or
-        [string]$Receipt.snapshot_frame_token -ne [string]$LastPresent.frame_token -or
-        $null -eq $Receipt.snapshot_presentation_serial -or
-        $null -eq $Receipt.presentation_serial -or
-        [long]$Receipt.snapshot_presentation_serial -ne [long]$LastPresent.presentation_serial -or
-        [long]$Receipt.presentation_serial -ne [long]$LastPresent.presentation_serial -or
         $expectedSurface.Count -ne 2 -or $actualSurface.Count -ne 2 -or
-        ($expectedSurface -join ",") -ne ($actualSurface -join ",") -or
-        [long]$Receipt.surface_generation -ne [long]$LastPresent.surface_generation -or
-        [long]$Receipt.renderer_generation -ne [long]$LastPresent.renderer_generation) {
+        ($expectedSurface -join ",") -ne ($actualSurface -join ",")) {
         throw "candidate-copy failure did not replay the prior accepted snapshot without advancing presentation identity"
     }
 }
@@ -1132,45 +1180,35 @@ function Assert-PresentationReplayFailureSubmission([object]$Receipt) {
     }
 }
 
-function Assert-PresentationReplayFailure([object]$Receipt, [object]$FaultReceipt, [object]$LastPresent) {
+function Assert-PresentationReplayFailure([object]$Receipt, [object]$FaultReceipt, [object]$Checkpoint) {
+    Assert-PresentationSnapshotReference $Receipt $Checkpoint "snapshot replay failure"
     if ($Receipt.receipt_kind -ne "renderer" -or
         $Receipt.event -ne "accepted_snapshot_replay_failed" -or
         $Receipt.phase -ne "snapshot_replay_failure" -or
         [string]$Receipt.frame_token -ne [string]$FaultReceipt.frame_token -or
         [int]$Receipt.magic -ne 0 -or [int]$Receipt.flags -ne 2 -or
         $Receipt.failure -ne "acceptance_injected" -or
-        $Receipt.snapshot_retained -ne $true -or
-        [string]$Receipt.snapshot_frame_token -ne [string]$LastPresent.frame_token -or
-        $null -eq $Receipt.snapshot_presentation_serial -or
-        $null -eq $Receipt.presentation_serial -or
-        [long]$Receipt.snapshot_presentation_serial -ne [long]$LastPresent.presentation_serial -or
-        [long]$Receipt.presentation_serial -ne [long]$LastPresent.presentation_serial -or
-        [long]$Receipt.surface_generation -ne [long]$LastPresent.surface_generation -or
-        [long]$Receipt.renderer_generation -ne [long]$LastPresent.renderer_generation) {
+        $Receipt.snapshot_retained -ne $true) {
         throw "snapshot replay failure receipt did not retain the last accepted frame identity and serial"
     }
 }
 
-function Assert-PresentationRestoreFailurePlaceholder([object]$Receipt, [object]$LastPresent) {
+function Assert-PresentationRestoreFailurePlaceholder([object]$Receipt, [object]$Checkpoint) {
     $size = @($Receipt.surface_size | ForEach-Object { [int]$_ })
     $background = @($Receipt.background_rgba8 | ForEach-Object { [int]$_ })
     $label = @($Receipt.restore_label_rgba8 | ForEach-Object { [int]$_ })
+    Assert-PresentationSnapshotReference $Receipt $Checkpoint "snapshot restore placeholder"
     if ($Receipt.receipt_kind -ne "renderer" -or
         $Receipt.event -ne "accepted_snapshot_restore_placeholder" -or
         $Receipt.phase -ne "snapshot_replay_failure" -or
         $Receipt.resource_state -ne "RESTORE_FAILED" -or
         $Receipt.placeholder_initialized -ne $true -or
         $Receipt.snapshot_retained -ne $true -or
-        [string]$Receipt.snapshot_frame_token -ne [string]$LastPresent.frame_token -or
-        $null -eq $Receipt.snapshot_presentation_serial -or
-        $null -eq $Receipt.presentation_serial -or
-        [long]$Receipt.snapshot_presentation_serial -ne [long]$LastPresent.presentation_serial -or
-        [long]$Receipt.presentation_serial -ne [long]$LastPresent.presentation_serial -or
         $size.Count -ne 2 -or $size[0] -le 0 -or $size[1] -le 0 -or
         ($background -join ",") -ne "15,20,28,255" -or
         ($label -join ",") -ne "66,153,225,255" -or
-        [long]$Receipt.surface_generation -ne [long]$LastPresent.surface_generation -or
-        [long]$Receipt.renderer_generation -ne [long]$LastPresent.renderer_generation) {
+        $size[0] -ne [int]$Checkpoint.surface_size[0] -or
+        $size[1] -ne [int]$Checkpoint.surface_size[1]) {
         throw "snapshot replay failure did not enter RESTORE_FAILED with the retained frame identity and initialized placeholder"
     }
     if ($null -eq $Receipt.restore_attempts -or $null -eq $Receipt.restore_failures -or
@@ -1179,27 +1217,22 @@ function Assert-PresentationRestoreFailurePlaceholder([object]$Receipt, [object]
     }
 }
 
-function Assert-PresentationRecoveryPresentPair([object]$Pair, [object]$LastPresent) {
-    $expectedSize = @($LastPresent.surface_size | ForEach-Object { [int]$_ })
+function Assert-PresentationRecoveryPresentPair([object]$Pair, [object]$Checkpoint) {
     foreach ($receipt in @($Pair.first, $Pair.second)) {
         Assert-PresentationPresentReceipt $receipt
-        $actualSize = @($receipt.surface_size | ForEach-Object { [int]$_ })
-        if ([string]$receipt.frame_token -eq [string]$LastPresent.frame_token -or
-            [long]$receipt.presentation_serial -le [long]$LastPresent.presentation_serial -or
-            $expectedSize.Count -ne 2 -or ($expectedSize -join ",") -ne ($actualSize -join ",") -or
-            [long]$receipt.surface_generation -ne [long]$LastPresent.surface_generation -or
-            [long]$receipt.renderer_generation -ne [long]$LastPresent.renderer_generation -or
-            [long]$receipt.display_generation -ne [long]$LastPresent.display_generation) {
+        Assert-PresentationPublishedOnSnapshotGeneration $receipt $Checkpoint "RESTORE_FAILED recovery PRESENT"
+        if ([string]$receipt.frame_token -eq [string]$Checkpoint.snapshot_frame_token -or
+            [long]$receipt.presentation_serial -le [long]$Checkpoint.presentation_serial) {
             throw "RESTORE_FAILED recovery did not publish a fresh frame on the original surface and renderer generations"
         }
     }
 }
 
-function Assert-PresentationAlphaProbeReceipt([object]$Receipt, [object]$LastPresent) {
+function Assert-PresentationAlphaProbeReceipt([object]$Receipt, [object]$Checkpoint) {
     $probeLogical = @($Receipt.probe.logical | ForEach-Object { [int]$_ })
     $expectedRgba = @($Receipt.probe.expected_rgba8 | ForEach-Object { [int]$_ })
     $logicalSize = @($Receipt.logical_size | ForEach-Object { [int]$_ })
-    $expectedSurface = @($LastPresent.surface_size | ForEach-Object { [int]$_ })
+    $expectedSurface = @($Checkpoint.surface_size | ForEach-Object { [int]$_ })
     $actualSurface = @($Receipt.surface_size | ForEach-Object { [int]$_ })
     $rects = @($Receipt.rects)
     $firstRect = if ($rects.Count -gt 0) { @($rects[0] | ForEach-Object { [double]$_ }) } else { @() }
@@ -1211,20 +1244,21 @@ function Assert-PresentationAlphaProbeReceipt([object]$Receipt, [object]$LastPre
         $rectsMatch = [math]::Abs($firstRect[$index] - $firstRectExpected[$index]) -le 0.001 -and
             [math]::Abs($secondRect[$index] - $secondRectExpected[$index]) -le 0.001
     }
+    Assert-PresentationPublishedOnSnapshotGeneration $Receipt $Checkpoint "alpha probe PRESENT"
     if ($Receipt.receipt_kind -ne "renderer" -or $Receipt.event -ne "alpha_probe_present" -or
         $Receipt.test_id -ne "PRESENTATION-BASELINE" -or
         [int]$Receipt.flags -ne 2 -or $Receipt.physical_target_poisoned -ne $true -or
         [string]::IsNullOrEmpty([string]$Receipt.frame_token) -or
-        [string]$Receipt.frame_token -eq [string]$LastPresent.frame_token -or
+        [string]$Receipt.frame_token -eq [string]$Checkpoint.snapshot_frame_token -or
         $null -eq $Receipt.presentation_serial -or
-        [long]$Receipt.presentation_serial -ne ([long]$LastPresent.presentation_serial + 1) -or
+        [long]$Receipt.presentation_serial -ne ([long]$Checkpoint.presentation_serial + 1) -or
         $logicalSize.Count -ne 2 -or ($logicalSize -join ",") -ne "640,360" -or
         $probeLogical.Count -ne 2 -or ($probeLogical -join ",") -ne "100,65" -or
         $expectedRgba.Count -ne 4 -or ($expectedRgba -join ",") -ne "115,147,10,255" -or
         -not $rectsMatch -or $expectedSurface.Count -ne 2 -or $actualSurface.Count -ne 2 -or
         ($expectedSurface -join ",") -ne ($actualSurface -join ",") -or
-        [long]$Receipt.surface_generation -ne [long]$LastPresent.surface_generation -or
-        [long]$Receipt.renderer_generation -ne [long]$LastPresent.renderer_generation) {
+        [long]$Receipt.surface_generation -ne [long]$Checkpoint.surface_generation -or
+        [long]$Receipt.renderer_generation -ne [long]$Checkpoint.renderer_generation) {
         throw "presentation-baseline alpha probe receipt did not describe a fresh blended probe frame"
     }
 }
@@ -1309,7 +1343,6 @@ function Assert-PresentationBaselineMatrix(
             elapsed_seconds = $coldPair.elapsed_seconds
         })
         $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "repeat-present" "present" $coldPair.second))
-        $lastPresent = $coldPair.second
 
         $surfaceXml = Join-Path $artifactRoot "presentation-baseline-current-window.xml"
         Remove-Item -LiteralPath $surfaceXml -Force -ErrorAction SilentlyContinue
@@ -1317,16 +1350,10 @@ function Assert-PresentationBaselineMatrix(
         $beforePause = (Read-PresentationBaselineReceipts $Package).receipts.Count
         Send-PresentationBaselineControl $Package "pause"
         $pause = Wait-PresentationBaselineControl $Package "pause" $beforePause $processId
-        $pausedPresents = @($pause.receipts | Where-Object {
-            $_.receipt_kind -eq "renderer" -and $_.event -eq "present"
-        })
-        if ($pausedPresents.Count -eq 0) { throw "pause acknowledgement had no accepted PRESENT baseline" }
-        $lastPresent = $pausedPresents[$pausedPresents.Count - 1]
-        Assert-PresentationPresentReceipt $lastPresent
         $matrix.stages.Add([pscustomobject]@{
             name = "pause"
             receipt = $pause.receipt
-            last_accepted_present = $lastPresent
+            cold_repeat_present = $coldPair.second
         })
 
         $beforeCandidatePoison = (Read-PresentationBaselineReceipts $Package).receipts.Count
@@ -1337,6 +1364,7 @@ function Assert-PresentationBaselineMatrix(
         }
         $candidatePoison = Wait-PresentationBaselineReceipt $Package $candidatePoisonPredicate $beforeCandidatePoison $RenderTimeoutSeconds "candidate-copy failure physical-target poison" $processId
         Assert-PresentationPoisonReceipt $candidatePoison.receipt @($currentSurface[2], $currentSurface[3])
+        $candidateCheckpoint = $candidatePoison.receipt
         $beforeCandidateFailure = $candidatePoison.marker_count
         Send-PresentationBaselineControl $Package "candidate_copy_failure"
         $candidateFailurePredicate = {
@@ -1344,13 +1372,14 @@ function Assert-PresentationBaselineMatrix(
             $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_candidate_copy_failed"
         }
         $candidateFailure = Wait-PresentationBaselineReceipt $Package $candidateFailurePredicate $beforeCandidateFailure $RenderTimeoutSeconds "injected candidate snapshot-copy failure" $processId
-        Assert-PresentationCandidateCopyFailure $candidateFailure.receipt $lastPresent
+        Assert-PresentationCandidateCopyFailure $candidateFailure.receipt $candidateCheckpoint
         $candidateReplayPredicate = {
             param($receipt)
             $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_replayed"
         }
         $candidateReplay = Wait-PresentationBaselineReceipt $Package $candidateReplayPredicate $candidateFailure.next_receipt_index $RenderTimeoutSeconds "candidate-copy failure snapshot rollback" $processId
-        Assert-PresentationCandidateSnapshotReplay $candidateReplay.receipt $candidateFailure.receipt $lastPresent
+        Assert-NoAcceptedSnapshotCapturedSince $candidateReplay $candidatePoison.next_receipt_index "candidate-copy rollback"
+        Assert-PresentationCandidateSnapshotReplay $candidateReplay.receipt $candidateFailure.receipt $candidateCheckpoint
         $candidateUnexpectedPresents = @($candidateReplay.receipts | Select-Object -Skip $beforeCandidateFailure | Where-Object {
             $_.receipt_kind -eq "renderer" -and $_.event -eq "present"
         })
@@ -1360,10 +1389,11 @@ function Assert-PresentationBaselineMatrix(
         $matrix.stages.Add([pscustomobject]@{
             name = "candidate-copy-failure"
             poison = $candidatePoison.receipt
+            accepted_snapshot_checkpoint = $candidateCheckpoint
             candidate_copy_failure = $candidateFailure.receipt
             rollback_replay = $candidateReplay.receipt
         })
-        $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "candidate-copy-failure-retained-red" "present" $lastPresent))
+        $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "candidate-copy-failure-retained-red" "present" $candidateReplay.receipt))
 
         foreach ($faultPhase in @("no_present", "reject")) {
             $beforePoison = (Read-PresentationBaselineReceipts $Package).receipts.Count
@@ -1374,6 +1404,7 @@ function Assert-PresentationBaselineMatrix(
             }
             $poison = Wait-PresentationBaselineReceipt $Package $poisonPredicate $beforePoison $RenderTimeoutSeconds ($faultPhase + " physical-target poison") $processId
             Assert-PresentationPoisonReceipt $poison.receipt @($currentSurface[2], $currentSurface[3])
+            $acceptedSnapshotCheckpoint = $poison.receipt
 
             $beforeFault = $poison.marker_count
             Send-PresentationBaselineControl $Package $faultPhase
@@ -1384,6 +1415,7 @@ function Assert-PresentationBaselineMatrix(
             }.GetNewClosure()
             $fault = Wait-PresentationBaselineReceipt $Package $faultPredicate $beforeFault $RenderTimeoutSeconds ($faultPhase + " non-publishing submission") $processId
             Assert-PresentationFaultReceipt $fault.receipt $faultPhase
+            Assert-NoAcceptedSnapshotCapturedSince $fault $poison.next_receipt_index ($faultPhase + " non-publishing submission")
             $beforeRedraw = $fault.marker_count
             Send-PresentationBaselineControl $Package "redraw"
             $forcedRedrawPredicate = {
@@ -1397,7 +1429,8 @@ function Assert-PresentationBaselineMatrix(
                 $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_replayed"
             }
             $replay = Wait-PresentationBaselineReceipt $Package $replayPredicate $forcedRedraw.next_receipt_index $RenderTimeoutSeconds ($faultPhase + " accepted snapshot replay") $processId
-            Assert-PresentationSnapshotReplay $replay.receipt $fault.receipt $lastPresent $faultPhase
+            Assert-NoAcceptedSnapshotCapturedSince $replay $poison.next_receipt_index ($faultPhase + " snapshot replay")
+            Assert-PresentationSnapshotReplay $replay.receipt $fault.receipt $acceptedSnapshotCheckpoint $faultPhase
             $unexpectedPresents = @($replay.receipts | Select-Object -Skip $beforeRedraw | Where-Object {
                 $_.receipt_kind -eq "renderer" -and $_.event -eq "present"
             })
@@ -1407,11 +1440,12 @@ function Assert-PresentationBaselineMatrix(
             $matrix.stages.Add([pscustomobject]@{
                 name = $faultPhase
                 poison = $poison.receipt
+                accepted_snapshot_checkpoint = $acceptedSnapshotCheckpoint
                 submission = $fault.receipt
                 forced_redraw = $forcedRedraw.receipt
                 snapshot_replay = $replay.receipt
             })
-            $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "retained-after-$faultPhase" "present" $lastPresent))
+            $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "retained-after-$faultPhase" "present" $replay.receipt))
             if ($faultPhase -eq "reject") {
                 $beforeAlphaProbe = (Read-PresentationBaselineReceipts $Package).receipts.Count
                 Send-PresentationBaselineControl $Package "alpha_after_replay"
@@ -1420,15 +1454,14 @@ function Assert-PresentationBaselineMatrix(
                     $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "alpha_probe_present"
                 }
                 $alphaProbe = Wait-PresentationBaselineReceipt $Package $alphaPredicate $beforeAlphaProbe $RenderTimeoutSeconds "alpha probe after accepted-snapshot replay" $processId
-                Assert-PresentationAlphaProbeReceipt $alphaProbe.receipt $lastPresent
+                Assert-PresentationAlphaProbeReceipt $alphaProbe.receipt $acceptedSnapshotCheckpoint
                 $matrix.stages.Add([pscustomobject]@{
                     name = "alpha-probe-after-replay"
-                    source_present = $lastPresent
+                    accepted_snapshot_checkpoint = $acceptedSnapshotCheckpoint
                     receipt = $alphaProbe.receipt
                     elapsed_seconds = $alphaProbe.elapsed_seconds
                 })
                 $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "alpha-probe-after-replay" "present-alpha-probe" $alphaProbe.receipt))
-                $lastPresent = $alphaProbe.receipt
             }
         }
 
@@ -1440,6 +1473,7 @@ function Assert-PresentationBaselineMatrix(
         }
         $replayFailurePoison = Wait-PresentationBaselineReceipt $Package $replayFailurePoisonPredicate $beforeReplayFailurePoison $RenderTimeoutSeconds "snapshot replay failure physical-target poison" $processId
         Assert-PresentationPoisonReceipt $replayFailurePoison.receipt @($currentSurface[2], $currentSurface[3])
+        $replayFailureCheckpoint = $replayFailurePoison.receipt
         $beforeReplayFailureSubmission = $replayFailurePoison.marker_count
         Send-PresentationBaselineControl $Package "snapshot_replay_failure"
         $replayFailureSubmissionPredicate = {
@@ -1448,6 +1482,7 @@ function Assert-PresentationBaselineMatrix(
         }
         $replayFailureSubmission = Wait-PresentationBaselineReceipt $Package $replayFailureSubmissionPredicate $beforeReplayFailureSubmission $RenderTimeoutSeconds "snapshot replay failure invalid submission" $processId
         Assert-PresentationReplayFailureSubmission $replayFailureSubmission.receipt
+        Assert-NoAcceptedSnapshotCapturedSince $replayFailureSubmission $replayFailurePoison.next_receipt_index "snapshot replay failure submission"
         $beforeReplayFailureRedraw = $replayFailureSubmission.marker_count
         Send-PresentationBaselineControl $Package "redraw"
         $replayFailureRedrawPredicate = {
@@ -1461,7 +1496,8 @@ function Assert-PresentationBaselineMatrix(
             $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_replay_failed"
         }
         $replayFailed = Wait-PresentationBaselineReceipt $Package $replayFailedPredicate $replayFailureRedraw.next_receipt_index $RenderTimeoutSeconds "injected accepted-snapshot replay failure" $processId
-        Assert-PresentationReplayFailure $replayFailed.receipt $replayFailureSubmission.receipt $lastPresent
+        Assert-NoAcceptedSnapshotCapturedSince $replayFailed $replayFailurePoison.next_receipt_index "snapshot replay failure callback"
+        Assert-PresentationReplayFailure $replayFailed.receipt $replayFailureSubmission.receipt $replayFailureCheckpoint
         $replayFailurePresents = @($replayFailed.receipts | Select-Object -Skip $beforeReplayFailureRedraw | Where-Object {
             $_.receipt_kind -eq "renderer" -and $_.event -eq "present"
         })
@@ -1473,10 +1509,12 @@ function Assert-PresentationBaselineMatrix(
             $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_restore_placeholder"
         }
         $restorePlaceholder = Wait-PresentationBaselineReceipt $Package $restorePlaceholderPredicate $replayFailed.next_receipt_index $RenderTimeoutSeconds "RESTORE_FAILED initialized placeholder" $processId
-        Assert-PresentationRestoreFailurePlaceholder $restorePlaceholder.receipt $lastPresent
+        Assert-NoAcceptedSnapshotCapturedSince $restorePlaceholder $replayFailurePoison.next_receipt_index "RESTORE_FAILED placeholder"
+        Assert-PresentationRestoreFailurePlaceholder $restorePlaceholder.receipt $replayFailureCheckpoint
         $matrix.stages.Add([pscustomobject]@{
             name = "snapshot-replay-failure"
             poison = $replayFailurePoison.receipt
+            accepted_snapshot_checkpoint = $replayFailureCheckpoint
             submission = $replayFailureSubmission.receipt
             forced_redraw = $replayFailureRedraw.receipt
             replay_failure = $replayFailed.receipt
@@ -1491,41 +1529,24 @@ function Assert-PresentationBaselineMatrix(
             throw "RESTORE_FAILED recovery resume did not rearm the bounded PRESENT evidence sequence"
         }
         $restoreRecoveryPair = Wait-PresentationBaselinePresentPair $Package $restoreRecoveryResume.next_receipt_index $RenderTimeoutSeconds "same-surface RESTORE_FAILED recovery PRESENT pair" $processId
-        Assert-PresentationRecoveryPresentPair $restoreRecoveryPair $lastPresent
+        Assert-PresentationRecoveryPresentPair $restoreRecoveryPair $replayFailureCheckpoint
         $matrix.stages.Add([pscustomobject]@{
             name = "snapshot-replay-failure-same-surface-recovery"
+            accepted_snapshot_checkpoint = $replayFailureCheckpoint
             resume_ack = $restoreRecoveryResume.receipt
             first = $restoreRecoveryPair.first
             second = $restoreRecoveryPair.second
             elapsed_seconds = $restoreRecoveryPair.elapsed_seconds
         })
         $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "snapshot-replay-failure-recovered-present" "present" $restoreRecoveryPair.second))
-        $lastPresent = $restoreRecoveryPair.second
 
         $beforeRecoveryPause = (Read-PresentationBaselineReceipts $Package).receipts.Count
         Send-PresentationBaselineControl $Package "pause"
         $recoveryPause = Wait-PresentationBaselineControl $Package "pause" $beforeRecoveryPause $processId
-        $recoveryPausedPresents = @($recoveryPause.receipts | Select-Object -Skip $beforeRecoveryPause | Where-Object {
-            $_.receipt_kind -eq "renderer" -and $_.event -eq "present"
-        })
-        if ($recoveryPausedPresents.Count -gt 0) {
-            $lastPausedPresent = $recoveryPausedPresents[$recoveryPausedPresents.Count - 1]
-            Assert-PresentationPresentReceipt $lastPausedPresent
-            $lastPausedSize = @($lastPausedPresent.surface_size | ForEach-Object { [int]$_ })
-            $recoveredSize = @($restoreRecoveryPair.second.surface_size | ForEach-Object { [int]$_ })
-            if ([long]$lastPausedPresent.presentation_serial -lt [long]$restoreRecoveryPair.second.presentation_serial -or
-                ($lastPausedSize -join ",") -ne ($recoveredSize -join ",") -or
-                [long]$lastPausedPresent.surface_generation -ne [long]$restoreRecoveryPair.second.surface_generation -or
-                [long]$lastPausedPresent.renderer_generation -ne [long]$restoreRecoveryPair.second.renderer_generation -or
-                [long]$lastPausedPresent.display_generation -ne [long]$restoreRecoveryPair.second.display_generation) {
-                throw "pause-after-recovery observed a PRESENT outside the restored surface generation"
-            }
-            $lastPresent = $lastPausedPresent
-        }
         $matrix.stages.Add([pscustomobject]@{
             name = "pause-after-snapshot-replay-recovery"
             receipt = $recoveryPause.receipt
-            last_accepted_present = $lastPresent
+            recovery_present_evidence = $restoreRecoveryPair.second
         })
 
         Complete-PresentationLifecycleVideo $coldVideo "transactional replay-failure recovery and pause observed"
@@ -1582,8 +1603,10 @@ function Assert-PresentationBaselineMatrix(
         Start-Sleep -Milliseconds 900
         $background = Read-PresentationBaselineReceipts $Package
         if ($background.process_id -ne $processId) { throw "Workshop process changed while backgrounded" }
-        $backgroundPresents = @($background.receipts | Select-Object -Skip $beforeHome | Where-Object { $_.receipt_kind -eq "renderer" -and $_.event -eq "present" })
-        if ($backgroundPresents.Count -gt 0) { throw "renderer published a test PRESENT while Workshop was backgrounded" }
+        $backgroundPresents = @($background.receipts | Select-Object -Skip $beforeHome | Where-Object {
+            $_.receipt_kind -eq "renderer" -and $_.event -in @("present", "accepted_snapshot_captured")
+        })
+        if ($backgroundPresents.Count -gt 0) { throw "renderer accepted a new presentation frame while Workshop was backgrounded" }
         Invoke-Adb @("shell", "am", "start", "-W", "--activity-single-top", "-n", "$Package/com.stasislang.workshop.MainActivity") | Out-Null
         $homePair = Wait-PresentationBaselinePresentPair $Package $background.receipts.Count $RenderTimeoutSeconds "HOME/background-resume PRESENT pair" $processId
         $lastPresent = $homePair.second

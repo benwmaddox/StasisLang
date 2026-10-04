@@ -1104,8 +1104,19 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
         Log.i(LOG_TAG, "Stasis Workshop presentation-baseline: {\"schema\":"
                 + "\"stasis.workshop_present_only.v1\",\"event\":\"backbuffer_poison\","
-                + "\"physical_target_poisoned\":true,\"surface_size\":["
-                + surfaceWidth + "," + surfaceHeight + "]}");
+                + "\"physical_target_poisoned\":true,\"snapshot_current\":"
+                + acceptedSnapshot.isAvailableFor(surfaceWidth, surfaceHeight,
+                        resourceLifecycle.surfaceGeneration(),
+                        resourceLifecycle.rendererGeneration())
+                + ",\"snapshot_frame_token\":" + acceptedSnapshot.frameToken()
+                + ",\"snapshot_presentation_serial\":"
+                + acceptedSnapshot.presentationSerial()
+                + ",\"presentation_serial\":" + presentation.serial()
+                + ",\"surface_generation\":" + resourceLifecycle.surfaceGeneration()
+                + ",\"renderer_generation\":" + resourceLifecycle.rendererGeneration()
+                + ",\"snapshot_display_generation\":"
+                + acceptedSnapshot.displayGeneration()
+                + ",\"surface_size\":[" + surfaceWidth + "," + surfaceHeight + "]}");
     }
 
     private void logPresentationBaselineSurfaceInitialization(String event,
@@ -1219,6 +1230,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         private int height;
         private int surfaceGeneration = -1;
         private int rendererGeneration = -1;
+        private int displayGeneration = -1;
         private int frameToken = -1;
         private long presentationSerial = -1L;
 
@@ -1238,6 +1250,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             height = 0;
             surfaceGeneration = -1;
             rendererGeneration = -1;
+            displayGeneration = -1;
             frameToken = -1;
             presentationSerial = -1L;
         }
@@ -1249,8 +1262,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
         boolean adoptCandidate(boolean copied, int candidateWidth, int candidateHeight,
                 int candidateSurfaceGeneration, int candidateRendererGeneration,
-                int candidateFrameToken, int candidateTrace, long candidateSerial,
-                PresentationState presentation) {
+                int candidateDisplayGeneration, int candidateFrameToken, int candidateTrace,
+                long candidateSerial, PresentationState presentation) {
             if (!copied || candidateTexture == 0 || candidateWidth <= 0
                     || candidateHeight <= 0 || presentation == null
                     || !presentation.canObserveSnapshot(candidateSerial)) {
@@ -1275,6 +1288,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             height = candidateHeight;
             surfaceGeneration = candidateSurfaceGeneration;
             rendererGeneration = candidateRendererGeneration;
+            displayGeneration = candidateDisplayGeneration;
             frameToken = candidateFrameToken;
             presentationSerial = candidateSerial;
             presentation.observeSnapshot(this, candidateFrameToken, candidateTrace);
@@ -1300,6 +1314,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         int height() { return height; }
         int surfaceGeneration() { return surfaceGeneration; }
         int rendererGeneration() { return rendererGeneration; }
+        int displayGeneration() { return displayGeneration; }
         int frameToken() { return frameToken; }
         long presentationSerial() { return presentationSerial; }
     }
@@ -1467,7 +1482,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         boolean copied = copyFailure == null;
         if (!acceptedSnapshot.adoptCandidate(copied, surfaceWidth, surfaceHeight,
                 resourceLifecycle.surfaceGeneration(), resourceLifecycle.rendererGeneration(),
-                frameToken, trace, presentationSerial, presentation)) {
+                displayGeneration, frameToken, trace, presentationSerial, presentation)) {
             if (copyFailure == null) copyFailure = "publication_serial_mismatch";
             Log.w(LOG_TAG, "accepted frame candidate snapshot rejected: " + copyFailure);
             if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
@@ -1486,6 +1501,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                         + ",\"snapshot_frame_token\":" + acceptedSnapshot.frameToken()
                         + ",\"snapshot_presentation_serial\":"
                         + acceptedSnapshot.presentationSerial()
+                        + ",\"snapshot_display_generation\":"
+                        + acceptedSnapshot.displayGeneration()
                         + ",\"presentation_serial\":" + presentation.serial()
                         + ",\"surface_generation\":"
                         + resourceLifecycle.surfaceGeneration()
@@ -1503,7 +1520,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     + ",\"renderer_generation\":" + acceptedSnapshot.rendererGeneration()
                     + ",\"snapshot_frame_token\":" + acceptedSnapshot.frameToken()
                     + ",\"snapshot_presentation_serial\":"
-                    + acceptedSnapshot.presentationSerial() + "}");
+                    + acceptedSnapshot.presentationSerial()
+                    + ",\"snapshot_display_generation\":"
+                    + acceptedSnapshot.displayGeneration() + "}");
         }
         return true;
     }
@@ -1569,6 +1588,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     + acceptedSnapshot.width() + "," + acceptedSnapshot.height()
                     + "],\"surface_generation\":" + acceptedSnapshot.surfaceGeneration()
                     + ",\"renderer_generation\":" + acceptedSnapshot.rendererGeneration()
+                    + ",\"snapshot_display_generation\":"
+                    + acceptedSnapshot.displayGeneration()
                     + ",\"phase\":" + JSONObject.quote(
                             presentationBaselineReplayPhase == null
                                     ? "unspecified" : presentationBaselineReplayPhase)
@@ -1613,6 +1634,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 + ",\"snapshot_frame_token\":" + acceptedSnapshot.frameToken()
                 + ",\"snapshot_presentation_serial\":"
                 + acceptedSnapshot.presentationSerial()
+                + ",\"snapshot_display_generation\":"
+                + acceptedSnapshot.displayGeneration()
                 + ",\"snapshot_retained\":" + acceptedSnapshot.available()
                 + ",\"presentation_serial\":" + presentation.serial()
                 + ",\"surface_generation\":" + resourceLifecycle.surfaceGeneration()
@@ -1641,6 +1664,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                     + ",\"snapshot_frame_token\":" + acceptedSnapshot.frameToken()
                     + ",\"snapshot_presentation_serial\":"
                     + acceptedSnapshot.presentationSerial()
+                    + ",\"snapshot_display_generation\":"
+                    + acceptedSnapshot.displayGeneration()
                     + ",\"snapshot_retained\":" + acceptedSnapshot.available()
                     + ",\"presentation_serial\":" + presentation.serial()
                     + ",\"surface_size\":[" + surfaceWidth + "," + surfaceHeight
