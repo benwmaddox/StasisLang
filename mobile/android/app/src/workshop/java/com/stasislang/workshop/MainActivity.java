@@ -6907,15 +6907,24 @@ public final class MainActivity extends Activity {
             AcceptanceFrameSubmission submission = runNativeFrameInternal(projectRoot,
                     0, 0, 0, Math.max(1, getWidth()), Math.max(1, getHeight()),
                     activity.nativeFrameValues, true, phase);
-            int flags = activity.nativeFrameValues[StasisPreviewRenderer.I_FLAGS];
-            int magic = activity.nativeFrameValues[StasisPreviewRenderer.I_MAGIC];
-            boolean frameValid = renderer.frameIsValid();
-            boolean requestsPresentation = renderer.frameRequestsPresentation();
+            int flags;
+            int magic;
+            int frameToken;
+            boolean frameValid;
+            boolean requestsPresentation;
+            synchronized (renderer) {
+                flags = activity.nativeFrameValues[StasisPreviewRenderer.I_FLAGS];
+                magic = activity.nativeFrameValues[StasisPreviewRenderer.I_MAGIC];
+                frameValid = renderer.frameIsValid();
+                requestsPresentation = renderer.frameRequestsPresentation();
+                frameToken = renderer.frameToken();
+            }
             android.util.Log.i("StasisWorkshop",
                     "Stasis Workshop presentation-baseline submission: {\"schema\":"
                             + "\"stasis.workshop_present_only.v1\",\"phase\":"
                             + JSONObject.quote(phase) + ",\"status\":" + submission.status()
                             + ",\"magic\":" + magic + ",\"flags\":" + flags
+                            + ",\"frame_token\":" + frameToken
                             + ",\"frame_valid\":" + frameValid
                             + ",\"requests_present\":" + requestsPresentation
                             + ",\"fault_applied\":" + submission.presentationFaultApplied()
