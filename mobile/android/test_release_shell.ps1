@@ -75,11 +75,14 @@ $workspaceRoot = Join-Path $artifactRoot "w"
 $packageRoot = Join-Path $workspaceRoot "d"
 $evidenceRoot = Join-Path $artifactRoot "e"
 New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null
 Copy-Item -LiteralPath $projectRoot -Destination $workspaceRoot -Recurse
-$vendorRoot = [System.IO.Path]::Combine($workspaceRoot, "vendor", "stasis", "src")
-New-Item -ItemType Directory -Force -Path $vendorRoot | Out-Null
-Copy-Item -LiteralPath (Join-Path $repoRoot "src\stdlib") `
-    -Destination (Join-Path $vendorRoot "stdlib") -Recurse
+if (-not $env:STASIS_CLI_EXECUTABLE) {
+    $vendorRoot = [System.IO.Path]::Combine($workspaceRoot, "vendor", "stasis", "src")
+    New-Item -ItemType Directory -Force -Path $vendorRoot | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repoRoot "src\stdlib") `
+        -Destination (Join-Path $vendorRoot "stdlib") -Recurse
+}
 
 function Assert-In-Time([string]$Step) {
     if ($startedAt.Elapsed.TotalSeconds -gt $TotalTimeoutSeconds) {
@@ -102,6 +105,50 @@ function Resolve-Gradle {
     throw "$gradleName was not found; install Gradle 8.9 or newer"
 }
 
+$gradleInitArgs = @()
+if ($env:STASIS_GRADLE_INIT_SCRIPT) {
+    if (-not (Test-Path -LiteralPath $env:STASIS_GRADLE_INIT_SCRIPT -PathType Leaf) -or
+            -not $env:STASIS_ANDROID_TEST_KEYSTORE_PATH -or
+            -not (Test-Path -LiteralPath $env:STASIS_ANDROID_TEST_KEYSTORE_PATH -PathType Leaf) -or
+            -not $env:STASIS_ANDROID_TEST_STORE_PASSWORD -or
+            -not $env:STASIS_ANDROID_TEST_KEY_PASSWORD -or
+            -not $env:STASIS_EXPECTED_ANDROID_TEST_SIGNER_SHA256) {
+        throw "Staged Android test signing inputs are incomplete"
+    }
+    $gradleInitArgs = @("--init-script", $env:STASIS_GRADLE_INIT_SCRIPT)
+} elseif ($env:STASIS_EXPECTED_ANDROID_TEST_SIGNER_SHA256) {
+    throw "An expected Android test signer was configured without its Gradle init script"
+}
+
+function Assert-AndroidTestSigner([string]$Apk, [string]$EvidencePath) {
+    if (-not $env:STASIS_EXPECTED_ANDROID_TEST_SIGNER_SHA256) { return }
+    $apksigner = Join-Path $androidHome "build-tools/35.0.0/apksigner"
+    if (-not $runningOnWindows -and -not (Test-Path -LiteralPath $apksigner -PathType Leaf)) {
+        throw "Android SDK apksigner was not found: $apksigner"
+    }
+    if ($runningOnWindows) {
+        $apksigner = Join-Path $androidHome "build-tools/35.0.0/apksigner.bat"
+    }
+    $output = @(& $apksigner verify --verbose --print-certs $Apk 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "Android test APK signature verification failed" }
+    $match = [regex]::Match(($output -join "`n"), '(?im)^\s*Signer #1 certificate SHA-256 digest:\s*([0-9a-f: ]+)\s*$')
+    if (-not $match.Success) { throw "Android test APK omitted its signer certificate digest" }
+    $actual = ($match.Groups[1].Value -replace '[:\s]', '').ToLowerInvariant()
+    $expected = ($env:STASIS_EXPECTED_ANDROID_TEST_SIGNER_SHA256 -replace '[:\s]', '').ToLowerInvariant()
+    if ($actual -ne $expected) { throw "Android test APK signer differs from the documented test certificate" }
+    $apkHash = (Get-FileHash -LiteralPath $Apk -Algorithm SHA256).Hash.ToLowerInvariant()
+    $receipt = @{
+        schema = "stasis.android_test_signer.v1"
+        artifact = [System.IO.Path]::GetFileName($Apk)
+        apk_sha256 = $apkHash
+        signer_sha256 = $actual
+        expected_signer_sha256 = $expected
+        result = "passed"
+    } | ConvertTo-Json -Depth 4
+    Set-Content -LiteralPath $EvidencePath -Value $receipt -Encoding utf8
+    Write-Output "Verified Android test signer SHA-256 $actual"
+}
+
 $abiOutput = @(& $adb -s $Serial shell getprop ro.product.cpu.abi)
 if ($LASTEXITCODE -ne 0 -or $abiOutput.Count -eq 0) {
     throw "Unable to inspect Android device $Serial"
@@ -117,20 +164,34 @@ if (-not $env:STASIS_SDL3_SOURCE -or -not $env:STASIS_SDL3_IMAGE_SOURCE) {
 
 Push-Location $repoRoot
 try {
-    python tools/cargo_cache.py run -- cargo build -p stasis
-    if ($LASTEXITCODE -ne 0) { throw "$testId compiler build failed with exit code $LASTEXITCODE" }
-    $commonGit = (& git rev-parse --path-format=absolute --git-common-dir).Trim()
-    if ($LASTEXITCODE -ne 0) { throw "Unable to resolve the shared Cargo target" }
-    $compiler = [System.IO.Path]::Combine(
-        (Split-Path -Parent $commonGit),
-        "build",
-        "codex-cargo-target",
-        "debug",
-        "stasis$executableSuffix"
-    )
-    if (-not (Test-Path $compiler)) { throw "Built Stasis compiler is missing: $compiler" }
-    & $compiler --workspace $workspaceRoot package-mobile `
-        --target $Target --out d --development-build
+    $isStagedArchive = -not [string]::IsNullOrWhiteSpace($env:STASIS_CLI_EXECUTABLE)
+    if ($isStagedArchive) {
+        $compiler = [System.IO.Path]::GetFullPath($env:STASIS_CLI_EXECUTABLE)
+        if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+            throw "Configured staged archive compiler is missing: $compiler"
+        }
+        if (-not $env:STASIS_RUNTIME_LIBRARY_PATH -or
+                -not (Test-Path -LiteralPath $env:STASIS_RUNTIME_LIBRARY_PATH -PathType Leaf)) {
+            throw "Staged archive mode requires its matching STASIS_RUNTIME_LIBRARY_PATH"
+        }
+        & $compiler --workspace $workspaceRoot package-mobile `
+            --target $Target --out d --development-build
+    } else {
+        python tools/cargo_cache.py run -- cargo build -p stasis
+        if ($LASTEXITCODE -ne 0) { throw "$testId compiler build failed with exit code $LASTEXITCODE" }
+        $commonGit = (& git rev-parse --path-format=absolute --git-common-dir).Trim()
+        if ($LASTEXITCODE -ne 0) { throw "Unable to resolve the shared Cargo target" }
+        $compiler = [System.IO.Path]::Combine(
+            (Split-Path -Parent $commonGit),
+            "build",
+            "codex-cargo-target",
+            "debug",
+            "stasis$executableSuffix"
+        )
+        if (-not (Test-Path $compiler)) { throw "Built Stasis compiler is missing: $compiler" }
+        & $compiler --workspace $workspaceRoot package-mobile `
+            --target $Target --out d --development-build
+    }
     if ($LASTEXITCODE -ne 0) { throw "$testId package-mobile failed with exit code $LASTEXITCODE" }
     Assert-In-Time "package-mobile"
 
@@ -159,7 +220,7 @@ try {
 
     $gradle = Resolve-Gradle
     if ($testId -ne "IT-022") {
-        & $gradle -p (Join-Path $packageRoot "android") `
+        & $gradle @gradleInitArgs -p (Join-Path $packageRoot "android") `
             :app:assembleDebug -PstasisSeamTests=true --no-daemon --max-workers=2 --console=plain
         if ($LASTEXITCODE -ne 0) { throw "$testId Gradle build failed with exit code $LASTEXITCODE" }
         Assert-In-Time "Gradle build"
@@ -178,6 +239,9 @@ try {
     if ($testId -ne "IT-022" -and -not (Test-Path $apk)) {
         throw "Generated Android APK is missing: $apk"
     }
+    if ($testId -ne "IT-022") {
+        Assert-AndroidTestSigner $apk (Join-Path $evidenceRoot "android-test-signer.json")
+    }
     $packageManifest = Join-Path $packageRoot "stasis_mobile_package.json"
     if ($testId -eq "IT-022") {
         $variants = @("missing", "tampered", "traversal", "duplicate", "oversized", "malformed-manifest")
@@ -192,10 +256,11 @@ try {
                 --variant $variant `
                 --expectations $variantExpectations
             if ($LASTEXITCODE -ne 0) { throw "IT-022 $variant mutation failed" }
-            & $gradle -p (Join-Path $variantRoot "android") `
+            & $gradle @gradleInitArgs -p (Join-Path $variantRoot "android") `
                 :app:assembleDebug -PstasisSeamTests=true --no-daemon --max-workers=2 --console=plain
             if ($LASTEXITCODE -ne 0) { throw "IT-022 $variant Gradle build failed with exit code $LASTEXITCODE" }
             $variantApk = Join-Path $variantRoot "android/app/build/outputs/apk/debug/app-debug.apk"
+            Assert-AndroidTestSigner $variantApk (Join-Path $evidenceRoot "$variant-android-test-signer.json")
             $retentionArgs = @()
             if ($variant -eq $variants[-1]) { $retentionArgs = @("--retain-installed-package") }
             python tools/ci/run_android_release_shell_seam.py `
@@ -211,10 +276,11 @@ try {
             if ($LASTEXITCODE -ne 0) { throw "IT-022 $variant device acceptance failed with exit code $LASTEXITCODE" }
         }
         # The pristine build is the recovery proof after all rejected packages.
-        & $gradle -p (Join-Path $packageRoot "android") `
+        & $gradle @gradleInitArgs -p (Join-Path $packageRoot "android") `
             :app:assembleDebug -PstasisSeamTests=true --no-daemon --max-workers=2 --console=plain
         if ($LASTEXITCODE -ne 0) { throw "IT-022 valid recovery Gradle build failed with exit code $LASTEXITCODE" }
         if (-not (Test-Path $apk)) { throw "Generated Android APK is missing: $apk" }
+        Assert-AndroidTestSigner $apk (Join-Path $evidenceRoot "valid-recovery-android-test-signer.json")
         Assert-In-Time "IT-022 valid recovery build"
         $validExpectations = Join-Path $repoRoot "samples/android_packaged_assets_seam/android_seam_expectations.json"
         python tools/ci/run_android_release_shell_seam.py `

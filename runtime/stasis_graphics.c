@@ -3578,6 +3578,60 @@ STASIS_EXPORT int stasis_set_recording_config(int width, int height, uint32_t fp
 }
 
 #if defined(_WIN32)
+static void stasis_console_diag_window(char* output, size_t capacity, HWND window) {
+    if (!window) {
+        snprintf(output, capacity, "none");
+        return;
+    }
+
+    char class_name[128] = {0};
+    GetClassNameA(window, class_name, (int)sizeof(class_name));
+    DWORD process_id = 0;
+    DWORD thread_id = GetWindowThreadProcessId(window, &process_id);
+    const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+    const LONG_PTR extended_style = GetWindowLongPtrW(window, GWL_EXSTYLE);
+    snprintf(output, capacity,
+        "%p pid=%lu tid=%lu class=%s visible=%d iconic=%d style=0x%llx exstyle=0x%llx",
+        (void*)window, (unsigned long)process_id, (unsigned long)thread_id,
+        class_name, !!IsWindowVisible(window), !!IsIconic(window),
+        (unsigned long long)(ULONG_PTR)style,
+        (unsigned long long)(ULONG_PTR)extended_style);
+}
+
+static void stasis_console_diag_trace(
+    const char* event, const char* branch, HWND console, HWND terminal, int show_return) {
+    wchar_t trace_path[32768];
+    const DWORD trace_path_length = GetEnvironmentVariableW(
+        L"STASIS_CONSOLE_START_MINIMIZED_TRACE", trace_path,
+        (DWORD)(sizeof(trace_path) / sizeof(trace_path[0])));
+    if (!trace_path_length || trace_path_length >= sizeof(trace_path) / sizeof(trace_path[0])) {
+        return;
+    }
+
+    char console_info[512];
+    char terminal_info[512];
+    char line[2048];
+    stasis_console_diag_window(console_info, sizeof(console_info), console);
+    stasis_console_diag_window(terminal_info, sizeof(terminal_info), terminal);
+    const int line_length = snprintf(line, sizeof(line),
+        "runtime tick=%llu event=%s branch=%s show_return=%d console={%s} terminal={%s}\n",
+        (unsigned long long)GetTickCount64(), event, branch, show_return,
+        console_info, terminal_info);
+    if (line_length <= 0 || (size_t)line_length >= sizeof(line) || line_length > 2048) return;
+
+    HANDLE trace_file = CreateFileW(trace_path, FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (trace_file == INVALID_HANDLE_VALUE) return;
+    LARGE_INTEGER current_size;
+    if (GetFileSizeEx(trace_file, &current_size) && current_size.QuadPart >= 0 &&
+        current_size.QuadPart <= 32768 - line_length) {
+        DWORD bytes_written = 0;
+        WriteFile(trace_file, line, (DWORD)line_length, &bytes_written, NULL);
+    }
+    CloseHandle(trace_file);
+}
+
 static void stasis_request_terminal_minimize(void) {
     HANDLE output = CreateFileW(
         L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -3602,22 +3656,47 @@ static void stasis_request_terminal_minimize(void) {
     CloseHandle(output);
 }
 
+static BOOL stasis_console_uses_pseudoconsole_window(HWND console) {
+    char class_name[64] = {0};
+    const int class_name_length = GetClassNameA(
+        console, class_name, (int)sizeof(class_name));
+    return class_name_length > 0 && strcmp(class_name, "PseudoConsoleWindow") == 0;
+}
+
 static void stasis_minimize_launch_console(void) {
     static bool applied = false;
     if (applied) return;
     applied = true;
 
     const char* enabled = SDL_getenv("STASIS_CONSOLE_START_MINIMIZED");
-    if (enabled && strcmp(enabled, "0") == 0) return;
+    if (enabled && strcmp(enabled, "0") == 0) {
+        stasis_console_diag_trace("opt-out", "disabled", NULL, NULL, -1);
+        return;
+    }
 
     HWND console = GetConsoleWindow();
-    if (!console) return;
+    if (!console) {
+        stasis_console_diag_trace("no-console", "none", console, NULL, -1);
+        return;
+    }
     HWND terminal = GetAncestor(console, GA_ROOTOWNER);
-    if (terminal && IsWindowVisible(terminal)) {
-        ShowWindow(terminal, SW_FORCEMINIMIZE);
+    /* In the Windows Terminal ConPTY path, GetConsoleWindow returns a
+       PseudoConsoleWindow whose visible root owner is the frontend. Request
+       iconification through VT instead of ShowWindow on that HWND. */
+    const BOOL pseudoconsole = stasis_console_uses_pseudoconsole_window(console);
+    const BOOL minimize_window = !pseudoconsole && terminal && IsWindowVisible(terminal);
+    stasis_console_diag_trace("branch-selected",
+        minimize_window ? "windows" : (pseudoconsole ? "pseudoconsole-vt" : "conpty"),
+        console, terminal, -1);
+    if (minimize_window) {
+        stasis_console_diag_trace("before-show-window", "windows", console, terminal, -1);
+        const int show_return = ShowWindow(terminal, SW_FORCEMINIMIZE);
+        stasis_console_diag_trace("after-show-window", "windows", console, terminal, show_return);
     } else {
-        /* ConPTY exposes only a message window; ask its frontend to iconify. */
+        /* ConPTY and pseudoconsole windows ask their frontend to iconify. */
         stasis_request_terminal_minimize();
+        stasis_console_diag_trace("after-terminal-vt-request",
+            pseudoconsole ? "pseudoconsole-vt" : "conpty", console, terminal, -1);
     }
 }
 #endif

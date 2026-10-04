@@ -2,6 +2,7 @@ import importlib.util
 import json
 import pathlib
 import tempfile
+import tarfile
 import unittest
 import zipfile
 
@@ -15,8 +16,8 @@ SPEC.loader.exec_module(AUDIT)
 
 
 class ReleaseBundleSizeTests(unittest.TestCase):
-    def _fixture(self, root):
-        for name in AUDIT.required_files("windows"):
+    def _fixture(self, root, platform="windows"):
+        for name in AUDIT.required_files(platform):
             path = root / pathlib.Path(*name.split("/"))
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(name.encode("ascii"))
@@ -42,6 +43,31 @@ class ReleaseBundleSizeTests(unittest.TestCase):
             self.assertEqual(first["archive"]["file_count"], first["bundle"]["file_count"])
             self.assertEqual(first["archive"]["compression"], "zip member compressed sizes")
             self.assertTrue(first["size_breakdown"]["files"][-1]["path"])
+
+    def test_tar_archive_root_name_must_match_its_top_level_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = pathlib.Path(directory)
+            root = base / "stasis-nightly-linux-x64"
+            root.mkdir()
+            self._fixture(root, "linux")
+            archive = base / "stasis-nightly-linux-x64.tar.gz"
+            with tarfile.open(archive, "w:gz") as output:
+                for path in sorted(root.rglob("*")):
+                    if path.is_file():
+                        output.add(path, arcname=path.relative_to(base).as_posix())
+
+            report = AUDIT.build_report(root, "linux", archive)
+            self.assertEqual(report["archive"]["file_count"], report["bundle"]["file_count"])
+
+            stripped_root = base / "staged-linux"
+            stripped_root.mkdir()
+            for path in sorted(root.rglob("*")):
+                if path.is_file():
+                    destination = stripped_root / path.relative_to(root)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(path.read_bytes())
+            with self.assertRaisesRegex(AUDIT.BundleAuditError, "files missing from archive"):
+                AUDIT.build_report(stripped_root, "linux", archive)
 
     def test_archive_rejects_bundled_host_compiler(self):
         with tempfile.TemporaryDirectory() as directory:

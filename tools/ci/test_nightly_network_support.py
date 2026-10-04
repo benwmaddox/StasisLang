@@ -200,6 +200,11 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
                     self.assertIn("tools/ci/build_ios_package.sh", workflow)
                     self.assertNotIn("workflow_call:", workflow)
                     self.assertNotIn("network-artifact", workflow)
+                elif path.name == "staged-ios-archive-acceptance.yml":
+                    self.assertIn("runs-on: macos-15", workflow)
+                    self.assertIn("STASIS_IOS_SIMULATOR_ACCEPTANCE: generics", workflow)
+                    self.assertIn("record_staged_archive_runtime.py", workflow)
+                    self.assertNotIn("kind: ios", workflow)
                 elif path.name != "nightly-release.yml":
                     self.assertNotRegex(
                         workflow,
@@ -228,8 +233,8 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             r"(?ms)^  network_browser_acceptance:\n    needs: detect\n    if: needs\.detect\.outputs\.should_release == 'true'\n    uses: \.\/\.github\/workflows\/network-browser-acceptance\.yml",
         )
         release = self.workflow.split("  release:", 1)[1].split("  no_changes:", 1)[0]
-        self.assertIn("needs.network_browser_acceptance.result == 'success'", release)
-        self.assertIn("needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams, performance_benchmarks, network_browser_acceptance]", release)
+        self.assertIn("network_browser_acceptance=${{ needs.network_browser_acceptance.result }}", release)
+        self.assertIn("needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams, performance_benchmarks, network_browser_acceptance, staged_archive_desktop_acceptance, staged_android_archive_acceptance, staged_ios_archive_acceptance]", release)
 
     def test_archive_layout_is_copied_before_provenance(self):
         for path in (

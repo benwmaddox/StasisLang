@@ -1200,9 +1200,278 @@ jobs:
           path: target/stasis-editor-release-${{ matrix.vsce_target }}.zip
           if-no-files-found: error
 
+  staged_archive_desktop_acceptance:
+    needs: [detect, build, windows_signing]
+    if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && (needs.windows_signing.result == 'success' || (github.ref != 'refs/heads/main' && needs.windows_signing.result == 'skipped')) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux
+            os: ubuntu-latest
+            archive: stasis-nightly-linux-x64
+            ext: tar.gz
+          - target: windows
+            os: windows-2022
+            archive: stasis-nightly-win-x64
+            ext: zip
+          - target: macos
+            os: macos-15
+            archive: stasis-nightly-osx-arm64
+            ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          package-manager-cache: false
+          node-version: "24"
+
+      - name: Install Linux desktop acceptance dependencies
+        if: matrix.target == 'linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes xvfb pkg-config libx11-dev
+          libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev
+          libxtst-dev libxkbcommon-dev libegl1 libgl1-mesa-dri
+
+      - name: Install macOS desktop acceptance dependencies
+        if: matrix.target == 'macos'
+        run: brew install pkg-config
+
+      - name: Locate and verify hosted Chrome on Windows
+        if: matrix.target == 'windows'
+        shell: pwsh
+        env:
+          STASIS_TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $chrome = switch ($env:STASIS_TARGET) {
+            "windows" { "C:/Program Files/Google/Chrome/Application/chrome.exe" }
+            default { throw "No staged Windows browser path is defined for $($env:STASIS_TARGET)" }
+          }
+          if (-not (Test-Path -LiteralPath $chrome -PathType Leaf)) {
+            throw "Hosted Google Chrome is missing for $($env:STASIS_TARGET): $chrome"
+          }
+          $productVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($chrome).ProductVersion
+          if ($productVersion -notmatch '^\d+(?:\.\d+){2,3}$') {
+            throw "Unexpected Google Chrome executable product version for $($env:STASIS_TARGET): $productVersion"
+          }
+          $version = "Google Chrome $productVersion"
+          Write-Host "Verified hosted Google Chrome ($($env:STASIS_TARGET)): $version"
+          New-Item -ItemType Directory -Path "target/staged-acceptance" -Force | Out-Null
+          Set-Content -LiteralPath "target/staged-acceptance/hosted-chrome-version.txt" -Value $version -Encoding utf8
+          "STASIS_BROWSER_EXECUTABLE=$chrome" >> $env:GITHUB_ENV
+
+      - name: Locate and verify hosted Chrome on Linux and macOS
+        if: matrix.target != 'windows'
+        shell: bash
+        env:
+          STASIS_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          trim_ascii_whitespace() {
+            local value="$1"
+            local edge
+            while [[ -n "$value" ]]; do
+              edge="${value:0:1}"
+              case "$edge" in
+                ' '|$'\t'|$'\n'|$'\r'|$'\v'|$'\f') value="${value:1}" ;;
+                *) break ;;
+              esac
+            done
+            while [[ -n "$value" ]]; do
+              edge="${value:$((${#value} - 1)):1}"
+              case "$edge" in
+                ' '|$'\t'|$'\n'|$'\r'|$'\v'|$'\f') value="${value%?}" ;;
+                *) break ;;
+              esac
+            done
+            printf '%s' "$value"
+          }
+          is_branded_chrome_version() {
+            [[ "$1" =~ ^Google\ Chrome(\ for\ Testing)?\ [0-9]+(\.[0-9]+){2,3}$ ]]
+          }
+          case "$STASIS_TARGET" in
+            linux)
+              candidates=(/usr/bin/google-chrome /usr/bin/google-chrome-stable /opt/google/chrome/chrome)
+              for name in google-chrome google-chrome-stable; do
+                if resolved="$(command -v "$name" 2>/dev/null)"; then
+                  candidates+=("$resolved")
+                fi
+              done
+              ;;
+            macos) candidates=("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome") ;;
+            *) echo "No staged Unix browser path is defined for $STASIS_TARGET" >&2; exit 1 ;;
+          esac
+          chrome=""
+          version=""
+          for candidate in "${candidates[@]}"; do
+            printf 'Google Chrome candidate: %s\n' "$candidate"
+            if [[ ! -x "$candidate" ]]; then
+              printf 'Candidate is missing or not executable: %s\n' "$candidate"
+              continue
+            fi
+            if version_output="$("$candidate" --version 2>&1)"; then
+              version_status=0
+            else
+              version_status=$?
+            fi
+            printf 'Google Chrome version probe: path=%s exit=%s raw=%q\n' \
+              "$candidate" "$version_status" "$version_output"
+            version_normalized="$(trim_ascii_whitespace "$version_output")"
+            printf 'Google Chrome normalized version: %q\n' "$version_normalized"
+            if [[ "$version_status" -ne 0 ]]; then
+              continue
+            fi
+            if is_branded_chrome_version "$version_normalized"; then
+              chrome="$candidate"
+              version="$version_normalized"
+              break
+            fi
+            printf 'Candidate did not report a branded Google Chrome version: %s\n' "$candidate"
+          done
+          if [[ -z "$chrome" ]]; then
+            echo "::error::No executable branded Google Chrome was found for $STASIS_TARGET" >&2
+            exit 1
+          fi
+          printf 'Verified hosted Google Chrome (%s): %s\n' "$STASIS_TARGET" "$version"
+          mkdir -p target/staged-acceptance
+          printf '%s\n' "$version" > target/staged-acceptance/hosted-chrome-version.txt
+          printf 'STASIS_BROWSER_EXECUTABLE=%s\n' "$chrome" >> "$GITHUB_ENV"
+
+      - name: Setup MSVC dev environment
+        if: matrix.target == 'windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Download signed Windows archive
+        if: matrix.target == 'windows' && github.ref == 'refs/heads/main'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stasis-nightly-win-x64
+          path: target/staged-archive
+
+      - name: Download candidate unsigned Windows archive
+        if: matrix.target == 'windows' && github.ref != 'refs/heads/main'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stasis-nightly-win-x64-unsigned
+          path: target/staged-archive
+
+      - name: Download Linux or macOS archive
+        if: matrix.target != 'windows'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ matrix.archive }}
+          path: target/staged-archive
+
+      - name: Extract and qualify the exact staged archive
+        id: qualify
+        shell: pwsh
+        env:
+          STASIS_TARGET: ${{ matrix.target }}
+          STASIS_ARCHIVE: target/staged-archive/${{ matrix.archive }}.${{ matrix.ext }}
+          STASIS_ARTIFACT_NAME: ${{ matrix.target == 'windows' && github.ref == 'refs/heads/main' && 'stasis-nightly-win-x64' || matrix.target == 'windows' && 'stasis-nightly-win-x64-unsigned' || matrix.archive }}
+          STASIS_RELEASE_ID: ${{ needs.detect.outputs.nightly_tag }}
+          STASIS_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $archiveFile = Join-Path $env:GITHUB_WORKSPACE $env:STASIS_ARCHIVE
+          $archiveParent = Join-Path $env:GITHUB_WORKSPACE "target"
+          New-Item -ItemType Directory -Force -Path $archiveParent | Out-Null
+          if ($env:STASIS_TARGET -eq "windows") {
+            $archiveRoot = Join-Path $env:GITHUB_WORKSPACE "target/staged-toolchain"
+            New-Item -ItemType Directory -Force -Path $archiveRoot | Out-Null
+            Expand-Archive -LiteralPath $archiveFile -DestinationPath $archiveRoot -Force
+          } else {
+            tar -xf $archiveFile -C $archiveParent
+            if ($LASTEXITCODE -ne 0) { throw "Archive extraction failed" }
+            $archiveRoot = Join-Path $archiveParent $env:STASIS_ARTIFACT_NAME
+            if (-not (Test-Path $archiveRoot -PathType Container)) {
+              throw "Archive root does not match artifact name: $($env:STASIS_ARTIFACT_NAME)"
+            }
+          }
+          $arguments = @(
+            "tools/ci/qualify_staged_archive.py",
+            "--archive-root", $archiveRoot,
+            "--archive-file", $archiveFile,
+            "--target", $env:STASIS_TARGET,
+            "--artifact-name", $env:STASIS_ARTIFACT_NAME,
+            "--release-id", $env:STASIS_RELEASE_ID,
+            "--source-commit", $env:STASIS_SOURCE_COMMIT,
+            "--repository", $env:GITHUB_REPOSITORY,
+            "--run-id", $env:GITHUB_RUN_ID,
+            "--evidence-dir", "target/staged-acceptance"
+          )
+          if (-not $env:STASIS_BROWSER_EXECUTABLE) { throw "Verified hosted Chrome path is missing" }
+          $arguments += "--browser"
+          python @arguments
+          if ($LASTEXITCODE -ne 0) { throw "Staged archive consumer qualification failed" }
+
+      - name: Collect staged archive review evidence
+        if: always()
+        shell: pwsh
+        env:
+          STASIS_TARGET: ${{ matrix.target }}
+          STASIS_STAGED_LANE_PASSED: ${{ steps.qualify.outcome == 'success' }}
+          STASIS_ARCHIVE_ROOT: ${{ github.workspace }}/target/${{ matrix.target == 'windows' && 'staged-toolchain' || matrix.archive }}
+        run: |
+          python tools/ci/collect_staged_archive_evidence.py `
+            --target $env:STASIS_TARGET `
+            --staged-root target/staged-acceptance `
+            --archive-root $env:STASIS_ARCHIVE_ROOT `
+            --output target/staged-release-evidence
+          if ($LASTEXITCODE -ne 0) { throw "Staged release evidence is incomplete" }
+
+      - name: Upload desktop staged archive review evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: true
+          name: staged-release-evidence-${{ matrix.target }}
+          path: target/staged-release-evidence
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload desktop staged archive receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: true
+          name: staged-release-receipt-${{ matrix.target }}
+          path: target/staged-acceptance/staged-archive-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+
+  staged_android_archive_acceptance:
+    needs: [detect, build]
+    if: needs.detect.outputs.should_release == 'true'
+    uses: ./.github/workflows/staged-android-archive-acceptance.yml
+    secrets:
+      android_test_keystore_base64: ${{ secrets.STASIS_ANDROID_TEST_KEYSTORE_BASE64 }}
+      android_test_store_password: ${{ secrets.STASIS_ANDROID_TEST_STORE_PASSWORD }}
+      android_test_key_password: ${{ secrets.STASIS_ANDROID_TEST_KEY_PASSWORD }}
+    with:
+      release_id: ${{ needs.detect.outputs.nightly_tag }}
+      source_commit: ${{ github.sha }}
+      run_id: ${{ format('{0}', github.run_id) }}
+
+  staged_ios_archive_acceptance:
+    needs: [detect, build]
+    if: needs.detect.outputs.should_release == 'true'
+    uses: ./.github/workflows/staged-ios-archive-acceptance.yml
+    with:
+      release_id: ${{ needs.detect.outputs.nightly_tag }}
+      source_commit: ${{ github.sha }}
+      run_id: ${{ format('{0}', github.run_id) }}
+
   release:
-    needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams, performance_benchmarks, network_browser_acceptance]
-    if: ${{ always() && needs.detect.outputs.should_release == 'true' && needs.build.result == 'success' && needs.windows_signing.result == 'success' && needs.android_prebuilt_acceptance.result == 'success' && needs.vscode_extension.result == 'success' && needs.integration_seams.result == 'success' && needs.android_device_seams.result == 'success' && needs.performance_benchmarks.result == 'success' && needs.network_browser_acceptance.result == 'success' }}
+    needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams, performance_benchmarks, network_browser_acceptance, staged_archive_desktop_acceptance, staged_android_archive_acceptance, staged_ios_archive_acceptance]
+    if: ${{ always() && needs.detect.outputs.should_release == 'true' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -1236,6 +1505,49 @@ jobs:
           pattern: stasis-editor-release-*
           path: dist
           merge-multiple: true
+
+      - name: Download staged archive qualification receipts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: staged-release-receipt-*
+          path: target/staged-receipts
+
+      - name: Require every release readiness lane and verify exact archive receipts
+        env:
+          REQUIRED_RESULTS: >-
+            build=${{ needs.build.result }}
+            windows_signing=${{ needs.windows_signing.result }}
+            android_prebuilt_acceptance=${{ needs.android_prebuilt_acceptance.result }}
+            vscode_extension=${{ needs.vscode_extension.result }}
+            integration_seams=${{ needs.integration_seams.result }}
+            android_device_seams=${{ needs.android_device_seams.result }}
+            performance_benchmarks=${{ needs.performance_benchmarks.result }}
+            network_browser_acceptance=${{ needs.network_browser_acceptance.result }}
+            staged_archive_desktop_acceptance=${{ needs.staged_archive_desktop_acceptance.result }}
+            staged_android_archive_acceptance=${{ needs.staged_android_archive_acceptance.result }}
+            staged_ios_archive_acceptance=${{ needs.staged_ios_archive_acceptance.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for lane in ${REQUIRED_RESULTS}; do
+            result="${lane#*=}"
+            if [[ "${result}" != "success" ]]; then
+              echo "Release readiness lane did not succeed: ${lane}" >&2
+              exit 1
+            fi
+          done
+          python tools/ci/verify_staged_archive_receipts.py \
+            --receipts target/staged-receipts \
+            --archive-dir dist \
+            --repository "${GITHUB_REPOSITORY}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --release-id "${{ needs.detect.outputs.nightly_tag }}" \
+            --source-commit "${GITHUB_SHA}" \
+            --require-signed-windows
+          if [[ "${?}" -ne 0 ]]; then
+            echo "Staged archive publication verification failed" >&2
+            exit 1
+          fi
 
       - name: Create GitHub prerelease
         env:

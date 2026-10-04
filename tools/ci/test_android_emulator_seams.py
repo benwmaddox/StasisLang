@@ -3,6 +3,7 @@ import json
 import re
 import shutil
 import subprocess
+import textwrap
 import unittest
 
 
@@ -23,6 +24,12 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         cls.release_script = read("mobile/android/test_release_shell.ps1")
         cls.release_runner = read("tools/ci/run_android_release_shell_seam.py")
         cls.emulator_script = read("mobile/android/test_release_shell_emulator.ps1")
+        cls.staged_android_workflow = read(
+            ".github/workflows/staged-android-archive-acceptance.yml"
+        )
+        cls.staged_android_script = read(
+            "tools/ci/run_staged_android_archive_acceptance.ps1"
+        )
         cls.strategy = read("docs/integration_seam_testing_strategy.md")
         cls.checklist = read("docs/build_checklist.md")
         cls.android_readme = read("mobile/android/README.md")
@@ -92,7 +99,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", self.workflow)
         self.assertIn("uses: ./.github/workflows/android-device-seams.yml", self.nightly_workflow)
         self.assertIn(
-            "needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams, performance_benchmarks, network_browser_acceptance]",
+            "needs: [detect, build, windows_signing, android_prebuilt_acceptance, vscode_extension, integration_seams, android_device_seams, performance_benchmarks, network_browser_acceptance, staged_archive_desktop_acceptance, staged_android_archive_acceptance, staged_ios_archive_acceptance]",
             self.nightly_workflow,
         )
         self.assertIn(
@@ -136,6 +143,176 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("android-generics-collections-evidence", self.workflow)
         self.assertIn("x86_64 emulator", self.generics_readme)
         self.assertIn("ANDROID-GENERICS", self.shell_readme)
+
+    def test_staged_generics_lane_uses_the_sample_fixture_from_each_archive_consumer(self):
+        self.assertIn("[string]$GenericsExpectationsPath = \"\"", self.emulator_script)
+        self.assertIn("$seam.Expectations = $GenericsExpectationsPath", self.emulator_script)
+        self.assertIn(
+            "-GenericsExpectationsPath $expectations",
+            self.staged_android_script,
+        )
+        self.assertIn('Join-Path $project "android_seam_expectations.json"', self.staged_android_script)
+        self.assertIn("STASIS_CLI_EXECUTABLE:", self.staged_android_workflow)
+        self.assertIn("--target android-arm64", self.staged_android_workflow)
+        self.assertIn(
+            'tar -xf "$STASIS_ARTIFACT_FILE" -C target',
+            self.staged_android_workflow,
+        )
+        self.assertIn(
+            "--archive-root target/stasis-nightly-linux-x64",
+            self.staged_android_workflow,
+        )
+
+    def test_staged_generics_uses_the_documented_temporary_android_test_signer(self):
+        fingerprint = "f115a250a33dc3e49b3b7f939075f6db118ce95e139e8c2703c437b1b3f37cc0"
+        self.assertIn("android_test_keystore_base64:", self.staged_android_workflow)
+        self.assertIn("android_test_store_password:", self.staged_android_workflow)
+        self.assertIn("android_test_key_password:", self.staged_android_workflow)
+        self.assertIn("Materialize the documented Android test key in runner temp", self.staged_android_workflow)
+        self.assertIn("tools/ci/materialize_android_test_signing.py", self.staged_android_workflow)
+        self.assertIn("--init-script \"$STASIS_GRADLE_INIT_SCRIPT\"", self.staged_android_workflow)
+        self.assertIn("--print-certs", self.staged_android_workflow)
+        self.assertIn(f"--expected-sha256 \"$STASIS_EXPECTED_ANDROID_TEST_SIGNER_SHA256\"", self.staged_android_workflow)
+        self.assertGreaterEqual(self.staged_android_workflow.count(fingerprint), 2)
+        self.assertIn("Remove the temporary Android test keystore", self.staged_android_workflow)
+        self.assertIn("if: always()", self.staged_android_workflow)
+        self.assertIn("STASIS_ANDROID_TEST_KEY_PASSWORD", self.release_script)
+        self.assertIn("Assert-AndroidTestSigner", self.release_script)
+        self.assertIn('$evidenceRoot = Join-Path $artifactRoot "e"', self.release_script)
+        self.assertIn(
+            "New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null",
+            self.release_script,
+        )
+        self.assertLess(
+            self.release_script.index(
+                "New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null"
+            ),
+            self.release_script.index("function Assert-AndroidTestSigner"),
+        )
+        self.assertIn('Set-Content -LiteralPath $EvidencePath', self.release_script)
+        init_script = read("tools/ci/android_test_debug_signing.init.gradle")
+        self.assertIn("androiddebugkey", init_script)
+        self.assertIn("buildTypes.getByName('debug').signingConfig", init_script)
+        nightly = self.nightly_workflow.split(
+            "  staged_android_archive_acceptance:", 1
+        )[1].split("  staged_ios_archive_acceptance:", 1)[0]
+        for secret in (
+            "STASIS_ANDROID_TEST_KEYSTORE_BASE64",
+            "STASIS_ANDROID_TEST_STORE_PASSWORD",
+            "STASIS_ANDROID_TEST_KEY_PASSWORD",
+        ):
+            self.assertIn(secret, nightly)
+
+    def test_emulator_action_script_is_one_shell_command_with_loop_in_powershell_file(self):
+        self.assertIn(
+            "script: pwsh -NoProfile -File tools/ci/run_staged_android_archive_acceptance.ps1",
+            self.staged_android_workflow,
+        )
+        script_lines = self.staged_android_workflow.split("script:", 1)[1].splitlines()
+        command = next(line.strip() for line in script_lines if line.strip())
+        self.assertEqual(command, "pwsh -NoProfile -File tools/ci/run_staged_android_archive_acceptance.ps1")
+        self.assertIn('foreach ($consumer in @("bundled-generics", "generated-generics"))', self.staged_android_script)
+
+    def test_staged_android_emulator_requires_hardware_kvm_and_valid_shell(self):
+        def step_block(name):
+            self.assertEqual(
+                self.staged_android_workflow.count(f"      - name: {name}\n"), 1
+            )
+            pattern = (
+                rf"(?ms)^      - name: {re.escape(name)}\n"
+                r"(?P<body>.*?)(?=^      - (?:name|uses):|\Z)"
+            )
+            match = re.search(pattern, self.staged_android_workflow)
+            self.assertIsNotNone(match, name)
+            return match.group("body")
+
+        sdk_install_name = "Install Android production package toolchain"
+        kvm_name = "Enable and verify hardware KVM"
+        materialize_name = "Materialize the documented Android test key in runner temp"
+        emulator_name = "Run shipped Android packages on the x86_64 emulator"
+        sdk_install_index = self.staged_android_workflow.index(
+            f"      - name: {sdk_install_name}"
+        )
+        kvm_index = self.staged_android_workflow.index(f"      - name: {kvm_name}")
+        materialize_index = self.staged_android_workflow.index(
+            f"      - name: {materialize_name}"
+        )
+        emulator_index = self.staged_android_workflow.index(
+            f"      - name: {emulator_name}"
+        )
+        self.assertLess(sdk_install_index, kvm_index)
+        self.assertLess(kvm_index, materialize_index)
+        self.assertLess(materialize_index, emulator_index)
+
+        sdk_install = step_block(sdk_install_name)
+        kvm = step_block(kvm_name)
+        emulator = step_block(emulator_name)
+        self.assertIn('sdkmanager "emulator"', sdk_install)
+        self.assertIn("        shell: bash\n", kvm)
+        for required in (
+            "set -euo pipefail",
+            'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"',
+            "udevadm control --reload-rules",
+            "udevadm trigger --name-match=kvm",
+            "udevadm settle --timeout=30",
+            "udev_settle_status=$?",
+            "KVM udev settle: failed",
+            "stat --printf=",
+            "id || echo",
+            "command -v getfacl",
+            "getfacl --absolute-names /dev/kvm",
+            "if test -r /dev/kvm; then",
+            "if test -w /dev/kvm; then",
+            'emulator="${ANDROID_HOME:-}/emulator/emulator"',
+            'if [[ ! -x "$emulator" ]]; then',
+            'trap \'rm -f "$accel_output"\' EXIT',
+            'if "$emulator" -accel-check >"$accel_output" 2>&1; then',
+            'cat "$accel_output"',
+            "grep -Eq '^KVM .* is installed and usable\\.?$'",
+            '"$kvm_readable" -ne 1',
+            '"$kvm_writable" -ne 1',
+            '"$accel_status" -ne 0',
+            '"$kvm_usable_report" -ne 1',
+            '"$udev_settle_status" -ne 0',
+            "KVM checks failed: udev_settle_exit=%s readable=%s writable=%s accel_exit=%s usable_report=%s",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, kvm)
+        self.assertLess(kvm.index("if test -r /dev/kvm"), kvm.index('if "$emulator" -accel-check'))
+        self.assertLess(kvm.index('if "$emulator" -accel-check'), kvm.index('"$kvm_readable" -ne 1'))
+        self.assertIn("          disable-linux-hw-accel: false", emulator)
+        self.assertIn("-accel on", emulator)
+        for required in (
+            "          api-level: 35",
+            "          target: google_apis",
+            "          arch: x86_64",
+            "          profile: pixel_7",
+            "          script: pwsh -NoProfile -File tools/ci/run_staged_android_archive_acceptance.ps1",
+        ):
+            with self.subTest(emulator_input=required):
+                self.assertIn(required, emulator)
+
+        bash = shutil.which("bash")
+        if bash is None:
+            candidate = Path(r"C:\Program Files\Git\bin\bash.exe")
+            if candidate.is_file():
+                bash = str(candidate)
+        if bash is None:
+            self.skipTest("bash is unavailable; workflow runner performs this syntax check")
+        run_match = re.search(
+            r"(?m)^        run: \|\n(?P<script>(?:^          [^\n]*\n)+)",
+            kvm,
+        )
+        self.assertIsNotNone(run_match, "KVM script block")
+        script = textwrap.dedent(run_match.group("script"))
+        result = subprocess.run(
+            [bash, "-n"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_generics_emulator_coverage_preserves_arm64_package_link_lane(self):
         self.assertIn(
@@ -517,7 +694,8 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
 
     def test_release_wrapper_defaults_to_all_seams_in_stable_order(self):
         self.assertIn('[string]$TestId = ""', self.emulator_script)
-        self.assertIn('$selectedSeams = if ($TestId)', self.emulator_script)
+        self.assertIn('$selectedSeams = if ($ProjectPath)', self.emulator_script)
+        self.assertIn('} elseif ($TestId) {', self.emulator_script)
         ordered_ids = [
             self.emulator_script.index(f'TestId = "{test_id}"')
             for test_id in ("IT-020", "IT-017", "IT-018", "IT-019", "IT-021", "IT-022", "IT-023", "IT-024")
