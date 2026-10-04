@@ -558,6 +558,10 @@ function set_maximized_canvas(width: i32, height: i32): i32 {
     return 0;
 }
 
+function set_canvas_size(width: i32, height: i32): void {
+    host_request_canvas(width, height);
+}
+
 function clear(r: f32, g: f32, b: f32, a: f32): void {
     gfx_cmd_clear(r, g, b, a);
 }

@@ -1,5 +1,5 @@
 {
-  "schema": "stasis.android_seam_expectations.v1",
+  "schema": "stasis.android_seam_expectations.v2",
   "test_id": "ANDROID-GENERICS",
   "stable_frame": 30,
   "logical_size": [1280, 720],
@@ -8,6 +8,7 @@
   ],
   "android_generics": {
     "digest": 507,
+    "math_raw_digest": -1430176193,
     "bounds_indices": {"low": -1, "high": 2},
     "bounds_signal": "SIGILL"
   }

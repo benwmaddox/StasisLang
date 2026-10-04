@@ -140,6 +140,7 @@ required = (
     "stasis_replay_state_snapshot_size",
     "stasis_replay_state_snapshot_write",
     "stasis_state_scalar__generics_collections_digest_value",
+    "stasis_state_scalar__math_oracle_raw_digest_value",
     "stasis_state_scalar__web_bounds_probe_index",
     "stasis_state_array__gfx_cmd_i32",
     "stasis_state_array__gfx_cmd_f32",
@@ -507,6 +508,7 @@ PY
     printf 'app=%s\n' "${simulator_app}"
     printf 'architectures=%s\n' "$(lipo "${simulator_executable}" -archs)"
     printf 'digest=507\n'
+    printf 'math_raw_digest=-1430176193\n'
     printf 'physical_device_qualified=false\n'
   } > "${build_root}/simulator-evidence.txt"
   cat "${build_root}/simulator-evidence.txt"

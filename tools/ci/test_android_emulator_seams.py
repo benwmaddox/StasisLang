@@ -114,6 +114,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         expectations = self.generics_expectations
         self.assertEqual("ANDROID-GENERICS", expectations["test_id"])
         self.assertEqual(507, expectations["android_generics"]["digest"])
+        self.assertEqual(-1430176193, expectations["android_generics"]["math_raw_digest"])
         self.assertEqual(
             {"low": -1, "high": 2},
             expectations["android_generics"]["bounds_indices"],
@@ -140,6 +141,7 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         self.assertIn("index != -1 && index != 2", self.android_assets_bridge)
         self.assertIn('"STASIS_ANDROID_GENERICS_BOUNDS_INDEX"', self.mobile_main)
         self.assertIn('"generics_collections_digest_value"', self.mobile_main)
+        self.assertIn('"math_oracle_raw_digest_value"', self.mobile_main)
         self.assertIn("android-generics-collections-evidence", self.workflow)
         self.assertIn("x86_64 emulator", self.generics_readme)
         self.assertIn("ANDROID-GENERICS", self.shell_readme)

@@ -3129,6 +3129,9 @@ fn validate_expression_access_with_expected(
             for argument in args {
                 validate_expression_access(argument, context, local_types)?;
             }
+            if validate_f32_math_intrinsic_signature(target, args, context, local_types)? {
+                return Ok(());
+            }
             let bare_target = target
                 .rsplit_once('.')
                 .map_or(target.as_str(), |(_, name)| name);
@@ -3292,6 +3295,34 @@ fn validate_expression_access_with_expected(
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_) => Ok(()),
     }
+}
+
+fn validate_f32_math_intrinsic_signature(
+    target: &str,
+    args: &[SimpleExpr],
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Result<bool, String> {
+    if !matches!(target, "f32_sqrt" | "f32_to_bits") {
+        return Ok(false);
+    }
+    if args.len() != 1 {
+        return Err(format!(
+            "math intrinsic '{target}' expects exactly one argument, found {}",
+            args.len()
+        ));
+    }
+    let actual_type = semantic_expression_type(&args[0], context, local_types)
+        .ok_or_else(|| format!("math intrinsic '{target}' argument type could not be inferred"))?;
+    if actual_type != TYPE_ID_F32 {
+        return Err(type_mismatch(
+            &format!("math intrinsic '{target}' argument"),
+            TYPE_ID_F32,
+            actual_type,
+            context.types,
+        ));
+    }
+    Ok(true)
 }
 
 fn validate_contextual_integer_expression_lane(
@@ -5108,6 +5139,8 @@ fn is_pure_intrinsic(target: &str) -> bool {
             | "fixed32_from_ratio"
             | "i32_to_f32"
             | "f32_to_i32"
+            | "f32_sqrt"
+            | "f32_to_bits"
             | "sin_fast"
             | "cos_fast"
     )
@@ -5233,9 +5266,9 @@ fn expression_type(
                 return Some(operation.return_type());
             }
             match target.as_str() {
-                "i32_to_f32" | "sin_fast" | "cos_fast" => Some(TYPE_ID_F32),
-                "f32_to_i32" | "fixed32_from_i32" | "fixed32_to_i32" | "fixed32_mul"
-                | "fixed32_div" | "fixed32_from_ratio" => Some(TYPE_ID_I32),
+                "i32_to_f32" | "f32_sqrt" | "sin_fast" | "cos_fast" => Some(TYPE_ID_F32),
+                "f32_to_i32" | "f32_to_bits" | "fixed32_from_i32" | "fixed32_to_i32"
+                | "fixed32_mul" | "fixed32_div" | "fixed32_from_ratio" => Some(TYPE_ID_I32),
                 _ => {
                     let argument_types: Vec<TypeId> = args
                         .iter()

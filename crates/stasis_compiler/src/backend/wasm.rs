@@ -6617,6 +6617,8 @@ fn is_inline_intrinsic(target: &str) -> bool {
         target,
         "i32_to_f32"
             | "f32_to_i32"
+            | "f32_sqrt"
+            | "f32_to_bits"
             | "fixed32_from_i32"
             | "fixed32_to_i32"
             | "fixed32_mul"
@@ -6653,6 +6655,18 @@ fn encode_inline_intrinsic(
             let actual = encode_expr_as(&args[0], Some(TYPE_ID_F32), context, out)?;
             require_same_type(TYPE_ID_F32, actual, "intrinsic argument")?;
             out.push(0xa8);
+            Ok(TYPE_ID_I32)
+        }
+        "f32_sqrt" => {
+            let actual = encode_expr_as(&args[0], Some(TYPE_ID_F32), context, out)?;
+            require_same_type(TYPE_ID_F32, actual, "intrinsic argument")?;
+            out.push(0x91);
+            Ok(TYPE_ID_F32)
+        }
+        "f32_to_bits" => {
+            let actual = encode_expr_as(&args[0], Some(TYPE_ID_F32), context, out)?;
+            require_same_type(TYPE_ID_F32, actual, "intrinsic argument")?;
+            out.push(0xbc);
             Ok(TYPE_ID_I32)
         }
         "fixed32_from_i32" => {
@@ -8222,10 +8236,96 @@ function render(): i32 { return 0; }
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
         process.upsert_file(
             "intrinsics.stasis",
-            "function main(): i32 { let scaled: i32 = fixed32_mul(fixed32_from_i32(3), fixed32_from_ratio(1, 2)); let value: f32 = i32_to_f32(fixed32_to_i32(scaled)); return f32_to_i32(value); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+            "function main(): i32 { let scaled: i32 = fixed32_mul(fixed32_from_i32(3), fixed32_from_ratio(1, 2)); let value: f32 = i32_to_f32(fixed32_to_i32(scaled)); let root: f32 = f32_sqrt(2.0); if (root < 1.414212 || root > 1.414215) { return 1; } if (f32_to_bits(0.0) != 0 || f32_to_bits(-0.0) != (-2147483647 - 1)) { return 2; } return f32_to_i32(value); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
         );
         process.compile().expect("compile web intrinsic module");
         assert!(process.module_bytes().starts_with(b"\0asm\x01\0\0\0"));
+        assert!(
+            process.module_bytes().contains(&0x91),
+            "Wasm f32.sqrt opcode is emitted"
+        );
+        assert!(
+            process.module_bytes().contains(&0xbc),
+            "Wasm i32.reinterpret_f32 opcode is emitted"
+        );
+    }
+
+    #[test]
+    fn math_wrappers_normalize_host_provided_negative_zero_in_wasm() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "math.stasis",
+            include_str!("../../../../src/stdlib/math.stasis"),
+        );
+        process.upsert_file(
+            "math_signed_zero.stasis",
+            "import \"math.stasis\"; function check_signed_zero(value: f32): i32 { if (f32_to_bits(value) != (-2147483647 - 1)) { return 1; } if (f32_to_bits(math_sqrt(value)) != 0) { return 2; } if (f32_to_bits(math_abs(value)) != 0) { return 3; } if (f32_to_bits(math_atan2_degrees(value, 1.0)) != 0) { return 4; } if (math_atan2_degrees(value, -1.0) != 180.0) { return 5; } return 0; } function main(): i32 { return check_signed_zero(0.0 / -1.0); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+        );
+        process
+            .compile()
+            .expect("compile math negative-zero oracle");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let wasm_path = std::env::temp_dir().join(format!(
+            "stasis_math_signed_zero_{}_{}.wasm",
+            std::process::id(),
+            stamp
+        ));
+        fs::write(&wasm_path, process.module_bytes()).expect("write math oracle Wasm");
+        let output = Command::new("node")
+            .args([
+                "-e",
+                "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+            ])
+            .arg(&wasm_path)
+            .output()
+            .expect("run Node for math negative-zero oracle");
+        let _ = fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "0");
+    }
+
+    #[test]
+    fn wasm_rejects_invalid_f32_math_intrinsic_arity_and_types() {
+        for (source, expected) in [
+            (
+                "function main(): f32 { return f32_sqrt(); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "math intrinsic 'f32_sqrt' expects exactly one argument, found 0",
+            ),
+            (
+                "function main(): i32 { return f32_to_bits(1); } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "math intrinsic 'f32_to_bits' argument expected f32 expression but found i32",
+            ),
+            (
+                "function unused(): f32 { return f32_sqrt(); } function main(): i32 { return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "math intrinsic 'f32_sqrt' expects exactly one argument, found 0",
+            ),
+            (
+                "function unused(): i32 { return f32_to_bits(true); } function main(): i32 { return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+                "math intrinsic 'f32_to_bits' argument expected f32 expression but found bool",
+            ),
+        ] {
+            let mut process = WasmProcess::new();
+            process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+            process.upsert_file("invalid_intrinsic.stasis", source);
+            match process
+                .compile()
+                .expect_err("reject invalid math intrinsic call before backend emission")
+            {
+                crate::compiler::CompileError::Frontend(message) => {
+                    assert!(message.contains(expected), "{message}");
+                }
+                other => panic!("expected shared frontend error, got {other:?}"),
+            }
+        }
     }
 
     #[test]

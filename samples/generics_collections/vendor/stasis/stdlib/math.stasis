@@ -1,0 +1,107 @@
+// Deterministic scalar math for games. See
+// docs/knowledge/scalar-math.md for units and edge-case contracts.
+
+function math_sqrt(value: f32): f32 {
+    if (value <= 0.0) {
+        return 0.0;
+    }
+    return f32_sqrt(value);
+}
+
+function math_abs(value: f32): f32 {
+    if (value == 0.0) {
+        return 0.0;
+    }
+    if (value < 0.0) {
+        return -value;
+    }
+    return value;
+}
+
+function math_abs(value: i32): i32 {
+    if (value ==(-2147483647 - 1)) {
+        return 2147483647;
+    }
+    if (value < 0) {
+        return -value;
+    }
+    return value;
+}
+
+function math_atan_series(value: f32): f32 {
+    let square: f32 = value * value;
+    let power: f32 = value;
+    let result: f32 = value;
+    let sign: f32 = -1.0;
+    let term: i32 = 1;
+    for (term = 1; term <= 8; term = term + 1) {
+        power = power * square;
+        result = result + sign * power / i32_to_f32(2 * term + 1);
+        sign = -sign;
+    }
+    return result;
+}
+
+function math_atan_positive_degrees(value: f32): f32 {
+    let radians: f32 = 0.0;
+    if (value > 0.41421357) {
+        let reduced: f32 =(value - 1.0) /(value + 1.0);
+        radians = 0.7853981633974483 + math_atan_series(reduced);
+    } else {
+        radians = math_atan_series(value);
+    }
+    return radians * 57.29577951308232;
+}
+
+function math_atan2_degrees(y: f32, x: f32): f32 {
+    if (y == 0.0) {
+        if (x < 0.0) {
+            return 180.0;
+        }
+        return 0.0;
+    }
+    if (x == 0.0) {
+        if (y < 0.0) {
+            return -90.0;
+        }
+        return 90.0;
+    }
+
+    let absolute_x: f32 = math_abs(x);
+    let absolute_y: f32 = math_abs(y);
+    if (absolute_x >= absolute_y) {
+        let angle: f32 = math_atan_positive_degrees(absolute_y / absolute_x);
+        if (x > 0.0) {
+            if (y < 0.0) {
+                return -angle;
+            }
+            return angle;
+        }
+        if (y < 0.0) {
+            return angle - 180.0;
+        }
+        return 180.0 - angle;
+    }
+
+    let angle: f32 = math_atan_positive_degrees(absolute_x / absolute_y);
+    if (y > 0.0) {
+        if (x < 0.0) {
+            return 90.0 + angle;
+        }
+        return 90.0 - angle;
+    }
+    if (x < 0.0) {
+        return -90.0 - angle;
+    }
+    return -90.0 + angle;
+}
+
+function math_acos_degrees(value: f32): f32 {
+    if (value <= -1.0) {
+        return 180.0;
+    }
+    if (value >= 1.0) {
+        return 0.0;
+    }
+    return math_atan2_degrees(math_sqrt(1.0 - value * value), value);
+}

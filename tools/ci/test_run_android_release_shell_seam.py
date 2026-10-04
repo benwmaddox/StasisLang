@@ -69,21 +69,36 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
         expectations = {
             "android_generics": {
                 "digest": 507,
+                "math_raw_digest": -1430176193,
                 "bounds_indices": {"low": -1, "high": 2},
                 "bounds_signal": "SIGILL",
             }
         }
         log = (
             'I/Stasis: Stasis Android generics: '
-            '{"schema":"stasis.android.generics.v1",'
+            '{"schema":"stasis.android.generics.v2",'
             '"test_id":"ANDROID-GENERICS","event":"oracle",'
-            '"digest":507,"frame":1}\n'
+            '"digest":507,"math_raw_digest":-1430176193,"frame":1}\n'
         )
         receipt = seam.validate_android_generics_acceptance(log, expectations)
         self.assertEqual(507, receipt["digest"])
+        self.assertEqual(-1430176193, receipt["math_raw_digest"])
         self.assertEqual(1, receipt["frame"])
         with self.assertRaisesRegex(seam.SeamError, "digest marker mismatch"):
             seam.validate_android_generics_acceptance(log.replace("507", "506"), expectations)
+        with self.assertRaisesRegex(seam.SeamError, "digest marker mismatch"):
+            seam.validate_android_generics_acceptance(
+                log.replace("-1430176193", "-1430176192"), expectations
+            )
+        with self.assertRaisesRegex(seam.SeamError, "digest marker mismatch"):
+            seam.validate_android_generics_acceptance(
+                log.replace("stasis.android.generics.v2", "stasis.android.generics.v1"),
+                expectations,
+            )
+        with self.assertRaisesRegex(seam.SeamError, "digest marker mismatch"):
+            seam.validate_android_generics_acceptance(
+                log.replace('"math_raw_digest":-1430176193,', ""), expectations
+            )
         with self.assertRaisesRegex(seam.SeamError, "exactly one"):
             seam.validate_android_generics_acceptance(log + log, expectations)
 

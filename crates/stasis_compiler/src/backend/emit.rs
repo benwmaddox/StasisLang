@@ -11948,6 +11948,46 @@ pub(crate) fn emit_simple_expression(
                     type_id: TYPE_ID_I32,
                 });
             }
+            if target == "f32_sqrt" {
+                if arg_values.len() != 1 {
+                    return Err(format!(
+                        "math intrinsic 'f32_sqrt' expects exactly one argument, found {}",
+                        arg_values.len()
+                    ));
+                }
+                if arg_types[0] != TYPE_ID_F32 {
+                    return Err(format!(
+                        "math intrinsic 'f32_sqrt' requires f32 argument, found type {}",
+                        arg_types[0]
+                    ));
+                }
+                return Ok(ValueBinding {
+                    value: builder.ins().sqrt(arg_values[0]),
+                    type_id: TYPE_ID_F32,
+                });
+            }
+            if target == "f32_to_bits" {
+                if arg_values.len() != 1 {
+                    return Err(format!(
+                        "math intrinsic 'f32_to_bits' expects exactly one argument, found {}",
+                        arg_values.len()
+                    ));
+                }
+                if arg_types[0] != TYPE_ID_F32 {
+                    return Err(format!(
+                        "math intrinsic 'f32_to_bits' requires f32 argument, found type {}",
+                        arg_types[0]
+                    ));
+                }
+                return Ok(ValueBinding {
+                    value: builder.ins().bitcast(
+                        types::I32,
+                        cranelift_codegen::ir::MemFlags::new(),
+                        arg_values[0],
+                    ),
+                    type_id: TYPE_ID_I32,
+                });
+            }
             if (target == "sin_fast" || target == "cos_fast") && arg_values.len() != 1 {
                 return Err(format!(
                     "math intrinsic '{}' expects exactly one argument, found {}",

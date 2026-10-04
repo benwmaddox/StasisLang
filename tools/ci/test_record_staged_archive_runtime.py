@@ -36,7 +36,7 @@ class RecordRuntimeTests(unittest.TestCase):
         write_json(
             path,
             {
-                "schema": "stasis.staged_archive_acceptance.v1",
+                "schema": "stasis.staged_archive_acceptance.v2",
                 "target": target,
                 "release_id": RELEASE_ID,
                 "source_commit": SOURCE_COMMIT,
@@ -112,12 +112,50 @@ class RecordRuntimeTests(unittest.TestCase):
                 "status": "passed",
                 "test_id": "ANDROID-GENERICS",
                 "android_generics": {
-                    "digest_receipt": {"digest": 507, "event": "oracle"},
+                    "digest_receipt": {
+                        "schema": "stasis.android.generics.v2",
+                        "test_id": "ANDROID-GENERICS",
+                        "frame": 1,
+                        "digest": 507,
+                        "math_raw_digest": -1430176193,
+                        "event": "oracle",
+                    },
                     "bounds_probes": bounds_probes if bounds_probes is not None else self.android_bounds_probe_fixtures(),
                     "frame_capture": str(frame),
                 },
             },
         )
+        return evidence
+
+    def add_ios_runtime_evidence(
+        self,
+        root: Path,
+        *,
+        receipt_schema: str = "stasis.ios.generics.v2",
+    ) -> Path:
+        evidence_root = root / "artifacts"
+        evidence = evidence_root / "simulator-evidence.json"
+        evidence_root.mkdir(parents=True, exist_ok=True)
+        (evidence_root / "simulator-frame.png").write_bytes(b"captured iOS frame")
+        write_json(
+            evidence,
+            {
+                "status": "passed",
+                "schema": "stasis.ios.generics.evidence.v2",
+                "receipt": {
+                    "schema": receipt_schema,
+                    "main_result": 0,
+                    "tick_result": 0,
+                    "render_result": 0,
+                    "digest": 507,
+                    "math_raw_digest": -1430176193,
+                    "frame": 1,
+                },
+                "bounds": {"low": {"index": -1}, "high": {"index": 2}},
+            },
+        )
+        write_json(evidence_root / "bounds-low.json", {"index": -1, "fatal": True})
+        write_json(evidence_root / "bounds-high.json", {"index": 2, "fatal": True})
         return evidence
 
     def add_ios_shipping_evidence(self, root: Path) -> None:
@@ -139,6 +177,7 @@ class RecordRuntimeTests(unittest.TestCase):
         )
         (build_root / "device-symbols.txt").write_text(
             "stasis_state_scalar__generics_collections_digest_value\n"
+            "stasis_state_scalar__math_oracle_raw_digest_value\n"
             "stasis_state_scalar__web_bounds_probe_index\n"
             "stasis_state_array__gfx_cmd_i32\n",
             encoding="utf-8",
@@ -170,6 +209,24 @@ class RecordRuntimeTests(unittest.TestCase):
             self.assertFalse(mobile["shipping_package"]["development_build"])
             self.assertEqual(mobile["shipping_package"]["linked_artifact_sha256"], sha256(roots[label] / "shipping/app-debug.apk"))
             self.assertEqual(receipt["consumers"][label]["mobile_runtime"]["frame_sha256"], sha256(roots[label] / "artifacts/frame.png"))
+
+    def test_rejects_legacy_v1_staged_archive_receipt(self) -> None:
+        receipt_path = self.make_receipt("android")
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["schema"] = "stasis.staged_archive_acceptance.v1"
+        write_json(receipt_path, receipt)
+        roots = {label: self.root / label for label in ("bundled", "generated")}
+        for root in roots.values():
+            root.mkdir()
+        with self.assertRaisesRegex(ValueError, "unsupported schema"):
+            recorder.record_runtime(
+                receipt_path,
+                "android",
+                roots["bundled"],
+                roots["generated"],
+                expected_release=RELEASE_ID,
+                expected_source=SOURCE_COMMIT,
+            )
 
     def test_accepts_android_producer_absolute_frame_with_relative_consumer_roots(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:
@@ -213,6 +270,75 @@ class RecordRuntimeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Android generics screenshot is missing"):
             recorder.find_runtime_evidence(consumer_root, "android")
+
+    def test_rejects_android_runtime_missing_math_raw_digest(self) -> None:
+        consumer_root = self.root / "consumer"
+        evidence_path = self.add_android_runtime_evidence(consumer_root)
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        del evidence["android_generics"]["digest_receipt"]["math_raw_digest"]
+        write_json(evidence_path, evidence)
+        with self.assertRaisesRegex(ValueError, "raw-bit oracle"):
+            recorder.find_runtime_evidence(consumer_root, "android")
+
+    def test_rejects_android_nested_legacy_v1_receipt(self) -> None:
+        consumer_root = self.root / "consumer"
+        evidence_path = self.add_android_runtime_evidence(consumer_root)
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["android_generics"]["digest_receipt"]["schema"] = "stasis.android.generics.v1"
+        write_json(evidence_path, evidence)
+        with self.assertRaisesRegex(ValueError, "raw-bit oracle"):
+            recorder.find_runtime_evidence(consumer_root, "android")
+
+    def test_rejects_android_floating_point_digest_fields(self) -> None:
+        for field, value in (("digest", 507.0), ("math_raw_digest", -1430176193.0)):
+            with self.subTest(field=field):
+                consumer_root = self.root / f"android-{field}-float"
+                evidence_path = self.add_android_runtime_evidence(consumer_root)
+                evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+                evidence["android_generics"]["digest_receipt"][field] = value
+                write_json(evidence_path, evidence)
+                with self.assertRaisesRegex(ValueError, "raw-bit oracle"):
+                    recorder.find_runtime_evidence(consumer_root, "android")
+
+    def test_accepts_ios_nested_v2_receipt_contract(self) -> None:
+        consumer_root = self.root / "consumer"
+        evidence_path = self.add_ios_runtime_evidence(consumer_root)
+        recorded_evidence, frame_path, files = recorder.find_runtime_evidence(consumer_root, "ios")
+        self.assertEqual(recorded_evidence, evidence_path)
+        self.assertEqual(frame_path, consumer_root / "artifacts" / "simulator-frame.png")
+        self.assertIn(recorded_evidence, files)
+
+    def test_rejects_ios_nested_legacy_or_incomplete_receipt(self) -> None:
+        invalid_cases = [
+            ("legacy schema", lambda receipt: receipt.update(schema="stasis.ios.generics.v1")),
+            ("missing schema", lambda receipt: receipt.pop("schema")),
+            ("missing main result", lambda receipt: receipt.pop("main_result")),
+            ("missing tick result", lambda receipt: receipt.pop("tick_result")),
+            ("missing render result", lambda receipt: receipt.pop("render_result")),
+            ("nonzero render result", lambda receipt: receipt.update(render_result=1)),
+            ("missing frame", lambda receipt: receipt.pop("frame")),
+            ("boolean frame", lambda receipt: receipt.update(frame=True)),
+            ("floating point digest", lambda receipt: receipt.update(digest=507.0)),
+            ("floating point math digest", lambda receipt: receipt.update(math_raw_digest=-1430176193.0)),
+        ]
+        for name, corrupt in invalid_cases:
+            with self.subTest(name=name):
+                consumer_root = self.root / name.replace(" ", "-")
+                evidence_path = self.add_ios_runtime_evidence(consumer_root)
+                evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+                corrupt(evidence["receipt"])
+                write_json(evidence_path, evidence)
+                with self.assertRaisesRegex(ValueError, "failed receipt, digest, or bounds"):
+                    recorder.find_runtime_evidence(consumer_root, "ios")
+
+    def test_rejects_ios_runtime_missing_math_raw_digest(self) -> None:
+        consumer_root = self.root / "consumer"
+        evidence_path = self.add_ios_runtime_evidence(consumer_root)
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        del evidence["receipt"]["math_raw_digest"]
+        write_json(evidence_path, evidence)
+        with self.assertRaisesRegex(ValueError, "failed receipt, digest, or bounds checks"):
+            recorder.find_runtime_evidence(consumer_root, "ios")
 
     def test_rejects_invalid_android_bounds_probe_receipts(self) -> None:
         consumer = self.root / "consumer"
@@ -296,8 +422,16 @@ class RecordRuntimeTests(unittest.TestCase):
                 evidence_root / "simulator-evidence.json",
                 {
                     "status": "passed",
-                    "schema": "stasis.ios.generics.evidence.v1",
-                    "receipt": {"digest": 507},
+                    "schema": "stasis.ios.generics.evidence.v2",
+                    "receipt": {
+                        "schema": "stasis.ios.generics.v2",
+                        "main_result": 0,
+                        "tick_result": 0,
+                        "render_result": 0,
+                        "digest": 507,
+                        "math_raw_digest": -1430176193,
+                        "frame": 1,
+                    },
                     "bounds": {"low": {"index": -1}, "high": {"index": 2}},
                 },
             )

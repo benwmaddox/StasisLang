@@ -1,5 +1,6 @@
 import "live_edit_helper.stasis";
 import "bitwise_oracle.stasis";
+import "/vendor/stasis/stdlib/math.stasis";
 import "/vendor/stasis/stdlib/rig2d.stasis";
 import "/vendor/stasis/stdlib/graphics.stasis";
 
@@ -202,6 +203,15 @@ global mode_one: CompileValue<1>;
 global mode_two: CompileValue<2>;
 global web_bounds_probe_index: i32;
 global generics_collections_digest_value: i32;
+global math_oracle_raw_digest_value: i32;
+global math_oracle_raw_bits: i32[13];
+global math_oracle_sqrt_two: f32;
+global math_oracle_sqrt_tiny: f32;
+global math_oracle_sqrt_large: f32;
+global math_oracle_atan2_three_four: f32;
+global math_oracle_atan2_negative_two_three: f32;
+global math_oracle_acos_negative_half: f32;
+global math_oracle_acos_near_one: f32;
 
 function near(actual: f32, expected: f32): bool {
     let difference: f32 = actual - expected;
@@ -215,7 +225,7 @@ function tick(): i32 {
 
 function render(): i32 {
     clear(0.04, 0.08, 0.16, 1.0);
-    if (generics_collections_digest_value == 507) {
+    if (generics_collections_digest_value == 507 && math_oracle_raw_digest_value == -1430176193) {
         fill_rect(48.0, 48.0, 160.0, 96.0, 0.16, 0.72, 0.52, 1.0);
     } else {
         fill_rect(48.0, 48.0, 160.0, 96.0, 0.85, 0.08, 0.08, 1.0);
@@ -230,7 +240,77 @@ function generics_collections_state_digest(): i32 {
     ) + entity_pool_id(entity_pool, 1) + integer_buffer.count + wide_buffer.count + float_buffer.count + nested_buffer.inner.count + sample_window.count + ring.count + entity_pool.count + live_edit_state + courier_rig.count + boss_rig.count;
 }
 
+function math_oracle_near(actual: f32, expected: f32, tolerance: f32): bool {
+    return math_abs(actual - expected) <= tolerance;
+}
+
+function math_oracle_relative_near(actual: f32, expected: f32, tolerance: f32): bool {
+    return math_abs(actual - expected) <= math_abs(expected) * tolerance;
+}
+
+function math_oracle_hash_raw_bits(): i32 {
+    let digest: i32 = -2128831035;
+    let index: i32 = 0;
+    for (index = 0; index < 13; index = index + 1) {
+        digest =(digest ^ math_oracle_raw_bits[index]) * 16777619;
+    }
+    return digest;
+}
+
+function math_oracle_run(): bool {
+    let negative_zero: f32 = 0.0 / -1.0;
+    math_oracle_sqrt_two = math_sqrt(2.0);
+    math_oracle_sqrt_tiny = math_sqrt(0.000000000000000000000000000001);
+    math_oracle_sqrt_large = math_sqrt(1000000000000000000000000000000.0);
+    math_oracle_atan2_three_four = math_atan2_degrees(3.0, 4.0);
+    math_oracle_atan2_negative_two_three = math_atan2_degrees(-2.0, 3.0);
+    math_oracle_acos_negative_half = math_acos_degrees(-0.5);
+    math_oracle_acos_near_one = math_acos_degrees(0.999999);
+
+    if (
+        !math_oracle_relative_near(math_oracle_sqrt_two, 1.41421356237, 0.000001)
+        || !math_oracle_relative_near(math_oracle_sqrt_tiny, 0.000000000000001, 0.000001)
+        || !math_oracle_relative_near(math_oracle_sqrt_large, 1000000000000000.0, 0.000001)
+        || !math_oracle_near(math_oracle_atan2_three_four, 36.86989765, 0.01)
+        || !math_oracle_near(math_oracle_atan2_negative_two_three, -33.6900675, 0.01)
+        || !math_oracle_near(math_oracle_acos_negative_half, 120.0, 0.01)
+        || !math_oracle_near(math_oracle_acos_near_one, 0.0810285, 0.01)
+        || math_sqrt(-1.0) != 0.0
+        || math_sqrt(0.0) != 0.0
+        || math_atan2_degrees(0.0, 0.0) != 0.0
+        || math_acos_degrees(-2.0) != 180.0
+        || math_acos_degrees(2.0) != 0.0
+        || math_abs((-2147483647 - 1)) != 2147483647
+        || f32_to_bits(negative_zero) !=(-2147483647 - 1)
+        || f32_to_bits(math_sqrt(negative_zero)) != 0
+        || f32_to_bits(math_abs(negative_zero)) != 0
+        || f32_to_bits(math_atan2_degrees(negative_zero, 1.0)) != 0
+        || math_atan2_degrees(negative_zero, -1.0) != 180.0
+    ) {
+        return false;
+    }
+
+    math_oracle_raw_bits[0] = f32_to_bits(math_oracle_sqrt_two);
+    math_oracle_raw_bits[1] = f32_to_bits(math_oracle_sqrt_tiny);
+    math_oracle_raw_bits[2] = f32_to_bits(math_oracle_sqrt_large);
+    math_oracle_raw_bits[3] = f32_to_bits(math_oracle_atan2_three_four);
+    math_oracle_raw_bits[4] = f32_to_bits(math_oracle_atan2_negative_two_three);
+    math_oracle_raw_bits[5] = f32_to_bits(math_oracle_acos_negative_half);
+    math_oracle_raw_bits[6] = f32_to_bits(math_oracle_acos_near_one);
+    math_oracle_raw_bits[7] = f32_to_bits(math_abs(-3.25));
+    math_oracle_raw_bits[8] = f32_to_bits(negative_zero);
+    math_oracle_raw_bits[9] = f32_to_bits(math_sqrt(negative_zero));
+    math_oracle_raw_bits[10] = f32_to_bits(math_abs(negative_zero));
+    math_oracle_raw_bits[11] = f32_to_bits(math_atan2_degrees(negative_zero, 1.0));
+    math_oracle_raw_bits[12] = f32_to_bits(math_atan2_degrees(negative_zero, -1.0));
+    math_oracle_raw_digest_value = math_oracle_hash_raw_bits();
+    return math_oracle_raw_digest_value == -1430176193;
+}
+
 function main(): i32 {
+    if (!math_oracle_run()) {
+        return 21;
+    }
     buffer_clear(integer_buffer);
     buffer_clear(wide_buffer);
     buffer_clear(float_buffer);

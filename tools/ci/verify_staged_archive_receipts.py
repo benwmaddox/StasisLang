@@ -104,6 +104,10 @@ def verify_web(web: Any, label: str, target: str, fingerprint: str) -> None:
     for field in ("package_provenance_sha256", "frame_sha256", "result_sha256"):
         require_sha256(web.get(field), f"{target} {label} Web {field}")
     require(web.get("state_digest") == 507, f"{target} {label} Web digest differs from the oracle")
+    require(
+        type(web.get("math_raw_digest")) is int and web.get("math_raw_digest") == -1430176193,
+        f"{target} {label} Web raw math digest differs from the oracle",
+    )
     require(web.get("bounds") == {"low": True, "high": True}, f"{target} {label} Web bounds traps are incomplete")
 
 
@@ -225,7 +229,7 @@ def load_receipts(receipt_root: Path) -> dict[str, dict[str, Any]]:
     for path in paths:
         value = json.loads(path.read_text(encoding="utf-8"))
         require(
-            value.get("schema") == "stasis.staged_archive_acceptance.v1",
+            value.get("schema") == "stasis.staged_archive_acceptance.v2",
             f"unsupported staged archive receipt schema in {path}",
         )
         target = value.get("target")

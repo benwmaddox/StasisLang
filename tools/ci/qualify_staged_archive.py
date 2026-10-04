@@ -543,7 +543,7 @@ def main() -> int:
         consumers["generated"]["web"] = browser["generated"]
 
     receipt = {
-        "schema": "stasis.staged_archive_acceptance.v1",
+        "schema": "stasis.staged_archive_acceptance.v2",
         "target": args.target,
         "repository": args.repository,
         "workflow_run_id": str(args.run_id),
@@ -724,6 +724,24 @@ def qualify_desktop(
     }
 
 
+def validate_generics_browser_receipt(result: Any) -> None:
+    """Require the v2 browser oracle receipt with its exact raw math result."""
+    if not isinstance(result, dict):
+        raise RuntimeError("browser acceptance receipt is not a JSON object")
+    if (
+        result.get("schema") != "stasis.generics_collections_browser_acceptance.v2"
+        or result.get("stateDigest") != 507
+        or type(result.get("mathRawDigest")) is not int
+        or result.get("mathRawDigest") != -1430176193
+        or result.get("mainResult") != 0
+    ):
+        raise RuntimeError("browser schema, collection, or raw math digest did not match the oracle")
+    if result.get("bounds") != {"low": True, "high": True}:
+        raise RuntimeError("browser bounds checks did not trap both invalid indices")
+    if result.get("failures") != []:
+        raise RuntimeError("browser acceptance reported runtime or console failures")
+
+
 def qualify_web(
     cli: Path,
     project: Path,
@@ -787,12 +805,7 @@ def qualify_web(
     if not result_path.is_file():
         raise RuntimeError("browser acceptance did not write receipt.json")
     result = json.loads(result_path.read_text(encoding="utf-8"))
-    if result.get("stateDigest") != 507 or result.get("mainResult") != 0:
-        raise RuntimeError("browser generics state digest or main result did not match the oracle")
-    if result.get("bounds") != {"low": True, "high": True}:
-        raise RuntimeError("browser bounds checks did not trap both invalid indices")
-    if result.get("failures") != []:
-        raise RuntimeError("browser acceptance reported runtime or console failures")
+    validate_generics_browser_receipt(result)
     return {
         "project_name": project_name(project),
         "package_provenance_sha256": sha256_file(bundle / "stasis_provenance.json"),
@@ -801,6 +814,7 @@ def qualify_web(
         "result_sha256": sha256_file(result_path),
         "frame_sha256": sha256_file(browser_evidence / "browser.png"),
         "state_digest": result["stateDigest"],
+        "math_raw_digest": result["mathRawDigest"],
         "bounds": result["bounds"],
         "result": "passed",
     }

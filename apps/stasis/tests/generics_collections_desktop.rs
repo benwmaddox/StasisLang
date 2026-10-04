@@ -445,11 +445,15 @@ fn full_generics_desktop_package_launches_with_provenance_and_digest_frame() {
         )
         .expect("copy desktop provenance evidence");
         let receipt = json!({
-            "schema": "stasis.generics_collections_desktop_acceptance.v1",
+            "schema": "stasis.generics_collections_desktop_acceptance.v2",
             "host": { "os": std::env::consts::OS, "arch": std::env::consts::ARCH },
             "entry": "src/main.stasis",
-            "results": { "main": 0, "tick": 0, "state_digest": 507 },
+            "results": {
+                "main": 0, "tick": 0, "state_digest": 507,
+                "math_raw_digest": -1430176193_i64,
+            },
             "digest_evidence": "the production render emits teal only when generics_collections_digest_value is exactly 507",
+            "math_digest_evidence": "main returns success and the production render emits teal only when math_oracle_raw_digest_value matches the exact raw-bit oracle",
             "render_construction_lifecycle": {
                 "version": 1,
                 "owner": lifecycle_owner,

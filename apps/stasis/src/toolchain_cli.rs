@@ -11326,6 +11326,7 @@ fn bundled_stdlib_dir() -> Result<PathBuf, String> {
         if candidate.join("stdlib.stasis").is_file()
             && candidate.join("internal/host_frame_raw.stasis").is_file()
             && candidate.join("internal/gfx_cmd.stasis").is_file()
+            && candidate.join("math.stasis").is_file()
         {
             return Ok(candidate);
         }
@@ -11355,6 +11356,7 @@ fn resolve_vendor_directories(roots: &[PathBuf]) -> Result<(PathBuf, PathBuf), S
             "stdlib.stasis",
             "internal/host_frame_raw.stasis",
             "internal/gfx_cmd.stasis",
+            "math.stasis",
         ]
         .iter()
         .all(|file| stdlib.join(file).is_file());
@@ -14564,6 +14566,10 @@ mod tests {
             fs::read(installed.join("src/stdlib/rig2d.stasis")).unwrap(),
             fs::read(stdlib.join("rig2d.stasis")).unwrap()
         );
+        assert_eq!(
+            fs::read(installed.join("src/stdlib/math.stasis")).unwrap(),
+            fs::read(stdlib.join("math.stasis")).unwrap()
+        );
         assert!(resolve_vendor_directories(&[installed.clone()]).is_err());
         copy_dir_if_exists(&docs, &installed.join("docs/knowledge")).unwrap();
         assert_eq!(
@@ -16709,6 +16715,15 @@ mod tests {
         assert!(root
             .join(".stasis_cache/toolchain/src/stdlib/internal/gfx_cmd.stasis")
             .is_file());
+        assert_eq!(
+            fs::read(root.join(".stasis_cache/toolchain/src/stdlib/math.stasis")).unwrap(),
+            fs::read(
+                bundled_stdlib_dir()
+                    .expect("bundled stdlib")
+                    .join("math.stasis")
+            )
+            .expect("read bundled math stdlib")
+        );
         assert_eq!(
             fs::read(root.join(".stasis_cache/toolchain/src/stdlib/rig2d.stasis")).unwrap(),
             fs::read(

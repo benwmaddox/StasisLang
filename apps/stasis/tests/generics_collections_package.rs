@@ -295,6 +295,8 @@ WebAssembly.instantiate(module, {}).then(instance => {
   const tickResult = e.tick();
   const digestHash = game.globals.generics_collections_digest_value.hash;
   const stateDigest = e.__stasis_global_get_i32(digestHash);
+  const mathDigestHash = game.globals.math_oracle_raw_digest_value.hash;
+  const mathRawDigest = e.__stasis_global_get_i32(mathDigestHash);
   const probeHash = game.globals.web_bounds_probe_index.hash;
   const trapped = index => {
     e.__stasis_global_set_i32(probeHash, index);
@@ -309,7 +311,7 @@ WebAssembly.instantiate(module, {}).then(instance => {
   const commandLayout = game.memory.gfx_cmd_i32;
   const commandView = new DataView(e.memory.buffer, commandLayout.offset, commandLayout.length * commandLayout.stride);
   process.stdout.write(JSON.stringify({
-    imports, mainResult, tickResult, stateDigest, lowTrap, highTrap, renderResult, finishResult,
+    imports, mainResult, tickResult, stateDigest, mathRawDigest, lowTrap, highTrap, renderResult, finishResult,
     commandMagic: commandView.getInt32(0, true),
     commandFlags: commandView.getInt32(2 * 4, true),
     rectangleCount: commandView.getInt32(24 * 4, true)
@@ -331,6 +333,7 @@ WebAssembly.instantiate(module, {}).then(instance => {
     assert_eq!(execution["mainResult"], 0);
     assert_eq!(execution["tickResult"], 0);
     assert_eq!(execution["stateDigest"], 507);
+    assert_eq!(execution["mathRawDigest"], -1430176193_i64);
     assert_eq!(execution["lowTrap"], true);
     assert_eq!(execution["highTrap"], true);
     assert_eq!(execution["renderResult"], 0);

@@ -38,6 +38,7 @@ Each page solves one system problem for one style of game.
 - [Benchmarking ticks and functions](benchmarking.md)
 - [Focused behavioral tests](testing.md)
 - [Geometry and collision](geometry-and-collision.md)
+- [Scalar math](scalar-math.md)
 - [Display and coordinate spaces](display-and-coordinate-spaces.md)
 - [Loading screens around asset IO](loading-screens.md)
 - [Semantic edit and validation](semantic-edit-and-validation.md)
