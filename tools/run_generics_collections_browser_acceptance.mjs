@@ -127,7 +127,7 @@ try {
   assert.deepEqual(await evaluate("genericsProof.imports"), []);
   assert.deepEqual(protocolFailures, []);
   assert.equal(await evaluate("genericsProof.guest.tick()"), 0);
-  assert.equal(await evaluate(`(() => {
+  const stateDigest = await evaluate(`(() => {
     const globalHash = path => {
       let hash = 2166136261;
       for (const byte of new TextEncoder().encode(path)) {
@@ -138,7 +138,21 @@ try {
     const hash = STASIS_GAME.globals.generics_collections_digest_value?.hash
       ?? globalHash("generics_collections_digest_value");
     return genericsProof.guest.__stasis_global_get_i32(hash);
-  })()`), 507);
+  })()`);
+  assert.equal(stateDigest, 507);
+  const mathRawDigest = await evaluate(`(() => {
+    const globalHash = path => {
+      let hash = 2166136261;
+      for (const byte of new TextEncoder().encode(path)) {
+        hash = Math.imul(hash ^ byte, 16777619) >>> 0;
+      }
+      return hash | 0;
+    };
+    const hash = STASIS_GAME.globals.math_oracle_raw_digest_value?.hash
+      ?? globalHash("math_oracle_raw_digest_value");
+    return genericsProof.guest.__stasis_global_get_i32(hash);
+  })()`);
+  assert.equal(mathRawDigest, -1430176193);
   const bounds = await evaluate(`(() => {
     const e = genericsProof.guest;
     const globalHash = path => {
@@ -212,10 +226,11 @@ try {
   assert.deepEqual(pageFailures, []);
   assert.deepEqual(protocolFailures, []);
   const receipt = {
-    schema: "stasis.generics_collections_browser_acceptance.v1",
+    schema: "stasis.generics_collections_browser_acceptance.v2",
     browser: await call("Browser.getVersion"),
     mainResult: 0,
-    stateDigest: 507,
+    stateDigest,
+    mathRawDigest,
     bounds,
     frame: {
       backend: "WebGL2",

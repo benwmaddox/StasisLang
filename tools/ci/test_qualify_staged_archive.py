@@ -140,5 +140,43 @@ class PackageIdentityTests(unittest.TestCase):
             )
 
 
+class GenericsBrowserReceiptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.receipt = {
+            "schema": "stasis.generics_collections_browser_acceptance.v2",
+            "mainResult": 0,
+            "stateDigest": 507,
+            "mathRawDigest": -1430176193,
+            "bounds": {"low": True, "high": True},
+            "failures": [],
+        }
+
+    def test_accepts_v2_receipt_with_expected_math_oracle(self) -> None:
+        qualify.validate_generics_browser_receipt(self.receipt)
+
+    def test_rejects_legacy_v1_receipt(self) -> None:
+        value = dict(self.receipt)
+        value["schema"] = "stasis.generics_collections_browser_acceptance.v1"
+        with self.assertRaisesRegex(RuntimeError, "schema.*raw math digest"):
+            qualify.validate_generics_browser_receipt(value)
+
+    def test_rejects_missing_or_mismatched_math_oracle(self) -> None:
+        for label, raw in (("missing", None), ("mismatched", -1430176192)):
+            with self.subTest(label=label):
+                value = dict(self.receipt)
+                if raw is None:
+                    del value["mathRawDigest"]
+                else:
+                    value["mathRawDigest"] = raw
+                with self.assertRaisesRegex(RuntimeError, "raw math digest"):
+                    qualify.validate_generics_browser_receipt(value)
+
+    def test_rejects_floating_point_math_oracle(self) -> None:
+        value = dict(self.receipt)
+        value["mathRawDigest"] = -1430176193.0
+        with self.assertRaisesRegex(RuntimeError, "raw math digest"):
+            qualify.validate_generics_browser_receipt(value)
+
+
 if __name__ == "__main__":
     unittest.main()

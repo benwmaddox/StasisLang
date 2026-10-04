@@ -5306,6 +5306,41 @@ function zero_capacity(): i32 {
     }
 
     #[test]
+    fn aot_rejects_new_f32_math_intrinsics_before_reachability_pruning() {
+        for (source, expected) in [
+            (
+                "function main(): f32 { return f32_sqrt(); }\n",
+                "math intrinsic 'f32_sqrt' expects exactly one argument, found 0",
+            ),
+            (
+                "function main(): i32 { return f32_to_bits(1); }\n",
+                "math intrinsic 'f32_to_bits' argument expected f32 expression but found i32",
+            ),
+            (
+                "function unused(): f32 { return f32_sqrt(); } function main(): i32 { return 0; }\n",
+                "math intrinsic 'f32_sqrt' expects exactly one argument, found 0",
+            ),
+            (
+                "function unused(): i32 { return f32_to_bits(true); } function main(): i32 { return 0; }\n",
+                "math intrinsic 'f32_to_bits' argument expected f32 expression but found bool",
+            ),
+        ] {
+            let mut process = AotProcess::new();
+            process.upsert_file("invalid_intrinsic.stasis", source);
+            match process
+                .compile()
+                .expect_err("reject invalid math intrinsic call before backend emission")
+            {
+                crate::compiler::CompileError::Frontend(message) => {
+                    assert!(message.contains(expected), "{message}");
+                }
+                other => panic!("expected shared frontend error, got {other:?}"),
+            }
+            assert!(process.artifacts().is_empty());
+        }
+    }
+
+    #[test]
     fn aot_process_rejects_removed_public_graphics_frame_calls_in_frontend() {
         let project_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         for removed_name in ["begin_frame", "end_frame"] {

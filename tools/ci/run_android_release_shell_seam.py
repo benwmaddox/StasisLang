@@ -509,10 +509,11 @@ def validate_android_generics_acceptance(log: str, expectations: dict) -> dict:
         )
     receipt = receipts[0]
     expected = {
-        "schema": "stasis.android.generics.v1",
+        "schema": "stasis.android.generics.v2",
         "test_id": "ANDROID-GENERICS",
         "event": "oracle",
         "digest": contract["digest"],
+        "math_raw_digest": contract["math_raw_digest"],
         "frame": 1,
     }
     mismatches = {

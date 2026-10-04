@@ -14,10 +14,11 @@ from pathlib import Path
 from typing import Sequence
 
 
-RECEIPT_SCHEMA = "stasis.ios.generics.v1"
+RECEIPT_SCHEMA = "stasis.ios.generics.v2"
 BOUNDS_SCHEMA = "stasis.ios.generics.bounds.v1"
-EVIDENCE_SCHEMA = "stasis.ios.generics.evidence.v1"
+EVIDENCE_SCHEMA = "stasis.ios.generics.evidence.v2"
 EXPECTED_DIGEST = 507
+EXPECTED_MATH_RAW_DIGEST = -1430176193
 AUTHORED_TEAL_RGB = (41, 184, 133)
 MIN_FRAME_PIXELS = 1024
 MAX_LOG_BYTES = 8 * 1024 * 1024
@@ -72,6 +73,7 @@ def validate_receipt(path: Path) -> dict:
     for key in ("main_result", "tick_result", "render_result"):
         _require_exact_int(value, key, 0, path)
     _require_exact_int(value, "digest", EXPECTED_DIGEST, path)
+    _require_exact_int(value, "math_raw_digest", EXPECTED_MATH_RAW_DIGEST, path)
     frame = value.get("frame")
     if isinstance(frame, bool) or not isinstance(frame, int) or frame < 1:
         raise EvidenceError(f"{path}: expected frame >= 1, got {frame!r}")
@@ -304,7 +306,8 @@ def validate_logs(paths: Sequence[Path], receipt: dict) -> tuple[list[dict], dic
         })
     combined = "\n".join(texts)
     acceptance_pattern = re.compile(
-        rf"Stasis iOS generics acceptance digest=507 frame={receipt['frame']}\b[^\n]*"
+        rf"Stasis iOS generics acceptance digest=507 math_raw_digest={EXPECTED_MATH_RAW_DIGEST} "
+        rf"frame={receipt['frame']}\b[^\n]*"
     )
     acceptance = acceptance_pattern.search(combined)
     provenance_pattern = re.compile(
@@ -318,7 +321,10 @@ def validate_logs(paths: Sequence[Path], receipt: dict) -> tuple[list[dict], dic
         "generics_acceptance": (
             acceptance.group(0).strip()
             if acceptance is not None
-            else f"verified receipt digest={receipt['digest']} frame={receipt['frame']}"
+            else (
+                f"verified receipt digest={receipt['digest']} "
+                f"math_raw_digest={receipt['math_raw_digest']} frame={receipt['frame']}"
+            )
         ),
         "provenance": provenance.group(0).strip(),
     }

@@ -10698,6 +10698,84 @@ function main(): i32 { return read(0); }
 
     #[cfg(windows)]
     #[test]
+    fn jit_process_executes_f32_sqrt_intrinsic_call() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "sample.stasis",
+            "function main(): i32 { let root: f32 = f32_sqrt(2.0); if (root > 1.414212 && root < 1.414215) { return 0; } return 1; }\n",
+        );
+        process.compile().expect("compile f32 sqrt intrinsic");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute main"),
+            0
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_process_preserves_f32_bits_for_signed_zero_and_sqrt() {
+        let mut process = JitProcess::new();
+        process.upsert_file(
+            "math.stasis",
+            include_str!("../../../../src/stdlib/math.stasis"),
+        );
+        process.upsert_file(
+            "sample.stasis",
+            "import \"math.stasis\"; global value: f32; function main(): i32 { let generated_negative_zero: f32 = 0.0 / -1.0; if (f32_to_bits(value) != (-2147483647 - 1)) { return 1; } if (f32_to_bits(math_sqrt(value)) != 0) { return 2; } if (f32_to_bits(math_abs(value)) != 0) { return 3; } if (f32_to_bits(math_atan2_degrees(value, 1.0)) != 0) { return 4; } if (math_atan2_degrees(value, -1.0) != 180.0) { return 5; } if (f32_to_bits(generated_negative_zero) != (-2147483647 - 1)) { return 6; } if (f32_to_bits(math_sqrt(generated_negative_zero)) != 0) { return 7; } if (f32_to_bits(math_abs(generated_negative_zero)) != 0) { return 8; } if (f32_to_bits(math_atan2_degrees(generated_negative_zero, 1.0)) != 0) { return 9; } if (f32_to_bits(f32_sqrt(2.0)) != 1068827891) { return 10; } return 0; }\n",
+        );
+        process.compile().expect("compile f32 bitcast intrinsics");
+        stasis_dynload::stasis_jit_global_f32_store(
+            stasis_dynload::global_path_hash("value"),
+            -0.0_f32,
+        );
+        let value = process
+            .execute_i32_noarg_by_name("main")
+            .expect("execute main");
+        assert_eq!(
+            value, 0,
+            "math wrappers canonicalize host-provided negative zero"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn jit_rejects_invalid_f32_math_intrinsic_arity_and_types() {
+        for (source, expected) in [
+            (
+                "function main(): f32 { return f32_sqrt(); }\n",
+                "math intrinsic 'f32_sqrt' expects exactly one argument, found 0",
+            ),
+            (
+                "function main(): i32 { return f32_to_bits(1); }\n",
+                "math intrinsic 'f32_to_bits' argument expected f32 expression but found i32",
+            ),
+            (
+                "function unused(): f32 { return f32_sqrt(); } function main(): i32 { return 0; }\n",
+                "math intrinsic 'f32_sqrt' expects exactly one argument, found 0",
+            ),
+            (
+                "function unused(): i32 { return f32_to_bits(true); } function main(): i32 { return 0; }\n",
+                "math intrinsic 'f32_to_bits' argument expected f32 expression but found bool",
+            ),
+        ] {
+            let mut process = JitProcess::new();
+            process.upsert_file("invalid_intrinsic.stasis", source);
+            match process
+                .compile()
+                .expect_err("reject invalid math intrinsic call before backend emission")
+            {
+                crate::compiler::CompileError::Frontend(message) => {
+                    assert!(message.contains(expected), "{message}");
+                }
+                other => panic!("expected shared frontend error, got {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn jit_process_executes_extern_keyword_function_call() {
         let mut process = JitProcess::new();
         process.upsert_file(

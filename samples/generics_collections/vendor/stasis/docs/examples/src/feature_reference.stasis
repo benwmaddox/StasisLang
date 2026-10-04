@@ -1,0 +1,30 @@
+import "/vendor/stasis/stdlib/storage.stasis";
+
+struct ScoreBuffer<T: type, N: i32> {
+    count: i32;
+    values: T[N];
+}
+
+global scores: ScoreBuffer<i32, 4>;
+global recent_scores: queue<i32, 4>;
+
+function capacity(self: ScoreBuffer<T, N>): i32 {
+    return N;
+}
+
+function enqueue_score(value: i32): bool {
+    if (recent_scores.can_push()) {
+        recent_scores.push(value);
+        return true;
+    }
+    return false;
+}
+
+function save_best_score(value: i32): bool {
+    return storage_save_i32("knowledge_demo", "best_score", value);
+}
+
+function main(): i32 {
+    scores.count = 0;
+    return 0;
+}

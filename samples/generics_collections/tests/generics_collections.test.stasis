@@ -8,6 +8,10 @@ test `generic collection workload has the stable state digest`(): bool {
     return main() == 0 && tick() == 0 && generics_collections_state_digest() == 507;
 }
 
+test `scalar math oracle matches its exact raw-bit digest`(): bool {
+    return math_oracle_run() && math_oracle_raw_digest_value == -1430176193;
+}
+
 test `live edit helper preserves the explicit state counter`(): bool {
     reset_live_edit_state();
     return live_edit_tick() == 8 && live_edit_tick() == 9;

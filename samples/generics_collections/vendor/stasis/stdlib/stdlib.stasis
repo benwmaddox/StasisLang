@@ -276,31 +276,286 @@ function ascii_push(dst: ascii[], b: u8): i32 {
     return base + 1;
 }
 
-function ascii_push_i32(dst: ascii[], value: i32): void {
-    let v: i32 = value;
-    if (v == 0) {
-        ascii_push(dst, 48);
-        return;
+function ascii_write_i32(dst: ascii[], value: i32, base: i32): i32 {
+    let negative: bool = value < 0;
+    let working: i32 = value;
+    if (working > 0) {
+        working = 0 - working;
     }
 
-    if (v < 0) {
-        ascii_push(dst, 45);
-        v = 0 - v;
-    }
-
-    // Find the highest power-of-10 divisor.
-    let pow10: i32 = 1;
+    let digit_count: i32 = 1;
+    let remaining: i32 = working;
     let i: i32 = 0;
-    for (i = 0; pow10 <= v / 10; i = i + 1) {
-        pow10 = pow10 * 10;
+    for (i = 0; i < 10; i = i + 1) {
+        if (remaining <= -10) {
+            remaining = remaining / 10;
+            digit_count = digit_count + 1;
+        }
     }
 
-    // Emit digits.
-    for (i = 0; pow10 > 0; i = i + 1) {
-        let digit: i32 =(v / pow10) % 10;
-        ascii_push(dst, to_u8_trunc(48 + digit));
-        pow10 = pow10 / 10;
+    let sign_count: i32 = 0;
+    if (negative) {
+        sign_count = 1;
     }
+    let result_length: i32 = base + sign_count + digit_count;
+    let capacity: i32 = ascii_max_length(dst);
+    if (base < 0 || result_length < base || capacity <= result_length) {
+        return -1;
+    }
+
+    let cursor: i32 = base;
+    if (negative) {
+        dst[cursor] = 45;
+        cursor = cursor + 1;
+    }
+
+    let divisor: i32 = 1;
+    for (i = 1; i < digit_count; i = i + 1) {
+        divisor = divisor * 10;
+    }
+    for (i = 0; i < digit_count; i = i + 1) {
+        let digit: i32 = 0 -((working / divisor) % 10);
+        dst[cursor] = to_u8_trunc(48 + digit);
+        cursor = cursor + 1;
+        divisor = divisor / 10;
+    }
+    dst[result_length] = 0;
+    ascii_set_len(dst, result_length);
+    return result_length;
+}
+
+function ascii_from_i32(dst: ascii[], value: i32): i32 {
+    return ascii_write_i32(dst, value, 0);
+}
+
+function ascii_append_i32(dst: ascii[], value: i32): i32 {
+    return ascii_write_i32(dst, value, length(dst));
+}
+
+function ascii_push_i32(dst: ascii[], value: i32): void {
+    ascii_append_i32(dst, value);
+}
+
+function ascii_write_f32_fixed(dst: ascii[], value: f32, decimals: i32, base: i32): i32 {
+    if (decimals < 0 || decimals > 6 || value != value) {
+        return -1;
+    }
+
+    let negative: bool = value < 0.0;
+    let scaled: f32 = value;
+    if (negative) {
+        scaled = 0.0 - scaled;
+    }
+
+    let digits: i32[46];
+    let count: i32 = 0;
+    let exp2: i32 = 0;
+    let i: i32 = 0;
+    if (scaled > 0.0) {
+        for (i = 0; i < 192; i = i + 1) {
+            if (scaled >= 16777216.0) {
+                scaled = scaled / 2.0;
+                exp2 = exp2 + 1;
+            }
+        }
+        if (scaled >= 16777216.0) {
+            return -1;
+        }
+        for (i = 0; i < 192; i = i + 1) {
+            if (scaled > 0.0 && scaled < 8388608.0) {
+                scaled = scaled * 2.0;
+                exp2 = exp2 - 1;
+            }
+        }
+    }
+
+    if (scaled == 0.0) {
+        digits[0] = 0;
+        count = 1;
+        negative = false;
+    } else {
+        if (scaled < 8388608.0 || scaled >= 16777216.0) {
+            return -1;
+        }
+        let mantissa: i32 = f32_to_i32(scaled);
+        let remaining: i32 = mantissa;
+        for (i = 0; i < 8; i = i + 1) {
+            if (remaining > 0) {
+                digits[count] = remaining % 10;
+                count = count + 1;
+                remaining = remaining / 10;
+            }
+        }
+
+        let pass: i32 = 0;
+        for (pass = 0; pass < 6; pass = pass + 1) {
+            if (pass < decimals) {
+                let carry: i32 = 0;
+                let index: i32 = 0;
+                for (index = 0; index < count; index = index + 1) {
+                    let product: i32 = digits[index] * 5 + carry;
+                    digits[index] = product % 10;
+                    carry = product / 10;
+                }
+                if (carry > 0) {
+                    digits[count] = carry;
+                    count = count + 1;
+                }
+            }
+        }
+
+        let shift: i32 = exp2 + decimals;
+        if (shift >= 0) {
+            for (pass = 0; pass < 192; pass = pass + 1) {
+                if (pass < shift) {
+                    let carry: i32 = 0;
+                    let index: i32 = 0;
+                    for (index = 0; index < count; index = index + 1) {
+                        let product: i32 = digits[index] * 2 + carry;
+                        digits[index] = product % 10;
+                        carry = product / 10;
+                    }
+                    if (carry > 0) {
+                        digits[count] = carry;
+                        count = count + 1;
+                    }
+                }
+            }
+        } else {
+            let right: i32 = 0 - shift;
+            let round_up: bool = false;
+            for (pass = 0; pass < 192; pass = pass + 1) {
+                if (pass < right) {
+                    let remainder: i32 = 0;
+                    let index: i32 = count - 1;
+                    for (index = count - 1; index >= 0; index = index - 1) {
+                        let lane: i32 = remainder * 10 + digits[index];
+                        digits[index] = lane / 2;
+                        remainder = lane % 2;
+                    }
+                    if (pass == right - 1 && remainder == 1) {
+                        round_up = true;
+                    }
+                    for (index = 0; index < 46; index = index + 1) {
+                        if (count > 1 && digits[count - 1] == 0) {
+                            count = count - 1;
+                        }
+                    }
+                }
+            }
+            if (round_up) {
+                let carry: i32 = 1;
+                let index: i32 = 0;
+                for (index = 0; index < 46; index = index + 1) {
+                    if (index < count && carry > 0) {
+                        let sum: i32 = digits[index] + carry;
+                        digits[index] = sum % 10;
+                        carry = sum / 10;
+                    }
+                }
+                if (carry > 0) {
+                    digits[count] = carry;
+                    count = count + 1;
+                }
+            }
+        }
+        if (count == 1 && digits[0] == 0) {
+            negative = false;
+        }
+    }
+
+    let sign_count: i32 = 0;
+    if (negative) {
+        sign_count = 1;
+    }
+    let payload_length: i32 = count;
+    if (decimals > 0) {
+        if (count <= decimals) {
+            payload_length = decimals + 2;
+        } else {
+            payload_length = count + 1;
+        }
+    }
+    payload_length = payload_length + sign_count;
+    let result_length: i32 = base + payload_length;
+    let capacity: i32 = ascii_max_length(dst);
+    if (base < 0 || result_length < base || capacity <= result_length) {
+        return -1;
+    }
+
+    let cursor: i32 = base;
+    if (negative) {
+        dst[cursor] = 45;
+        cursor = cursor + 1;
+    }
+    if (decimals == 0) {
+        for (i = count - 1; i >= 0; i = i - 1) {
+            dst[cursor] = to_u8_trunc(48 + digits[i]);
+            cursor = cursor + 1;
+        }
+    } else if (count <= decimals) {
+        dst[cursor] = 48;
+        cursor = cursor + 1;
+        dst[cursor] = 46;
+        cursor = cursor + 1;
+        let zero_count: i32 = decimals - count;
+        for (i = 0; i < zero_count; i = i + 1) {
+            dst[cursor] = 48;
+            cursor = cursor + 1;
+        }
+        for (i = count - 1; i >= 0; i = i - 1) {
+            dst[cursor] = to_u8_trunc(48 + digits[i]);
+            cursor = cursor + 1;
+        }
+    } else {
+        for (i = count - 1; i >= decimals; i = i - 1) {
+            dst[cursor] = to_u8_trunc(48 + digits[i]);
+            cursor = cursor + 1;
+        }
+        dst[cursor] = 46;
+        cursor = cursor + 1;
+        for (i = decimals - 1; i >= 0; i = i - 1) {
+            dst[cursor] = to_u8_trunc(48 + digits[i]);
+            cursor = cursor + 1;
+        }
+    }
+    dst[result_length] = 0;
+    ascii_set_len(dst, result_length);
+    return result_length;
+}
+
+function ascii_from_f32_fixed(dst: ascii[], value: f32, decimals: i32): i32 {
+    return ascii_write_f32_fixed(dst, value, decimals, 0);
+}
+
+function ascii_append_f32_fixed(dst: ascii[], value: f32, decimals: i32): i32 {
+    return ascii_write_f32_fixed(dst, value, decimals, length(dst));
+}
+
+function ascii_pad_left(dst: ascii[], width: i32, fill: u8): i32 {
+    let current: i32 = length(dst);
+    if (width < 0) {
+        return -1;
+    }
+    if (width <= current) {
+        return current;
+    }
+    let fill_value: i32 = to_i32(fill);
+    let capacity: i32 = ascii_max_length(dst);
+    if (fill_value <= 0 || fill_value > 127 || capacity <= width) {
+        return -1;
+    }
+    let padding: i32 = width - current;
+    let i: i32 = 0;
+    for (i = current; i >= 0; i = i - 1) {
+        dst[padding + i] = dst[i];
+    }
+    for (i = 0; i < padding; i = i + 1) {
+        dst[i] = fill;
+    }
+    dst[width] = 0;
+    ascii_set_len(dst, width);
+    return width;
 }
 
 function ascii_cmp(a: ascii[], b: ascii[]): i32 {

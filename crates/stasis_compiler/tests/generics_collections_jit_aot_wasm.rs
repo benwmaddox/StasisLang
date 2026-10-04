@@ -23,6 +23,7 @@ const PARITY_ORACLE_MODULE: &str =
 const RIG2D_IMPORT: &str = "/vendor/stasis/stdlib/rig2d.stasis";
 const GRAPHICS_IMPORT: &str = "/vendor/stasis/stdlib/graphics.stasis";
 const WASM_ROOT: &str = "main";
+const EXPECTED_MATH_ORACLE_RAW_DIGEST: i32 = -1430176193;
 
 #[cfg(windows)]
 struct AotTree(PathBuf);
@@ -1045,7 +1046,7 @@ fn rejects_named_struct_array_returns_at_the_shared_frontend_boundary() {
 fn generic_collection_sample_tests_pass_in_the_production_jit_shape() {
     let (rewritten, tests) =
         rewrite_top_level_test_declarations(TESTS).expect("discover generic sample tests");
-    assert_eq!(tests.len(), 3);
+    assert_eq!(tests.len(), 4);
     let mut process = JitProcess::new();
     process
         .set_project_root(repository_root().to_string_lossy())
@@ -1077,6 +1078,13 @@ fn generic_collection_sample_tests_pass_in_the_production_jit_shape() {
             .expect("execute canonical generic sample digest in JIT"),
         507
     );
+    assert_eq!(
+        stasis_dynload::stasis_jit_global_i32_load(stasis_dynload::global_path_hash(
+            "math_oracle_raw_digest_value"
+        )),
+        EXPECTED_MATH_ORACLE_RAW_DIGEST,
+        "JIT sample must expose the exact expected f32 raw-bit digest"
+    );
     for test in tests {
         assert!(
             process
@@ -1098,17 +1106,24 @@ fn generic_collection_aot_accepts_vendor_graphics_after_expansion() {
         "tick".to_string(),
         "render".to_string(),
         "generics_collections_run_and_digest".to_string(),
+        "generics_collections_run_and_math_digest".to_string(),
     ]);
     aot.upsert_file(
         "src/main.stasis",
         format!(
-            "{ENTRY}\nfunction generics_collections_run_and_digest(): i32 {{\n    if (main() != 0) {{ return -1; }}\n    if (tick() != 0) {{ return -2; }}\n    return generics_collections_state_digest();\n}}\n"
+            "{ENTRY}\nfunction generics_collections_run_and_digest(): i32 {{\n    if (main() != 0) {{ return -1; }}\n    if (tick() != 0) {{ return -2; }}\n    return generics_collections_state_digest();\n}}\nfunction generics_collections_run_and_math_digest(): i32 {{\n    if (main() != 0) {{ return -1; }}\n    return math_oracle_raw_digest_value;\n}}\n"
         ),
     );
     aot.compile()
         .expect("generic collection AOT must preserve vendor graphics provenance");
     #[cfg(windows)]
     run_linked_aot_oracle(&aot, "generics_collections_run_and_digest", 507);
+    #[cfg(windows)]
+    run_linked_aot_oracle(
+        &aot,
+        "generics_collections_run_and_math_digest",
+        EXPECTED_MATH_ORACLE_RAW_DIGEST,
+    );
 }
 
 #[test]

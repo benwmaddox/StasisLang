@@ -49,6 +49,7 @@ def consumer(label: str, target: str) -> dict:
             "frame_sha256": "7" * 64,
             "result_sha256": "8" * 64,
             "state_digest": 507,
+            "math_raw_digest": -1430176193,
             "bounds": {"low": True, "high": True},
         }
     return item
@@ -159,7 +160,7 @@ class VerifyReceiptsTests(unittest.TestCase):
         }
         consumers = {label: consumer(label, target) for label in ("bundled", "generated")}
         receipt = {
-            "schema": "stasis.staged_archive_acceptance.v1",
+            "schema": "stasis.staged_archive_acceptance.v2",
             "target": target,
             "repository": REPOSITORY,
             "workflow_run_id": RUN_ID,
@@ -229,6 +230,34 @@ class VerifyReceiptsTests(unittest.TestCase):
                 self.save(path, receipt)
                 with self.assertRaisesRegex(ValueError, "generated consumer omitted packaged Web"):
                     self.verify()
+
+    def test_rejects_web_receipt_with_missing_math_raw_digest(self) -> None:
+        path, receipt = self.load("windows")
+        del receipt["consumers"]["bundled"]["web"]["math_raw_digest"]
+        self.save(path, receipt)
+        with self.assertRaisesRegex(ValueError, "Web raw math digest differs"):
+            self.verify()
+
+    def test_rejects_web_receipt_with_mismatched_math_raw_digest(self) -> None:
+        path, receipt = self.load("windows")
+        receipt["consumers"]["bundled"]["web"]["math_raw_digest"] = -1430176192
+        self.save(path, receipt)
+        with self.assertRaisesRegex(ValueError, "Web raw math digest differs"):
+            self.verify()
+
+    def test_rejects_web_receipt_with_floating_point_math_raw_digest(self) -> None:
+        path, receipt = self.load("windows")
+        receipt["consumers"]["bundled"]["web"]["math_raw_digest"] = -1430176193.0
+        self.save(path, receipt)
+        with self.assertRaisesRegex(ValueError, "Web raw math digest differs"):
+            self.verify()
+
+    def test_rejects_legacy_v1_archive_receipt(self) -> None:
+        path, receipt = self.load("windows")
+        receipt["schema"] = "stasis.staged_archive_acceptance.v1"
+        self.save(path, receipt)
+        with self.assertRaisesRegex(ValueError, "unsupported staged archive receipt schema"):
+            self.verify()
 
     def test_rejects_missing_mobile_consumer(self) -> None:
         path, receipt = self.load("android")

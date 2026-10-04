@@ -70,18 +70,19 @@ class IosGenericsVerifierTest(unittest.TestCase):
         write_json(
             self.receipt,
             {
-                "schema": "stasis.ios.generics.v1",
+                "schema": "stasis.ios.generics.v2",
                 "main_result": 0,
                 "tick_result": 0,
                 "render_result": 0,
                 "digest": 507,
+                "math_raw_digest": -1430176193,
                 "frame": 1,
             },
         )
         write_png(self.frame, TEAL)
         self.log.write_text(
             "Stasis provenance: generics tag=v0 commit=abc renderer=gfx_cmd schema=7\n"
-            "Stasis iOS generics acceptance digest=507 frame=1 receipt=/tmp/result.json\n",
+            "Stasis iOS generics acceptance digest=507 math_raw_digest=-1430176193 frame=1 receipt=/tmp/result.json\n",
             encoding="utf-8",
         )
         self.crash_low.write_text(
@@ -141,8 +142,9 @@ class IosGenericsVerifierTest(unittest.TestCase):
         ])
         self.assertEqual(result, 0)
         evidence = json.loads(self.output.read_text(encoding="utf-8"))
-        self.assertEqual(evidence["schema"], "stasis.ios.generics.evidence.v1")
+        self.assertEqual(evidence["schema"], "stasis.ios.generics.evidence.v2")
         self.assertEqual(evidence["receipt"]["digest"], 507)
+        self.assertEqual(evidence["receipt"]["math_raw_digest"], -1430176193)
         self.assertGreater(evidence["frame"]["teal_pixels"], WIDTH * HEIGHT // 100)
         self.assertGreater(evidence["frame"]["background_pixels"], WIDTH * HEIGHT // 2)
         self.assertLess(evidence["frame"]["failure_pixels"], 100)
@@ -159,6 +161,27 @@ class IosGenericsVerifierTest(unittest.TestCase):
         value["digest"] = 506
         write_json(self.receipt, value)
         with self.assertRaisesRegex(EvidenceError, "expected digest=507"):
+            self.evidence()
+
+    def test_wrong_math_raw_digest_is_rejected(self) -> None:
+        value = json.loads(self.receipt.read_text(encoding="utf-8"))
+        value["math_raw_digest"] = -1430176192
+        write_json(self.receipt, value)
+        with self.assertRaisesRegex(EvidenceError, "expected math_raw_digest=-1430176193"):
+            self.evidence()
+
+    def test_missing_math_raw_digest_is_rejected(self) -> None:
+        value = json.loads(self.receipt.read_text(encoding="utf-8"))
+        del value["math_raw_digest"]
+        write_json(self.receipt, value)
+        with self.assertRaisesRegex(EvidenceError, "expected math_raw_digest=-1430176193"):
+            self.evidence()
+
+    def test_legacy_v1_receipt_is_rejected(self) -> None:
+        value = json.loads(self.receipt.read_text(encoding="utf-8"))
+        value["schema"] = "stasis.ios.generics.v1"
+        write_json(self.receipt, value)
+        with self.assertRaisesRegex(EvidenceError, "unexpected schema"):
             self.evidence()
 
     def test_red_frame_is_rejected(self) -> None:
@@ -217,7 +240,7 @@ class IosGenericsVerifierTest(unittest.TestCase):
         evidence = self.evidence()
         self.assertEqual(
             evidence["log_markers"]["generics_acceptance"],
-            "verified receipt digest=507 frame=1",
+            "verified receipt digest=507 math_raw_digest=-1430176193 frame=1",
         )
 
     def test_bounds_report_must_match_its_launch_pid(self) -> None:
@@ -287,6 +310,10 @@ class IosGenericsManualToolContractTest(unittest.TestCase):
         self.assertIn('for name in ("main", "tick", "render"):', self.script)
         self.assertIn(
             '"stasis_state_scalar__generics_collections_digest_value"',
+            self.script,
+        )
+        self.assertIn(
+            '"stasis_state_scalar__math_oracle_raw_digest_value"',
             self.script,
         )
         self.assertIn("len(linked_aot_functions) < 16", self.script)

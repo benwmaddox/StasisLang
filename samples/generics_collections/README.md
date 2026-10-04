@@ -42,7 +42,12 @@ and a freshly linked native AOT executable on each desktop host, including
 isolated bounds-trap children. It then packages and launches this canonical
 sample through the production desktop runtime. The authored frame is teal only
 when the captured sample digest is exactly `507`, giving the package launch an
-independent visible digest oracle; a mismatch renders red.
+independent visible digest oracle; a mismatch renders red. The shared entry
+also runs the scalar math oracle and hashes 13 raw f32 bit patterns, including
+negative-zero input and canonicalized outputs, into
+`math_oracle_raw_digest_value`. Every target compares that value with the
+independent expected digest `-1430176193`; packaged Web and mobile receipts
+record the observed value, and the desktop teal frame is gated on both digests.
 `vendor/stasis` is the recorded, hash-checked graphics/runtime snapshot used
 by every packaged target.
 

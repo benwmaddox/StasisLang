@@ -184,20 +184,22 @@ static int write_ios_generics_receipt(int frame) {
     FILE *file = fopen(temporary_path, "wb");
     if (file == NULL) return 0;
     int32_t digest = seam_i32("generics_collections_digest_value");
+    int32_t math_raw_digest = seam_i32("math_oracle_raw_digest_value");
     int ok = fprintf(
         file,
-        "{\"schema\":\"stasis.ios.generics.v1\","
+        "{\"schema\":\"stasis.ios.generics.v2\","
         "\"main_result\":0,\"tick_result\":0,\"render_result\":0,"
-        "\"digest\":%d,\"frame\":%d}\n",
+        "\"digest\":%d,\"math_raw_digest\":%d,\"frame\":%d}\n",
         digest,
+        math_raw_digest,
         frame) > 0;
     ok = fclose(file) == 0 && ok;
     if (ok) ok = rename(temporary_path, path) == 0;
     if (!ok) remove(temporary_path);
     if (ok) {
         SDL_Log(
-            "Stasis iOS generics acceptance digest=%d frame=%d receipt=%s",
-            digest, frame, path);
+            "Stasis iOS generics acceptance digest=%d math_raw_digest=%d frame=%d receipt=%s",
+            digest, math_raw_digest, frame, path);
     }
     return ok;
 #else
@@ -816,10 +818,11 @@ int SDL_main(int argc, char **argv) {
             }
             if (android_generics_acceptance && frame == 1) {
                 SDL_Log(
-                    "Stasis Android generics: {\"schema\":\"stasis.android.generics.v1\","
+                    "Stasis Android generics: {\"schema\":\"stasis.android.generics.v2\","
                     "\"test_id\":\"ANDROID-GENERICS\",\"event\":\"oracle\","
-                    "\"digest\":%d,\"frame\":%d}",
+                    "\"digest\":%d,\"math_raw_digest\":%d,\"frame\":%d}",
                     seam_i32("generics_collections_digest_value"),
+                    seam_i32("math_oracle_raw_digest_value"),
                     frame);
             }
             if (android_numeric_text_acceptance && frame == 1 &&

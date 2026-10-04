@@ -1,0 +1,99 @@
+import "../../src/stdlib/math.stasis";
+
+function math_test_near(actual: f32, expected: f32, tolerance: f32): bool {
+    return math_abs(actual - expected) <= tolerance;
+}
+
+function math_test_relative_near(actual: f32, expected: f32, tolerance: f32): bool {
+    return math_abs(actual - expected) <= math_abs(expected) * tolerance;
+}
+
+test `sqrt clamps nonpositive input and meets relative accuracy across scale`(): bool {
+    return math_sqrt(-1.0) == 0.0 && math_sqrt(0.0) == 0.0 && math_test_relative_near(math_sqrt(2.0), 1.41421356237, 0.000001) && math_test_relative_near(
+        math_sqrt(0.000000000000000000000000000001),
+        0.000000000000001,
+        0.000001
+    ) && math_test_relative_near(math_sqrt(1000000000000000000000000000000.0), 1000000000000000.0, 0.000001);
+}
+
+test `atan2 uses clockwise screen degrees and meets angular accuracy`(): bool {
+    return math_test_near(math_atan2_degrees(1.0, 1.0), 45.0, 0.0001) && math_test_near(math_atan2_degrees(1.0, -1.0), 135.0, 0.0001) && math_test_near(
+        math_atan2_degrees(-1.0, -1.0),
+        -135.0,
+        0.0001
+    ) && math_test_near(math_atan2_degrees(-1.0, 1.0), -45.0, 0.0001) && math_test_near(math_atan2_degrees(3.0, 4.0), 36.86989765, 0.01) && math_test_near(
+        math_atan2_degrees(4.0, 3.0),
+        53.13010235,
+        0.01
+    ) && math_test_near(math_atan2_degrees(2.0, -3.0), 146.3099325, 0.01) && math_test_near(math_atan2_degrees(-2.0, 3.0), -33.6900675, 0.01) && math_atan2_degrees(
+        0.0,
+        0.0
+    ) == 0.0 && math_atan2_degrees(-0.0, -1.0) == 180.0 && math_atan2_degrees(1.0, 0.0) == 90.0 && math_atan2_degrees(-1.0, 0.0) == -90.0 && math_atan2_degrees(
+        1.0,
+        -0.0
+    ) == 90.0 && math_test_near(math_atan2_degrees(0.000000000000000000000000000001, 1000000000000000000000000000000.0), 0.0, 0.000001);
+}
+
+test `atan2 range reduction stays accurate around the branch and across unit ratios`(): bool {
+    // References are double-precision atan(x) * 180 / pi rounded to f32 input.
+    return math_test_near(math_atan2_degrees(0.414213538, 1.0), 22.4999988163, 0.0002) && math_test_near(
+        math_atan2_degrees(0.41421357, 1.0),
+        22.5000002738,
+        0.0002
+    ) && math_test_near(math_atan2_degrees(0.414213598, 1.0), 22.5000017313, 0.0002) && math_test_near(
+        math_atan2_degrees(0.05, 1.0),
+        2.8624052687,
+        0.0002
+    ) && math_test_near(math_atan2_degrees(0.1, 1.0), 5.7105932220, 0.0002) && math_test_near(math_atan2_degrees(0.15, 1.0), 8.5307659439, 0.0002) && math_test_near(
+        math_atan2_degrees(0.2, 1.0),
+        11.3099326382,
+        0.0002
+    ) && math_test_near(math_atan2_degrees(0.25, 1.0), 14.0362434679, 0.0002) && math_test_near(math_atan2_degrees(0.3, 1.0), 16.6992448606, 0.0002) && math_test_near(
+        math_atan2_degrees(0.35, 1.0),
+        19.2900459149,
+        0.0002
+    ) && math_test_near(math_atan2_degrees(0.4, 1.0), 21.8014097808, 0.0002) && math_test_near(math_atan2_degrees(0.45, 1.0), 24.2277447500, 0.0002) && math_test_near(
+        math_atan2_degrees(0.5, 1.0),
+        26.5650511771,
+        0.0002
+    ) && math_test_near(math_atan2_degrees(0.55, 1.0), 28.8107942674, 0.0002) && math_test_near(math_atan2_degrees(0.6, 1.0), 30.9637575365, 0.0002) && math_test_near(
+        math_atan2_degrees(0.65, 1.0),
+        33.0238665955,
+        0.0002
+    ) && math_test_near(math_atan2_degrees(0.7, 1.0), 34.9920197402, 0.0002) && math_test_near(math_atan2_degrees(0.75, 1.0), 36.8698976458, 0.0002) && math_test_near(
+        math_atan2_degrees(0.8, 1.0),
+        38.6598086706,
+        0.0002
+    ) && math_test_near(math_atan2_degrees(0.85, 1.0), 40.3645373662, 0.0002) && math_test_near(math_atan2_degrees(0.9, 1.0), 41.9872117411, 0.0002) && math_test_near(
+        math_atan2_degrees(0.95, 1.0),
+        43.5311989266,
+        0.0002
+    ) && math_test_near(math_atan2_degrees(1.0, 1.0), 45.0, 0.0002);
+}
+
+test `acos clamps its domain and stays within the angle bound`(): bool {
+    return math_acos_degrees(-2.0) == 180.0 && math_acos_degrees(-1.0) == 180.0 && math_acos_degrees(1.0) == 0.0 && math_acos_degrees(2.0) == 0.0 && math_test_near(
+        math_acos_degrees(0.0),
+        90.0,
+        0.0001
+    ) && math_test_near(math_acos_degrees(0.5), 60.0, 0.01) && math_test_near(math_acos_degrees(-0.5), 120.0, 0.01) && math_test_near(
+        math_acos_degrees(0.999999),
+        0.0810285,
+        0.01
+    ) && math_test_near(math_acos_degrees(-0.999999), 179.9189715, 0.01);
+}
+
+test `absolute value canonicalizes float zero and saturates i32 minimum`(): bool {
+    return math_abs(-2.5) == 2.5 && math_abs(2.5) == 2.5 && math_abs(-0.0) == 0.0 && math_abs(0.0) == 0.0 && math_abs(-7) == 7 && math_abs(7) == 7 && math_abs(
+        (-2147483647 - 1)
+    ) == 2147483647;
+}
+
+test `f32 raw bit conversion observes signed zero and exact math results`(): bool {
+    let negative_zero: f32 = 0.0 / -1.0;
+    return f32_to_bits(negative_zero) ==(-2147483647 - 1) && f32_to_bits(math_sqrt(negative_zero)) == 0 && f32_to_bits(math_abs(negative_zero)) == 0 && f32_to_bits(
+        math_atan2_degrees(negative_zero, 1.0)
+    ) == 0 && math_atan2_degrees(negative_zero, -1.0) == 180.0 && f32_to_bits(math_sqrt(0.0)) == 0 && f32_to_bits(math_abs(0.0)) == 0 && f32_to_bits(
+        math_atan2_degrees(0.0, 1.0)
+    ) == 0 && f32_to_bits(math_sqrt(2.0)) == 1068827891;
+}

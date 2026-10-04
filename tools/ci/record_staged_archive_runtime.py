@@ -161,6 +161,7 @@ def find_shipping_link_evidence(consumer_root: Path, target: str) -> tuple[Path,
         raise ValueError("iOS arm64 shipping executable did not link the expected platform SDL frameworks")
     for symbol in (
         "stasis_state_scalar__generics_collections_digest_value",
+        "stasis_state_scalar__math_oracle_raw_digest_value",
         "stasis_state_scalar__web_bounds_probe_index",
         "stasis_state_array__gfx_cmd_i32",
     ):
@@ -191,9 +192,26 @@ def find_runtime_evidence(consumer_root: Path, target: str) -> tuple[Path, Path,
         if value.get("status") != "passed" or value.get("test_id") != "ANDROID-GENERICS":
             raise ValueError(f"Android generics runtime did not pass: {evidence_path}")
         generics = value.get("android_generics", {})
+        if not isinstance(generics, dict):
+            raise ValueError(f"Android generics runtime omitted its nested evidence: {evidence_path}")
         digest = generics.get("digest_receipt", {})
-        if digest.get("digest") != 507 or digest.get("event") != "oracle":
-            raise ValueError(f"Android generics runtime digest differs from 507: {evidence_path}")
+        if not isinstance(digest, dict):
+            raise ValueError(f"Android generics runtime omitted its v2 digest receipt: {evidence_path}")
+        if (
+            digest.get("schema") != "stasis.android.generics.v2"
+            or digest.get("test_id") != "ANDROID-GENERICS"
+            or type(digest.get("frame")) is not int
+            or digest.get("frame") != 1
+            or type(digest.get("digest")) is not int
+            or digest.get("digest") != 507
+            or type(digest.get("math_raw_digest")) is not int
+            or digest.get("math_raw_digest") != -1430176193
+            or digest.get("event") != "oracle"
+        ):
+            raise ValueError(
+                "Android generics runtime digest differs from the accepted raw-bit oracle: "
+                f"{evidence_path}"
+            )
         bounds = generics.get("bounds_probes")
         if not isinstance(bounds, list) or len(bounds) != 2:
             raise ValueError(f"Android generics runtime has malformed bounds-probe evidence: {evidence_path}")
@@ -227,14 +245,28 @@ def find_runtime_evidence(consumer_root: Path, target: str) -> tuple[Path, Path,
             raise ValueError(f"iOS consumer must have one simulator-evidence.json, found {len(candidates)} under {consumer_root}")
         evidence_path = candidates[0]
         value = json.loads(evidence_path.read_text(encoding="utf-8"))
+        receipt = value.get("receipt")
+        if not isinstance(receipt, dict):
+            raise ValueError(f"iOS generics simulator evidence omitted its nested receipt: {evidence_path}")
+        frame = receipt.get("frame")
         if (
             value.get("status") != "passed"
-            or value.get("schema") != "stasis.ios.generics.evidence.v1"
-            or value.get("receipt", {}).get("digest") != 507
+            or value.get("schema") != "stasis.ios.generics.evidence.v2"
+            or receipt.get("schema") != "stasis.ios.generics.v2"
+            or any(type(receipt.get(field)) is not int or receipt.get(field) != 0
+                   for field in ("main_result", "tick_result", "render_result"))
+            or type(frame) is not int
+            or frame < 1
+            or type(receipt.get("digest")) is not int
+            or receipt.get("digest") != 507
+            or type(receipt.get("math_raw_digest")) is not int
+            or receipt.get("math_raw_digest") != -1430176193
             or value.get("bounds", {}).get("low", {}).get("index") != -1
             or value.get("bounds", {}).get("high", {}).get("index") != 2
         ):
-            raise ValueError(f"iOS generics simulator evidence failed digest or bounds checks: {evidence_path}")
+            raise ValueError(
+                f"iOS generics simulator evidence failed receipt, digest, or bounds checks: {evidence_path}"
+            )
         frame_path = evidence_path.parent / "simulator-frame.png"
         if not frame_path.is_file():
             raise ValueError(f"iOS simulator frame is missing: {frame_path}")
@@ -275,7 +307,7 @@ def record_runtime(
         if not root.is_dir():
             raise ValueError(f"mobile consumer evidence root is missing: {root}")
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    if receipt.get("schema") != "stasis.staged_archive_acceptance.v1":
+    if receipt.get("schema") != "stasis.staged_archive_acceptance.v2":
         raise ValueError("staged archive receipt has an unsupported schema")
     if receipt.get("target") != target:
         raise ValueError("mobile evidence target differs from staged archive receipt")
