@@ -27,6 +27,9 @@ CONSUMER_COMMANDS = {"fmt-check", "check", "test", "jit-headless"}
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 SOURCE_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 RELEASE_PATTERN = re.compile(r"^nightly-\d{8}-\d+$")
+OBSOLETE_FIXTURE_LABEL = "staged-archive-obsolete-fixture"
+OBSOLETE_FIXTURE_MODULE = "vendor/stasis/stdlib/staged_archive_obsolete_fixture.stasis"
+OBSOLETE_FIXTURE_KIND = "obsolete_unimported_vendor_module"
 TOOLCHAIN_LAYOUT = {
     "windows": ("x86_64-pc-windows-msvc", "stasis.exe", "stasis_graphics.dll"),
     "linux": ("x86_64-unknown-linux-gnu", "bin/stasis", "bin/libstasis_graphics.so"),
@@ -68,6 +71,97 @@ def verify_consumer_commands(consumer: dict[str, Any], label: str, target: str) 
         HASH_PATTERN.fullmatch(consumer.get("post_update_sha256", consumer.get("sha256", "")))
         is not None,
         f"{target} {label} consumer omitted its installed vendor hash",
+    )
+
+
+def verify_vendor_transition_evidence(
+    consumer: dict[str, Any], *, target: str, expected_release: str
+) -> None:
+    source = consumer.get("source_vendor")
+    require(isinstance(source, dict), f"{target} bundled consumer omitted source vendor evidence")
+    for field in ("current", "update_available", "pin_verified", "legacy_pin_unverified", "local_changes"):
+        require(type(source.get(field)) is bool, f"{target} source vendor {field} is missing")
+    require(
+        source["pin_verified"] is True
+        and source["legacy_pin_unverified"] is False
+        and source["local_changes"] is False
+        and source["current"] != source["update_available"],
+        f"{target} bundled source vendor pin was unverified, dirty, or inconsistent",
+    )
+    require(
+        source.get("installed_release_id") == expected_release
+        and isinstance(source.get("recorded_release_id"), str)
+        and bool(source["recorded_release_id"]),
+        f"{target} bundled source vendor release identity is malformed",
+    )
+    for field in ("recorded_hash_version", "actual_hash_version"):
+        require(type(source.get(field)) is int and source[field] == 2,
+                f"{target} bundled source vendor is not pinned with canonical v2 hashes")
+    require_sha256(source.get("recorded_sha256"), f"{target} bundled source recorded vendor hash")
+    require_sha256(source.get("actual_sha256"), f"{target} bundled source actual vendor hash")
+    require_sha256(source.get("installed_sha256"), f"{target} bundled source installed vendor hash")
+    require(
+        source["recorded_sha256"] == source["actual_sha256"],
+        f"{target} bundled source vendor pin does not match its actual tree",
+    )
+    require(
+        (source["current"] and source["recorded_sha256"] == source["installed_sha256"])
+        or (source["update_available"] and source["recorded_sha256"] != source["installed_sha256"]),
+        f"{target} bundled source vendor status does not match the installed tree hash",
+    )
+
+    fixture = consumer.get("stale_fixture")
+    require(isinstance(fixture, dict), f"{target} bundled consumer omitted stale fixture evidence")
+    require(
+        fixture.get("kind") == OBSOLETE_FIXTURE_KIND
+        and fixture.get("label") == OBSOLETE_FIXTURE_LABEL
+        and fixture.get("module_path") == OBSOLETE_FIXTURE_MODULE,
+        f"{target} bundled stale fixture identity is malformed",
+    )
+    require(
+        consumer.get("pre_update_release") == OBSOLETE_FIXTURE_LABEL,
+        f"{target} bundled pre-update consumer release differs from the fixture label",
+    )
+    require(fixture.get("removed") is True,
+            f"{target} bundled vendor update did not remove the obsolete fixture")
+    stale = fixture.get("pre_update_status")
+    require(isinstance(stale, dict), f"{target} bundled stale fixture omitted its pre-update status")
+    for field in ("current", "update_available", "pin_verified", "legacy_pin_unverified", "local_changes"):
+        require(type(stale.get(field)) is bool, f"{target} stale fixture status {field} is missing")
+    require(
+        stale["pin_verified"] is True
+        and stale["legacy_pin_unverified"] is False
+        and stale["local_changes"] is False
+        and stale["current"] is False
+        and stale["update_available"] is True,
+        f"{target} bundled stale fixture was not a verified clean update candidate",
+    )
+    require(
+        stale.get("recorded_release_id") == OBSOLETE_FIXTURE_LABEL
+        and stale.get("installed_release_id") == expected_release,
+        f"{target} bundled stale fixture release identity is malformed",
+    )
+    for field in ("recorded_hash_version", "actual_hash_version"):
+        require(type(stale.get(field)) is int and stale[field] == 2,
+                f"{target} bundled stale fixture is not pinned with canonical v2 hashes")
+    require_sha256(stale.get("recorded_sha256"), f"{target} stale fixture recorded hash")
+    require_sha256(stale.get("actual_sha256"), f"{target} stale fixture actual hash")
+    require_sha256(stale.get("installed_sha256"), f"{target} stale fixture installed hash")
+    require_sha256(fixture.get("pre_update_sha256"), f"{target} stale fixture pre-update hash")
+    require(
+        stale["recorded_sha256"] == stale["actual_sha256"] == fixture["pre_update_sha256"]
+        and stale["recorded_sha256"] != stale["installed_sha256"],
+        f"{target} bundled stale fixture hash does not match its pre-update tree",
+    )
+    require(
+        consumer.get("pre_update_sha256") == fixture["pre_update_sha256"],
+        f"{target} bundled consumer pre-update hash differs from the fixture evidence",
+    )
+    require(
+        source["installed_sha256"]
+        == stale["installed_sha256"]
+        == consumer.get("post_update_sha256"),
+        f"{target} bundled source, stale, and post-update installed vendor hashes differ",
     )
 
 
@@ -229,7 +323,7 @@ def load_receipts(receipt_root: Path) -> dict[str, dict[str, Any]]:
     for path in paths:
         value = json.loads(path.read_text(encoding="utf-8"))
         require(
-            value.get("schema") == "stasis.staged_archive_acceptance.v2",
+            value.get("schema") == "stasis.staged_archive_acceptance.v3",
             f"unsupported staged archive receipt schema in {path}",
         )
         target = value.get("target")
@@ -334,6 +428,9 @@ def verify_receipts(
                 consumer.get("post_update_release", consumer.get("release")) == expected_release_id,
                 f"{target} {label} consumer uses a different vendor release",
             )
+        verify_vendor_transition_evidence(
+            consumers["bundled"], target=target, expected_release=expected_release_id
+        )
         rollback = receipt.get("vendor_failure_rollback", {})
         require(
             rollback.get("result") == "rejected_tampered_archive_without_consumer_changes"

@@ -34,6 +34,15 @@ ARCHIVE_LAYOUT = {
         "runtime": "bin/libstasis_graphics.dylib",
     },
 }
+OBSOLETE_FIXTURE_LABEL = "staged-archive-obsolete-fixture"
+OBSOLETE_FIXTURE_MODULE = "vendor/stasis/stdlib/staged_archive_obsolete_fixture.stasis"
+OBSOLETE_FIXTURE_KIND = "obsolete_unimported_vendor_module"
+OBSOLETE_FIXTURE_SOURCE = (
+    "function staged_archive_obsolete_fixture(): i32 {\n"
+    "    return 0;\n"
+    "}\n"
+)
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def toolchain_environment() -> dict[str, str]:
@@ -298,13 +307,183 @@ def require_vendor_current(
     ).get("result")
     if not isinstance(status, dict):
         raise RuntimeError(f"{label} vendor status omitted its result")
-    if status.get("current") is not True or status.get("local_changes") is not False:
+    normalized = normalize_vendor_status(status, expected_release=expected_release, label=label)
+    if (
+        normalized["current"] is not True
+        or normalized["update_available"] is not False
+        or normalized["pin_verified"] is not True
+        or normalized["legacy_pin_unverified"] is not False
+        or normalized["local_changes"] is not False
+        or normalized["recorded_sha256"] != normalized["actual_sha256"]
+        or normalized["installed_sha256"] != normalized["actual_sha256"]
+    ):
         raise RuntimeError(f"{label} vendor snapshot is not current and clean: {status}")
-    if status.get("installed", {}).get("release_id") != expected_release:
-        raise RuntimeError(f"{label} is pinned to another release: {status.get('installed')}")
-    if status.get("recorded_sha256") != status.get("actual_sha256"):
-        raise RuntimeError(f"{label} recorded and actual vendor hashes differ")
+    if normalized["recorded_release_id"] != expected_release:
+        raise RuntimeError(f"{label} recorded vendor pin names another release: {status}")
     return status
+
+
+def normalize_vendor_status(
+    status: dict[str, Any], *, expected_release: str, label: str
+) -> dict[str, Any]:
+    """Validate and retain the status fields needed to prove a vendor transition."""
+    for field in ("current", "update_available", "pin_verified", "legacy_pin_unverified", "local_changes"):
+        if type(status.get(field)) is not bool:
+            raise RuntimeError(f"{label} vendor status omitted boolean {field}: {status}")
+    recorded = status.get("recorded")
+    installed = status.get("installed")
+    if not isinstance(recorded, dict) or not isinstance(installed, dict):
+        raise RuntimeError(f"{label} vendor status omitted recorded or installed pin: {status}")
+    recorded_release = recorded.get("release_id")
+    installed_release = installed.get("release_id")
+    if not isinstance(recorded_release, str) or not recorded_release:
+        raise RuntimeError(f"{label} recorded vendor release is malformed: {status}")
+    if installed_release != expected_release:
+        raise RuntimeError(f"{label} is pinned to another release: {installed}")
+    installed_sha256 = installed.get("sha256")
+    if (
+        type(installed.get("hash_version")) is not int
+        or installed["hash_version"] != 2
+        or not isinstance(installed_sha256, str)
+        or SHA256_PATTERN.fullmatch(installed_sha256) is None
+    ):
+        raise RuntimeError(f"{label} installed vendor hash is not canonical v2: {status}")
+    for field in ("recorded_hash_version", "actual_hash_version"):
+        if type(status.get(field)) is not int or status[field] != 2:
+            raise RuntimeError(f"{label} vendor status is not canonical hash version 2: {status}")
+    recorded_sha256 = status.get("recorded_sha256")
+    actual_sha256 = status.get("actual_sha256")
+    if (
+        not isinstance(recorded_sha256, str)
+        or SHA256_PATTERN.fullmatch(recorded_sha256) is None
+        or not isinstance(actual_sha256, str)
+        or SHA256_PATTERN.fullmatch(actual_sha256) is None
+    ):
+        raise RuntimeError(f"{label} vendor status contains a malformed SHA-256: {status}")
+    return {
+        "current": status["current"],
+        "update_available": status["update_available"],
+        "pin_verified": status["pin_verified"],
+        "legacy_pin_unverified": status["legacy_pin_unverified"],
+        "local_changes": status["local_changes"],
+        "recorded_release_id": recorded_release,
+        "installed_release_id": installed_release,
+        "installed_sha256": installed_sha256,
+        "recorded_hash_version": status["recorded_hash_version"],
+        "actual_hash_version": status["actual_hash_version"],
+        "recorded_sha256": recorded_sha256,
+        "actual_sha256": actual_sha256,
+    }
+
+
+def require_verified_source_vendor(
+    status: dict[str, Any], *, expected_release: str
+) -> dict[str, Any]:
+    normalized = normalize_vendor_status(
+        status, expected_release=expected_release, label="bundled source"
+    )
+    if (
+        normalized["pin_verified"] is not True
+        or normalized["legacy_pin_unverified"] is not False
+        or normalized["local_changes"] is not False
+        or normalized["recorded_sha256"] != normalized["actual_sha256"]
+        or normalized["current"] == normalized["update_available"]
+        or (
+            normalized["current"]
+            and normalized["actual_sha256"] != normalized["installed_sha256"]
+        )
+        or (
+            normalized["update_available"]
+            and normalized["actual_sha256"] == normalized["installed_sha256"]
+        )
+    ):
+        raise RuntimeError(f"bundled source vendor pin is not verified and clean: {status}")
+    return normalized
+
+
+def stage_obsolete_vendor_fixture(
+    cli: Path,
+    project: Path,
+    evidence: Path,
+    *,
+    expected_release: str,
+) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    """Create a CLI-hashed stale pin whose obsolete unimported module must be removed."""
+    source_status = run_json(
+        cli,
+        ["--workspace", str(project), "vendor", "status"],
+        cwd=project,
+        log=evidence / "bundled-source-vendor-status.log",
+    ).get("result")
+    if not isinstance(source_status, dict):
+        raise RuntimeError("bundled source vendor status omitted its result")
+    source_vendor = require_verified_source_vendor(
+        source_status, expected_release=expected_release
+    )
+
+    fixture = project / OBSOLETE_FIXTURE_MODULE
+    if fixture.exists() or fixture.is_symlink():
+        raise RuntimeError(f"staged-archive stale fixture already exists: {fixture}")
+    fixture.parent.mkdir(parents=True, exist_ok=True)
+    fixture.write_text(OBSOLETE_FIXTURE_SOURCE, encoding="utf-8", newline="\n")
+
+    fixture_hash_status = run_json(
+        cli,
+        ["--workspace", str(project), "vendor", "status"],
+        cwd=project,
+        log=evidence / "bundled-stale-fixture-hash.log",
+    ).get("result")
+    if not isinstance(fixture_hash_status, dict):
+        raise RuntimeError("CLI vendor status omitted the stale fixture tree hash")
+    fixture_hash = fixture_hash_status.get("actual_sha256")
+    if (
+        not isinstance(fixture_hash, str)
+        or SHA256_PATTERN.fullmatch(fixture_hash) is None
+        or type(fixture_hash_status.get("actual_hash_version")) is not int
+        or fixture_hash_status["actual_hash_version"] != 2
+    ):
+        raise RuntimeError(f"CLI did not return a canonical v2 fixture tree hash: {fixture_hash_status}")
+
+    manifest_path = project / "stasis.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    vendor = manifest.get("vendor")
+    if not isinstance(vendor, dict) or not isinstance(vendor.get("stasis"), dict):
+        raise RuntimeError("bundled sample manifest omitted vendor.stasis")
+    vendor["stasis"] = {
+        "release_id": OBSOLETE_FIXTURE_LABEL,
+        "sha256": fixture_hash,
+        "hash_version": 2,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    stale_status = run_json(
+        cli,
+        ["--workspace", str(project), "vendor", "status"],
+        cwd=project,
+        log=evidence / "bundled-vendor-before.log",
+    ).get("result")
+    if not isinstance(stale_status, dict):
+        raise RuntimeError("bundled sample vendor status omitted its stale fixture result")
+    normalized_stale = normalize_vendor_status(
+        stale_status, expected_release=expected_release, label="bundled stale fixture"
+    )
+    if (
+        normalized_stale["pin_verified"] is not True
+        or normalized_stale["legacy_pin_unverified"] is not False
+        or normalized_stale["local_changes"] is not False
+        or normalized_stale["current"] is not False
+        or normalized_stale["update_available"] is not True
+        or normalized_stale["recorded_release_id"] != OBSOLETE_FIXTURE_LABEL
+        or normalized_stale["recorded_sha256"] != fixture_hash
+        or normalized_stale["actual_sha256"] != fixture_hash
+    ):
+        raise RuntimeError(f"bundled sample did not become a verified clean stale fixture: {stale_status}")
+    return source_vendor, normalized_stale, fixture
+
+
+def require_obsolete_fixture_removed(fixture: Path) -> None:
+    if fixture.exists() or fixture.is_symlink():
+        raise RuntimeError(f"vendor update retained the obsolete fixture module: {fixture}")
 
 
 def run_consumer_checks(
@@ -437,24 +616,16 @@ def main() -> int:
     shutil.copytree(sample_source, bundled)
     rollback = probe_vendor_failure_rollback(archive_root, cli, sample_source, evidence)
 
-    bundled_before = run_json(
-        cli,
-        ["--workspace", str(bundled), "vendor", "status"],
-        cwd=bundled,
-        log=evidence / "bundled-vendor-before.log",
-    ).get("result")
-    if not isinstance(bundled_before, dict):
-        raise RuntimeError("bundled sample vendor status omitted its result")
-    if bundled_before.get("current") is not False or bundled_before.get("update_available") is not True:
-        raise RuntimeError("bundled sample did not start as a verified stale vendor consumer")
-    if bundled_before.get("local_changes") is not False:
-        raise RuntimeError("bundled sample contains local vendor changes before update")
+    source_vendor, bundled_before, obsolete_fixture = stage_obsolete_vendor_fixture(
+        cli, bundled, evidence, expected_release=args.release_id
+    )
     run_json(
         cli,
         ["--workspace", str(bundled), "vendor", "update"],
         cwd=bundled,
         log=evidence / "bundled-vendor-update.log",
     )
+    require_obsolete_fixture_removed(obsolete_fixture)
     bundled_after = require_vendor_current(
         cli, bundled, expected_release=args.release_id, evidence=evidence, label="bundled"
     )
@@ -474,10 +645,19 @@ def main() -> int:
 
     consumers = {
         "bundled": {
-            "pre_update_release": bundled_before.get("recorded", {}).get("release_id"),
-            "pre_update_sha256": bundled_before.get("recorded_sha256"),
+            "pre_update_release": bundled_before["recorded_release_id"],
+            "pre_update_sha256": bundled_before["recorded_sha256"],
             "post_update_release": bundled_after.get("installed", {}).get("release_id"),
             "post_update_sha256": bundled_after.get("actual_sha256"),
+            "source_vendor": source_vendor,
+            "stale_fixture": {
+                "kind": OBSOLETE_FIXTURE_KIND,
+                "label": OBSOLETE_FIXTURE_LABEL,
+                "module_path": OBSOLETE_FIXTURE_MODULE,
+                "pre_update_sha256": bundled_before["actual_sha256"],
+                "pre_update_status": bundled_before,
+                "removed": True,
+            },
             "commands": run_consumer_checks(cli, bundled, evidence, label="bundled"),
         },
         "generated": {
@@ -543,7 +723,7 @@ def main() -> int:
         consumers["generated"]["web"] = browser["generated"]
 
     receipt = {
-        "schema": "stasis.staged_archive_acceptance.v2",
+        "schema": "stasis.staged_archive_acceptance.v3",
         "target": args.target,
         "repository": args.repository,
         "workflow_run_id": str(args.run_id),

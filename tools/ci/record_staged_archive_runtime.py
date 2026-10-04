@@ -307,7 +307,7 @@ def record_runtime(
         if not root.is_dir():
             raise ValueError(f"mobile consumer evidence root is missing: {root}")
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    if receipt.get("schema") != "stasis.staged_archive_acceptance.v2":
+    if receipt.get("schema") != "stasis.staged_archive_acceptance.v3":
         raise ValueError("staged archive receipt has an unsupported schema")
     if receipt.get("target") != target:
         raise ValueError("mobile evidence target differs from staged archive receipt")

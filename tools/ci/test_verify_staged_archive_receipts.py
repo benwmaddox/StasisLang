@@ -28,8 +28,47 @@ def consumer(label: str, target: str) -> dict:
     item = {
         "commands": {name: "passed" for name in verifier.CONSUMER_COMMANDS},
         "post_update_release": RELEASE_ID,
-        "post_update_sha256": "4" * 64,
+        "post_update_sha256": "f" * 64,
     }
+    if label == "bundled":
+        item["pre_update_release"] = verifier.OBSOLETE_FIXTURE_LABEL
+        item["pre_update_sha256"] = "a" * 64
+        item["source_vendor"] = {
+            "current": True,
+            "update_available": False,
+            "pin_verified": True,
+            "legacy_pin_unverified": False,
+            "local_changes": False,
+            "recorded_release_id": "development",
+            "installed_release_id": RELEASE_ID,
+            "installed_sha256": "f" * 64,
+            "recorded_hash_version": 2,
+            "actual_hash_version": 2,
+            "recorded_sha256": "f" * 64,
+            "actual_sha256": "f" * 64,
+        }
+        stale_status = {
+            "current": False,
+            "update_available": True,
+            "pin_verified": True,
+            "legacy_pin_unverified": False,
+            "local_changes": False,
+            "recorded_release_id": verifier.OBSOLETE_FIXTURE_LABEL,
+            "installed_release_id": RELEASE_ID,
+            "installed_sha256": "f" * 64,
+            "recorded_hash_version": 2,
+            "actual_hash_version": 2,
+            "recorded_sha256": "a" * 64,
+            "actual_sha256": "a" * 64,
+        }
+        item["stale_fixture"] = {
+            "kind": verifier.OBSOLETE_FIXTURE_KIND,
+            "label": verifier.OBSOLETE_FIXTURE_LABEL,
+            "module_path": verifier.OBSOLETE_FIXTURE_MODULE,
+            "pre_update_sha256": "a" * 64,
+            "pre_update_status": stale_status,
+            "removed": True,
+        }
     if target in {"windows", "linux", "macos"}:
         item["native"] = {
             "result": "passed",
@@ -160,7 +199,7 @@ class VerifyReceiptsTests(unittest.TestCase):
         }
         consumers = {label: consumer(label, target) for label in ("bundled", "generated")}
         receipt = {
-            "schema": "stasis.staged_archive_acceptance.v2",
+            "schema": "stasis.staged_archive_acceptance.v3",
             "target": target,
             "repository": REPOSITORY,
             "workflow_run_id": RUN_ID,
@@ -252,11 +291,96 @@ class VerifyReceiptsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Web raw math digest differs"):
             self.verify()
 
-    def test_rejects_legacy_v1_archive_receipt(self) -> None:
-        path, receipt = self.load("windows")
-        receipt["schema"] = "stasis.staged_archive_acceptance.v1"
+    def test_rejects_legacy_v1_and_v2_archive_receipts(self) -> None:
+        path, baseline = self.load("windows")
+        for version in ("v1", "v2"):
+            with self.subTest(version=version):
+                receipt = json.loads(json.dumps(baseline))
+                receipt["schema"] = f"stasis.staged_archive_acceptance.{version}"
+                self.save(path, receipt)
+                with self.assertRaisesRegex(ValueError, "unsupported staged archive receipt schema"):
+                    self.verify()
+
+    def test_rejects_missing_bundled_source_vendor_evidence(self) -> None:
+        path, receipt = self.load("linux")
+        del receipt["consumers"]["bundled"]["source_vendor"]
         self.save(path, receipt)
-        with self.assertRaisesRegex(ValueError, "unsupported staged archive receipt schema"):
+        with self.assertRaisesRegex(ValueError, "omitted source vendor evidence"):
+            self.verify()
+
+    def test_rejects_unverified_or_mismatched_bundled_source_vendor_pin(self) -> None:
+        path, baseline = self.load("linux")
+        for mutation, message in (
+            (lambda source: source.update(pin_verified=False), "unverified, dirty, or inconsistent"),
+            (lambda source: source.update(actual_sha256="8" * 64), "does not match its actual tree"),
+        ):
+            with self.subTest(message=message):
+                receipt = json.loads(json.dumps(baseline))
+                mutation(receipt["consumers"]["bundled"]["source_vendor"])
+                self.save(path, receipt)
+                with self.assertRaisesRegex(ValueError, message):
+                    self.verify()
+
+    def test_accepts_clean_stale_bundled_source_pin(self) -> None:
+        path, receipt = self.load("linux")
+        source = receipt["consumers"]["bundled"]["source_vendor"]
+        source.update(
+            current=False,
+            update_available=True,
+            recorded_sha256="9" * 64,
+            actual_sha256="9" * 64,
+        )
+        self.save(path, receipt)
+        self.assertEqual(set(self.verify()), set(verifier.TARGET_FILES))
+
+    def test_rejects_missing_or_mislabeled_stale_fixture(self) -> None:
+        path, baseline = self.load("linux")
+        receipt = json.loads(json.dumps(baseline))
+        del receipt["consumers"]["bundled"]["stale_fixture"]
+        self.save(path, receipt)
+        with self.assertRaisesRegex(ValueError, "omitted stale fixture evidence"):
+            self.verify()
+
+        for field, value in (
+            ("label", RELEASE_ID),
+            ("kind", "official_vendor_snapshot"),
+            ("module_path", "vendor/stasis/stdlib/another_module.stasis"),
+        ):
+            with self.subTest(field=field):
+                receipt = json.loads(json.dumps(baseline))
+                receipt["consumers"]["bundled"]["stale_fixture"][field] = value
+                self.save(path, receipt)
+                with self.assertRaisesRegex(ValueError, "stale fixture identity is malformed"):
+                    self.verify()
+
+    def test_rejects_stale_fixture_without_exact_clean_v2_hash_evidence(self) -> None:
+        path, baseline = self.load("linux")
+        for mutation, message in (
+            (lambda fixture: fixture["pre_update_status"].update(local_changes=True),
+             "not a verified clean update candidate"),
+            (lambda fixture: fixture["pre_update_status"].update(current=True),
+             "not a verified clean update candidate"),
+            (lambda fixture: fixture["pre_update_status"].update(actual_hash_version=1),
+             "not pinned with canonical v2 hashes"),
+            (lambda fixture: fixture.update(pre_update_sha256="b" * 64),
+             "hash does not match its pre-update tree"),
+            (lambda fixture: fixture.update(removed=False),
+             "did not remove the obsolete fixture"),
+        ):
+            with self.subTest(message=message):
+                receipt = json.loads(json.dumps(baseline))
+                mutation(receipt["consumers"]["bundled"]["stale_fixture"])
+                self.save(path, receipt)
+                with self.assertRaisesRegex(ValueError, message):
+                    self.verify()
+
+    def test_rejects_source_stale_and_post_update_installed_hash_mismatch(self) -> None:
+        path, receipt = self.load("linux")
+        receipt["consumers"]["bundled"]["stale_fixture"]["pre_update_status"][
+            "installed_sha256"
+        ] = "e" * 64
+        self.save(path, receipt)
+        with self.assertRaisesRegex(ValueError, "source, stale, and post-update installed vendor hashes differ"):
             self.verify()
 
     def test_rejects_missing_mobile_consumer(self) -> None:

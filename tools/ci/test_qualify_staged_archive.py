@@ -178,5 +178,206 @@ class GenericsBrowserReceiptTests(unittest.TestCase):
             qualify.validate_generics_browser_receipt(value)
 
 
+class ObsoleteVendorFixtureTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.project = self.root / "consumer"
+        (self.project / "vendor/stasis/stdlib").mkdir(parents=True)
+        (self.project / "vendor/stasis/stdlib/used.stasis").write_text(
+            "function used(): i32 {\n    return 1;\n}\n", encoding="utf-8"
+        )
+        (self.project / "stasis.json").write_text(
+            json.dumps(
+                {
+                    "name": "fixture",
+                    "vendor": {
+                        "stasis": {
+                            "release_id": RELEASE_ID,
+                            "sha256": "1" * 64,
+                            "hash_version": 2,
+                            "discarded_field": "must be replaced",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.source = self.vendor_status(
+            current=True,
+            update_available=False,
+            recorded_release="development",
+            recorded_sha="1" * 64,
+            actual_sha="1" * 64,
+        )
+        self.fixture_sha = "2" * 64
+        self.stale = self.vendor_status(
+            current=False,
+            update_available=True,
+            recorded_release=qualify.OBSOLETE_FIXTURE_LABEL,
+            recorded_sha=self.fixture_sha,
+            actual_sha=self.fixture_sha,
+        )
+
+    @staticmethod
+    def vendor_status(
+        *, current: bool, update_available: bool, recorded_release: str,
+        recorded_sha: str, actual_sha: str,
+    ) -> dict:
+        return {
+            "current": current,
+            "update_available": update_available,
+            "pin_verified": True,
+            "legacy_pin_unverified": False,
+            "local_changes": False,
+            "recorded": {"release_id": recorded_release},
+            "installed": {
+                "release_id": RELEASE_ID,
+                "sha256": actual_sha if current else "f" * 64,
+                "hash_version": 2,
+            },
+            "recorded_hash_version": 2,
+            "actual_hash_version": 2,
+            "recorded_sha256": recorded_sha,
+            "actual_sha256": actual_sha,
+        }
+
+    def run_fixture_staging(self, statuses: list[dict]) -> tuple[dict, dict, Path]:
+        with patch.object(
+            qualify,
+            "run_json",
+            side_effect=[{"ok": True, "result": status} for status in statuses],
+        ):
+            return qualify.stage_obsolete_vendor_fixture(
+                Path("archived-stasis"),
+                self.project,
+                self.root / "evidence",
+                expected_release=RELEASE_ID,
+            )
+
+    def test_uses_archived_cli_hash_and_replaces_complete_stale_pin(self) -> None:
+        intermediate = {
+            "actual_hash_version": 2,
+            "actual_sha256": self.fixture_sha,
+        }
+        source, stale, fixture = self.run_fixture_staging(
+            [self.source, intermediate, self.stale]
+        )
+        manifest = json.loads((self.project / "stasis.json").read_text(encoding="utf-8"))
+        self.assertEqual(source["actual_sha256"], "1" * 64)
+        self.assertEqual(stale["recorded_release_id"], qualify.OBSOLETE_FIXTURE_LABEL)
+        self.assertEqual(stale["recorded_sha256"], self.fixture_sha)
+        self.assertEqual(
+            manifest["vendor"]["stasis"],
+            {
+                "release_id": "staged-archive-obsolete-fixture",
+                "sha256": self.fixture_sha,
+                "hash_version": 2,
+            },
+        )
+        self.assertEqual(fixture.read_text(encoding="utf-8"), qualify.OBSOLETE_FIXTURE_SOURCE)
+        self.assertNotIn("discarded_field", manifest["vendor"]["stasis"])
+
+    def test_rejects_unverified_source_pin_before_creating_fixture(self) -> None:
+        source = dict(self.source, pin_verified=False)
+        with self.assertRaisesRegex(RuntimeError, "not verified and clean"):
+            self.run_fixture_staging([source])
+        self.assertFalse((self.project / qualify.OBSOLETE_FIXTURE_MODULE).exists())
+
+    def test_rejects_source_pin_that_does_not_match_actual_tree(self) -> None:
+        source = dict(self.source, actual_sha256="3" * 64)
+        with self.assertRaisesRegex(RuntimeError, "not verified and clean"):
+            self.run_fixture_staging([source])
+        self.assertFalse((self.project / qualify.OBSOLETE_FIXTURE_MODULE).exists())
+
+    def test_accepts_clean_source_with_update_available(self) -> None:
+        source = self.vendor_status(
+            current=False,
+            update_available=True,
+            recorded_release="development",
+            recorded_sha="1" * 64,
+            actual_sha="1" * 64,
+        )
+        intermediate = {"actual_hash_version": 2, "actual_sha256": self.fixture_sha}
+        _, stale, _ = self.run_fixture_staging([source, intermediate, self.stale])
+        self.assertEqual(stale["recorded_release_id"], qualify.OBSOLETE_FIXTURE_LABEL)
+
+    def test_rejects_noncanonical_cli_fixture_hash(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "canonical v2 fixture tree hash"):
+            self.run_fixture_staging(
+                [self.source, {"actual_hash_version": 1, "actual_sha256": self.fixture_sha}]
+            )
+
+    def test_rejects_dirty_or_current_fixture_status(self) -> None:
+        intermediate = {"actual_hash_version": 2, "actual_sha256": self.fixture_sha}
+        for status in (
+            dict(self.stale, local_changes=True),
+            dict(self.stale, current=True, update_available=False),
+        ):
+            with self.subTest(status=status):
+                self.setUp()
+                intermediate = {"actual_hash_version": 2, "actual_sha256": self.fixture_sha}
+                with self.assertRaisesRegex(RuntimeError, "verified clean stale fixture"):
+                    self.run_fixture_staging([self.source, intermediate, status])
+
+    def test_removal_check_fails_closed_for_a_surviving_module(self) -> None:
+        fixture = self.project / qualify.OBSOLETE_FIXTURE_MODULE
+        fixture.parent.mkdir(parents=True, exist_ok=True)
+        fixture.write_text("obsolete", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "retained the obsolete fixture"):
+            qualify.require_obsolete_fixture_removed(fixture)
+        fixture.unlink()
+        qualify.require_obsolete_fixture_removed(fixture)
+
+    def test_post_update_status_requires_verified_official_v2_pin(self) -> None:
+        status = dict(self.source)
+        status["recorded"] = {"release_id": RELEASE_ID}
+        status["installed"] = {
+            "release_id": RELEASE_ID,
+            "sha256": status["actual_sha256"],
+            "hash_version": 2,
+        }
+        with patch.object(
+            qualify,
+            "run_json",
+            return_value={"ok": True, "result": status},
+        ):
+            current = qualify.require_vendor_current(
+                Path("archived-stasis"),
+                self.project,
+                expected_release=RELEASE_ID,
+                evidence=self.root / "evidence",
+                label="after",
+            )
+        self.assertEqual(current["recorded_hash_version"], 2)
+
+        invalid_statuses = (
+            ("unverified", dict(status, pin_verified=False)),
+            ("legacy", dict(status, legacy_pin_unverified=True)),
+            ("hash mismatch", dict(status, recorded_sha256="b" * 64)),
+            ("installed hash mismatch", dict(status, installed={
+                "release_id": RELEASE_ID,
+                "sha256": "b" * 64,
+                "hash_version": 2,
+            })),
+        )
+        for field, invalid in invalid_statuses:
+            with self.subTest(field=field):
+                with patch.object(
+                    qualify,
+                    "run_json",
+                    return_value={"ok": True, "result": invalid},
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "not current and clean"):
+                        qualify.require_vendor_current(
+                            Path("archived-stasis"),
+                            self.project,
+                            expected_release=RELEASE_ID,
+                            evidence=self.root / "evidence",
+                            label="after",
+                        )
+
+
 if __name__ == "__main__":
     unittest.main()
