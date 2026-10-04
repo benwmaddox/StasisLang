@@ -87,6 +87,10 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public final class MainActivity extends Activity {
+    static final String PRESENTATION_BASELINE_ACCEPTANCE_EXTRA = "stasis_presentation_baseline";
+    static final String PRESENTATION_BASELINE_POISON_EXTRA = "stasis_presentation_poison";
+    static final String PRESENTATION_BASELINE_TEST_ACTION =
+            "com.stasislang.workshop.PRESENTATION_BASELINE_TEST";
     private static final String PROJECT_DIR = WorkshopProjectRegistry.LEGACY_PROJECT_DIR;
     private static final String PROJECT_BASELINES_DIR = "workshop_project_baselines";
     private static final String PROJECT_BASELINE_READY = ".ready";
@@ -217,6 +221,10 @@ public final class MainActivity extends Activity {
     private boolean workshopDiagnosticSeamAcceptanceRun;
     private boolean workshopSoakAcceptanceRun;
     private long renderAcceptanceSurfaceWaitStartedAtMillis;
+    private boolean presentationBaselineAcceptance;
+    private boolean presentationBaselinePoisonAcceptance;
+    private volatile boolean presentationBaselinePausedForAcceptance;
+    private BroadcastReceiver presentationBaselineTestReceiver;
     private boolean gameRuntimeActive;
     private String lastCompileResult = "CompileNotRun";
     private long lastDebugUpdateNanos;
@@ -274,11 +282,18 @@ public final class MainActivity extends Activity {
         AndroidCrashStore.install(this);
         JSONObject crashState = AndroidCrashStore.noteLaunch(this);
         restartLoopRecoveryActive = crashState.optBoolean("restart_loop_detected", false);
+        presentationBaselineAcceptance = BuildConfig.STASIS_RENDER_ACCEPTANCE
+                && getIntent().getBooleanExtra(PRESENTATION_BASELINE_ACCEPTANCE_EXTRA, false);
+        presentationBaselinePoisonAcceptance = presentationBaselineAcceptance
+                && getIntent().getBooleanExtra(PRESENTATION_BASELINE_POISON_EXTRA, false);
 
         try {
+            String acceptanceTemplate = presentationBaselineAcceptance
+                    ? WorkshopTemplateCatalog.PRESENTATION_BASELINE_TEMPLATE_ID
+                    : WorkshopTemplateCatalog.RENDER_ACCEPTANCE_TEMPLATE_ID;
             activeProject = WorkshopProjectRegistry.initialize(this,
                     BuildConfig.STASIS_RENDER_ACCEPTANCE
-                            ? WorkshopTemplateCatalog.RENDER_ACCEPTANCE_TEMPLATE_ID
+                            ? acceptanceTemplate
                             : WorkshopTemplateCatalog.DEFAULT_TEMPLATE_ID);
             projectRootFile = activeProject.root;
         } catch (Exception error) {
@@ -304,6 +319,7 @@ public final class MainActivity extends Activity {
             projectRegistryError = "baseline: " + error.getMessage();
         }
         setContentView(createWorkshopView(project));
+        registerPresentationBaselineTestReceiver();
         handleRenderPerformanceAcceptanceIntent(getIntent());
         registerNetworkMonitoring();
         registerPowerMonitoring();
@@ -335,6 +351,70 @@ public final class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         handleRenderPerformanceAcceptanceIntent(intent);
+    }
+
+    private void registerPresentationBaselineTestReceiver() {
+        if (!presentationBaselineAcceptance) return;
+        presentationBaselineTestReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context context, Intent intent) {
+                handlePresentationBaselineTestCommand(
+                        intent == null ? "" : intent.getStringExtra("phase"));
+            }
+        };
+        IntentFilter filter = new IntentFilter(PRESENTATION_BASELINE_TEST_ACTION);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(presentationBaselineTestReceiver, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(presentationBaselineTestReceiver, filter);
+        }
+    }
+
+    private void handlePresentationBaselineTestCommand(String phase) {
+        if (!presentationBaselineAcceptance || !BuildConfig.STASIS_RENDER_ACCEPTANCE) return;
+        if ("pause".equals(phase)) {
+            presentationBaselinePausedForAcceptance = true;
+            android.util.Log.i("StasisWorkshop", "Stasis Workshop presentation-baseline control: "
+                    + "{\"schema\":\"stasis.workshop_present_only.v1\",\"phase\":\"pause\","
+                    + "\"status\":\"ready\"}");
+            return;
+        }
+        if ("resume".equals(phase)) {
+            presentationBaselinePausedForAcceptance = false;
+            android.util.Log.i("StasisWorkshop", "Stasis Workshop presentation-baseline control: "
+                    + "{\"schema\":\"stasis.workshop_present_only.v1\",\"phase\":\"resume\","
+                    + "\"status\":\"ready\"}");
+            return;
+        }
+        if (gamePreview == null || !presentationBaselinePausedForAcceptance) {
+            logPresentationBaselineTestFailure(phase, "preview_not_paused_or_missing");
+            return;
+        }
+        if ("poison".equals(phase)) {
+            if (!presentationBaselinePoisonAcceptance) {
+                logPresentationBaselineTestFailure(phase, "poison_hook_disabled");
+                return;
+            }
+            gamePreview.poisonPhysicalBackbufferForAcceptance();
+            return;
+        }
+        if ("redraw".equals(phase)) {
+            gamePreview.forcePresentationBaselineRedrawForAcceptance();
+            return;
+        }
+        if ("no_present".equals(phase) || "reject".equals(phase)
+                || "alpha_after_replay".equals(phase)) {
+            gamePreview.submitPresentationBaselineTestFrame(phase, projectRootPath());
+            return;
+        }
+        logPresentationBaselineTestFailure(phase, "unknown_phase");
+    }
+
+    private void logPresentationBaselineTestFailure(String phase, String reason) {
+        android.util.Log.e("StasisWorkshop", "Stasis Workshop presentation-baseline control: "
+                + "{\"schema\":\"stasis.workshop_present_only.v1\",\"phase\":"
+                + JSONObject.quote(phase == null ? "" : phase)
+                + ",\"status\":\"failed\",\"reason\":"
+                + JSONObject.quote(reason) + "}");
     }
 
     private void handleRenderPerformanceAcceptanceIntent(Intent intent) {
@@ -412,6 +492,10 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         if (externalUrlActivity == this) externalUrlActivity = null;
+        if (presentationBaselineTestReceiver != null) {
+            unregisterReceiver(presentationBaselineTestReceiver);
+            presentationBaselineTestReceiver = null;
+        }
         nativeClearExternalUrlAction();
         activityDestroyed = true;
         shutdownGameAudio();
@@ -996,6 +1080,8 @@ public final class MainActivity extends Activity {
         if (gameLoop != null) {
             return;
         }
+        final boolean runRenderAcceptance = BuildConfig.STASIS_RENDER_ACCEPTANCE
+                && !presentationBaselineAcceptance;
         gameLoop = new Runnable() {
             @Override
             public void run() {
@@ -1006,7 +1092,7 @@ public final class MainActivity extends Activity {
                     compileAttempted = true;
                     setStatusText(compileResult);
                 }
-                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                if (runRenderAcceptance && compileReady
                         && !jniFrameAbiAcceptanceRun) {
                     if (gamePreview != null && gamePreview.isAcceptanceSurfaceReady()) {
                         renderAcceptanceSurfaceWaitStartedAtMillis = 0L;
@@ -1038,7 +1124,7 @@ public final class MainActivity extends Activity {
                         }
                     }
                 }
-                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                if (runRenderAcceptance && compileReady
                         && !jniFrameAbiAcceptanceRun) {
                     String abiResult = WorkshopJniFrameAbiAcceptance.run(projectRootPath());
                     jniFrameAbiAcceptanceRun = true;
@@ -1053,7 +1139,7 @@ public final class MainActivity extends Activity {
                         setStatusText("IT-026 JNI frame ABI acceptance failed: " + abiResult);
                     }
                 }
-                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                if (runRenderAcceptance && compileReady
                         && !workshopTouchAcceptanceRun) {
                     String touchResult = WorkshopTouchAcceptance.run(
                             MainActivity.this, projectRootPath());
@@ -1069,7 +1155,7 @@ public final class MainActivity extends Activity {
                         setStatusText("IT-027 Workshop touch acceptance failed: " + touchResult);
                     }
                 }
-                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                if (runRenderAcceptance && compileReady
                         && workshopTouchAcceptanceRun && !workshopHotEditAcceptanceRun) {
                     String hotEditResult = WorkshopHotEditAcceptance.run(
                             MainActivity.this, projectRootPath());
@@ -1086,7 +1172,7 @@ public final class MainActivity extends Activity {
                         setStatusText("IT-028 Workshop hot-edit acceptance failed: " + hotEditResult);
                     }
                 }
-                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                if (runRenderAcceptance && compileReady
                         && workshopHotEditAcceptanceRun && !workshopResourceScopeAcceptanceRun) {
                     String resourceScopeResult = WorkshopResourceScopeAcceptance.run(
                             MainActivity.this);
@@ -1105,7 +1191,7 @@ public final class MainActivity extends Activity {
                                 + resourceScopeResult);
                     }
                 }
-                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                if (runRenderAcceptance && compileReady
                         && workshopResourceScopeAcceptanceRun
                         && !workshopTestRunnerAcceptanceRun) {
                     String testRunnerResult = WorkshopTestRunnerAcceptance.run(
@@ -1125,7 +1211,7 @@ public final class MainActivity extends Activity {
                                 + testRunnerResult);
                     }
                 }
-                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                if (runRenderAcceptance && compileReady
                         && workshopTestRunnerAcceptanceRun
                         && !workshopDiagnosticSeamAcceptanceRun) {
                     String diagnosticResult = WorkshopDiagnosticSeamAcceptance.run(
@@ -1145,7 +1231,7 @@ public final class MainActivity extends Activity {
                                 + diagnosticResult);
                     }
                 }
-                if (BuildConfig.STASIS_RENDER_ACCEPTANCE && compileReady
+                if (runRenderAcceptance && compileReady
                         && workshopDiagnosticSeamAcceptanceRun
                         && !workshopSoakAcceptanceRun) {
                     String soakResult = WorkshopSoakAcceptance.run(
@@ -1164,7 +1250,9 @@ public final class MainActivity extends Activity {
                         setStatusText("IT-032 Workshop soak acceptance failed: " + soakResult);
                     }
                 }
-                if (compileReady || gameRuntimeActive) {
+                if ((compileReady || gameRuntimeActive)
+                        && !(presentationBaselineAcceptance
+                                && presentationBaselinePausedForAcceptance)) {
                     runNativeTick();
                 }
                 gameLoopHandler.postDelayed(this, DEFAULT_TICK_INTERVAL_MS);
@@ -3506,7 +3594,7 @@ public final class MainActivity extends Activity {
         });
         long captureDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L);
         while (captureReady.getCount() != 0L && System.nanoTime() < captureDeadline) {
-            gamePreview.requestRender();
+            if (gamePreview.renderer.frameRequestsPresentation()) gamePreview.requestRender();
             long remaining = captureDeadline - System.nanoTime();
             if (remaining > 0L) {
                 captureReady.await(Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(100L)),
@@ -6484,13 +6572,18 @@ public final class MainActivity extends Activity {
             private final long baselinePresentationSerial;
             private final int frameToken;
             private final int trace;
+            private final boolean presentationFaultApplied;
+            private final boolean drawScheduled;
 
             AcceptanceFrameSubmission(int status, long baselinePresentationSerial,
-                    int frameToken, int trace) {
+                    int frameToken, int trace, boolean presentationFaultApplied,
+                    boolean drawScheduled) {
                 this.status = status;
                 this.baselinePresentationSerial = baselinePresentationSerial;
                 this.frameToken = frameToken;
                 this.trace = trace;
+                this.presentationFaultApplied = presentationFaultApplied;
+                this.drawScheduled = drawScheduled;
             }
 
             int status() {
@@ -6508,10 +6601,18 @@ public final class MainActivity extends Activity {
             int trace() {
                 return trace;
             }
+
+            boolean presentationFaultApplied() {
+                return presentationFaultApplied;
+            }
+
+            boolean drawScheduled() {
+                return drawScheduled;
+            }
         }
 
         private static final AcceptanceFrameSubmission NORMAL_SUCCESS_SUBMISSION =
-                new AcceptanceFrameSubmission(0, -1L, -1, -1);
+                new AcceptanceFrameSubmission(0, -1L, -1, -1, false, false);
 
         private final MainActivity activity;
         private final StasisPreviewRenderer renderer;
@@ -6532,11 +6633,12 @@ public final class MainActivity extends Activity {
             setPreserveEGLContextOnPause(true);
             textureProvider = new WorkshopTextureProvider(activity);
             renderer = new StasisPreviewRenderer(textureProvider,
-                    activity::recordRenderTimeNanos);
+                    activity::recordRenderTimeNanos,
+                    activity.presentationBaselinePoisonAcceptance);
             performanceRenderPump = new Runnable() {
                 @Override public void run() {
                     if (!renderer.isPerformanceSamplingForAcceptanceActive()) return;
-                    requestRender();
+                    if (renderer.frameRequestsPresentation()) requestRender();
                     postOnAnimation(this);
                 }
             };
@@ -6654,7 +6756,7 @@ public final class MainActivity extends Activity {
                 onHostResume();
                 long deadline = SystemClock.uptimeMillis() + timeoutMillis;
                 while (SystemClock.uptimeMillis() < deadline) {
-                    requestRender();
+                    if (renderer.frameRequestsPresentation()) requestRender();
                     if (rendererGeneration() > previous) return true;
                     SystemClock.sleep(10L);
                 }
@@ -6677,6 +6779,7 @@ public final class MainActivity extends Activity {
 
         private boolean awaitPresentedFrame(int token, int trace, long afterPresentationSerial,
                 long timeoutMillis) {
+            if (!renderer.frameRequestsPresentation()) return false;
             if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || timeoutMillis <= 0L) {
                 return renderer.awaitPresentedFrame(token, trace, afterPresentationSerial,
                         timeoutMillis);
@@ -6685,7 +6788,7 @@ public final class MainActivity extends Activity {
             while (true) {
                 long remainingNanos = deadline - System.nanoTime();
                 if (remainingNanos <= 0L) return false;
-                requestRender();
+                if (renderer.frameRequestsPresentation()) requestRender();
                 remainingNanos = deadline - System.nanoTime();
                 if (remainingNanos <= 0L) return false;
                 long remainingMillis = (remainingNanos + 999_999L) / 1_000_000L;
@@ -6699,6 +6802,7 @@ public final class MainActivity extends Activity {
         }
 
         boolean awaitPresentedFrameToken(int token, long timeoutMillis) {
+            if (!renderer.frameRequestsPresentation()) return false;
             if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || timeoutMillis <= 0L) {
                 return renderer.awaitPresentedFrameToken(token, timeoutMillis);
             }
@@ -6706,7 +6810,7 @@ public final class MainActivity extends Activity {
             while (true) {
                 long remainingNanos = deadline - System.nanoTime();
                 if (remainingNanos <= 0L) return false;
-                requestRender();
+                if (renderer.frameRequestsPresentation()) requestRender();
                 remainingNanos = deadline - System.nanoTime();
                 if (remainingNanos <= 0L) return false;
                 long remainingMillis = (remainingNanos + 999_999L) / 1_000_000L;
@@ -6727,7 +6831,7 @@ public final class MainActivity extends Activity {
         void onHostResume() {
             onResume();
             queueEvent(renderer::onHostResumed);
-            requestRender();
+            if (renderer.frameRequestsPresentation()) requestRender();
             if (renderer.isPerformanceSamplingForAcceptanceActive()) {
                 postOnAnimation(performanceRenderPump);
             }
@@ -6736,26 +6840,79 @@ public final class MainActivity extends Activity {
         int runNativeFrame(String projectRoot, int inputX, int inputY, int inputActive,
                 int screenWidth, int screenHeight, int[] header) {
             return runNativeFrameInternal(projectRoot, inputX, inputY, inputActive,
-                    screenWidth, screenHeight, header, false).status();
+                    screenWidth, screenHeight, header, false, null).status();
         }
 
         AcceptanceFrameSubmission runNativeAcceptanceFrame(String projectRoot, int inputX,
                 int inputY, int inputActive,
                 int screenWidth, int screenHeight, int[] header) {
             return runNativeFrameInternal(projectRoot, inputX, inputY, inputActive,
-                    screenWidth, screenHeight, header, true);
+                    screenWidth, screenHeight, header, true, null);
+        }
+
+        void poisonPhysicalBackbufferForAcceptance() {
+            if (!BuildConfig.STASIS_RENDER_ACCEPTANCE
+                    || !activity.presentationBaselinePoisonAcceptance) return;
+            queueEvent(renderer::poisonPhysicalBackbufferForAcceptance);
+        }
+
+        void forcePresentationBaselineRedrawForAcceptance() {
+            if (!BuildConfig.STASIS_RENDER_ACCEPTANCE
+                    || !activity.presentationBaselineAcceptance
+                    || !activity.presentationBaselinePausedForAcceptance) {
+                activity.logPresentationBaselineTestFailure("redraw", "test_gate_closed");
+                return;
+            }
+            synchronized (renderer) {
+                android.util.Log.i("StasisWorkshop",
+                        "Stasis Workshop presentation-baseline control: {\"schema\":"
+                                + "\"stasis.workshop_present_only.v1\",\"phase\":\"forced_redraw\","
+                                + "\"status\":\"scheduled\",\"frame_valid\":"
+                                + renderer.frameIsValid() + ",\"requests_present\":"
+                                + renderer.frameRequestsPresentation() + ",\"frame_token\":"
+                                + renderer.frameToken() + ",\"magic\":" + renderer.frameMagic()
+                                + ",\"flags\":" + renderer.frameFlags() + "}");
+            }
+            requestRender();
+        }
+
+        void submitPresentationBaselineTestFrame(String phase, String projectRoot) {
+            if (!BuildConfig.STASIS_RENDER_ACCEPTANCE
+                    || !activity.presentationBaselineAcceptance
+                    || !activity.presentationBaselinePausedForAcceptance) {
+                activity.logPresentationBaselineTestFailure(phase, "test_gate_closed");
+                return;
+            }
+            AcceptanceFrameSubmission submission = runNativeFrameInternal(projectRoot,
+                    0, 0, 0, Math.max(1, getWidth()), Math.max(1, getHeight()),
+                    activity.nativeFrameValues, true, phase);
+            int flags = activity.nativeFrameValues[StasisPreviewRenderer.I_FLAGS];
+            int magic = activity.nativeFrameValues[StasisPreviewRenderer.I_MAGIC];
+            boolean frameValid = renderer.frameIsValid();
+            boolean requestsPresentation = renderer.frameRequestsPresentation();
+            android.util.Log.i("StasisWorkshop",
+                    "Stasis Workshop presentation-baseline submission: {\"schema\":"
+                            + "\"stasis.workshop_present_only.v1\",\"phase\":"
+                            + JSONObject.quote(phase) + ",\"status\":" + submission.status()
+                            + ",\"magic\":" + magic + ",\"flags\":" + flags
+                            + ",\"frame_valid\":" + frameValid
+                            + ",\"requests_present\":" + requestsPresentation
+                            + ",\"fault_applied\":" + submission.presentationFaultApplied()
+                            + ",\"draw_scheduled\":" + submission.drawScheduled() + "}");
         }
 
         private AcceptanceFrameSubmission runNativeFrameInternal(String projectRoot, int inputX,
                 int inputY,
                 int inputActive, int screenWidth, int screenHeight, int[] header,
-                boolean acceptance) {
+                boolean acceptance, String presentationBaselineFaultPhase) {
             int status;
             long baselinePresentationSerial = -1L;
             int submittedFrameToken = -1;
             int submittedTrace = -1;
             boolean releaseBatchEnqueued = false;
             boolean releaseCancellationApplied = false;
+            boolean validPresentFrame = false;
+            boolean testFaultApplied = false;
             long requested = System.nanoTime();
             synchronized (renderer) {
                 if (acceptance) baselinePresentationSerial = renderer.presentationSerial();
@@ -6776,8 +6933,13 @@ public final class MainActivity extends Activity {
                             nativeDrainSpriteReleases());
                 }
                 lastNativeFrameDurationNanos = System.nanoTime() - started;
+                if (status == 0 && presentationBaselineFaultPhase != null) {
+                    testFaultApplied = renderer.applyPresentationBaselineTestFault(
+                            presentationBaselineFaultPhase);
+                }
+                validPresentFrame = status == 0 && renderer.frameRequestsPresentation();
                 renderer.copyFrameHeaderInto(header);
-                if (acceptance && status == 0) {
+                if (acceptance && validPresentFrame) {
                     submittedFrameToken = renderer.frameToken();
                     submittedTrace = MainActivity.nativeFrameTrace(renderer.frameI32Bytes(),
                             renderer.frameF32Bytes(), renderer.frameU8Bytes());
@@ -6786,10 +6948,22 @@ public final class MainActivity extends Activity {
                     renderer.clearAcceptanceTrace();
                 }
             }
-            if (status == 0 || releaseBatchEnqueued || releaseCancellationApplied) requestRender();
+            boolean drawScheduled = StasisPreviewRenderer.shouldSchedulePresentationDraw(
+                    status, validPresentFrame);
+            if (drawScheduled) {
+                requestRender();
+            } else if (releaseBatchEnqueued || releaseCancellationApplied) {
+                // Sprite release work owns GL resources but must not publish a
+                // stale or rejected frame through GLSurfaceView's swap path.
+                queueEvent(() -> renderer.finishPendingSpriteReleases(false, false));
+            }
+            if (presentationBaselineFaultPhase != null && !testFaultApplied) {
+                activity.logPresentationBaselineTestFailure(
+                        presentationBaselineFaultPhase, "fault_injection_not_applied");
+            }
             if (!acceptance && status == 0) return NORMAL_SUCCESS_SUBMISSION;
             return new AcceptanceFrameSubmission(status, baselinePresentationSerial,
-                    submittedFrameToken, submittedTrace);
+                    submittedFrameToken, submittedTrace, testFaultApplied, drawScheduled);
         }
 
         long lastNativeFrameDurationNanos() {
@@ -6801,6 +6975,11 @@ public final class MainActivity extends Activity {
         }
 
         void captureFrame(CaptureCallback callback) {
+            if (!renderer.frameRequestsPresentation()) {
+                callback.onCaptured(null, "current renderer frame does not request PRESENT",
+                        renderer.captureLogicalFrame());
+                return;
+            }
             renderer.requestCapture(callback::onCaptured);
             requestRender();
         }

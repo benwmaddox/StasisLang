@@ -123,6 +123,8 @@
   const PREPARED_TEXT_MAX_ENTRIES = 256;
   const PREPARED_TEXT_MAX_BYTES = 8 * 1024 * 1024;
   let preparedTextBytes = 0;
+  let activeFrameTextCache = null;
+  let activeFrameTextResources = null;
   const DISPLAY_MAX_DPR = 4;
   const DISPLAY_MIN_DPR = 0.5;
   const DISPLAY_MAX_BACKING_WIDTH = 8192;
@@ -3199,12 +3201,40 @@
           frameAtlasTransitions = 0;
           lastTexture = null;
         },
-        beginFrame: (red, green, blue, alpha = 1) => {
+        clearPhysicalTarget: (red, green, blue, alpha = 1) => {
           gl.clearColor(red, green, blue, alpha);
           gl.clear(gl.COLOR_BUFFER_BIT);
         },
+        beginLogicalFrame: (red, green, blue, alpha = 1) => {
+          const width = display.backingWidth;
+          const height = display.backingHeight;
+          const logicalWidth = Math.max(1, display.logicalWidth);
+          const logicalHeight = Math.max(1, display.logicalHeight);
+          const logicalAspect = logicalWidth / logicalHeight;
+          const targetAspect = width / height;
+          let x = 0;
+          let y = 0;
+          let clearWidth = width;
+          let clearHeight = height;
+          if (targetAspect > logicalAspect) {
+            clearWidth = Math.max(1, Math.min(width, Math.round(height * logicalAspect)));
+            x = Math.floor((width - clearWidth) / 2);
+          } else if (targetAspect < logicalAspect) {
+            clearHeight = Math.max(1, Math.min(height, Math.round(width / logicalAspect)));
+            y = Math.floor((height - clearHeight) / 2);
+          }
+          gl.enable(gl.SCISSOR_TEST);
+          gl.scissor(x, y, clearWidth, clearHeight);
+          try {
+            gl.clearColor(red, green, blue, alpha);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+          } finally {
+            gl.disable(gl.SCISSOR_TEST);
+          }
+        },
         prepareFrame: () => {
           failIfLost();
+          gl.colorMask(true, true, true, true);
           gl.disable(gl.SCISSOR_TEST);
           gl.viewport(0, 0, display.backingWidth, display.backingHeight);
         },
@@ -3303,11 +3333,17 @@
     };
     const rasterScale = display.textRasterScale;
     const key = `${fontHandle}|${rasterScale}|${font.calibrationGeneration || 0}|${text}`;
+    const frameResource = activeFrameTextCache?.get(key);
+    if (frameResource) return frameResource;
     const existing = preparedText.get(key);
     if (existing) {
       // Map iteration order is the LRU order used by the bounded cache.
       preparedText.delete(key);
       preparedText.set(key, existing);
+      if (activeFrameTextCache) {
+        activeFrameTextCache.set(key, existing);
+        activeFrameTextResources.add(existing);
+      }
       return existing;
     }
     const { context: measurement } = resourcePreparationContext();
@@ -3364,22 +3400,43 @@
       rasterScale, generation: 1, baseline: font.baseline, text, fontHandle, byteLength,
       atlasDomain: "text", transient: false
     };
+    if (activeFrameTextCache) {
+      activeFrameTextCache.set(key, resource);
+      activeFrameTextResources.add(resource);
+    }
     if (resource.byteLength > PREPARED_TEXT_MAX_BYTES) {
       resource.transient = true;
       return resource;
     }
     preparedText.set(key, resource);
     preparedTextBytes += resource.byteLength;
+    trimPreparedTextCache();
+    return resource;
+  };
+  const trimPreparedTextCache = () => {
     for (const [candidateKey, candidate] of preparedText) {
       if (preparedText.size <= PREPARED_TEXT_MAX_ENTRIES
           && preparedTextBytes <= PREPARED_TEXT_MAX_BYTES) break;
-      // The new resource is prepared and drawn by the caller immediately.
-      if (candidate === resource) continue;
+      if (activeFrameTextResources?.has(candidate)) continue;
       preparedText.delete(candidateKey);
       preparedTextBytes = Math.max(0, preparedTextBytes - candidate.byteLength);
       gpuBatcher?.releaseResource(candidate);
     }
-    return resource;
+  };
+  const beginFrameTextPreparation = () => {
+    activeFrameTextCache = new Map();
+    activeFrameTextResources = new Set();
+  };
+  const finishFrameTextPreparation = () => {
+    const resources = activeFrameTextResources;
+    activeFrameTextCache = null;
+    activeFrameTextResources = null;
+    if (resources) {
+      for (const resource of resources) {
+        if (resource.transient) gpuBatcher?.releaseResource(resource);
+      }
+    }
+    trimPreparedTextCache();
   };
   const drawPreparedText = (fontHandle, text, x, y, red, green, blue, alpha) => {
     if (!text) return;
@@ -3401,15 +3458,22 @@
       performanceWorkload.drawCalls += 1;
       performanceWorkload.uploadedBytes += 16 * Float32Array.BYTES_PER_ELEMENT;
     } finally {
-      if (resource.transient) renderer.releaseResource(resource);
+      if (resource.transient && !activeFrameTextResources?.has(resource)) {
+        renderer.releaseResource(resource);
+      }
     }
   };
-  function executeCommands() {
-    getGpuBatcher()?.prepareFrame();
-    performanceWorkload.commands += commands.length;
-    for (const command of commands) {
+  const preflightTextResource = (renderer, fontHandle, text) => {
+    if (!text) return;
+    const resource = preparedTextResource(fontHandle, text);
+    if (!resource) return;
+    if (!renderer.atlasFor(resource, null)) throw gpuFailure("WebGL2 text atlas allocation failed");
+  };
+  const replayLegacyCommands = (renderer, frameCommands) => {
+    performanceWorkload.commands += frameCommands.length;
+    for (const command of frameCommands) {
       if (command[0] === 0) {
-        getGpuBatcher()?.beginFrame((command[1] & 255) / 255,
+        renderer.beginLogicalFrame((command[1] & 255) / 255,
           (command[2] & 255) / 255, (command[3] & 255) / 255, 1);
       } else if (command[0] === 1) {
         drawImmediateSolid(command[1], command[2], command[3], command[4],
@@ -3420,16 +3484,51 @@
         drawPreparedText(0, `score ${command[3]}`, command[1], command[2], 0.875, 0.965, 1, 1);
       }
     }
-    executeStasisBuffer();
+  };
+  const preflightLegacyCommands = (renderer, frameCommands) => {
+    for (const command of frameCommands) {
+      if (command[0] === 1) {
+        if (!renderer.solidFor()) throw gpuFailure("WebGL2 solid atlas allocation failed");
+      } else if (command[0] === 2) {
+        preflightTextResource(renderer, 0, `score ${command[3]}`);
+      }
+    }
+  };
+  const replayLegacyOnlyFrame = frameCommands => {
+    if (frameCommands.length === 0) return;
+    const batcher = getGpuBatcher();
+    if (!batcher) return;
+    beginFrameTextPreparation();
+    preflightLegacyCommands(batcher, frameCommands);
+    batcher.prepareFrame();
+    batcher.clearPhysicalTarget(0, 0, 0, 1);
+    replayLegacyCommands(batcher, frameCommands);
+  };
+  function executeCommands() {
+    const frameCommands = commands.splice(0, commands.length);
+    try {
+      executeStasisBuffer(frameCommands);
+    } finally {
+      finishFrameTextPreparation();
+    }
   }
 
-  function executeStasisBuffer() {
+  function executeStasisBuffer(frameCommands) {
     const iLayout = game.memory.gfx_cmd_i32;
     const fLayout = game.memory.gfx_cmd_f32;
-    if (!iLayout || !fLayout || !instance.exports.memory) return;
+    if (!iLayout || !fLayout || !instance.exports.memory) {
+      if ((game.renderContractVersion ?? GFX_CMD_LEGACY_VERSION) !== GFX_CMD_LEGACY_VERSION) return;
+      replayLegacyOnlyFrame(frameCommands);
+      return;
+    }
     const i32 = new Int32Array(instance.exports.memory.buffer, iLayout.offset, iLayout.length);
     const f32 = new Float32Array(instance.exports.memory.buffer, fLayout.offset, fLayout.length);
-    if (i32[GFX_I_MAGIC] !== GFX_CMD_MAGIC) return;
+    if (i32[GFX_I_MAGIC] !== GFX_CMD_MAGIC) {
+      if ((game.renderContractVersion ?? GFX_CMD_LEGACY_VERSION) === GFX_CMD_LEGACY_VERSION) {
+        replayLegacyOnlyFrame(frameCommands);
+      }
+      return;
+    }
     const version = i32[GFX_I_VERSION];
     if (version !== GFX_CMD_VERSION && version !== GFX_CMD_LEGACY_VERSION) return;
     const publishedSprites = i32[GFX_I_SPRITE_COUNT];
@@ -3462,10 +3561,7 @@
     if (!batcher) return;
     const flags = i32[GFX_I_FLAGS];
     if (version >= 8 && !(flags & GFX_FLAG_PRESENT)) return;
-    if (flags & GFX_FLAG_CLEAR) {
-      batcher.beginFrame(f32[GFX_F_CLEAR_BASE], f32[GFX_F_CLEAR_BASE + 1],
-        f32[GFX_F_CLEAR_BASE + 2], Math.max(0, Math.min(1, f32[GFX_F_CLEAR_BASE + 3])));
-    }
+    if (version >= 8 && (flags & ~(GFX_FLAG_CLEAR | GFX_FLAG_PRESENT))) return;
     const drawLine = index => {
       performanceWorkload.lines += 1;
       const base = GFX_F_LINE_BASE + index * GFX_LINE_STRIDE_F32;
@@ -3539,12 +3635,25 @@
         blue: ((tint >>> 8) & 255) / 255, alpha: (tint & 255) / 255,
         radians: f32[baseF + 12] * Math.PI / 180 };
     };
-    const drawSprite = index => {
-      performanceWorkload.sprites += 1;
+    const preparedSprites = new Map();
+    const preparedSprite = index => {
+      if (preparedSprites.has(index)) return preparedSprites.get(index);
       const info = spriteInfo(index);
-      if (!info) return;
+      if (!info) {
+        preparedSprites.set(index, null);
+        return null;
+      }
       const atlas = batcher.atlasFor(info.resource, info.variant);
       if (!atlas) throw gpuFailure("WebGL2 sprite atlas allocation failed");
+      const prepared = { ...info, atlas };
+      preparedSprites.set(index, prepared);
+      return prepared;
+    };
+    const drawSprite = index => {
+      performanceWorkload.sprites += 1;
+      const info = preparedSprite(index);
+      if (!info) return;
+      const { atlas } = info;
       writeQuad(0,
         info.x + info.pivotX - info.pivotX * info.scaleX,
         info.y + info.pivotY - info.pivotY * info.scaleY,
@@ -3567,10 +3676,9 @@
         let batchCount = 0;
         let page = null;
         while (offset + batchCount < count && batchCount < SPRITE_CAP) {
-          const value = spriteInfo(start + offset + batchCount);
+          const value = preparedSprite(start + offset + batchCount);
           if (!value) { if (batchCount === 0) offset += 1; break; }
-          const atlas = batcher.atlasFor(value.resource, value.variant);
-          if (!atlas) throw gpuFailure("WebGL2 sprite atlas allocation failed");
+          const { atlas } = value;
           if (!atlas || (page && atlas.page !== page)) break;
           page ||= atlas.page;
           writeQuad(batchCount * 16,
@@ -3640,12 +3748,12 @@
         if (kind === GFX_ORDER_RECT) {
           atlas = batcher.solidFor(page || preferredPage);
         } else {
-          value = spriteInfo(index);
+          value = preparedSprite(index);
           if (!value) {
             flush();
             return;
           }
-          atlas = batcher.atlasFor(value.resource, value.variant);
+          atlas = value.atlas;
         }
         if (!atlas) {
           throw gpuFailure("WebGL2 atlas allocation failed");
@@ -3705,8 +3813,8 @@
                 if (Math.floor(future / GFX_ORDER_KIND_SCALE) !== GFX_ORDER_SPRITE) continue;
                 const futureRun = GFX_I_SPRITE_RUN_BASE
                   + (future % GFX_ORDER_KIND_SCALE) * GFX_SPRITE_RUN_STRIDE_I32;
-                const futureValue = spriteInfo(i32[futureRun]);
-                if (futureValue) preferredPage = batcher.atlasFor(futureValue.resource, futureValue.variant)?.page;
+                const futureValue = preparedSprite(i32[futureRun]);
+                if (futureValue) preferredPage = futureValue.atlas.page;
                 break;
               }
             }
@@ -3725,8 +3833,7 @@
         throw error;
       }
     };
-    const drawText = index => {
-      performanceWorkload.text += 1;
+    const textInvocation = index => {
       const baseI = GFX_I_TEXT_BASE + index * GFX_TEXT_STRIDE_I32;
       const baseF = textBase + index * GFX_TEXT_STRIDE_F32;
       const offset = i32[baseI + 1];
@@ -3739,8 +3846,19 @@
         const bytes = new Uint8Array(instance.exports.memory.buffer, bytesLayout.offset + offset, i32[baseI + 2]);
         text = new TextDecoder().decode(bytes);
       }
-      drawPreparedText(fontHandle, text, f32[baseF], f32[baseF + 1],
-        f32[baseF + 2], f32[baseF + 3], f32[baseF + 4], f32[baseF + 5]);
+      return { fontHandle, text, x: f32[baseF], y: f32[baseF + 1],
+        red: f32[baseF + 2], green: f32[baseF + 3], blue: f32[baseF + 4], alpha: f32[baseF + 5] };
+    };
+    const prepareTextInvocation = invocation => {
+      if (!invocation) return;
+      preflightTextResource(batcher, invocation.fontHandle, invocation.text);
+    };
+    const drawText = index => {
+      performanceWorkload.text += 1;
+      const invocation = textInvocation(index);
+      if (!invocation) return;
+      drawPreparedText(invocation.fontHandle, invocation.text, invocation.x, invocation.y,
+        invocation.red, invocation.green, invocation.blue, invocation.alpha);
     };
     const lineCount = Math.max(0, Math.min(i32[GFX_I_LINE_COUNT], GFX_MAX_LINES));
     const spriteCount = Math.max(0, Math.min(i32[GFX_I_SPRITE_COUNT], GFX_MAX_SPRITES));
@@ -3749,6 +3867,43 @@
     const rectCount = Math.max(0, Math.min(i32[GFX_I_RECT_COUNT], GFX_MAX_GEOMETRY - lineCount));
     const orderCount = Math.max(0, Math.min(i32[GFX_I_ORDER_COUNT], GFX_MAX_ORDER));
     const clipCount = Math.max(0, Math.min(i32[GFX_I_CLIP_COUNT], GFX_MAX_CLIPS));
+    const prepareSolid = () => {
+      if (!batcher.solidFor()) throw gpuFailure("WebGL2 solid atlas allocation failed");
+    };
+    const prepareSpriteRun = run => {
+      const base = GFX_I_SPRITE_RUN_BASE + run * GFX_SPRITE_RUN_STRIDE_I32;
+      const first = i32[base];
+      const count = i32[base + 1];
+      for (let item = 0; item < count; item += 1) preparedSprite(first + item);
+    };
+    beginFrameTextPreparation();
+    preflightLegacyCommands(batcher, frameCommands);
+    if (orderCount > 0) {
+      for (let order = 0; order < orderCount; order += 1) {
+        const encoded = i32[GFX_I_ORDER_BASE + order];
+        const kind = Math.floor(encoded / GFX_ORDER_KIND_SCALE);
+        const index = encoded % GFX_ORDER_KIND_SCALE;
+        if ((kind === GFX_ORDER_LINE && index < lineCount)
+            || (kind === GFX_ORDER_RECT && index < rectCount)) prepareSolid();
+        else if (kind === GFX_ORDER_SPRITE && index < spriteRunCount) prepareSpriteRun(index);
+        else if (kind === GFX_ORDER_TEXT && index < textCount) {
+          prepareTextInvocation(textInvocation(index));
+        }
+      }
+    } else {
+      if (lineCount > 0 || rectCount > 0) prepareSolid();
+      for (let run = 0; run < spriteRunCount; run += 1) prepareSpriteRun(run);
+      for (let index = 0; index < textCount; index += 1) {
+        prepareTextInvocation(textInvocation(index));
+      }
+    }
+    batcher.prepareFrame();
+    batcher.clearPhysicalTarget(0, 0, 0, 1);
+    replayLegacyCommands(batcher, frameCommands);
+    if (flags & GFX_FLAG_CLEAR) {
+      batcher.beginLogicalFrame(f32[GFX_F_CLEAR_BASE], f32[GFX_F_CLEAR_BASE + 1],
+        f32[GFX_F_CLEAR_BASE + 2], Math.max(0, Math.min(1, f32[GFX_F_CLEAR_BASE + 3])));
+    }
     const clipStack = [];
     const pushClip = index => {
       if (index < 0 || index >= clipCount) return;
@@ -4046,6 +4201,7 @@
     const constructionResult = typeof constructionFinish === "function"
       ? constructionFinish(renderResult ?? 0) : (renderResult ?? 0);
     if (constructionResult !== 0) {
+      commands.length = 0;
       document.body.dataset.guestStopped = String(constructionResult);
       return;
     }

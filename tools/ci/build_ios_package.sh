@@ -107,10 +107,11 @@ install_xcframework() {
   active_mount=""
 }
 
-verify_ios_generics_symbols() {
+verify_ios_package_symbols() {
   local engine_manifest="$1"
   local symbols="$2"
-  python3 - "${engine_manifest}" "${symbols}" <<'PY'
+  local acceptance="$3"
+  python3 - "${engine_manifest}" "${symbols}" "${acceptance}" <<'PY'
 import json
 import re
 import sys
@@ -119,6 +120,7 @@ with open(sys.argv[1], encoding="utf-8") as source:
     manifest = json.load(source)
 with open(sys.argv[2], encoding="utf-8") as source:
     symbols = source.read()
+acceptance = sys.argv[3]
 
 functions = manifest.get("functions")
 if not isinstance(functions, list):
@@ -135,23 +137,26 @@ for name in ("main", "tick", "render"):
     if re.search(rf"^[0-9a-f]+ T _{re.escape(symbol)}$", symbols, re.MULTILINE) is None:
         raise SystemExit(f"linked app is missing lifecycle AOT symbol {name}={symbol}")
 
-required = (
-    "stasis_replay_state_snapshot_restore",
-    "stasis_replay_state_snapshot_size",
-    "stasis_replay_state_snapshot_write",
-    "stasis_state_scalar__generics_collections_digest_value",
-    "stasis_state_scalar__math_oracle_raw_digest_value",
-    "stasis_state_scalar__web_bounds_probe_index",
+required = [
     "stasis_state_array__gfx_cmd_i32",
     "stasis_state_array__gfx_cmd_f32",
     "stasis_state_array__gfx_cmd_u8",
-)
+]
+if acceptance != "presentation":
+    required.extend((
+        "stasis_replay_state_snapshot_restore",
+        "stasis_replay_state_snapshot_size",
+        "stasis_replay_state_snapshot_write",
+        "stasis_state_scalar__generics_collections_digest_value",
+        "stasis_state_scalar__math_oracle_raw_digest_value",
+        "stasis_state_scalar__web_bounds_probe_index",
+    ))
 for symbol in required:
     if re.search(rf"^[0-9a-f]+ [A-Z] _{re.escape(symbol)}$", symbols, re.MULTILINE) is None:
         raise SystemExit(f"linked app is missing required workload symbol {symbol}")
 
 linked_aot_functions = re.findall(r"^[0-9a-f]+ T _aot_fn_[0-9]+$", symbols, re.MULTILINE)
-if len(linked_aot_functions) < 16:
+if acceptance != "presentation" and len(linked_aot_functions) < 16:
     raise SystemExit(
         f"linked app contains only {len(linked_aot_functions)} AOT functions; expected the full workload"
     )
@@ -218,9 +223,15 @@ otool -L "${executable}" | tee "${build_root}/linked-libraries.txt"
 grep -Fq '@rpath/SDL3.framework/SDL3' "${build_root}/linked-libraries.txt"
 grep -Fq '@rpath/SDL3_image.framework/SDL3_image' "${build_root}/linked-libraries.txt"
 nm -gU "${executable}" | tee "${build_root}/device-symbols.txt"
-verify_ios_generics_symbols \
+if grep -Eq '_stasis_test_(poison_physical_target|presentation_poison_target_kind)$' \
+    "${build_root}/device-symbols.txt"; then
+  echo "production iOS device binary unexpectedly exports presentation poison seams" >&2
+  exit 1
+fi
+verify_ios_package_symbols \
   "${package_root}/aot/engine_bundle_manifest.json" \
-  "${build_root}/device-symbols.txt"
+  "${build_root}/device-symbols.txt" \
+  "${simulator_acceptance}"
 stasis_source=""
 while IFS= read -r candidate; do
   stasis_source="${candidate}"
@@ -265,7 +276,8 @@ shasum -a 256 \
 
 cat "${build_root}/evidence.txt"
 
-if [[ "${simulator_acceptance}" = "generics" ]]; then
+if [[ "${simulator_acceptance}" = "generics" || \
+      "${simulator_acceptance}" = "presentation" ]]; then
   simulator_output="${package_output}-simulator"
   cd "${repo_root}"
   package_mobile ios-simulator-arm64 "${simulator_output}"
@@ -287,6 +299,10 @@ if manifest.get("development_build") is not expected_development:
         f"expected {expected_development!r} for the selected compiler"
     )
 PY
+  simulator_definitions='$(inherited) TVG_STATIC=1 NOMINMAX=1 STASIS_ENABLE_SEAM_TESTS=1'
+  if [[ "${simulator_acceptance}" = "presentation" ]]; then
+    simulator_definitions="${simulator_definitions} STASIS_TEST_PRESENTATION_POISON=1"
+  fi
   xcodebuild \
     -project "${simulator_project}/StasisMobile.xcodeproj" \
     -scheme StasisMobile \
@@ -295,7 +311,7 @@ PY
     -arch arm64 \
     -derivedDataPath "${simulator_derived_data}" \
     STASIS_SDL_FRAMEWORKS="${framework_root}" \
-    'GCC_PREPROCESSOR_DEFINITIONS=$(inherited) TVG_STATIC=1 NOMINMAX=1 STASIS_ENABLE_SEAM_TESTS=1' \
+    GCC_PREPROCESSOR_DEFINITIONS="${simulator_definitions}" \
     CODE_SIGNING_ALLOWED=NO \
     CODE_SIGNING_REQUIRED=NO \
     build | tee "${build_root}/simulator-xcodebuild.log"
@@ -310,9 +326,14 @@ PY
   grep -Fq '@rpath/SDL3.framework/SDL3' "${build_root}/simulator-linked-libraries.txt"
   grep -Fq '@rpath/SDL3_image.framework/SDL3_image' "${build_root}/simulator-linked-libraries.txt"
   nm -gU "${simulator_executable}" | tee "${build_root}/simulator-symbols.txt"
-  verify_ios_generics_symbols \
+  if [[ "${simulator_acceptance}" = "presentation" ]]; then
+    grep -Eq '_stasis_test_poison_physical_target$' "${build_root}/simulator-symbols.txt"
+    grep -Eq '_stasis_test_presentation_poison_target_kind$' "${build_root}/simulator-symbols.txt"
+  fi
+  verify_ios_package_symbols \
     "${simulator_package}/aot/engine_bundle_manifest.json" \
-    "${build_root}/simulator-symbols.txt"
+    "${build_root}/simulator-symbols.txt" \
+    "${simulator_acceptance}"
   cmp "${simulator_package}/stasis_provenance.json" \
     "${simulator_app}/stasis_game/stasis_provenance.json"
   shasum -a 256 \
@@ -361,20 +382,13 @@ else:
     raise SystemExit("no supported iPhone simulator type")
 PY
 )"
-  simulator_name="StasisGenerics-${GITHUB_RUN_ID:-local}-$$"
+  simulator_name="Stasis-${simulator_acceptance}-${GITHUB_RUN_ID:-local}-$$"
   simulator_udid="$(xcrun simctl create "${simulator_name}" "${device_type_id}" "${runtime_id}")"
   xcrun simctl boot "${simulator_udid}"
   xcrun simctl bootstatus "${simulator_udid}" -b
   xcrun simctl install "${simulator_udid}" "${simulator_app}"
   bundle_id="$(/usr/libexec/PlistBuddy -c 'Print:CFBundleIdentifier' "${simulator_app}/Info.plist")"
   data_container="$(xcrun simctl get_app_container "${simulator_udid}" "${bundle_id}" data)"
-  result_receipt="${data_container}/Documents/stasis-ios-generics-result.json"
-  launch_output="$(
-    SIMCTL_CHILD_STASIS_ENABLE_TEST_INPUT=1 \
-    SIMCTL_CHILD_STASIS_SEAM_TEST_ID=IOS-GENERICS \
-      xcrun simctl launch --terminate-running-process "${simulator_udid}" "${bundle_id}"
-  )"
-  printf '%s\n' "${launch_output}" | tee "${build_root}/simulator-launch.txt"
   wait_for_receipt() {
     local path="$1"
     for _ in $(seq 1 160); do
@@ -384,6 +398,71 @@ PY
     echo "timed out waiting for simulator receipt: ${path}" >&2
     return 1
   }
+
+  if [[ "${simulator_acceptance}" = "presentation" ]]; then
+    run_presentation_phase() {
+      local phase="$1"
+      local receipt="${data_container}/Documents/stasis-ios-presentation-${phase}.json"
+      rm -f -- "${receipt}"
+      launch_output="$(
+        SIMCTL_CHILD_STASIS_ENABLE_TEST_INPUT=1 \
+        SIMCTL_CHILD_STASIS_SEAM_TEST_ID=IOS-PRESENTATION-BASELINE \
+        SIMCTL_CHILD_STASIS_PRESENTATION_PHASE="${phase}" \
+          xcrun simctl launch --terminate-running-process "${simulator_udid}" "${bundle_id}"
+      )"
+      printf '%s\n' "${launch_output}" | tee "${build_root}/simulator-${phase}-launch.txt"
+      wait_for_receipt "${receipt}"
+      cp "${receipt}" "${build_root}/simulator-${phase}-receipt.json"
+      sleep 1
+      xcrun simctl io "${simulator_udid}" screenshot \
+        "${build_root}/simulator-${phase}-frame.png"
+      xcrun simctl terminate "${simulator_udid}" "${bundle_id}"
+    }
+
+    run_presentation_phase initial
+    run_presentation_phase relaunch
+    xcrun simctl spawn "${simulator_udid}" log show --style compact --last 5m \
+      --predicate 'process == "StasisMobile"' > "${build_root}/simulator.log"
+    grep -Eq 'Stasis provenance: .* renderer=gfx_cmd schema=7' \
+      "${build_root}/simulator.log"
+    grep -Fq 'Stasis iOS presentation baseline phase=initial' \
+      "${build_root}/simulator.log"
+    grep -Fq 'Stasis iOS presentation baseline phase=relaunch' \
+      "${build_root}/simulator.log"
+    python3 "${repo_root}/tools/ci/verify_ios_presentation_baseline.py" \
+      --initial-receipt "${build_root}/simulator-initial-receipt.json" \
+      --initial-frame "${build_root}/simulator-initial-frame.png" \
+      --relaunch-receipt "${build_root}/simulator-relaunch-receipt.json" \
+      --relaunch-frame "${build_root}/simulator-relaunch-frame.png" \
+      --provenance "${simulator_package}/stasis_provenance.json" \
+      --mobile-manifest "${simulator_package}/stasis_mobile_package.json" \
+      --source "${workspace}/src/main.stasis" \
+      --output "${build_root}/simulator-presentation-evidence.json"
+    {
+      printf 'simulator_name=%s\n' "${simulator_name}"
+      printf 'simulator_udid=%s\n' "${simulator_udid}"
+      printf 'runtime=%s\n' "${runtime_id}"
+      printf 'device_type=%s\n' "${device_type_id}"
+      printf 'bundle_id=%s\n' "${bundle_id}"
+      printf 'app=%s\n' "${simulator_app}"
+      printf 'architectures=%s\n' "$(lipo "${simulator_executable}" -archs)"
+      printf 'logical=640x360\n'
+      printf 'poison_target=physical-window\n'
+      printf 'surface_lifecycle_qualified=fresh-process-relaunch\n'
+      printf 'same_process_context_loss_qualified=false\n'
+      printf 'physical_device_qualified=false\n'
+    } > "${build_root}/simulator-presentation-evidence.txt"
+    cat "${build_root}/simulator-presentation-evidence.txt"
+    exit 0
+  fi
+
+  result_receipt="${data_container}/Documents/stasis-ios-generics-result.json"
+  launch_output="$(
+    SIMCTL_CHILD_STASIS_ENABLE_TEST_INPUT=1 \
+    SIMCTL_CHILD_STASIS_SEAM_TEST_ID=IOS-GENERICS \
+      xcrun simctl launch --terminate-running-process "${simulator_udid}" "${bundle_id}"
+  )"
+  printf '%s\n' "${launch_output}" | tee "${build_root}/simulator-launch.txt"
   wait_for_receipt "${result_receipt}"
   cp "${result_receipt}" "${build_root}/simulator-result.json"
   sleep 1

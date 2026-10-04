@@ -53,6 +53,14 @@ function Assert-In-Time([string]$Step) {
     }
 }
 
+function Get-RemainingPresentationTimeout([int]$RequestedSeconds) {
+    $remainingSeconds = [math]::Floor($TotalTimeoutSeconds - $startedAt.Elapsed.TotalSeconds)
+    if ($remainingSeconds -le 0) {
+        throw ("Android render E2E exceeded " + $TotalTimeoutSeconds + "s during presentation-baseline acceptance")
+    }
+    return [int][math]::Min($RequestedSeconds, $remainingSeconds)
+}
+
 function Invoke-BoundedScript([string]$Path, [string[]]$Arguments, [string]$Phase) {
     $remainingSeconds = [math]::Floor($TotalTimeoutSeconds - $startedAt.Elapsed.TotalSeconds)
     $stepSeconds = [math]::Min($StepTimeoutSeconds, $remainingSeconds)
@@ -349,6 +357,7 @@ function Wait-ForWorkshopIT032Readiness(
     [scriptblock]$ReadProcessLog,
     [scriptblock]$OnPending = {}
 ) {
+    $TimeoutSeconds = Get-RemainingPresentationTimeout $TimeoutSeconds
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
     do {
         $processId = ([string](& $ReadProcessId | Select-Object -First 1)).Trim()
@@ -393,6 +402,718 @@ function Fit-LogicalViewport([int[]]$Surface) {
     $viewportHeight = [int][math]::Floor(($width * $logicalHeight / $logicalWidth) + 0.5)
     $viewportTop = $Surface[1] + [int][math]::Ceiling(($height - $viewportHeight) / 2.0)
     return @($Surface[0], $viewportTop, $width, $viewportHeight)
+}
+
+$script:presentationBaselinePrefixes = @(
+    @{ kind = "control"; prefix = "Stasis Workshop presentation-baseline control: " },
+    @{ kind = "poison"; prefix = "Stasis Workshop presentation-baseline: " },
+    @{ kind = "submission"; prefix = "Stasis Workshop presentation-baseline submission: " },
+    @{ kind = "renderer"; prefix = "Stasis Workshop present-only baseline: " }
+)
+
+function Read-PresentationBaselineReceipts([string]$Package) {
+    $processId = Find-PackageProcessId $Package
+    if (-not $processId) { return [pscustomobject]@{ process_id = ""; receipts = @() } }
+    $lines = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw "presentation-baseline logcat read failed" }
+    $receipts = [System.Collections.Generic.List[object]]::new()
+    foreach ($line in $lines) {
+        foreach ($spec in $script:presentationBaselinePrefixes) {
+            $markerIndex = $line.IndexOf($spec.prefix, [System.StringComparison]::Ordinal)
+            if ($markerIndex -lt 0) { continue }
+            $jsonText = $line.Substring($markerIndex + $spec.prefix.Length).Trim()
+            try {
+                $receipt = $jsonText | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                throw "presentation-baseline $($spec.kind) receipt is malformed: $($_.Exception.Message)"
+            }
+            if ($receipt.schema -ne "stasis.workshop_present_only.v1") {
+                throw "presentation-baseline $($spec.kind) receipt has an unexpected schema"
+            }
+            $receiptKind = if ($spec.kind -eq "poison" -and $receipt.event -eq "accepted_snapshot_replayed") {
+                "renderer"
+            } else {
+                $spec.kind
+            }
+            $receipt | Add-Member -NotePropertyName receipt_kind -NotePropertyValue $receiptKind -Force
+            [void]$receipts.Add($receipt)
+            break
+        }
+    }
+    return [pscustomobject]@{ process_id = $processId; receipts = @($receipts.ToArray()) }
+}
+
+function Wait-PresentationBaselineReceipt(
+    [string]$Package,
+    [scriptblock]$Predicate,
+    [int]$AfterReceiptCount,
+    [int]$TimeoutSeconds,
+    [string]$Description,
+    [string]$InitialProcessId = "",
+    [bool]$AllowProcessRestart = $false
+) {
+    $TimeoutSeconds = Get-RemainingPresentationTimeout $TimeoutSeconds
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    do {
+        $state = Read-PresentationBaselineReceipts $Package
+        if (-not $state.process_id) {
+            $remaining = ($TimeoutSeconds * 1000) - [int]$timer.ElapsedMilliseconds
+            if ($remaining -le 0) { break }
+            Start-Sleep -Milliseconds ([math]::Min(250, $remaining))
+            continue
+        }
+        if ($InitialProcessId -and $state.process_id -ne $InitialProcessId -and -not $AllowProcessRestart) {
+            throw "$Description changed Workshop process unexpectedly"
+        }
+        $startAt = if ($InitialProcessId -and $state.process_id -ne $InitialProcessId) {
+            0
+        } else {
+            [math]::Min($AfterReceiptCount, $state.receipts.Count)
+        }
+        for ($index = $startAt; $index -lt $state.receipts.Count; $index += 1) {
+            $receipt = $state.receipts[$index]
+            if (& $Predicate $receipt) {
+                return [pscustomobject]@{
+                    process_id = $state.process_id
+                    receipt = $receipt
+                    receipts = $state.receipts
+                    marker_count = $state.receipts.Count
+                    elapsed_seconds = [math]::Round($timer.Elapsed.TotalSeconds, 3)
+                }
+            }
+        }
+        $remaining = ($TimeoutSeconds * 1000) - [int]$timer.ElapsedMilliseconds
+        if ($remaining -gt 0) { Start-Sleep -Milliseconds ([math]::Min(250, $remaining)) }
+    } while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+    throw ($Description + " was not observed within " + $TimeoutSeconds + "s")
+}
+
+function Assert-PresentationPresentReceipt([object]$Receipt) {
+    if ($Receipt.receipt_kind -ne "renderer" -or $Receipt.event -ne "present" -or
+        $Receipt.test_id -ne "PRESENTATION-BASELINE" -or [int]$Receipt.flags -ne 2 -or
+        $Receipt.physical_target_poisoned -ne $true) {
+        throw "presentation-baseline PRESENT receipt is missing identity, flags, or physical poison proof"
+    }
+    $logicalSize = @($Receipt.logical_size | ForEach-Object { [int]$_ })
+    $rect = @($Receipt.rect | ForEach-Object { [int]$_ })
+    $rgba = @($Receipt.rgba | ForEach-Object { [double]$_ })
+    $surfaceSize = @($Receipt.surface_size | ForEach-Object { [int]$_ })
+    if ($logicalSize.Count -ne 2 -or $logicalSize[0] -ne 640 -or $logicalSize[1] -ne 360 -or
+        $rect.Count -ne 4 -or $rect[0] -ne 80 -or $rect[1] -ne 45 -or
+        $rect[2] -ne 160 -or $rect[3] -ne 90 -or
+        $rgba.Count -ne 4 -or [math]::Abs($rgba[0] - 0.9) -gt 0.001 -or
+        [math]::Abs($rgba[1] - 0.15) -gt 0.001 -or
+        [math]::Abs($rgba[2] - 0.08) -gt 0.001 -or
+        [math]::Abs($rgba[3] - 1.0) -gt 0.001 -or
+        $surfaceSize.Count -ne 2 -or $surfaceSize[0] -le 0 -or $surfaceSize[1] -le 0 -or
+        [int]$Receipt.sequence -notin @(1, 2) -or
+        $null -eq $Receipt.surface_generation -or $null -eq $Receipt.renderer_generation -or
+        $null -eq $Receipt.display_generation -or $null -eq $Receipt.frame_token -or
+        $null -eq $Receipt.presentation_serial) {
+        throw "presentation-baseline PRESENT receipt does not match the frozen 640x360 scene contract"
+    }
+}
+
+function Wait-PresentationBaselinePresentPair(
+    [string]$Package,
+    [int]$AfterReceiptCount,
+    [int]$TimeoutSeconds,
+    [string]$Description,
+    [string]$InitialProcessId = "",
+    [bool]$AllowProcessRestart = $false
+) {
+    $TimeoutSeconds = Get-RemainingPresentationTimeout $TimeoutSeconds
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    do {
+        $state = Read-PresentationBaselineReceipts $Package
+        if (-not $state.process_id) {
+            $remaining = ($TimeoutSeconds * 1000) - [int]$timer.ElapsedMilliseconds
+            if ($remaining -le 0) { break }
+            Start-Sleep -Milliseconds ([math]::Min(250, $remaining))
+            continue
+        }
+        if ($InitialProcessId -and $state.process_id -ne $InitialProcessId -and -not $AllowProcessRestart) {
+            throw "$Description changed Workshop process unexpectedly"
+        }
+        $startAt = if ($InitialProcessId -and $state.process_id -ne $InitialProcessId) {
+            0
+        } else {
+            [math]::Min($AfterReceiptCount, $state.receipts.Count)
+        }
+        $newPresents = @()
+        for ($index = $startAt; $index -lt $state.receipts.Count; $index += 1) {
+            $receipt = $state.receipts[$index]
+            if ($receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "present") {
+                Assert-PresentationPresentReceipt $receipt
+                $newPresents += $receipt
+            }
+        }
+        $groups = @($newPresents | Group-Object {
+            "{0}/{1}/{2}/{3}x{4}" -f $_.surface_generation, $_.renderer_generation,
+                $_.display_generation, $_.surface_size[0], $_.surface_size[1]
+        })
+        foreach ($group in $groups) {
+            $first = @($group.Group | Where-Object { [int]$_.sequence -eq 1 } | Select-Object -First 1)
+            $second = @($group.Group | Where-Object { [int]$_.sequence -eq 2 } | Select-Object -Last 1)
+            if ($first.Count -gt 0 -and $second.Count -gt 0) {
+                if ([string]$first[0].frame_token -eq [string]$second[0].frame_token) {
+                    throw "$Description repeated a frame token instead of presenting a fresh second frame"
+                }
+                if ([long]$second[0].presentation_serial -le [long]$first[0].presentation_serial) {
+                    throw "$Description did not advance the accepted presentation serial"
+                }
+                return [pscustomobject]@{
+                    process_id = $state.process_id
+                    first = $first[0]
+                    second = $second[0]
+                    receipts = $state.receipts
+                    marker_count = $state.receipts.Count
+                    elapsed_seconds = [math]::Round($timer.Elapsed.TotalSeconds, 3)
+                }
+            }
+        }
+        $remaining = ($TimeoutSeconds * 1000) - [int]$timer.ElapsedMilliseconds
+        if ($remaining -gt 0) { Start-Sleep -Milliseconds ([math]::Min(250, $remaining)) }
+    } while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+    throw ($Description + " did not produce two new poisoned PRESENT receipts within " + $TimeoutSeconds + "s")
+}
+
+function Send-PresentationBaselineControl([string]$Package, [string]$Phase) {
+    Invoke-Adb @(
+        "shell", "am", "broadcast", "-a", "com.stasislang.workshop.PRESENTATION_BASELINE_TEST",
+        "-p", $Package, "--es", "phase", $Phase
+    ) | Out-Null
+}
+
+function Wait-PresentationBaselineControl(
+    [string]$Package,
+    [string]$Phase,
+    [int]$AfterReceiptCount,
+    [string]$ProcessId
+) {
+    $predicate = {
+        param($receipt)
+        $receipt.receipt_kind -eq "control" -and
+            $receipt.phase -eq $Phase -and $receipt.status -eq "ready"
+    }.GetNewClosure()
+    return Wait-PresentationBaselineReceipt $Package $predicate $AfterReceiptCount $RenderTimeoutSeconds ("presentation-baseline " + $Phase + " control acknowledgement") $ProcessId
+}
+
+function Get-AndroidWindowSizeState {
+    $output = @(Invoke-Adb @("shell", "wm", "size"))
+    $text = $output -join [Environment]::NewLine
+    $physicalMatch = [regex]::Match($text, '(?m)^\s*Physical size:\s*(\d+)x(\d+)\s*$')
+    $overrideMatch = [regex]::Match($text, '(?m)^\s*Override size:\s*(\d+)x(\d+)\s*$')
+    if (-not $physicalMatch.Success) { throw "emulator wm size did not report physical dimensions" }
+    $physical = @([int]$physicalMatch.Groups[1].Value, [int]$physicalMatch.Groups[2].Value)
+    $override = if ($overrideMatch.Success) {
+        @([int]$overrideMatch.Groups[1].Value, [int]$overrideMatch.Groups[2].Value)
+    } else {
+        @()
+    }
+    $effective = if ($override.Count -eq 2) { $override } else { $physical }
+    return [pscustomobject]@{ physical = $physical; override = $override; effective = $effective }
+}
+
+function Restore-AndroidWindowSize([object]$State) {
+    if ($State.override.Count -eq 2) {
+        Invoke-AdbQuiet @("shell", "wm", "size", "$($State.override[0])x$($State.override[1])")
+    } else {
+        Invoke-AdbQuiet @("shell", "wm", "size", "reset")
+    }
+}
+
+function Save-AndVerifyPresentationBaselineCapture(
+    [string]$Package,
+    [string]$SurfaceDescription,
+    [string]$Stage,
+    [string]$Mode,
+    [object]$Receipt
+) {
+    $uiTree = Join-Path $artifactRoot "presentation-baseline-$Stage-window.xml"
+    Remove-Item -LiteralPath $uiTree -Force -ErrorAction SilentlyContinue
+    $surface = @(Read-SurfaceBounds $SurfaceDescription $uiTree $Package)
+    $surfaceArg = ($surface | ForEach-Object { $_.ToString() }) -join ","
+    if ($Receipt.surface_size) {
+        $receiptSize = @($Receipt.surface_size | ForEach-Object { [int]$_ })
+        if ($receiptSize.Count -ne 2 -or
+            $receiptSize[0] -ne $surface[2] -or $receiptSize[1] -ne $surface[3]) {
+            throw "$Stage UI surface and renderer receipt dimensions disagree"
+        }
+    }
+    $capture = Join-Path $artifactRoot "presentation-baseline-$Stage.png"
+    $evidence = Join-Path $artifactRoot "presentation-baseline-$Stage.json"
+    $verificationLog = Join-Path $artifactRoot "presentation-baseline-$Stage-verify.log"
+    $arguments = @(
+        (Join-Path $toolsCiRoot "verify_presentation_baseline.py"),
+        "--capture", $capture, "--surface", $surfaceArg,
+        "--mode", $Mode, "--evidence", $evidence
+    )
+    $viewport = @()
+    if ($Mode -in @("present", "present-alpha-probe")) {
+        $viewport = @(Fit-LogicalViewport $surface)
+        $viewportArg = ($viewport | ForEach-Object { $_.ToString() }) -join ","
+        $arguments += @("--viewport", $viewportArg)
+    }
+    $captureAttempts = 0
+    $verificationPassed = $false
+    while ($captureAttempts -lt 5 -and -not $verificationPassed) {
+        Assert-In-Time ("during " + $Stage + " presentation-baseline capture")
+        $captureAttempts += 1
+        Save-Screenshot $capture
+        $verificationOutput = @(& python @arguments 2>&1)
+        $verificationExitCode = $LASTEXITCODE
+        $verificationOutput | Set-Content -LiteralPath $verificationLog -Encoding UTF8
+        if ($verificationExitCode -eq 0) {
+            $verificationPassed = $true
+        } elseif ($captureAttempts -lt 5) {
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    if (-not $verificationPassed) {
+        throw "$Stage presentation-baseline pixel verification failed after five captures; see $verificationLog"
+    }
+    $pixelEvidence = Get-Content -Raw -LiteralPath $evidence | ConvertFrom-Json -ErrorAction Stop
+    return [pscustomobject]@{
+        stage = $Stage
+        mode = $Mode
+        capture_attempts = $captureAttempts
+        capture = $capture
+        surface = $surface
+        viewport = $viewport
+        capture_sha256 = (Get-FileHash -LiteralPath $capture -Algorithm SHA256).Hash.ToLowerInvariant()
+        pixel_evidence = $pixelEvidence
+        renderer_receipt = $Receipt
+    }
+}
+
+function Assert-PresentationPoisonReceipt([object]$Receipt, [int[]]$ExpectedSurfaceSize) {
+    $size = @($Receipt.surface_size | ForEach-Object { [int]$_ })
+    if ($Receipt.receipt_kind -ne "poison" -or $Receipt.event -ne "backbuffer_poison" -or
+        $Receipt.physical_target_poisoned -ne $true -or $size.Count -ne 2 -or
+        $size[0] -ne $ExpectedSurfaceSize[0] -or $size[1] -ne $ExpectedSurfaceSize[1]) {
+        throw "presentation-baseline poison receipt did not cover the current physical surface"
+    }
+}
+
+function Assert-PresentationFaultReceipt([object]$Receipt, [string]$Phase) {
+    $expectedFlags = if ($Phase -eq "no_present") { 0 } else { 2 }
+    $expectedFrameValid = $Phase -eq "no_present"
+    if ($Receipt.receipt_kind -ne "submission" -or $Receipt.phase -ne $Phase -or
+        [int]$Receipt.status -ne 0 -or [int]$Receipt.flags -ne $expectedFlags -or
+        $Receipt.frame_valid -ne $expectedFrameValid -or $Receipt.requests_present -ne $false -or
+        $Receipt.fault_applied -ne $true -or $Receipt.draw_scheduled -ne $false -or
+        [string]::IsNullOrEmpty([string]$Receipt.frame_token) -or
+        ($Phase -eq "reject" -and [int]$Receipt.magic -ne 0) -or
+        ($Phase -eq "no_present" -and [int]$Receipt.magic -eq 0)) {
+        throw ("presentation-baseline " + $Phase + " receipt did not prove a non-publishing native submission")
+    }
+}
+
+function Assert-PresentationForcedRedrawControl([object]$Receipt, [object]$FaultReceipt, [string]$FaultPhase) {
+    $expectedFrameValid = $FaultPhase -eq "no_present"
+    if ($Receipt.receipt_kind -ne "control" -or $Receipt.phase -ne "forced_redraw" -or
+        $Receipt.status -ne "scheduled" -or $Receipt.frame_valid -ne $expectedFrameValid -or
+        $Receipt.requests_present -ne $false -or
+        [string]$Receipt.frame_token -ne [string]$FaultReceipt.frame_token -or
+        [int]$Receipt.flags -ne [int]$FaultReceipt.flags -or
+        [int]$Receipt.magic -ne [int]$FaultReceipt.magic) {
+        throw ("presentation-baseline forced redraw after " + $FaultPhase +
+            " did not report the expected valid/present state")
+    }
+}
+
+function Assert-PresentationSnapshotReplay(
+    [object]$Receipt,
+    [object]$FaultReceipt,
+    [object]$LastPresent,
+    [string]$FaultPhase
+) {
+    $expectedFrameValid = $FaultPhase -eq "no_present"
+    $expectedFlags = if ($FaultPhase -eq "no_present") { 0 } else { 2 }
+    $expectedSurface = @($LastPresent.surface_size | ForEach-Object { [int]$_ })
+    $actualSurface = @($Receipt.surface_size | ForEach-Object { [int]$_ })
+    if ($Receipt.receipt_kind -ne "renderer" -or $Receipt.event -ne "accepted_snapshot_replayed" -or
+        $Receipt.phase -ne $FaultPhase -or $Receipt.frame_valid -ne $expectedFrameValid -or
+        $Receipt.requests_present -ne $false -or [int]$Receipt.flags -ne $expectedFlags -or
+        [string]$Receipt.frame_token -ne [string]$FaultReceipt.frame_token -or
+        [int]$Receipt.magic -ne [int]$FaultReceipt.magic -or
+        [string]$Receipt.snapshot_frame_token -ne [string]$LastPresent.frame_token -or
+        $null -eq $Receipt.snapshot_presentation_serial -or
+        $null -eq $Receipt.presentation_serial -or
+        [long]$Receipt.snapshot_presentation_serial -ne [long]$LastPresent.presentation_serial -or
+        [long]$Receipt.presentation_serial -ne [long]$LastPresent.presentation_serial -or
+        $expectedSurface.Count -ne 2 -or $actualSurface.Count -ne 2 -or
+        ($expectedSurface -join ",") -ne ($actualSurface -join ",") -or
+        [long]$Receipt.surface_generation -ne [long]$LastPresent.surface_generation -or
+        [long]$Receipt.renderer_generation -ne [long]$LastPresent.renderer_generation) {
+        throw ("presentation-baseline " + $FaultPhase +
+            " forced redraw did not replay the last accepted snapshot with the rejected frame state")
+    }
+}
+
+function Assert-PresentationAlphaProbeReceipt([object]$Receipt, [object]$LastPresent) {
+    $probeLogical = @($Receipt.probe.logical | ForEach-Object { [int]$_ })
+    $expectedRgba = @($Receipt.probe.expected_rgba8 | ForEach-Object { [int]$_ })
+    $logicalSize = @($Receipt.logical_size | ForEach-Object { [int]$_ })
+    $expectedSurface = @($LastPresent.surface_size | ForEach-Object { [int]$_ })
+    $actualSurface = @($Receipt.surface_size | ForEach-Object { [int]$_ })
+    $rects = @($Receipt.rects)
+    $firstRect = if ($rects.Count -gt 0) { @($rects[0] | ForEach-Object { [double]$_ }) } else { @() }
+    $secondRect = if ($rects.Count -gt 1) { @($rects[1] | ForEach-Object { [double]$_ }) } else { @() }
+    $firstRectExpected = @(80, 45, 160, 90, 0.9, 0.15, 0.08, 1.0)
+    $secondRectExpected = @(90, 55, 20, 20, 0.0, 1.0, 0.0, 0.5)
+    $rectsMatch = $firstRect.Count -eq 8 -and $secondRect.Count -eq 8
+    for ($index = 0; $rectsMatch -and $index -lt 8; $index += 1) {
+        $rectsMatch = [math]::Abs($firstRect[$index] - $firstRectExpected[$index]) -le 0.001 -and
+            [math]::Abs($secondRect[$index] - $secondRectExpected[$index]) -le 0.001
+    }
+    if ($Receipt.receipt_kind -ne "renderer" -or $Receipt.event -ne "alpha_probe_present" -or
+        $Receipt.test_id -ne "PRESENTATION-BASELINE" -or
+        [int]$Receipt.flags -ne 2 -or $Receipt.physical_target_poisoned -ne $true -or
+        [string]::IsNullOrEmpty([string]$Receipt.frame_token) -or
+        [string]$Receipt.frame_token -eq [string]$LastPresent.frame_token -or
+        $null -eq $Receipt.presentation_serial -or
+        [long]$Receipt.presentation_serial -ne ([long]$LastPresent.presentation_serial + 1) -or
+        $logicalSize.Count -ne 2 -or ($logicalSize -join ",") -ne "640,360" -or
+        $probeLogical.Count -ne 2 -or ($probeLogical -join ",") -ne "100,65" -or
+        $expectedRgba.Count -ne 4 -or ($expectedRgba -join ",") -ne "115,147,10,255" -or
+        -not $rectsMatch -or $expectedSurface.Count -ne 2 -or $actualSurface.Count -ne 2 -or
+        ($expectedSurface -join ",") -ne ($actualSurface -join ",") -or
+        [long]$Receipt.surface_generation -ne [long]$LastPresent.surface_generation -or
+        [long]$Receipt.renderer_generation -ne [long]$LastPresent.renderer_generation) {
+        throw "presentation-baseline alpha probe receipt did not describe a fresh blended probe frame"
+    }
+}
+
+function Assert-PresentationResetReceipt([object]$Receipt) {
+    $size = @($Receipt.surface_size | ForEach-Object { [int]$_ })
+    $background = @($Receipt.background_rgba8 | ForEach-Object { [int]$_ })
+    $label = @($Receipt.restore_label_rgba8 | ForEach-Object { [int]$_ })
+    if ($Receipt.receipt_kind -ne "renderer" -or
+        $Receipt.event -ne "surface_reset_placeholder" -or
+        $Receipt.initialized -ne $true -or $Receipt.restore_label_drawn -ne $true -or
+        $size.Count -ne 2 -or $size[0] -le 0 -or $size[1] -le 0 -or
+        ($background -join ",") -ne "15,20,28,255" -or
+        ($label -join ",") -ne "66,153,225,255" -or
+        $null -eq $Receipt.surface_generation -or $null -eq $Receipt.renderer_generation) {
+        throw "presentation-baseline resize receipt did not describe the initialized dark-and-blue reset"
+    }
+}
+
+function Assert-PresentationBaselineMatrix(
+    [string]$Package,
+    [string]$SurfaceDescription,
+    [string]$Apk
+) {
+    Assert-In-Time "before Android presentation-baseline matrix"
+    if ($AvdName -ne "Stasis_API_35") {
+        throw "presentation-baseline matrix requires the dedicated Stasis_API_35 emulator"
+    }
+    $matrixPath = Join-Path $artifactRoot "presentation-baseline-matrix.json"
+    $matrix = [ordered]@{
+        schema = "stasis.workshop_present_only_android_matrix.v1"
+        package = $Package
+        apk = [System.IO.Path]::GetFullPath($Apk)
+        apk_sha256 = (Get-FileHash -LiteralPath $Apk -Algorithm SHA256).Hash.ToLowerInvariant()
+        avd = $AvdName
+        serial = $serial
+        android_sdk = [int](Invoke-Adb @("shell", "getprop", "ro.build.version.sdk") | Select-Object -First 1)
+        device_model = ((Invoke-Adb @("shell", "getprop", "ro.product.model") | Select-Object -First 1).ToString().Trim())
+        build_fingerprint = ((Invoke-Adb @("shell", "getprop", "ro.build.fingerprint") | Select-Object -First 1).ToString().Trim())
+        captures = [System.Collections.Generic.List[object]]::new()
+        stages = [System.Collections.Generic.List[object]]::new()
+        raw_logs = [System.Collections.Generic.List[string]]::new()
+        restore_errors = [System.Collections.Generic.List[string]]::new()
+    }
+    $displaySizeState = $null
+    $originalRotation = ""
+    $originalAutoRotation = ""
+    $processId = ""
+    $status = "failed"
+    try {
+        Invoke-Adb @("shell", "am", "force-stop", $Package) | Out-Null
+        Invoke-Adb @("logcat", "-c") | Out-Null
+        Invoke-Adb @("shell", "am", "start", "-W", "-n", "$Package/com.stasislang.workshop.MainActivity", "--ez", "stasis_presentation_baseline", "true", "--ez", "stasis_presentation_poison", "true") | Out-Null
+
+        $coldPredicate = {
+            param($receipt)
+            $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "present"
+        }
+        $cold = Wait-PresentationBaselineReceipt $Package $coldPredicate 0 $RenderTimeoutSeconds "cold no-CLEAR PRESENT"
+        $processId = $cold.process_id
+        Assert-PresentationPresentReceipt $cold.receipt
+        $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "cold-present" "present" $cold.receipt))
+
+        $coldPair = Wait-PresentationBaselinePresentPair $Package 0 $RenderTimeoutSeconds "cold/repeat PRESENT pair" $processId
+        $matrix.stages.Add([pscustomobject]@{
+            name = "cold-and-repeat-present"
+            process_id = $processId
+            first = $coldPair.first
+            second = $coldPair.second
+            elapsed_seconds = $coldPair.elapsed_seconds
+        })
+        $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "repeat-present" "present" $coldPair.second))
+        $lastPresent = $coldPair.second
+
+        $surfaceXml = Join-Path $artifactRoot "presentation-baseline-current-window.xml"
+        Remove-Item -LiteralPath $surfaceXml -Force -ErrorAction SilentlyContinue
+        $currentSurface = @(Read-SurfaceBounds $SurfaceDescription $surfaceXml $Package)
+        $beforePause = (Read-PresentationBaselineReceipts $Package).receipts.Count
+        Send-PresentationBaselineControl $Package "pause"
+        $pause = Wait-PresentationBaselineControl $Package "pause" $beforePause $processId
+        $pausedPresents = @($pause.receipts | Where-Object {
+            $_.receipt_kind -eq "renderer" -and $_.event -eq "present"
+        })
+        if ($pausedPresents.Count -eq 0) { throw "pause acknowledgement had no accepted PRESENT baseline" }
+        $lastPresent = $pausedPresents[$pausedPresents.Count - 1]
+        Assert-PresentationPresentReceipt $lastPresent
+        $matrix.stages.Add([pscustomobject]@{
+            name = "pause"
+            receipt = $pause.receipt
+            last_accepted_present = $lastPresent
+        })
+
+        foreach ($faultPhase in @("no_present", "reject")) {
+            $beforePoison = (Read-PresentationBaselineReceipts $Package).receipts.Count
+            Send-PresentationBaselineControl $Package "poison"
+            $poisonPredicate = {
+                param($receipt)
+                $receipt.receipt_kind -eq "poison" -and $receipt.event -eq "backbuffer_poison"
+            }
+            $poison = Wait-PresentationBaselineReceipt $Package $poisonPredicate $beforePoison $RenderTimeoutSeconds ($faultPhase + " physical-target poison") $processId
+            Assert-PresentationPoisonReceipt $poison.receipt @($currentSurface[2], $currentSurface[3])
+
+            $beforeFault = $poison.marker_count
+            Send-PresentationBaselineControl $Package $faultPhase
+            $phaseToWait = $faultPhase
+            $faultPredicate = {
+                param($receipt)
+                $receipt.receipt_kind -eq "submission" -and $receipt.phase -eq $phaseToWait
+            }.GetNewClosure()
+            $fault = Wait-PresentationBaselineReceipt $Package $faultPredicate $beforeFault $RenderTimeoutSeconds ($faultPhase + " non-publishing submission") $processId
+            Assert-PresentationFaultReceipt $fault.receipt $faultPhase
+            $beforeRedraw = $fault.marker_count
+            Send-PresentationBaselineControl $Package "redraw"
+            $forcedRedrawPredicate = {
+                param($receipt)
+                $receipt.receipt_kind -eq "control" -and $receipt.phase -eq "forced_redraw"
+            }
+            $forcedRedraw = Wait-PresentationBaselineReceipt $Package $forcedRedrawPredicate $beforeRedraw $RenderTimeoutSeconds ($faultPhase + " forced redraw acknowledgement") $processId
+            Assert-PresentationForcedRedrawControl $forcedRedraw.receipt $fault.receipt $faultPhase
+            $replayPredicate = {
+                param($receipt)
+                $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "accepted_snapshot_replayed"
+            }
+            $replay = Wait-PresentationBaselineReceipt $Package $replayPredicate $forcedRedraw.marker_count $RenderTimeoutSeconds ($faultPhase + " accepted snapshot replay") $processId
+            Assert-PresentationSnapshotReplay $replay.receipt $fault.receipt $lastPresent $faultPhase
+            $unexpectedPresents = @($replay.receipts | Select-Object -Skip $beforeRedraw | Where-Object {
+                $_.receipt_kind -eq "renderer" -and $_.event -eq "present"
+            })
+            if ($unexpectedPresents.Count -gt 0) {
+                throw "forced snapshot replay advanced the accepted PRESENT stream after $faultPhase"
+            }
+            $matrix.stages.Add([pscustomobject]@{
+                name = $faultPhase
+                poison = $poison.receipt
+                submission = $fault.receipt
+                forced_redraw = $forcedRedraw.receipt
+                snapshot_replay = $replay.receipt
+            })
+            $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "retained-after-$faultPhase" "present" $lastPresent))
+            if ($faultPhase -eq "reject") {
+                $beforeAlphaProbe = (Read-PresentationBaselineReceipts $Package).receipts.Count
+                Send-PresentationBaselineControl $Package "alpha_after_replay"
+                $alphaPredicate = {
+                    param($receipt)
+                    $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "alpha_probe_present"
+                }
+                $alphaProbe = Wait-PresentationBaselineReceipt $Package $alphaPredicate $beforeAlphaProbe $RenderTimeoutSeconds "alpha probe after accepted-snapshot replay" $processId
+                Assert-PresentationAlphaProbeReceipt $alphaProbe.receipt $lastPresent
+                $matrix.stages.Add([pscustomobject]@{
+                    name = "alpha-probe-after-replay"
+                    source_present = $lastPresent
+                    receipt = $alphaProbe.receipt
+                    elapsed_seconds = $alphaProbe.elapsed_seconds
+                })
+                $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "alpha-probe-after-replay" "present-alpha-probe" $alphaProbe.receipt))
+            }
+        }
+
+        $displaySizeState = Get-AndroidWindowSizeState
+        if ($displaySizeState.effective[0] -lt 800 -or $displaySizeState.effective[1] -lt 1000) {
+            throw "Stasis_API_35 display is too small for a resized presentation-baseline capture"
+        }
+        $resizedWidth = [int][math]::Floor(($displaySizeState.effective[0] * 0.75) / 2) * 2
+        $resizedHeight = [int][math]::Floor(($displaySizeState.effective[1] * 0.75) / 2) * 2
+        $beforeReset = (Read-PresentationBaselineReceipts $Package).receipts.Count
+        Invoke-Adb @("shell", "wm", "size", "$($resizedWidth)x$($resizedHeight)") | Out-Null
+        $resetPredicate = {
+            param($receipt)
+            $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "surface_reset_placeholder"
+        }
+        $reset = Wait-PresentationBaselineReceipt $Package $resetPredicate $beforeReset $RenderTimeoutSeconds "resized surface reset placeholder" $processId
+        Assert-PresentationResetReceipt $reset.receipt
+        $resetSize = @($reset.receipt.surface_size | ForEach-Object { [int]$_ })
+        if ($resetSize[0] -eq $currentSurface[2] -and $resetSize[1] -eq $currentSurface[3]) {
+            throw "wm size did not change the Workshop rendering surface dimensions"
+        }
+        $matrix.stages.Add([pscustomobject]@{
+            name = "resize-reset-placeholder"
+            requested_size = @($resizedWidth, $resizedHeight)
+            receipt = $reset.receipt
+        })
+        $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "resize-reset-placeholder" "reset-placeholder" $reset.receipt))
+
+        $beforeResume = (Read-PresentationBaselineReceipts $Package).receipts.Count
+        Send-PresentationBaselineControl $Package "resume"
+        $resume = Wait-PresentationBaselineControl $Package "resume" $beforeResume $processId
+        $resizedPair = Wait-PresentationBaselinePresentPair $Package $beforeResume $RenderTimeoutSeconds "post-resize PRESENT pair" $processId
+        $lastPresent = $resizedPair.second
+        $matrix.stages.Add([pscustomobject]@{
+            name = "post-resize-present"
+            first = $resizedPair.first
+            second = $resizedPair.second
+            resume_ack = $resume.receipt
+            elapsed_seconds = $resizedPair.elapsed_seconds
+        })
+        $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "post-resize-present" "present" $lastPresent))
+
+        $beforeHome = (Read-PresentationBaselineReceipts $Package).receipts.Count
+        Invoke-Adb @("shell", "input", "keyevent", "KEYCODE_HOME") | Out-Null
+        Start-Sleep -Milliseconds 900
+        $background = Read-PresentationBaselineReceipts $Package
+        if ($background.process_id -ne $processId) { throw "Workshop process changed while backgrounded" }
+        $backgroundPresents = @($background.receipts | Select-Object -Skip $beforeHome | Where-Object { $_.receipt_kind -eq "renderer" -and $_.event -eq "present" })
+        if ($backgroundPresents.Count -gt 0) { throw "renderer published a test PRESENT while Workshop was backgrounded" }
+        Invoke-Adb @("shell", "am", "start", "-W", "--activity-single-top", "-n", "$Package/com.stasislang.workshop.MainActivity") | Out-Null
+        $homePair = Wait-PresentationBaselinePresentPair $Package $background.receipts.Count $RenderTimeoutSeconds "HOME/background-resume PRESENT pair" $processId
+        $lastPresent = $homePair.second
+        $matrix.stages.Add([pscustomobject]@{
+            name = "home-resume"
+            process_id = $homePair.process_id
+            first = $homePair.first
+            second = $homePair.second
+            elapsed_seconds = $homePair.elapsed_seconds
+        })
+        $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "home-resume-present" "present" $lastPresent))
+
+        $oldProcessId = $processId
+        $oldLogPath = Join-Path $artifactRoot "presentation-baseline-process-$oldProcessId-logcat.txt"
+        @(Invoke-Adb @("logcat", "--pid=$oldProcessId", "-d")) | Set-Content -LiteralPath $oldLogPath -Encoding UTF8
+        $matrix.raw_logs.Add($oldLogPath)
+        Invoke-Adb @("shell", "am", "force-stop", $Package) | Out-Null
+        $stopDeadline = (Get-Date).AddSeconds(10)
+        do {
+            $stoppedProcessId = Find-PackageProcessId $Package
+            if (-not $stoppedProcessId) { break }
+            Start-Sleep -Milliseconds 250
+        } while ((Get-Date) -lt $stopDeadline)
+        if ($stoppedProcessId) { throw "Workshop process did not stop for surface-loss relaunch" }
+        Invoke-Adb @("logcat", "-c") | Out-Null
+        Invoke-Adb @("shell", "am", "start", "-W", "-n", "$Package/com.stasislang.workshop.MainActivity", "--ez", "stasis_presentation_baseline", "true", "--ez", "stasis_presentation_poison", "true") | Out-Null
+        $relaunchPair = Wait-PresentationBaselinePresentPair $Package 0 $RenderTimeoutSeconds "surface-loss relaunch PRESENT pair" $oldProcessId $true
+        if ($relaunchPair.process_id -eq $oldProcessId) { throw "surface-loss relaunch reused the prior Workshop process" }
+        $surfaceCreated = @($relaunchPair.receipts | Where-Object { $_.receipt_kind -eq "renderer" -and $_.event -eq "surface_created_initialized" } | Select-Object -First 1)
+        $surfaceCreatedSize = if ($surfaceCreated.Count -gt 0) {
+            @($surfaceCreated[0].surface_size | ForEach-Object { [int]$_ })
+        } else { @() }
+        if ($surfaceCreated.Count -eq 0 -or $surfaceCreated[0].initialized -ne $true -or
+            $surfaceCreated[0].restore_label_drawn -ne $false -or
+            $surfaceCreatedSize.Count -ne 2 -or $surfaceCreatedSize[0] -le 0 -or $surfaceCreatedSize[1] -le 0 -or
+            $null -eq $surfaceCreated[0].surface_generation -or $null -eq $surfaceCreated[0].renderer_generation) {
+            throw "fresh process did not report initialization of its recreated GL surface"
+        }
+        $processId = $relaunchPair.process_id
+        $lastPresent = $relaunchPair.second
+        $matrix.stages.Add([pscustomobject]@{
+            name = "surface-loss-relaunch"
+            previous_process_id = $oldProcessId
+            process_id = $processId
+            surface_created = $surfaceCreated[0]
+            first = $relaunchPair.first
+            second = $relaunchPair.second
+            elapsed_seconds = $relaunchPair.elapsed_seconds
+        })
+        $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "surface-loss-relaunch-present" "present" $lastPresent))
+
+        $originalAutoRotation = (Invoke-Adb @("shell", "settings", "get", "system", "accelerometer_rotation") | Select-Object -First 1).Trim()
+        $originalRotation = (Invoke-Adb @("shell", "settings", "get", "system", "user_rotation") | Select-Object -First 1).Trim()
+        if ($originalAutoRotation -notmatch '^\d+$' -or $originalRotation -notmatch '^\d+$') {
+            throw "emulator rotation settings could not be read for safe restoration"
+        }
+        Invoke-Adb @("shell", "settings", "put", "system", "accelerometer_rotation", "0") | Out-Null
+        foreach ($rotation in @(1, 3)) {
+            $beforeRotation = (Read-PresentationBaselineReceipts $Package).receipts.Count
+            Invoke-Adb @("shell", "settings", "put", "system", "user_rotation", "$rotation") | Out-Null
+            $actualRotation = (Invoke-Adb @("shell", "settings", "get", "system", "user_rotation") | Select-Object -First 1).Trim()
+            if ($actualRotation -ne "$rotation") { throw "emulator did not apply requested rotation $rotation" }
+            $rotationPair = Wait-PresentationBaselinePresentPair $Package $beforeRotation $RenderTimeoutSeconds ("rotation-" + $rotation + " PRESENT pair") $processId $true
+            if ([int]$rotationPair.first.surface_size[0] -le [int]$rotationPair.first.surface_size[1]) {
+                throw ("rotation " + $rotation + " did not produce a landscape renderer surface")
+            }
+            $processId = $rotationPair.process_id
+            $lastPresent = $rotationPair.second
+            $matrix.stages.Add([pscustomobject]@{
+                name = "landscape-rotation-$rotation"
+                requested_user_rotation = $rotation
+                applied_user_rotation = [int]$actualRotation
+                first = $rotationPair.first
+                second = $rotationPair.second
+                elapsed_seconds = $rotationPair.elapsed_seconds
+            })
+            $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "landscape-rotation-$rotation" "present" $lastPresent))
+        }
+        $status = "passed"
+    } finally {
+        if ($processId) {
+            $finalLogPath = Join-Path $artifactRoot "presentation-baseline-process-$processId-logcat.txt"
+            $finalLog = @(& $adb -s $serial logcat "--pid=$processId" -d 2>$null)
+            if ($LASTEXITCODE -eq 0) {
+                $finalLog | Set-Content -LiteralPath $finalLogPath -Encoding UTF8
+                if (-not $matrix.raw_logs.Contains($finalLogPath)) { $matrix.raw_logs.Add($finalLogPath) }
+            }
+        }
+        if ($originalRotation -match '^\d+$') {
+            try {
+                Invoke-AdbQuiet @("shell", "settings", "put", "system", "user_rotation", $originalRotation)
+                $restoredRotation = (Invoke-Adb @("shell", "settings", "get", "system", "user_rotation") | Select-Object -First 1).Trim()
+                if ($restoredRotation -ne $originalRotation) { throw "user rotation restored as $restoredRotation" }
+            } catch {
+                $matrix.restore_errors.Add("user rotation: $($_.Exception.Message)")
+            }
+        }
+        if ($originalAutoRotation -match '^\d+$') {
+            try {
+                Invoke-AdbQuiet @("shell", "settings", "put", "system", "accelerometer_rotation", $originalAutoRotation)
+                $restoredAutoRotation = (Invoke-Adb @("shell", "settings", "get", "system", "accelerometer_rotation") | Select-Object -First 1).Trim()
+                if ($restoredAutoRotation -ne $originalAutoRotation) { throw "accelerometer rotation restored as $restoredAutoRotation" }
+            } catch {
+                $matrix.restore_errors.Add("accelerometer rotation: $($_.Exception.Message)")
+            }
+        }
+        if ($displaySizeState) {
+            try {
+                Restore-AndroidWindowSize $displaySizeState
+                $restoredDisplaySize = Get-AndroidWindowSizeState
+                $sizeRestored = ($restoredDisplaySize.physical -join "x") -eq ($displaySizeState.physical -join "x") -and
+                    ($restoredDisplaySize.override -join "x") -eq ($displaySizeState.override -join "x")
+                if (-not $sizeRestored) { throw "emulator wm size did not return to its original physical/override state" }
+                $matrix.restored_display_size = $restoredDisplaySize
+            } catch {
+                $matrix.restore_errors.Add("display size: $($_.Exception.Message)")
+            }
+        }
+        if ($matrix.restore_errors.Count -gt 0) { $status = "failed" }
+        $matrix.status = $status
+        $matrix.elapsed_seconds = [math]::Round($startedAt.Elapsed.TotalSeconds, 3)
+        $matrix | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $matrixPath -Encoding UTF8
+    }
+    if ($status -ne "passed") {
+        $restoreDetails = if ($matrix.restore_errors.Count -gt 0) { ": " + ($matrix.restore_errors -join "; ") } else { "" }
+        throw "Android presentation-baseline matrix did not complete$restoreDetails"
+    }
+    Write-Output "Android presentation-baseline matrix passed: $matrixPath"
 }
 
 function Assert-RenderedVariant(
@@ -755,6 +1476,8 @@ try {
             $workshopApk `
             "Interactive Stasis game preview. Touch the game to control it." $true
         Assert-In-Time "render acceptance"
+        Assert-PresentationBaselineMatrix "com.stasislang.workshop" "Interactive Stasis game preview. Touch the game to control it." $workshopApk
+        Assert-In-Time "presentation-baseline matrix"
         $renderAcceptanceSucceeded = $true
     } finally {
         $renderAcceptanceTimer.Stop()

@@ -8,11 +8,11 @@ use lifecycle 0/absent direct or manual construction. Packaged render entries
 used by `stasis_runner` must publish lifecycle 1; lifecycle 1 must not attach to
 `main` or `tick` as a substitute for a render entry.
 
-1. Enter `render()`; a lifecycle-v1 host resets the command builder exactly once before calling guest code. Call optional `clear(...)` when the frame requests background replacement.
+1. Enter `render()`; a lifecycle-v1 host resets the command builder exactly once before calling guest code. Call optional `clear(...)` when the frame requests a non-black logical background.
 2. Immediate `draw_line`, `fill_rect`, typed `draw_sprite(SpriteRef, ...)`, `draw_text`, drawable methods, or caller-owned `PresentationList`, `SpriteRunWriter`, and `LineBatch` values.
 3. Return from `render()`; the host calls `gfx_cmd_construction_finish(result)` to validate and publish the construction.
 
-An unsuccessful render result, malformed frame, or unfinished `SpriteRunWriter` aborts the construction, leaving the last accepted frame independently owned by the consumer. A no-clear construction requests no background replacement and does not promise retained framebuffer pixels. Authored source must not call the removed public `begin_frame` or `end_frame` wrappers; the frontend rejects those calls. Native `stasis_begin_frame` and `stasis_end_frame` remain host-private device and submission operations.
+An unsuccessful render result, malformed frame, or unfinished `SpriteRunWriter` aborts the construction. A valid construction is presented only when it carries `PRESENT`. Before drawing each valid presented frame, the host establishes an opaque-black baseline across the physical target, including fitted-content margins. Optional `clear(r, g, b, a)` then replaces the logical canvas background with the supplied RGBA color before authored geometry; it does not change the margins. Without `clear`, the logical canvas also starts black. A construction without `PRESENT` or a rejected construction does not publish a replacement guest image, so the last accepted image stays visible on the same live surface. Backends may perform host maintenance or draw into an unpublished target while withholding presentation. On surface recreation or context loss, the host may publish an initialized loading frame while resources recover; that lifecycle frame is separate from guest no-present behavior. Authored source must not call the removed public `begin_frame` or `end_frame` wrappers; the frontend rejects those calls. Native `stasis_begin_frame` and `stasis_end_frame` remain host-private device and submission operations.
 
 ## Render-entry ownership and migration
 

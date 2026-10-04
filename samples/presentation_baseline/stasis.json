@@ -1,0 +1,8 @@
+{
+  "manifest_version": 1,
+  "name": "presentation_baseline",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "stdlib": "toolchain"
+}

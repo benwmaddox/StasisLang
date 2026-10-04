@@ -386,6 +386,7 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     private final TextureProvider textures;
     private final TimingListener timing;
+    private final boolean presentationBaselinePoisonAcceptance;
     private final RendererResourceLifecycle resourceLifecycle = new RendererResourceLifecycle();
     static final int MAX_PENDING_SPRITE_RELEASES = 256;
     private final ArrayDeque<Integer> pendingSpriteReleases = new ArrayDeque<>();
@@ -399,6 +400,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             LINE_CHUNK_SIZE * 2 * COLOR_VERTEX_FLOATS * 4).asFloatBuffer();
     private final FloatBuffer spriteVertices = directBytes(
             SPRITE_CHUNK_SIZE * VERTICES_PER_QUAD * TEXTURE_VERTEX_FLOATS * 4).asFloatBuffer();
+    private final FloatBuffer acceptedSnapshotVertices = directBytes(
+            VERTICES_PER_QUAD * TEXTURE_VERTEX_FLOATS * 4).asFloatBuffer();
     private final int[] frameSpriteTextures = new int[MAX_SPRITES];
     private final int[] frameSpriteFilters = new int[MAX_SPRITES];
     private final int[] frameSpriteWidths = new int[MAX_SPRITES];
@@ -418,10 +421,19 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private int textureColor;
     private int textureResolution;
     private int textureSampler;
+    private int acceptedSnapshotTexture;
+    private int acceptedSnapshotWidth;
+    private int acceptedSnapshotHeight;
+    private int acceptedSnapshotSurfaceGeneration = -1;
+    private int acceptedSnapshotRendererGeneration = -1;
+    private int acceptedSnapshotFrameToken = -1;
+    private long acceptedSnapshotPresentationSerial = -1L;
+    private boolean acceptedSnapshotAvailable;
     private int surfaceWidth = 1;
     private int surfaceHeight = 1;
     private int logicalWidth = 1;
     private int logicalHeight = 1;
+    private boolean presentationTargetReady;
     private DisplayViewport displayViewport = new DisplayViewport(
             0, 0, 1, 1, 1.0f, 1.0f, 1.0f);
     private int displayGeneration = -1;
@@ -433,6 +445,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private final PresentationState presentation = new PresentationState();
     private int lastAcceptanceGlesEvidenceToken = -1;
     private int lastHotEditGlesEvidenceToken = -1;
+    private int presentationBaselineEvidenceCount;
+    private String presentationBaselineReplayPhase;
+    private boolean presentationBaselineAlphaProbePending;
     private int acceptanceTrace = -1;
     private int acceptanceTraceToken = -1;
     private boolean workshopSoakAcceptanceActive;
@@ -447,8 +462,15 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
     private int clipDepth;
 
     StasisPreviewRenderer(TextureProvider textures, TimingListener timing) {
+        this(textures, timing, false);
+    }
+
+    StasisPreviewRenderer(TextureProvider textures, TimingListener timing,
+            boolean presentationBaselinePoisonAcceptance) {
         this.textures = textures;
         this.timing = timing;
+        this.presentationBaselinePoisonAcceptance = BuildConfig.STASIS_RENDER_ACCEPTANCE
+                && presentationBaselinePoisonAcceptance;
     }
 
     synchronized boolean enqueuePendingSpriteReleases(String message) {
@@ -546,6 +568,14 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return frameI32.get(I_FRAME_TOKEN);
     }
 
+    synchronized int frameMagic() {
+        return frameI32.get(I_MAGIC);
+    }
+
+    synchronized int frameFlags() {
+        return frameI32.get(I_FLAGS);
+    }
+
     synchronized int rectCount() {
         return frameI32.get(I_RECT_COUNT);
     }
@@ -602,18 +632,23 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
 
     synchronized void onHostPaused() {
         resourceLifecycle.onPause();
+        presentationBaselineEvidenceCount = 0;
     }
 
     synchronized void onHostResumed() {
         resourceLifecycle.onResume();
+        presentationBaselineEvidenceCount = 0;
     }
 
     @Override
     public synchronized void onSurfaceCreated(javax.microedition.khronos.opengles.GL10 gl,
             javax.microedition.khronos.egl.EGLConfig config) {
         resourceLifecycle.onRendererCreated();
+        presentationTargetReady = true;
+        invalidateAcceptedSnapshot();
         restorePlaceholderPending = true;
         restorePlaceholderUntilNanos = System.nanoTime() + MIN_RESTORE_LABEL_NANOS;
+        presentationBaselineEvidenceCount = 0;
         drawRestorePlaceholder();
         colorProgram = createProgram(VERTEX_SHADER, FRAGMENT_SHADER);
         colorPosition = GLES20.glGetAttribLocation(colorProgram, "aPosition");
@@ -625,6 +660,21 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         textureColor = GLES20.glGetAttribLocation(textureProgram, "aColor");
         textureResolution = GLES20.glGetUniformLocation(textureProgram, "uResolution");
         textureSampler = GLES20.glGetUniformLocation(textureProgram, "uTexture");
+        int[] snapshotTexture = new int[1];
+        GLES20.glGenTextures(1, snapshotTexture, 0);
+        acceptedSnapshotTexture = snapshotTexture[0];
+        if (acceptedSnapshotTexture != 0) {
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, acceptedSnapshotTexture);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER,
+                    GLES20.GL_NEAREST);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER,
+                    GLES20.GL_NEAREST);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S,
+                    GLES20.GL_CLAMP_TO_EDGE);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T,
+                    GLES20.GL_CLAMP_TO_EDGE);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        }
         textures.onResourceGenerationChanged(
                 resourceLifecycle.surfaceGeneration(),
                 resourceLifecycle.rendererGeneration(), true, resourceLifecycle.reason());
@@ -632,16 +682,23 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
         GLES20.glClearColor(15.0f / 255.0f, 20.0f / 255.0f, 28.0f / 255.0f, 1.0f);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        logPresentationBaselineSurfaceInitialization("surface_created_initialized", false);
     }
 
     @Override
     public synchronized void onSurfaceChanged(javax.microedition.khronos.opengles.GL10 gl,
             int width, int height) {
         resourceLifecycle.onSurfaceChanged();
+        presentationTargetReady = true;
         surfaceWidth = Math.max(1, width);
         surfaceHeight = Math.max(1, height);
+        invalidateAcceptedSnapshot();
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
-        if (restorePlaceholderPending) drawRestorePlaceholder();
+        restorePlaceholderPending = true;
+        restorePlaceholderUntilNanos = System.nanoTime() + MIN_RESTORE_LABEL_NANOS;
+        presentationBaselineEvidenceCount = 0;
+        drawRestorePlaceholder();
+        logPresentationBaselineSurfaceInitialization("surface_reset_placeholder", true);
         displayGeneration = -1;
         Log.i(LOG_TAG, "drawable=" + surfaceWidth + "x" + surfaceHeight);
     }
@@ -671,14 +728,34 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             frameSamples = performanceSamples;
             long lockAcquiredAt = frameSamples == null ? 0L : System.nanoTime();
             if (frameSamples != null) monitorWaitNanos = lockAcquiredAt - started;
-            // Rejection must not clear the prior frame, prepare resources, or consume
-            // its presentation token/capture. The next valid frame can recover normally.
-            if (!isValidFrame(frameI32, frameF32)) {
+            // GLSurfaceView can invoke the renderer in host-side tests before EGL
+            // supplies a target. There is nothing to publish or initialize yet.
+            if (!presentationTargetReady) {
                 timing.onRendered(System.nanoTime() - started);
                 return;
             }
-            if (restorePlaceholderPending
-                    && System.nanoTime() < restorePlaceholderUntilNanos) {
+            // Rejection must not clear the prior frame, prepare resources, or consume
+            // its presentation token/capture. The next valid frame can recover normally.
+            if (!isValidFrame(frameI32, frameF32)) {
+                if (!restorePlaceholderPending && !drawAcceptedSnapshot()) {
+                    drawRestorePlaceholder();
+                } else if (restorePlaceholderPending) {
+                    drawRestorePlaceholder();
+                }
+                // Snapshot replay or the reset placeholder no longer uses guest sprite textures.
+                finishPendingSpriteReleases(false, false);
+                timing.onRendered(System.nanoTime() - started);
+                return;
+            }
+            boolean hasFrame = (frameI32.get(I_FLAGS) & FLAG_PRESENT) != 0;
+            if (!hasFrame && !restorePlaceholderPending) {
+                if (!drawAcceptedSnapshot()) drawRestorePlaceholder();
+                finishPendingSpriteReleases(false, false);
+                timing.onRendered(System.nanoTime() - started);
+                return;
+            }
+            if (restorePlaceholderPending && (!hasFrame
+                    || System.nanoTime() < restorePlaceholderUntilNanos)) {
                 drawRestorePlaceholder();
                 timing.onRendered(System.nanoTime() - started);
                 return;
@@ -691,7 +768,6 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             if (restoring) {
                 while (GLES20.glGetError() != GLES20.GL_NO_ERROR) {}
             }
-            boolean hasFrame = (frameI32.get(I_FLAGS) & FLAG_PRESENT) != 0;
             if (hasFrame) prepareFrameResources();
             String resourceFailure = textures.consumeFailure();
             int glError = restoring ? GLES20.glGetError() : GLES20.GL_NO_ERROR;
@@ -724,8 +800,8 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                             + (resourceFailure == null ? "gl_error_" + glError : resourceFailure));
                 }
             }
-            if (!restoreComplete && resourceFailure == null
-                    && glError == GLES20.GL_NO_ERROR) drawRestorePlaceholder();
+            if (shouldDrawRestorePlaceholder(hasFrame, restoreComplete,
+                    resourceFailure != null, glError)) drawRestorePlaceholder();
             if (hasFrame && restored && resourceLifecycle.canPresent()) {
                 lineCount = clampCount(frameI32.get(I_LINE_COUNT), MAX_LINES);
                 rectCount = clampedRectCount(lineCount, frameI32.get(I_RECT_COUNT));
@@ -744,16 +820,18 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 frameMixedRuns = 0;
                 frameSubmittedQuads = 0;
                 drawFrame();
-                drawFinishedAt = frameSamples == null ? 0L : System.nanoTime();
-                drawNanos = frameSamples == null
-                        ? 0L : drawFinishedAt - drawStarted;
-                drawCalls = frameDrawCalls;
                 presented = true;
                 int frameToken = frameI32.get(I_FRAME_TOKEN);
                 int presentedTrace = acceptanceTraceToken == frameToken
                         ? acceptanceTrace : -1;
                 presentation.observe(frameToken, presentedTrace);
+                logPresentOnlyBaselineEvidence(frameToken);
                 if (workshopSoakAcceptanceActive) workshopSoakPresentations.observe(frameToken);
+                captureAcceptedSnapshot(frameToken, presentation.serial());
+                drawFinishedAt = frameSamples == null ? 0L : System.nanoTime();
+                drawNanos = frameSamples == null
+                        ? 0L : drawFinishedAt - drawStarted;
+                drawCalls = frameDrawCalls;
                 notifyAll();
                 if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
                     int markerBase = F_RECT_REVERSE_BASE - GEOMETRY_F32_STRIDE;
@@ -892,6 +970,86 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         return presentation.serial();
     }
 
+    synchronized boolean frameRequestsPresentation() {
+        return shouldPresent(frameI32, frameF32);
+    }
+
+    synchronized boolean frameIsValid() {
+        return isValidFrame(frameI32, frameF32);
+    }
+
+    static boolean shouldSchedulePresentationDraw(int nativeStatus, boolean validPresentFrame) {
+        return nativeStatus == 0 && validPresentFrame;
+    }
+
+    synchronized boolean applyPresentationBaselineTestFault(String phase) {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || phase == null) return false;
+        if ("no_present".equals(phase)) {
+            presentationBaselineReplayPhase = phase;
+            frameI32.put(I_FLAGS, frameI32.get(I_FLAGS) & ~FLAG_PRESENT);
+            return true;
+        }
+        if ("reject".equals(phase)) {
+            presentationBaselineReplayPhase = phase;
+            frameI32.put(I_MAGIC, 0);
+            return true;
+        }
+        if ("alpha_after_replay".equals(phase)) {
+            int rectCount = frameI32.get(I_RECT_COUNT);
+            int orderCount = frameI32.get(I_ORDER_COUNT);
+            if (!isValidFrame(frameI32, frameF32)
+                    || !shouldPresent(frameI32, frameF32)
+                    || rectCount != 1 || orderCount != 1
+                    || orderCount >= MAX_ORDER) {
+                return false;
+            }
+            int rectBase = F_RECT_REVERSE_BASE - GEOMETRY_F32_STRIDE;
+            frameF32.put(rectBase, 90.0f);
+            frameF32.put(rectBase + 1, 55.0f);
+            frameF32.put(rectBase + 2, 20.0f);
+            frameF32.put(rectBase + 3, 20.0f);
+            frameF32.put(rectBase + 4, 0.0f);
+            frameF32.put(rectBase + 5, 1.0f);
+            frameF32.put(rectBase + 6, 0.0f);
+            frameF32.put(rectBase + 7, 0.5f);
+            frameI32.put(I_ORDER_BASE + orderCount,
+                    ORDER_RECT * ORDER_KIND_SCALE + rectCount);
+            frameI32.put(I_RECT_COUNT, rectCount + 1);
+            frameI32.put(I_ORDER_COUNT, orderCount + 1);
+            presentationBaselineAlphaProbePending = true;
+            return true;
+        }
+        return false;
+    }
+
+    synchronized void poisonPhysicalBackbufferForAcceptance() {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE || !presentationBaselinePoisonAcceptance) {
+            return;
+        }
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
+        GLES20.glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        Log.i(LOG_TAG, "Stasis Workshop presentation-baseline: {\"schema\":"
+                + "\"stasis.workshop_present_only.v1\",\"event\":\"backbuffer_poison\","
+                + "\"physical_target_poisoned\":true,\"surface_size\":["
+                + surfaceWidth + "," + surfaceHeight + "]}");
+    }
+
+    private void logPresentationBaselineSurfaceInitialization(String event,
+            boolean restoreLabelDrawn) {
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE
+                || !presentationBaselinePoisonAcceptance) return;
+        Log.i(LOG_TAG, "Stasis Workshop present-only baseline: {\"schema\":"
+                + "\"stasis.workshop_present_only.v1\",\"event\":"
+                + JSONObject.quote(event) + ",\"initialized\":true,\"surface_size\":["
+                + surfaceWidth + "," + surfaceHeight + "],\"background_rgba8\":[15,20,28,255],"
+                + "\"restore_label_drawn\":" + restoreLabelDrawn
+                + ",\"restore_label_rgba8\":[66,153,225,255],\"surface_generation\":"
+                + resourceLifecycle.surfaceGeneration() + ",\"renderer_generation\":"
+                + resourceLifecycle.rendererGeneration() + "}");
+    }
+
     synchronized void setAcceptanceTrace(int token, int trace) {
         acceptanceTraceToken = token;
         acceptanceTrace = trace;
@@ -969,6 +1127,62 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
                 && Math.abs(frameF32.get(markerBase + 6) - 0.95f) < 0.001f;
     }
 
+    private void logPresentOnlyBaselineEvidence(int frameToken) {
+        int lines = clampCount(frameI32.get(I_LINE_COUNT), MAX_LINES);
+        int rectCount = clampedRectCount(lines, frameI32.get(I_RECT_COUNT));
+        if (!BuildConfig.STASIS_RENDER_ACCEPTANCE
+                || frameI32.get(I_FLAGS) != FLAG_PRESENT
+                || frameI32.get(I_LOGICAL_W) != 640 || frameI32.get(I_LOGICAL_H) != 360) {
+            return;
+        }
+        if (presentationBaselineAlphaProbePending && rectCount == 2) {
+            int redBase = F_RECT_REVERSE_BASE;
+            int alphaBase = F_RECT_REVERSE_BASE - GEOMETRY_F32_STRIDE;
+            float[] red = {80.0f, 45.0f, 160.0f, 90.0f, 0.9f, 0.15f, 0.08f, 1.0f};
+            float[] alpha = {90.0f, 55.0f, 20.0f, 20.0f, 0.0f, 1.0f, 0.0f, 0.5f};
+            for (int index = 0; index < red.length; index += 1) {
+                if (Math.abs(frameF32.get(redBase + index) - red[index]) > 0.001f
+                        || Math.abs(frameF32.get(alphaBase + index) - alpha[index]) > 0.001f) {
+                    return;
+                }
+            }
+            presentationBaselineAlphaProbePending = false;
+            Log.i(LOG_TAG, "Stasis Workshop present-only baseline: {\"schema\":"
+                    + "\"stasis.workshop_present_only.v1\",\"test_id\":"
+                    + "\"PRESENTATION-BASELINE\",\"event\":\"alpha_probe_present\","
+                    + "\"frame_token\":" + frameToken + ",\"flags\":" + FLAG_PRESENT
+                    + ",\"presentation_serial\":" + presentation.serial()
+                    + ",\"physical_target_poisoned\":" + presentationBaselinePoisonAcceptance
+                    + ",\"logical_size\":[640,360],\"rects\":["
+                    + "[80,45,160,90,0.9,0.15,0.08,1.0],"
+                    + "[90,55,20,20,0.0,1.0,0.0,0.5]],"
+                    + "\"probe\":{\"logical\":[100,65],\"expected_rgba8\":[115,147,10,255]},"
+                    + "\"surface_size\":[" + surfaceWidth + "," + surfaceHeight + "],"
+                    + "\"surface_generation\":" + resourceLifecycle.surfaceGeneration()
+                    + ",\"renderer_generation\":" + resourceLifecycle.rendererGeneration() + "}");
+            return;
+        }
+        if (presentationBaselineEvidenceCount >= 2 || rectCount != 1) return;
+        int base = F_RECT_REVERSE_BASE;
+        float[] expected = {80.0f, 45.0f, 160.0f, 90.0f, 0.9f, 0.15f, 0.08f, 1.0f};
+        for (int index = 0; index < expected.length; index += 1) {
+            if (Math.abs(frameF32.get(base + index) - expected[index]) > 0.001f) return;
+        }
+        presentationBaselineEvidenceCount += 1;
+        Log.i(LOG_TAG, "Stasis Workshop present-only baseline: {\"schema\":\"stasis.workshop_present_only.v1\","
+                + "\"test_id\":\"PRESENTATION-BASELINE\",\"event\":\"present\","
+                + "\"sequence\":" + presentationBaselineEvidenceCount
+                + ",\"frame_token\":" + frameToken + ",\"flags\":" + FLAG_PRESENT
+                + ",\"presentation_serial\":" + presentation.serial()
+                + ",\"logical_size\":[640,360],\"rect\":[80,45,160,90],"
+                + "\"rgba\":[0.9,0.15,0.08,1.0],\"physical_target_poisoned\":"
+                + presentationBaselinePoisonAcceptance + ",\"surface_size\":["
+                + surfaceWidth + "," + surfaceHeight + "],\"surface_generation\":"
+                + resourceLifecycle.surfaceGeneration() + ",\"renderer_generation\":"
+                + resourceLifecycle.rendererGeneration() + ",\"display_generation\":"
+                + displayGeneration + "}");
+    }
+
     // Releases must wait until the command buffer has consumed its sprite textures. A
     // frame blocked by restore/resource failure is retried later, so retain its queue.
     synchronized void finishPendingSpriteReleases(boolean hasFrame, boolean presented) {
@@ -998,6 +1212,145 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
             }
         }
         GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+    }
+
+    private void invalidateAcceptedSnapshot() {
+        acceptedSnapshotAvailable = false;
+        acceptedSnapshotWidth = 0;
+        acceptedSnapshotHeight = 0;
+        acceptedSnapshotSurfaceGeneration = -1;
+        acceptedSnapshotRendererGeneration = -1;
+        acceptedSnapshotFrameToken = -1;
+        acceptedSnapshotPresentationSerial = -1L;
+    }
+
+    private void captureAcceptedSnapshot(int frameToken, long presentationSerial) {
+        acceptedSnapshotAvailable = false;
+        if (acceptedSnapshotTexture == 0 || surfaceWidth <= 0 || surfaceHeight <= 0) {
+            Log.w(LOG_TAG, "accepted frame snapshot unavailable: texture or surface is missing");
+            return;
+        }
+        int errorBeforeCopy = GLES20.glGetError();
+        if (errorBeforeCopy != GLES20.GL_NO_ERROR) {
+            Log.w(LOG_TAG, "accepted frame snapshot skipped: prior GLES error=" + errorBeforeCopy);
+            return;
+        }
+        int[] previousActiveTexture = new int[1];
+        int[] previousTextureBinding = new int[1];
+        GLES20.glGetIntegerv(GLES20.GL_ACTIVE_TEXTURE, previousActiveTexture, 0);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glGetIntegerv(GLES20.GL_TEXTURE_BINDING_2D, previousTextureBinding, 0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, acceptedSnapshotTexture);
+        if (acceptedSnapshotWidth == surfaceWidth && acceptedSnapshotHeight == surfaceHeight) {
+            GLES20.glCopyTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0,
+                    0, 0, surfaceWidth, surfaceHeight);
+        } else {
+            GLES20.glCopyTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                    0, 0, surfaceWidth, surfaceHeight, 0);
+        }
+        int copyError = GLES20.glGetError();
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, previousTextureBinding[0]);
+        GLES20.glActiveTexture(previousActiveTexture[0]);
+        if (copyError != GLES20.GL_NO_ERROR) {
+            Log.w(LOG_TAG, "accepted frame snapshot failed: GLES error=" + copyError);
+            return;
+        }
+        acceptedSnapshotWidth = surfaceWidth;
+        acceptedSnapshotHeight = surfaceHeight;
+        acceptedSnapshotSurfaceGeneration = resourceLifecycle.surfaceGeneration();
+        acceptedSnapshotRendererGeneration = resourceLifecycle.rendererGeneration();
+        acceptedSnapshotFrameToken = frameToken;
+        acceptedSnapshotPresentationSerial = presentationSerial;
+        acceptedSnapshotAvailable = true;
+        if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
+            Log.i(LOG_TAG, "Stasis Workshop presentation-baseline: {\"schema\":"
+                    + "\"stasis.workshop_present_only.v1\",\"event\":"
+                    + "\"accepted_snapshot_captured\",\"surface_size\":["
+                    + acceptedSnapshotWidth + "," + acceptedSnapshotHeight
+                    + "],\"surface_generation\":" + acceptedSnapshotSurfaceGeneration
+                    + ",\"renderer_generation\":" + acceptedSnapshotRendererGeneration
+                    + ",\"snapshot_frame_token\":" + acceptedSnapshotFrameToken
+                    + ",\"snapshot_presentation_serial\":"
+                    + acceptedSnapshotPresentationSerial + "}");
+        }
+    }
+
+    private boolean drawAcceptedSnapshot() {
+        if (!acceptedSnapshotAvailable || acceptedSnapshotTexture == 0
+                || acceptedSnapshotWidth != surfaceWidth || acceptedSnapshotHeight != surfaceHeight
+                || acceptedSnapshotSurfaceGeneration != resourceLifecycle.surfaceGeneration()
+                || acceptedSnapshotRendererGeneration != resourceLifecycle.rendererGeneration()) {
+            return false;
+        }
+        finishPipeline();
+        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
+        GLES20.glDisable(GLES20.GL_BLEND);
+        GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
+        GLES20.glUseProgram(textureProgram);
+        GLES20.glUniform2f(textureResolution, surfaceWidth, surfaceHeight);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, acceptedSnapshotTexture);
+        GLES20.glUniform1i(textureSampler, 0);
+        GLES20.glEnableVertexAttribArray(texturePosition);
+        GLES20.glEnableVertexAttribArray(textureCoordinate);
+        GLES20.glEnableVertexAttribArray(textureColor);
+        acceptedSnapshotVertices.clear();
+        putAcceptedSnapshotVertex(0.0f, 0.0f, 0.0f, 1.0f);
+        putAcceptedSnapshotVertex(0.0f, surfaceHeight, 0.0f, 0.0f);
+        putAcceptedSnapshotVertex(surfaceWidth, 0.0f, 1.0f, 1.0f);
+        putAcceptedSnapshotVertex(surfaceWidth, 0.0f, 1.0f, 1.0f);
+        putAcceptedSnapshotVertex(0.0f, surfaceHeight, 0.0f, 0.0f);
+        putAcceptedSnapshotVertex(surfaceWidth, surfaceHeight, 1.0f, 0.0f);
+        acceptedSnapshotVertices.position(0);
+        GLES20.glVertexAttribPointer(texturePosition, 2, GLES20.GL_FLOAT, false,
+                TEXTURE_VERTEX_BYTES, acceptedSnapshotVertices);
+        acceptedSnapshotVertices.position(2);
+        GLES20.glVertexAttribPointer(textureCoordinate, 2, GLES20.GL_FLOAT, false,
+                TEXTURE_VERTEX_BYTES, acceptedSnapshotVertices);
+        acceptedSnapshotVertices.position(4);
+        GLES20.glVertexAttribPointer(textureColor, 4, GLES20.GL_FLOAT, false,
+                TEXTURE_VERTEX_BYTES, acceptedSnapshotVertices);
+        acceptedSnapshotVertices.position(0);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, VERTICES_PER_QUAD);
+        int replayError = GLES20.glGetError();
+        GLES20.glDisableVertexAttribArray(textureColor);
+        GLES20.glDisableVertexAttribArray(textureCoordinate);
+        GLES20.glDisableVertexAttribArray(texturePosition);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, 0);
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        if (replayError != GLES20.GL_NO_ERROR) {
+            acceptedSnapshotAvailable = false;
+            Log.e(LOG_TAG, "accepted frame snapshot replay failed: GLES error=" + replayError);
+            return false;
+        }
+        if (BuildConfig.STASIS_RENDER_ACCEPTANCE) {
+            Log.i(LOG_TAG, "Stasis Workshop presentation-baseline: {\"schema\":"
+                    + "\"stasis.workshop_present_only.v1\",\"event\":"
+                    + "\"accepted_snapshot_replayed\",\"surface_size\":["
+                    + acceptedSnapshotWidth + "," + acceptedSnapshotHeight
+                    + "],\"surface_generation\":" + acceptedSnapshotSurfaceGeneration
+                    + ",\"renderer_generation\":" + acceptedSnapshotRendererGeneration
+                    + ",\"phase\":" + JSONObject.quote(
+                            presentationBaselineReplayPhase == null
+                                    ? "unspecified" : presentationBaselineReplayPhase)
+                    + ",\"frame_valid\":" + isValidFrame(frameI32, frameF32)
+                    + ",\"requests_present\":" + shouldPresent(frameI32, frameF32)
+                    + ",\"frame_token\":" + frameI32.get(I_FRAME_TOKEN)
+                    + ",\"magic\":" + frameI32.get(I_MAGIC)
+                    + ",\"flags\":" + frameI32.get(I_FLAGS)
+                    + ",\"snapshot_frame_token\":" + acceptedSnapshotFrameToken
+                    + ",\"snapshot_presentation_serial\":"
+                    + acceptedSnapshotPresentationSerial + ",\"presentation_serial\":"
+                    + presentation.serial() + "}");
+        }
+        presentationBaselineReplayPhase = null;
+        return true;
+    }
+
+    private void putAcceptedSnapshotVertex(float x, float y, float u, float v) {
+        acceptedSnapshotVertices.put(x).put(y).put(u).put(v)
+                .put(1.0f).put(1.0f).put(1.0f).put(1.0f);
     }
 
     static boolean isValidRestoreLabel() {
@@ -1084,7 +1437,12 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         activePipeline = PIPELINE_NONE;
         resetClipState();
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight);
-        clearLetterboxBars();
+        if (presentationBaselinePoisonAcceptance) {
+            GLES20.glClearColor(1.0f, 0.0f, 1.0f, 1.0f);
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+        }
+        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
         GLES20.glViewport(displayViewport.x,
                 surfaceHeight - displayViewport.y - displayViewport.height,
                 displayViewport.width, displayViewport.height);
@@ -1240,23 +1598,9 @@ final class StasisPreviewRenderer implements GLSurfaceView.Renderer {
         }
     }
 
-    private void clearLetterboxBars() {
-        int right = displayViewport.x + displayViewport.width;
-        int bottom = displayViewport.y + displayViewport.height;
-        GLES20.glEnable(GLES20.GL_SCISSOR_TEST);
-        GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        clearScissorRect(0, 0, displayViewport.x, surfaceHeight);
-        clearScissorRect(right, 0, surfaceWidth - right, surfaceHeight);
-        clearScissorRect(0, 0, surfaceWidth, surfaceHeight - bottom);
-        clearScissorRect(0, surfaceHeight - displayViewport.y,
-                surfaceWidth, displayViewport.y);
-        GLES20.glDisable(GLES20.GL_SCISSOR_TEST);
-    }
-
-    private static void clearScissorRect(int x, int y, int width, int height) {
-        if (width <= 0 || height <= 0) return;
-        GLES20.glScissor(x, y, width, height);
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+    static boolean shouldDrawRestorePlaceholder(boolean hasFrame, boolean restoreComplete,
+            boolean resourceFailure, int glError) {
+        return hasFrame && !restoreComplete && !resourceFailure && glError == GLES20.GL_NO_ERROR;
     }
 
     private void updateDisplayMetrics() {

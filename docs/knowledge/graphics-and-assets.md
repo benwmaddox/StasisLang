@@ -11,8 +11,15 @@ Import `/vendor/stasis/stdlib/graphics.stasis` for drawing and
 
 The host resets, validates, and publishes each `render()` construction. Draw
 in painter order; authored code must not call `begin_frame` or `end_frame`.
-Use `clear` when replacing the background. Coordinates and hit tests use the
-same logical units; see [display spaces](display-and-coordinate-spaces.md).
+Every valid presented frame starts with opaque black across the physical target,
+including letterbox margins. Use `clear(r, g, b, a)` to choose a different RGBA
+background for the logical canvas; margins remain black. A render that does not
+publish `PRESENT`, or a rejected render, leaves the prior accepted image alone.
+After surface recreation or context loss, the host may show an initialized dark
+restore screen while renderer resources recover; this is separate from a
+same-surface no-present or rejected render.
+Coordinates and hit tests use the same logical units; see
+[display spaces](display-and-coordinate-spaces.md).
 
 Use `PresentationList` for reusable sprite/rectangle input, `LineBatch` for
 lines, or `SpriteRunWriter` for streaming sprites. Finalize or cancel a writer

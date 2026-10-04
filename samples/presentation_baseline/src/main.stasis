@@ -1,0 +1,15 @@
+import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
+
+function main(): i32 {
+    init_window(640, 360, "Stasis presentation baseline");
+    return 0;
+}
+
+function tick(): i32 {
+    return 0;
+}
+
+function @effects(graphics) render(): i32 {
+    fill_rect(80.0, 45.0, 160.0, 90.0, 0.9, 0.15, 0.08, 1.0);
+    return 0;
+}

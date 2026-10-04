@@ -83,7 +83,7 @@ jobs:
           python -m unittest tools.ci.test_build_android_runtime
           python -m unittest tools.ci.test_qualify_staged_archive tools.ci.test_verify_staged_archive_receipts tools.ci.test_record_staged_archive_runtime tools.ci.test_collect_staged_archive_evidence
           python -m unittest tools.ci.test_nightly_freshness tools.ci.test_removed_ai_surface
-          python -m unittest tools.ci.test_pr_ci_seam_placement tools.ci.test_ios_generics_workflow
+          python -m unittest tools.ci.test_pr_ci_seam_placement tools.ci.test_ios_generics_workflow tools.ci.test_ios_presentation_workflow tools.ci.test_verify_ios_presentation_baseline
 
       - name: Test release provenance
         run: python -m unittest tools.ci.test_release_provenance tools.ci.test_audio_stream_native_acceptance tools.ci.test_release_bundle_size tools.ci.test_check_package_time tools.ci.test_assemble_editor_release tools.ci.test_copy_release_samples

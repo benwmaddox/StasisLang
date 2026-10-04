@@ -282,12 +282,12 @@ class PrCiSeamPlacementTests(unittest.TestCase):
                 self.assertIn(marker, self.generics)
         self.assertNotIn("macos-", self.generics)
         self.assertNotIn("STASIS_REQUIRE_SIGNED_EXECUTION", self.generics)
-        self.assertEqual(self.generics.count("-DSTASIS_BUILD_RUNNER=ON"), 2)
+        self.assertEqual(self.generics.count("-DSTASIS_BUILD_RUNNER=ON"), 3)
         self.assertEqual(
             self.generics.count(
                 "--target stasis_graphics stasis_runner"
             ),
-            2,
+            3,
         )
         self.assertEqual(self.generics.count("STASIS_RUNTIME_RUNNER_PATH="), 2)
         self.assertIn("if-no-files-found: error", self.generics)
@@ -305,6 +305,50 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             "- name: Run packaged generics desktop acceptance on Unix", 1
         )[1].split("\n      - name:", 1)[0]
         self.assertIn("timeout-minutes: 15", unix_acceptance)
+
+    def test_linux_presentation_baseline_uses_an_isolated_test_runtime(self):
+        build = step(self.generics, "Build isolated presentation-poison runtime on Linux")
+        acceptance = step(self.generics, "Run packaged presentation baseline on Linux")
+        verification = step(self.generics, "Verify presentation baseline evidence on Linux")
+        upload = step(self.generics, "Upload Linux presentation baseline evidence")
+        normal_runtime = step(self.generics, "Build matching packaged desktop runtime on Unix")
+
+        self.assertIn("if: runner.os == 'Linux'", build)
+        self.assertIn("timeout-minutes: 15", build)
+        self.assertIn("target/presentation-desktop-runtime", build)
+        self.assertIn("-DSTASIS_TEST_PRESENTATION_POISON=ON", build)
+        self.assertIn("ci-presentation-desktop-${GITHUB_RUN_ID}", build)
+        self.assertIn("compute_toolchain_fingerprint.py", build)
+        self.assertNotIn("STASIS_TEST_PRESENTATION_POISON", normal_runtime)
+        self.assertIn("default-OFF production runtime unexpectedly exports", build)
+        self.assertIn("default-OFF production runner unexpectedly contains", build)
+        self.assertIn("default-off-runtime-symbols.txt", build)
+        self.assertIn("instrumented-runtime-symbols.txt", build)
+        self.assertIn("STASIS_TEST_PRESENTATION_POISON_ONCE", build)
+        self.assertIn("STASIS_PRESENTATION_DESKTOP_EVIDENCE_DIR", acceptance)
+        self.assertIn("target/presentation-desktop-runtime/bin/libstasis_graphics.so", acceptance)
+        self.assertIn("target/presentation-desktop-runtime/bin/Release/stasis_runner", acceptance)
+        self.assertIn("xvfb-run -a", acceptance)
+        self.assertIn('STASIS_RELEASE_ID="$STASIS_PRESENTATION_RELEASE_ID"', acceptance)
+        self.assertIn(
+            'STASIS_BUILD_FINGERPRINT="$STASIS_PRESENTATION_BUILD_FINGERPRINT"',
+            acceptance,
+        )
+        self.assertIn("--test presentation_baseline_desktop", acceptance)
+        self.assertIn(
+            "packaged_presentation_baseline_initializes_poisoned_target_without_guest_clear",
+            acceptance,
+        )
+        for artifact in (
+            "presentation-desktop-frame.png",
+            "presentation-desktop-provenance.json",
+            "presentation-desktop-runtime.log",
+            "presentation-desktop-receipt.json",
+        ):
+            with self.subTest(artifact=artifact):
+                self.assertIn(artifact, verification)
+        self.assertIn("if-no-files-found: error", upload)
+        self.assertIn("presentation-baseline-linux-x64-${{ github.run_id }}", upload)
 
     def test_runner_uses_cached_cargo_and_names_grouped_failures(self):
         cargo_tokens = (

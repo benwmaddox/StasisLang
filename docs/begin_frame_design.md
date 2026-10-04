@@ -20,6 +20,36 @@ through a generated entry wrapper, rather than duplicate its stores in each
 host. Backend submission preparation remains host-private and runs even when
 there is no clear. This is the implemented v8 contract.
 
+## Current physical-pixel publication contract
+
+Task 625 adds a host-owned pixel baseline to valid presented frames without
+changing guest construction ownership. Once a frame has passed schema/content
+validation and its required resources are ready, each backend clears the whole
+physical target to opaque black before replaying the frame. This includes the
+fitted-content margins. Native sprite and font/text resource preparation must
+finish before this clear; if it fails, SDL withholds the entire presentation
+and leaves the prior target contents untouched. Guest `clear(r, g, b, a)` remains a separate,
+last-background-wins operation scoped to the logical canvas; it does not replace
+the physical margin baseline. SDL's full-target clear must not be narrowed to
+the logical viewport or current clip, and Workshop's GLES clear must use the
+full surface viewport before restoring the content viewport.
+
+Only a valid `PRESENT` may publish a replacement guest image. On the negotiated `STASIS_RENDER_VERSION` path (v8), a valid no-PRESENT
+construction calls `stasis_begin_frame` for maintenance and then returns before
+target pixel writes; rejected native constructions return before
+`stasis_begin_frame` and drawing. The v7 compatibility path may draw to an
+unpublished SDL backbuffer but remains present-only at `stasis_end_frame`.
+Workshop validates before guest drawing; an unavoidable callback on the same live
+surface replays its accepted same-generation GPU snapshot without advancing guest
+frame identity. Reset invalidates that snapshot, so the host may display its
+initialized placeholder/loading frame until a valid guest presentation. Surface
+recreation or context loss follows each platform's resource-restoration policy.
+Resource validation and preparation that may fail must remain before the
+physical clear. Web's supported legacy command list keeps its established replay
+order before canonical commands after the canonical frame has passed its
+publication gate; `clearPhysicalTarget` and `beginLogicalFrame` are distinct
+backend operations.
+
 ## Evidence and current call graph
 
 Paths and named functions below identify the audited code; the companion
@@ -53,20 +83,33 @@ helpers rather than relying only on public spelling.
    export and canonical global arrays for JIT. These are host boundaries, not
    side effects of the guest `begin_frame` call.
 4. SDL `stasis_gfx_submit_frame` validates, records acceptance/trace and display
-   metadata, resets submission metrics, calls native `stasis_begin_frame`,
-   optionally clears, replays ordered commands, resets clipping, and calls
-   native `stasis_end_frame` only for `PRESENT`.
+   metadata, resets submission metrics, and calls native `stasis_begin_frame`
+   for event/resource maintenance. A native v8 construction without `PRESENT`
+   returns after maintenance before target pixel writes; rejected constructions
+   return before `stasis_begin_frame` and drawing. The v7 compatibility path may
+   draw into an unpublished SDL backbuffer, but `stasis_end_frame` remains
+   present-only. For valid `PRESENT`, resource preparation precedes the opaque
+   black physical-target clear. Sprite sampling and all fallible font/text
+   preparation finish before that clear; a preparation failure returns without
+   clearing or swapping. Optional guest clear fills only the logical canvas,
+   then ordered commands replay.
 5. Web [`game.js`](../runtime/web/game.js), `frame`, invokes Wasm tick/render,
    resets workload metrics, then `executeCommands` -> `executeStasisBuffer` ->
-   WebGL2 batcher. The separate legacy `web_begin_frame(r,g,b)` import clears a
-   JavaScript command list and inserts a background command. That legacy list
-   is replayed before the canonical buffer. It is not the stdlib API.
+   WebGL2 batcher. The canonical frame is validated and must carry `PRESENT`
+   before batcher preparation, physical-target black clear, legacy command replay,
+   optional logical `beginLogicalFrame`, or canonical drawing. The separate
+   legacy `web_begin_frame(r,g,b)` import still builds its own command list and
+   preserves its established replay order before canonical commands; it is not
+   the stdlib API. The backend's `clearPhysicalTarget` and `beginLogicalFrame`
+   operations are distinct.
 6. Android [`stasis_android_bridge_run_render_frame`](../crates/stasis_android_bridge/src/lib.rs)
    executes lifecycle code, copies active canonical lanes through
    `copy_jit_render_active` in dynload and stamps display/frame-token metadata.
    [`StasisPreviewRenderer.java`](../mobile/android/app/src/main/java/com/stasislang/workshop/StasisPreviewRenderer.java)
-   validates the frame, prepares/restores resources, then draws only when
-   `FLAG_PRESENT` and resource readiness permit. GLSurfaceView owns scheduling.
+   validates the frame and prepares/restores resources before drawing only when
+   `FLAG_PRESENT` and resource readiness permit. `drawFrame` clears the whole
+   GLES surface opaque black, restores the fitted logical viewport, applies an
+   optional logical clear, and draws. GLSurfaceView owns scheduling.
 
 ### What each operation actually owns
 
@@ -78,8 +121,8 @@ helpers rather than relying only on public spelling.
 | Host finish / internal `gfx_cmd_submit` | Validate the host-owned construction and publish it when the render result and writer state are valid. The removed guest wrappers no longer add lifecycle flags or submit arrays. |
 | Native `stasis_begin_frame` | Reset debug hash, apply asset-watch changes, pump events if needed, attempt resource restore, reset queued line count and clip state, set SDL blend/clip defaults. Called by submission independently of guest begin. |
 | Native `stasis_end_frame` | Gate on resource readiness, flush queued lines, capture before present, call SDL present, finish timing, advance debug frame counter and reset event-pump bookkeeping. No guest array reset. |
-| Web batcher `beginFrame` | Check context, disable scissor, set viewport, clear color buffer. Called only for clear intent; misleadingly named backend clear operation. Metrics reset separately in `frame`. |
-| Workshop `drawFrame` | Reset pipeline and clipping, set surface/logical viewport, clear letterbox bars, optionally clear logical canvas, replay/batch. `onDrawFrame` owns resource restore, counters, captures and deferred sprite releases. |
+| Web batcher `clearPhysicalTarget` / `beginLogicalFrame` | After canonical validation and `PRESENT`, prepare the batcher and clear the full drawing buffer opaque black. Preserve legacy command replay before canonical commands. `beginLogicalFrame` separately scissor-clears the logical canvas only for guest `CLEAR`; invalid or non-present canonical frames return before pixel writes. Metrics reset separately in `frame`. |
+| Workshop guest draw | The guest draw body runs only for a valid, ready `PRESENT`; it clears the full surface opaque black, sets the fitted logical viewport, optionally clears the logical canvas, then replays/batches. The Java scheduler requests a swap only for a valid PRESENT. An unavoidable same-surface callback replays the accepted same-generation GPU snapshot, or draws the initialized restore placeholder after reset, instead of publishing a replacement guest image. `onDrawFrame` owns resource restore, counters, captures and deferred sprite releases. |
 | `ui_begin_frame` | Reset UI layout rectangle, status, stack, hot/pointer and scroll scratch state in [ui_single_pass.stasis](../src/stdlib/ui_single_pass.stasis). It does not call graphics begin. Keep this independently scoped UI operation; multiple UI roots need not imply multiple graphics frames. |
 
 The renderer resource generations are distinct from the sprite writer generation.
@@ -99,31 +142,34 @@ removes the publication flag; this is a flag API defect, not useful clear
 semantics. Evidence: `gfx_cmd_clear`, `gfx_cmd_mark_present`, and each consumer's
 clear-before-order-loop implementation cited above.
 
-Proposed contract: retain last-background-wins behavior; clear changes only
-background intent, never lifecycle flags. Specify finite RGBA components in
-0..1 for portable input. It replaces the logical canvas background rather than
-alpha-blending a rectangle with previous contents; letterbox treatment is host
-display policy. Native currently clears black then fills the logical rectangle
-with blend disabled; Workshop clears a scissored logical viewport; Web clears
-the backing framebuffer and clamps alpha. Out-of-range/NaN conversion equivalence
-is not established here and must not be promised by the new contract.
+Current contract: retain last-background-wins behavior; clear changes only
+logical background intent, never lifecycle flags. Specify finite RGBA components
+in 0..1 for portable input. It replaces the logical canvas background rather
+than alpha-blending a rectangle with previous contents; physical margins remain
+opaque black. Out-of-range/NaN conversion equivalence is not established and
+must not be promised.
 
-No clear means no requested background replacement. It does **not** promise
-persistent pixels across swaps/context loss. A frame that needs deterministic
-full-canvas pixels must clear or cover the canvas. Retained *commands* and retained
-framebuffer *contents* are different features; a future persistent render target
-would need a separate explicit contract. This portability recommendation avoids
-depending on unspecified prior backbuffer contents; it is not a measured claim
-that all current backends preserve or discard those pixels identically.
+Without guest `CLEAR`, a valid `PRESENT` still receives a deterministic opaque
+black physical baseline before its content is drawn. On the negotiated `STASIS_RENDER_VERSION` path (v8), a valid no-PRESENT
+construction calls `stasis_begin_frame` for maintenance and returns before target
+pixel writes; rejected native frames return before target drawing. The v7 compatibility
+path may write an unpublished SDL backbuffer, but `stasis_end_frame` remains
+present-only. Workshop may redraw the previously accepted physical snapshot into
+the current buffer during an unavoidable same-surface callback, preserving that
+guest image without advancing its token or consuming its capture. Reset
+invalidates the snapshot, so the host may display its initialized
+restore/loading frame until a new valid presentation. Retained *commands* and
+retained framebuffer *contents* are different features; no guest command
+snapshot or persistent render-target API is introduced here.
 
 ## Backend findings and risks
 
 | Backend | Observation | Migration risk / required boundary |
 | --- | --- | --- |
-| Desktop SDL JIT and native runner | Validation precedes native begin; begin owns event/resource setup. Missing PRESENT still replays draws but skips swap. Submission counters and actual successful display are not interchangeable (`stasis_end_frame` can withhold for restore). | Do not remove native setup when removing the guest call. Wrap actual guest render entry, not the submit call, which is too late. Preserve screenshot-before-present and event pumping on withheld frames. |
+| Desktop SDL JIT and native runner | Validation precedes native begin; begin owns event/resource setup. Negotiated `STASIS_RENDER_VERSION` (v8) no-PRESENT frames call `stasis_begin_frame` for maintenance, then return before target writes. The v7 compatibility path may draw into an unpublished target, while `stasis_end_frame` remains present-only. Rejected frames return before begin and target drawing. Reset events may publish the host loading frame. Submission counters and actual successful display are not interchangeable (`stasis_end_frame` can withhold for restore). | Keep event/resource setup on no-present frames, and keep all fallible resource preparation before the physical clear. Preserve screenshot-before-present and event pumping on withheld frames. |
 | Generated SDL mobile AOT | Runtime binds/initializes arrays, invokes lifecycle entries, skips submission on nonzero entry result and while paused. Same SDL consumer. [Mobile runtime test](../runtime/tests/stasis_mobile_runtime_test.c) counts begin/end/submit and checks early-stop paths. | Generated wrapper must be retained/exported and used on device; resetting only desktop JIT would leave stale mobile commands. Pause/resume and renderer restore remain host-owned. |
-| Web Wasm/WebGL2 | Canonical replay checks magic/version and sprite/run validity; no PRESENT gate in `executeStasisBuffer`. It calls batcher `beginFrame` only with CLEAR. `frame` catches replay errors, but guest tick/render calls occur outside that catch. Legacy command list reset is separate. | Separate viewport/scissor preparation from clear; gate publication consistently; do not claim existing error handling is atomic. Reset both producers only under their negotiated contract; migrate legacy imports separately. Context loss cannot be repaired by guest begin. Tests use mocked GL, not a real compositor. |
-| Android Workshop / preview GLES2 | Java validates before clearing or preparing resources. PRESENT gates resource preparation/drawing. Active-lane copy is not an immutable guest-side seal. Frame tokens, synchronization, captures and deferred releases are host mechanisms. | Reset before bridge render and keep host snapshot/copy ownership; never reset arrays while GL consumes them. Preserve token/capture rejection behavior, bounded restore and releases after successful presentation. Test invalid/unfinished new frames against the last accepted snapshot. |
+| Web Wasm/WebGL2 | Canonical replay validates and gates on PRESENT before batcher preparation or target writes. It clears the physical buffer black, preserves supported legacy-command replay before canonical commands, and applies guest CLEAR only to the logical canvas. Context loss is a separate lifecycle. | Preserve legacy command order while keeping writes behind the publication gate. Do not claim existing error handling is atomic. Context loss cannot be repaired by guest begin. Tests use mocked GL unless paired with browser pixel evidence. |
+| Android Workshop / preview GLES2 | Java validates before guest resource preparation or drawing. PRESENT gates resource preparation and the request from `MainActivity`; GL cleanup uses the render thread without requesting a swap. An unavoidable same-surface callback replays the accepted same-generation GPU snapshot. After that replay or an initialized reset placeholder, `onDrawFrame` drains deferred sprite releases because the visible image no longer depends on guest textures. Surface callbacks initialize the dark restore screen and discard the old snapshot. Frame tokens, synchronization, captures and release queues are host mechanisms. | Reset before bridge render and keep host snapshot/copy ownership; never reset arrays while GL consumes them. Preserve token/capture rejection behavior, bounded restore and releases after successful presentation. Test invalid/no-present frames against the last accepted image on a live surface and test reset callbacks against the initialized restore screen. |
 | Legacy/conformance adapters | `stasis_begin_frame` remains a native exported symbol in [stasis_graphics.def](../runtime/stasis_graphics.def). Two web smoke samples import `web_begin_frame`; Web executes their commands through the same WebGL2 renderer. [Resource docs](renderer_resource_lifecycle.md) mention historical desktop GL, but the audited production C begin/submit is SDL. | Do not infer a separate shipping GL lifecycle from historical prose. Preserve exported C compatibility until explicitly retired; rename private Web method independently of its legacy import. |
 
 Neither the canonical order kinds nor v7 run metadata define multiple passes:

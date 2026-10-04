@@ -115,6 +115,11 @@ static void stasis_desktop_network_present_join_card(void) {
 int stasis_test_get_render_submission_state(int32_t *out_i32, int32_t capacity);
 int stasis_gfx_get_resource_lifecycle(int32_t *out_i32, int count);
 int stasis_test_get_display_presentation(float *out_f32, int32_t capacity);
+#if defined(STASIS_TEST_PRESENTATION_POISON)
+int stasis_test_get_presentation_baseline_state(int32_t *out_state, int32_t capacity);
+int stasis_test_poison_physical_target(int32_t *out_state, int32_t capacity);
+int stasis_test_presentation_poison_target_kind(void);
+#endif
 
 static int32_t hash_global_path(const char *path) {
     uint32_t hash = 2166136261U;
@@ -207,6 +212,104 @@ static int write_ios_generics_receipt(int frame) {
     return 0;
 #endif
 }
+
+#if defined(STASIS_TEST_PRESENTATION_POISON)
+static int state_halves_match(const int32_t *state) {
+    return memcmp(state, state + 20, 20 * sizeof(int32_t)) == 0;
+}
+
+static int write_ios_presentation_receipt(
+    const char *phase,
+    int frame,
+    const int32_t *poison_state
+) {
+#if defined(__APPLE__) && !defined(__ANDROID__)
+    if (phase == NULL ||
+            (strcmp(phase, "initial") != 0 && strcmp(phase, "relaunch") != 0)) {
+        return 0;
+    }
+    int32_t render[7] = {0};
+    int32_t lifecycle[6] = {0};
+    int32_t baseline_state[40] = {0};
+    float presentation[14] = {0};
+    if (!poison_state || !state_halves_match(poison_state) ||
+            stasis_test_presentation_poison_target_kind() != 1 ||
+            !stasis_test_get_render_submission_state(render, 7) ||
+            !stasis_gfx_get_resource_lifecycle(lifecycle, 6) ||
+            !stasis_test_get_display_presentation(presentation, 14) ||
+            !stasis_test_get_presentation_baseline_state(baseline_state, 40) ||
+            !state_halves_match(baseline_state)) {
+        return 0;
+    }
+    const char *home = SDL_getenv("HOME");
+    if (home == NULL || home[0] == '\0') return 0;
+    char path[1024];
+    int written = snprintf(
+        path,
+        sizeof(path),
+        "%s/Documents/stasis-ios-presentation-%s.json",
+        home,
+        phase);
+    if (written < 0 || (size_t)written >= sizeof(path)) return 0;
+    char temporary_path[1060];
+    written = snprintf(temporary_path, sizeof(temporary_path), "%s.tmp", path);
+    if (written < 0 || (size_t)written >= sizeof(temporary_path)) return 0;
+    FILE *file = fopen(temporary_path, "wb");
+    if (file == NULL) return 0;
+    int ok = fprintf(
+        file,
+        "{\"schema\":\"stasis.ios.presentation_baseline.v1\","
+        "\"phase\":\"%s\",\"frame\":%d,\"logical\":[640,360],"
+        "\"poison_target\":\"physical-window\","
+        "\"poison_state_restored\":true,\"baseline_state_restored\":true,"
+        "\"render\":{\"accepted\":%d,\"rejected\":%d,\"presented\":%d,"
+        "\"validation\":%d,\"command_trace\":%u,"
+        "\"display_generation\":%d,\"density_generation\":%d},"
+        "\"resource\":{\"state\":%d,\"surface_generation\":%d,"
+        "\"renderer_generation\":%d,\"restore_attempts\":%d,"
+        "\"restore_failures\":%d,\"restore_reason\":%d},"
+        "\"native_viewport\":[%.3f,%.3f,%.3f,%.3f],"
+        "\"drawable_viewport\":[%.3f,%.3f,%.3f,%.3f],"
+        "\"safe_drawable\":[%.3f,%.3f,%.3f,%.3f],"
+        "\"content_scale\":%.4f,\"raster_scale\":%.4f,"
+        "\"poison_selected_target_state\":[",
+        phase,
+        frame,
+        render[0], render[1], render[2], render[3], (uint32_t)render[4],
+        render[5], render[6],
+        lifecycle[0], lifecycle[1], lifecycle[2], lifecycle[3],
+        lifecycle[4], lifecycle[5],
+        presentation[0], presentation[1], presentation[2], presentation[3],
+        presentation[4], presentation[5], presentation[6], presentation[7],
+        presentation[8], presentation[9], presentation[10], presentation[11],
+        presentation[12], presentation[13]) > 0;
+    for (int index = 0; ok && index < 40; index++) {
+        ok = fprintf(file, "%s%d", index == 0 ? "" : ",", poison_state[index]) > 0;
+    }
+    if (ok) ok = fputs("],\"baseline_selected_target_state\":[", file) >= 0;
+    for (int index = 0; ok && index < 40; index++) {
+        ok = fprintf(file, "%s%d", index == 0 ? "" : ",", baseline_state[index]) > 0;
+    }
+    if (ok) ok = fputs("]}\n", file) >= 0;
+    ok = fclose(file) == 0 && ok;
+    if (ok) ok = rename(temporary_path, path) == 0;
+    if (!ok) remove(temporary_path);
+    if (ok) {
+        SDL_Log(
+            "Stasis iOS presentation baseline phase=%s frame=%d receipt=%s",
+            phase,
+            frame,
+            path);
+    }
+    return ok;
+#else
+    (void)phase;
+    (void)frame;
+    (void)poison_state;
+    return 0;
+#endif
+}
+#endif
 
 static int seam_it021_audio = 0;
 static int seam_it021_audio_collected = 0;
@@ -764,6 +867,26 @@ int SDL_main(int argc, char **argv) {
         seam_test_id != NULL && strcmp(seam_test_id, "ANDROID-GENERICS") == 0;
     int android_numeric_text_acceptance =
         seam_test_id != NULL && strcmp(seam_test_id, "ANDROID-NUMERIC-TEXT") == 0;
+#if defined(STASIS_TEST_PRESENTATION_POISON)
+    int ios_presentation_acceptance =
+        seam_test_id != NULL &&
+        strcmp(seam_test_id, "IOS-PRESENTATION-BASELINE") == 0;
+    const char *ios_presentation_phase = NULL;
+    int32_t ios_presentation_poison_state[40] = {0};
+    if (ios_presentation_acceptance) {
+        ios_presentation_phase = SDL_getenv("STASIS_PRESENTATION_PHASE");
+        if (status != STASIS_MOBILE_RUNTIME_OK || ios_presentation_phase == NULL ||
+                (strcmp(ios_presentation_phase, "initial") != 0 &&
+                 strcmp(ios_presentation_phase, "relaunch") != 0) ||
+                !stasis_test_poison_physical_target(
+                    ios_presentation_poison_state, 40) ||
+                stasis_test_presentation_poison_target_kind() != 1 ||
+                !state_halves_match(ios_presentation_poison_state)) {
+            SDL_Log("Stasis iOS presentation baseline could not poison and restore the physical window target");
+            status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+        }
+    }
+#endif
     if (ios_generics_acceptance) {
         const char *bounds_index = SDL_getenv("STASIS_IOS_GENERICS_BOUNDS_INDEX");
         if (bounds_index != NULL && bounds_index[0] != '\0') {
@@ -816,6 +939,16 @@ int SDL_main(int argc, char **argv) {
                 SDL_Log("Stasis iOS generics acceptance could not write its receipt");
                 status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
             }
+#if defined(STASIS_TEST_PRESENTATION_POISON)
+            if (ios_presentation_acceptance && frame == 1 &&
+                    !write_ios_presentation_receipt(
+                        ios_presentation_phase,
+                        frame,
+                        ios_presentation_poison_state)) {
+                SDL_Log("Stasis iOS presentation baseline could not write its receipt");
+                status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+            }
+#endif
             if (android_generics_acceptance && frame == 1) {
                 SDL_Log(
                     "Stasis Android generics: {\"schema\":\"stasis.android.generics.v2\","
