@@ -403,7 +403,8 @@ PY
     run_presentation_phase() {
       local phase="$1"
       local receipt="${data_container}/Documents/stasis-ios-presentation-${phase}.json"
-      rm -f -- "${receipt}"
+      local capture_release="${data_container}/Documents/stasis-ios-presentation-${phase}.captured"
+      rm -f -- "${receipt}" "${capture_release}"
       launch_output="$(
         SIMCTL_CHILD_STASIS_ENABLE_TEST_INPUT=1 \
         SIMCTL_CHILD_STASIS_SEAM_TEST_ID=IOS-PRESENTATION-BASELINE \
@@ -416,19 +417,51 @@ PY
       sleep 1
       xcrun simctl io "${simulator_udid}" screenshot \
         "${build_root}/simulator-${phase}-frame.png"
+      touch "${capture_release}"
+      local capture_release_consumed=0
+      for _ in $(seq 1 40); do
+        if [[ ! -e "${capture_release}" ]]; then
+          capture_release_consumed=1
+          break
+        fi
+        sleep 0.25
+      done
+      if [[ "${capture_release_consumed}" -ne 1 ]]; then
+        echo "simulator ${phase} presentation capture barrier did not consume ${capture_release}" >&2
+        return 1
+      fi
       xcrun simctl terminate "${simulator_udid}" "${bundle_id}"
     }
 
     run_presentation_phase initial
     run_presentation_phase relaunch
-    xcrun simctl spawn "${simulator_udid}" log show --style compact --last 5m \
-      --predicate 'process == "StasisMobile"' > "${build_root}/simulator.log"
-    grep -Eq 'Stasis provenance: .* renderer=gfx_cmd schema=7' \
-      "${build_root}/simulator.log"
-    grep -Fq 'Stasis iOS presentation baseline phase=initial' \
-      "${build_root}/simulator.log"
-    grep -Fq 'Stasis iOS presentation baseline phase=relaunch' \
-      "${build_root}/simulator.log"
+    presentation_log_ready=0
+    for _ in $(seq 1 40); do
+      xcrun simctl spawn "${simulator_udid}" log show --style compact --last 5m \
+        --predicate 'process == "StasisMobile"' > "${build_root}/simulator.log"
+      if grep -Eq 'Stasis provenance: .* renderer=gfx_cmd schema=7' \
+          "${build_root}/simulator.log" && \
+          grep -Fq 'Stasis iOS presentation baseline phase=initial' \
+          "${build_root}/simulator.log" && \
+          grep -Fq 'Stasis iOS presentation baseline phase=relaunch' \
+          "${build_root}/simulator.log" && \
+          grep -Fq 'Stasis iOS presentation capture barrier phase=initial state=holding' \
+          "${build_root}/simulator.log" && \
+          grep -Fq 'Stasis iOS presentation capture barrier phase=initial state=released' \
+          "${build_root}/simulator.log" && \
+          grep -Fq 'Stasis iOS presentation capture barrier phase=relaunch state=holding' \
+          "${build_root}/simulator.log" && \
+          grep -Fq 'Stasis iOS presentation capture barrier phase=relaunch state=released' \
+          "${build_root}/simulator.log"; then
+        presentation_log_ready=1
+        break
+      fi
+      sleep 0.25
+    done
+    if [[ "${presentation_log_ready}" -ne 1 ]]; then
+      echo "simulator unified log did not publish provenance, presentation phases, and capture barriers" >&2
+      exit 1
+    fi
     python3 "${repo_root}/tools/ci/verify_ios_presentation_baseline.py" \
       --initial-receipt "${build_root}/simulator-initial-receipt.json" \
       --initial-frame "${build_root}/simulator-initial-frame.png" \

@@ -1,0 +1,36 @@
+{
+  "schema": "stasis.android_seam_expectations.v1",
+  "test_id": "ANDROID-PRESENTATION-BASELINE",
+  "stable_frame": 30,
+  "require_command_trace": true,
+  "logical_size": [640, 360],
+  "regions": [
+    {"name": "outside_letterbox", "location": "outside_letterbox", "rgb": [0, 0, 0], "tolerance": 12},
+    {"name": "left_black_margin", "center": [40, 90], "rgb": [0, 0, 0], "tolerance": 12},
+    {"name": "red_scene", "center": [160, 90], "rgb": [230, 38, 20], "tolerance": 30},
+    {"name": "right_black_margin", "center": [280, 90], "rgb": [0, 0, 0], "tolerance": 12},
+    {"name": "top_black_margin", "center": [160, 25], "rgb": [0, 0, 0], "tolerance": 12},
+    {"name": "bottom_black_margin", "center": [160, 155], "rgb": [0, 0, 0], "tolerance": 12}
+  ],
+  "resource_regions": [
+    {
+      "name": "red_scene_fill",
+      "rect": [80, 45, 160, 90],
+      "target_rgb": [230, 38, 20],
+      "tolerance": 30,
+      "minimum_target_pixels": 500
+    }
+  ],
+  "lifecycle": {
+    "stages": [
+      {"name": "initial", "action": "launch", "same_pid": false, "min_renderer_generation": 1},
+      {"name": "resume", "action": "background_resume", "same_pid": true, "min_renderer_generation": 1},
+      {"name": "recreated", "action": "force_activity_restart", "same_pid": false, "min_renderer_generation": 1}
+    ],
+    "diagnostic_forbidden": [
+      "renderer restore failed",
+      "resource restore failed",
+      "resource_restore_failed"
+    ]
+  }
+}

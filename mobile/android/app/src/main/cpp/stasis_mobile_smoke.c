@@ -899,8 +899,9 @@ Java_com_stasislang_workshop_MainActivity_nativeSourceItems(
 }
 
 JNIEXPORT jint JNICALL
-Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h, jobject frame_i32, jobject frame_f32, jobject frame_u8) {
+Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass activity_class, jstring project_root, jint touch_x, jint touch_y, jint touch_active, jint screen_w, jint screen_h, jboolean require_it025_checksum, jobject frame_i32, jobject frame_f32, jobject frame_u8) {
     (void)activity_class;
+    (void)require_it025_checksum;
     if (!validate_stasis_jni_frame_buffers(env, frame_i32, frame_f32, frame_u8)) {
         return -1;
     }
@@ -950,7 +951,7 @@ Java_com_stasislang_workshop_MainActivity_nativeRunFrameInto(JNIEnv *env, jclass
             last_density_generation = values_i32[STASIS_RENDER_I_DENSITY_GENERATION];
         }
 #if STASIS_RENDER_ACCEPTANCE
-        {
+        if (require_it025_checksum == JNI_TRUE) {
             static int it025_state_ready = 0;
             static int it025_state_checksum;
             static const char *it025_bridge_version;

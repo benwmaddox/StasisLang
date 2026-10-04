@@ -357,7 +357,6 @@ function Wait-ForWorkshopIT032Readiness(
     [scriptblock]$ReadProcessLog,
     [scriptblock]$OnPending = {}
 ) {
-    $TimeoutSeconds = Get-RemainingPresentationTimeout $TimeoutSeconds
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
     do {
         $processId = ([string](& $ReadProcessId | Select-Object -First 1)).Trim()

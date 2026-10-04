@@ -247,8 +247,8 @@ public final class MainActivity extends Activity {
     private static native void nativeArmExternalUrlAction();
     private static native void nativeClearExternalUrlAction();
     static native int nativeRunFrameInto(String projectRoot, int touchX, int touchY,
-            int touchActive, int screenWidth, int screenHeight, ByteBuffer frameI32,
-            ByteBuffer frameF32, ByteBuffer frameU8);
+            int touchActive, int screenWidth, int screenHeight, boolean requireIt025Checksum,
+            ByteBuffer frameI32, ByteBuffer frameF32, ByteBuffer frameU8);
     static native String nativeFrameAbiDescriptor();
     static native int nativeFrameTrace(ByteBuffer frameI32, ByteBuffer frameF32, ByteBuffer frameU8);
     private static native String nativeDrainSpriteReleases();
@@ -6920,7 +6920,10 @@ public final class MainActivity extends Activity {
                 lastRendererSyncWaitNanos = started - requested;
                 boolean drainReleases = !renderer.hasPendingSpriteReleases();
                 status = nativeRunFrameInto(projectRoot, inputX, inputY, inputActive,
-                        screenWidth, screenHeight, renderer.frameI32Bytes(),
+                        screenWidth, screenHeight,
+                        BuildConfig.STASIS_RENDER_ACCEPTANCE
+                                && !activity.presentationBaselineAcceptance,
+                        renderer.frameI32Bytes(),
                         renderer.frameF32Bytes(), renderer.frameU8Bytes());
                 if (activity.audioFocus != null && nativeAudioRequested()) activity.audioFocus.resume();
                 releaseCancellationApplied = renderer.cancelPendingSpriteReleases(

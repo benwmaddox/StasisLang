@@ -119,6 +119,9 @@ int stasis_test_get_display_presentation(float *out_f32, int32_t capacity);
 int stasis_test_get_presentation_baseline_state(int32_t *out_state, int32_t capacity);
 int stasis_test_poison_physical_target(int32_t *out_state, int32_t capacity);
 int stasis_test_presentation_poison_target_kind(void);
+#if defined(__APPLE__) && !defined(__ANDROID__)
+int stasis_mobile_poll_events(void);
+#endif
 #endif
 
 static int32_t hash_global_path(const char *path) {
@@ -309,6 +312,57 @@ static int write_ios_presentation_receipt(
     return 0;
 #endif
 }
+
+#if defined(__APPLE__) && !defined(__ANDROID__)
+static int hold_ios_presentation_frame_for_capture(const char *phase) {
+    const char *home = SDL_getenv("HOME");
+    if (home == NULL || home[0] == '\0' || phase == NULL) {
+        return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+    }
+    char marker_path[1024];
+    int written = snprintf(
+        marker_path,
+        sizeof(marker_path),
+        "%s/Documents/stasis-ios-presentation-%s.captured",
+        home,
+        phase);
+    if (written < 0 || (size_t)written >= sizeof(marker_path)) {
+        return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+    }
+
+    const uint64_t started_ns = SDL_GetTicksNS();
+    SDL_Log(
+        "Stasis iOS presentation capture barrier phase=%s state=holding",
+        phase);
+    for (;;) {
+        FILE *marker = fopen(marker_path, "rb");
+        if (marker != NULL) {
+            int closed = fclose(marker) == 0;
+            int removed = remove(marker_path) == 0;
+            if (!closed || !removed) {
+                SDL_Log(
+                    "Stasis iOS presentation capture barrier could not consume %s",
+                    marker_path);
+                return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+            }
+            SDL_Log(
+                "Stasis iOS presentation capture barrier phase=%s state=released",
+                phase);
+            return STASIS_MOBILE_RUNTIME_OK;
+        }
+        if (stasis_mobile_poll_events()) {
+            return STASIS_MOBILE_RUNTIME_STOP_REQUESTED;
+        }
+        if (SDL_GetTicksNS() - started_ns >= 60000000000ULL) {
+            SDL_Log(
+                "Stasis iOS presentation capture barrier phase=%s timed out after 60 seconds",
+                phase);
+            return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+        }
+        SDL_Delay(10);
+    }
+}
+#endif
 #endif
 
 static int seam_it021_audio = 0;
@@ -940,13 +994,20 @@ int SDL_main(int argc, char **argv) {
                 status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
             }
 #if defined(STASIS_TEST_PRESENTATION_POISON)
-            if (ios_presentation_acceptance && frame == 1 &&
-                    !write_ios_presentation_receipt(
-                        ios_presentation_phase,
-                        frame,
-                        ios_presentation_poison_state)) {
-                SDL_Log("Stasis iOS presentation baseline could not write its receipt");
-                status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+            if (ios_presentation_acceptance && frame == 1) {
+                if (!write_ios_presentation_receipt(
+                            ios_presentation_phase,
+                            frame,
+                            ios_presentation_poison_state)) {
+                    SDL_Log("Stasis iOS presentation baseline could not write its receipt");
+                    status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+                }
+#if defined(__APPLE__) && !defined(__ANDROID__)
+                else {
+                    status = hold_ios_presentation_frame_for_capture(
+                        ios_presentation_phase);
+                }
+#endif
             }
 #endif
             if (android_generics_acceptance && frame == 1) {
