@@ -720,7 +720,7 @@ public final class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
 
-        installGameStatusOverlay(root, true);
+        installGameStatusOverlay(root, !isPresentationBaselineCapture());
         installBlockingErrorPanel(root);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -881,6 +881,7 @@ public final class MainActivity extends Activity {
         editorToggle.setMinWidth(dp(52));
         editorToggle.setMinHeight(dp(48));
         editorToggle.setBackground(createFocusableControlBackground());
+        if (isPresentationBaselineCapture()) editorToggle.setVisibility(View.GONE);
         editorToggle.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -900,6 +901,10 @@ public final class MainActivity extends Activity {
 
         startGameLoop();
         return root;
+    }
+
+    private boolean isPresentationBaselineCapture() {
+        return BuildConfig.STASIS_RENDER_ACCEPTANCE && presentationBaselineAcceptance;
     }
 
     private void installGameStatusOverlay(FrameLayout root, boolean visible) {
@@ -989,7 +994,7 @@ public final class MainActivity extends Activity {
     }
 
     private void toggleBenchmarkHudFromPreview() {
-        if (gameStatus == null) {
+        if (isPresentationBaselineCapture() || gameStatus == null) {
             return;
         }
         gameStatus.setVisibility(gameStatus.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
