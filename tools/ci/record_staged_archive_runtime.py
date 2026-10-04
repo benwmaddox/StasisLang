@@ -194,11 +194,28 @@ def find_runtime_evidence(consumer_root: Path, target: str) -> tuple[Path, Path,
         digest = generics.get("digest_receipt", {})
         if digest.get("digest") != 507 or digest.get("event") != "oracle":
             raise ValueError(f"Android generics runtime digest differs from 507: {evidence_path}")
-        bounds = generics.get("bounds_probes", [])
-        if sorted(probe.get("index") for probe in bounds) != [-1, 2] or any(
-            probe.get("fatal") is not True for probe in bounds
-        ):
-            raise ValueError(f"Android generics runtime omitted both fatal bounds traps: {evidence_path}")
+        bounds = generics.get("bounds_probes")
+        if not isinstance(bounds, list) or len(bounds) != 2:
+            raise ValueError(f"Android generics runtime has malformed bounds-probe evidence: {evidence_path}")
+        bounds_by_index: dict[int, dict[str, Any]] = {}
+        bound_pids: list[int] = []
+        for probe in bounds:
+            if not isinstance(probe, dict):
+                raise ValueError(f"Android generics runtime has malformed bounds-probe evidence: {evidence_path}")
+            index = probe.get("index")
+            if isinstance(index, bool) or not isinstance(index, int) or index not in (-1, 2) or index in bounds_by_index:
+                raise ValueError(f"Android generics runtime has invalid bounds-probe indices: {evidence_path}")
+            pid = probe.get("pid")
+            if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+                raise ValueError(f"Android generics runtime has invalid bounds-probe PID: {evidence_path}")
+            if probe.get("signal") != "SIGILL" or probe.get("process_exited") is not True:
+                raise ValueError(f"Android generics runtime has invalid fatal bounds-probe result: {evidence_path}")
+            bounds_by_index[index] = probe
+            bound_pids.append(pid)
+        if set(bounds_by_index) != {-1, 2}:
+            raise ValueError(f"Android generics runtime omitted a low or high bounds probe: {evidence_path}")
+        if len(set(bound_pids)) != 2:
+            raise ValueError(f"Android generics runtime reused a bounds-probe PID: {evidence_path}")
         frame_path = Path(generics.get("frame_capture", ""))
         if not frame_path.is_absolute():
             frame_path = evidence_path.parent / frame_path
