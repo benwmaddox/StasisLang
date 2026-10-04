@@ -146,6 +146,8 @@ jobs:
             simulator-relaunch-launch.txt
             simulator-relaunch-receipt.json
             simulator-relaunch-frame.png
+            simulator-presentation-lifecycle.mp4
+            simulator-presentation-record-video.log
             simulator.log
             simulator-presentation-evidence.json
             simulator-presentation-evidence.txt

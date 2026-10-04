@@ -32,6 +32,8 @@ class IosPresentationWorkflowContractTests(unittest.TestCase):
             "simulator-initial-frame.png",
             "simulator-relaunch-receipt.json",
             "simulator-relaunch-frame.png",
+            "simulator-presentation-lifecycle.mp4",
+            "simulator-presentation-record-video.log",
             "simulator-presentation-evidence.json",
             "if-no-files-found: warn",
         ):
@@ -124,6 +126,48 @@ class IosPresentationWorkflowContractTests(unittest.TestCase):
             "simulator unified log did not publish provenance, presentation phases, and capture barriers",
             poll,
         )
+
+    def test_presentation_video_spans_both_held_phases_and_is_finalized(self) -> None:
+        presentation_start = self.helper.index(
+            '  if [[ "${simulator_acceptance}" = "presentation" ]]; then'
+        )
+        presentation_end = self.helper.index("\n  result_receipt=", presentation_start)
+        presentation = self.helper[presentation_start:presentation_end]
+        ordered = (
+            presentation.index("\n    start_presentation_video\n"),
+            presentation.index("\n    run_presentation_phase initial\n"),
+            presentation.index("\n    run_presentation_phase relaunch\n"),
+            presentation.index("\n    stop_presentation_video 1\n"),
+        )
+        self.assertEqual(ordered, tuple(sorted(ordered)))
+        self.assertIn(
+            'require_simulator_video_live "before ${phase} launch"', presentation
+        )
+        self.assertIn(
+            'require_simulator_video_live "after ${phase} termination"', presentation
+        )
+
+        self.assertIn(
+            'xcrun simctl io "${simulator_udid}" recordVideo --codec=h264',
+            self.helper,
+        )
+        self.assertIn("simulator_video_pid=$!", self.helper)
+        self.assertIn('kill -INT "${simulator_video_pid}"', self.helper)
+        self.assertIn('wait "${simulator_video_pid}"', self.helper)
+        self.assertIn('return "${exit_status}"', self.helper)
+        self.assertIn('! -s "${presentation_video_path}"', self.helper)
+        self.assertIn('! -s "${presentation_video_log}"', self.helper)
+
+        cleanup_start = self.helper.index("cleanup() {")
+        cleanup_end = self.helper.index("\n}\ntrap cleanup EXIT", cleanup_start)
+        cleanup = self.helper[cleanup_start:cleanup_end]
+        self.assertIn("local status=$?", cleanup)
+        self.assertIn('exit "${status}"', cleanup)
+        self.assertLess(
+            cleanup.index("stop_presentation_video 0"),
+            cleanup.index('xcrun simctl shutdown "${simulator_udid}"'),
+        )
+        self.assertNotIn("recordVideo", self.generics)
 
 
 if __name__ == "__main__":

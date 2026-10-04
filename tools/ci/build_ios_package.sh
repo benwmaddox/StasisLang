@@ -19,6 +19,9 @@ simulator_udid=""
 simulator_acceptance="${STASIS_IOS_SIMULATOR_ACCEPTANCE:-aspect-fit}"
 simulator_output=""
 simulator_package_created=0
+simulator_video_pid=""
+presentation_video_path="${build_root}/simulator-presentation-lifecycle.mp4"
+presentation_video_log="${build_root}/simulator-presentation-record-video.log"
 
 package_mobile() {
   local target="$1"
@@ -57,8 +60,133 @@ fi
 mkdir -p "${framework_root}" "${download_root}"
 active_mount=""
 package_created=0
+
+require_simulator_video_live() {
+  local stage="$1"
+  local exit_status=0
+  if [[ -z "${simulator_video_pid}" ]]; then
+    echo "iOS presentation recorder is not running during ${stage}" >&2
+    return 1
+  fi
+  if kill -0 "${simulator_video_pid}" >/dev/null 2>&1; then
+    return 0
+  fi
+  if wait "${simulator_video_pid}"; then
+    exit_status=0
+  else
+    exit_status=$?
+  fi
+  simulator_video_pid=""
+  echo "iOS presentation recorder exited during ${stage} with status ${exit_status}" >&2
+  if [[ -s "${presentation_video_log}" ]]; then
+    cat "${presentation_video_log}" >&2
+  fi
+  if [[ ${exit_status} -ne 0 ]]; then
+    return "${exit_status}"
+  fi
+  return 1
+}
+
+start_presentation_video() {
+  rm -f -- "${presentation_video_path}" "${presentation_video_log}"
+  xcrun simctl io "${simulator_udid}" recordVideo --codec=h264 \
+    "${presentation_video_path}" >"${presentation_video_log}" 2>&1 &
+  simulator_video_pid=$!
+  sleep 1
+  require_simulator_video_live "startup"
+}
+
+stop_presentation_video() {
+  local strict="${1:-1}"
+  local exit_status=0
+  local signal_failed=0
+  local stopped=0
+  local timed_out=0
+  if [[ -z "${simulator_video_pid}" ]]; then
+    if [[ "${strict}" -eq 1 ]]; then
+      echo "iOS presentation recorder has no process to finalize" >&2
+      return 1
+    fi
+    return 0
+  fi
+  if ! kill -0 "${simulator_video_pid}" >/dev/null 2>&1; then
+    if wait "${simulator_video_pid}"; then
+      exit_status=0
+    else
+      exit_status=$?
+    fi
+    simulator_video_pid=""
+    if [[ "${strict}" -eq 1 ]]; then
+      echo "iOS presentation recorder exited before finalization with status ${exit_status}" >&2
+      if [[ ${exit_status} -ne 0 ]]; then
+        return "${exit_status}"
+      fi
+      return 1
+    fi
+    return 0
+  fi
+  if ! kill -INT "${simulator_video_pid}" >/dev/null 2>&1; then
+    signal_failed=1
+    if ! kill -0 "${simulator_video_pid}" >/dev/null 2>&1; then
+      stopped=1
+    fi
+  else
+    for _ in $(seq 1 40); do
+      if ! kill -0 "${simulator_video_pid}" >/dev/null 2>&1; then
+        stopped=1
+        break
+      fi
+      sleep 0.25
+    done
+  fi
+  if [[ "${stopped}" -ne 1 ]]; then
+    timed_out=1
+    if [[ "${signal_failed}" -eq 1 ]]; then
+      echo "failed to request iOS presentation recorder finalization" >&2
+    else
+      echo "timed out finalizing iOS presentation recorder" >&2
+    fi
+    kill -TERM "${simulator_video_pid}" >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+      if ! kill -0 "${simulator_video_pid}" >/dev/null 2>&1; then
+        stopped=1
+        break
+      fi
+      sleep 0.25
+    done
+    if kill -0 "${simulator_video_pid}" >/dev/null 2>&1; then
+      kill -KILL "${simulator_video_pid}" >/dev/null 2>&1 || true
+    fi
+  fi
+  if wait "${simulator_video_pid}"; then
+    exit_status=0
+  else
+    exit_status=$?
+  fi
+  simulator_video_pid=""
+  if [[ "${strict}" -eq 1 && ${exit_status} -ne 0 ]]; then
+    echo "iOS presentation recorder exited with status ${exit_status}" >&2
+    return "${exit_status}"
+  fi
+  if [[ "${strict}" -eq 1 && \
+        ( "${timed_out}" -eq 1 || "${signal_failed}" -eq 1 ) ]]; then
+    return 1
+  fi
+  if [[ "${strict}" -eq 1 && ! -s "${presentation_video_path}" ]]; then
+    echo "iOS presentation recorder did not produce a nonempty MP4" >&2
+    return 1
+  fi
+  if [[ "${strict}" -eq 1 && ! -s "${presentation_video_log}" ]]; then
+    echo "iOS presentation recorder did not produce a nonempty log" >&2
+    return 1
+  fi
+}
+
 cleanup() {
   local status=$?
+  if [[ -n "${simulator_video_pid}" ]]; then
+    stop_presentation_video 0 || true
+  fi
   if [[ -n "${simulator_udid}" ]]; then
     xcrun simctl shutdown "${simulator_udid}" >/dev/null 2>&1 || true
     xcrun simctl delete "${simulator_udid}" >/dev/null 2>&1 || true
@@ -405,6 +533,7 @@ PY
       local receipt="${data_container}/Documents/stasis-ios-presentation-${phase}.json"
       local capture_release="${data_container}/Documents/stasis-ios-presentation-${phase}.captured"
       rm -f -- "${receipt}" "${capture_release}"
+      require_simulator_video_live "before ${phase} launch"
       launch_output="$(
         SIMCTL_CHILD_STASIS_ENABLE_TEST_INPUT=1 \
         SIMCTL_CHILD_STASIS_SEAM_TEST_ID=IOS-PRESENTATION-BASELINE \
@@ -431,10 +560,13 @@ PY
         return 1
       fi
       xcrun simctl terminate "${simulator_udid}" "${bundle_id}"
+      require_simulator_video_live "after ${phase} termination"
     }
 
+    start_presentation_video
     run_presentation_phase initial
     run_presentation_phase relaunch
+    stop_presentation_video 1
     presentation_log_ready=0
     for _ in $(seq 1 40); do
       xcrun simctl spawn "${simulator_udid}" log show --style compact --last 5m \
