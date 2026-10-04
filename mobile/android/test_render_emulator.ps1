@@ -363,7 +363,7 @@ function Complete-PresentationLifecycleVideo([object]$Session, [string]$StopReas
     if (-not $Session -or $Session.completed) { return }
     $record = $Session.record
     $process = $Session.process
-    $elapsedAtStageEnd = ((Get-Date).ToUniversalTime() - [datetime]$Session.started_utc).TotalSeconds
+    $elapsedAtStageEnd = ([DateTimeOffset]::UtcNow - [DateTimeOffset]::Parse([string]$Session.started_utc)).TotalSeconds
     $process.Refresh()
     $recorderAlreadyExited = $process.HasExited
     $record.elapsed_seconds_at_stage_end = [math]::Round($elapsedAtStageEnd, 3)
