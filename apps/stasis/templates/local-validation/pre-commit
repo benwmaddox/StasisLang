@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(pwd -P)
+hook="$repo_root/.githooks/pre-commit.ps1"
+
+if command -v pwsh >/dev/null 2>&1; then
+    exec pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$hook" -ProjectRoot "$repo_root"
+fi
+if command -v powershell.exe >/dev/null 2>&1; then
+    exec powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$hook" -ProjectRoot "$repo_root"
+fi
+
+echo "Stasis pre-commit requires PowerShell (pwsh or Windows PowerShell)." >&2
+exit 1
