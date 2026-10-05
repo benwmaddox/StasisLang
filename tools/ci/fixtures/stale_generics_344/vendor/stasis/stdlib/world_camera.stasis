@@ -1,0 +1,330 @@
+// Deterministic 2D world presentation. Gameplay remains in world space;
+// these values are derived by render code and must not enter simulation state.
+
+import "graphics.stasis";
+
+const WORLD_CAMERA_MAX_TILES_AXIS: i32 = 16;
+const WORLD_CAMERA_MAX_RESIDENT_TILES: i32 = 256;
+const WORLD_CAMERA_MAX_RASTER_SIDE: i32 = 2048;
+const WORLD_CAMERA_RESIDENCY_BUDGET_BYTES: i32 = 67108864;
+
+struct WorldCamera {
+    world_min_x: f32;
+    world_min_y: f32;
+    world_max_x: f32;
+    world_max_y: f32;
+    viewport_x: f32;
+    viewport_y: f32;
+    viewport_w: f32;
+    viewport_h: f32;
+    scale: f32;
+    origin_x: f32;
+    origin_y: f32;
+}
+
+struct WorldCameraHistory {
+    previous_x: f32;
+    previous_y: f32;
+    current_x: f32;
+    current_y: f32;
+}
+
+struct WorldTileRange {
+    first_x: i32;
+    first_y: i32;
+    end_x: i32;
+    end_y: i32;
+    count: i32;
+    effective_tile_world_size: f32;
+    coarsening_steps: i32;
+    status: i32;
+}
+
+function world_camera_clamp(value: f32, low: f32, high: f32): f32 {
+    if (value < low) {
+        return low;
+    }
+    if (value > high) {
+        return high;
+    }
+    return value;
+}
+
+function world_camera_configure(
+    self: WorldCamera,
+    world_min_x: f32,
+    world_min_y: f32,
+    world_max_x: f32,
+    world_max_y: f32,
+    viewport_x: f32,
+    viewport_y: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+    scale: f32
+): void {
+    self.world_min_x = world_min_x;
+    self.world_min_y = world_min_y;
+    self.world_max_x = world_max_x;
+    self.world_max_y = world_max_y;
+    if (self.world_max_x < self.world_min_x) {
+        self.world_max_x = self.world_min_x;
+    }
+    if (self.world_max_y < self.world_min_y) {
+        self.world_max_y = self.world_min_y;
+    }
+    self.viewport_x = viewport_x;
+    self.viewport_y = viewport_y;
+    self.viewport_w = viewport_w;
+    self.viewport_h = viewport_h;
+    if (self.viewport_w < 0.0) {
+        self.viewport_w = 0.0;
+    }
+    if (self.viewport_h < 0.0) {
+        self.viewport_h = 0.0;
+    }
+    self.scale = scale;
+    if (self.scale <= 0.0) {
+        self.scale = 1.0;
+    }
+    self.world_camera_follow(world_min_x, world_min_y);
+}
+
+function visible_world_width(self: WorldCamera): f32 {
+    return self.viewport_w / self.scale;
+}
+
+function visible_world_height(self: WorldCamera): f32 {
+    return self.viewport_h / self.scale;
+}
+
+function world_camera_follow(self: WorldCamera, world_x: f32, world_y: f32): void {
+    let span_x: f32 = self.visible_world_width();
+    let span_y: f32 = self.visible_world_height();
+    let world_w: f32 = self.world_max_x - self.world_min_x;
+    let world_h: f32 = self.world_max_y - self.world_min_y;
+
+    if (world_w <= span_x) {
+        self.origin_x = self.world_min_x -(span_x - world_w) / 2.0;
+    } else {
+        self.origin_x = world_camera_clamp(world_x - span_x / 2.0, self.world_min_x, self.world_max_x - span_x);
+    }
+    if (world_h <= span_y) {
+        self.origin_y = self.world_min_y -(span_y - world_h) / 2.0;
+    } else {
+        self.origin_y = world_camera_clamp(world_y - span_y / 2.0, self.world_min_y, self.world_max_y - span_y);
+    }
+}
+
+function world_to_view_x(self: WorldCamera, world_x: f32): f32 {
+    return self.viewport_x +(world_x - self.origin_x) * self.scale;
+}
+
+function world_to_view_y(self: WorldCamera, world_y: f32): f32 {
+    return self.viewport_y +(world_y - self.origin_y) * self.scale;
+}
+
+function view_to_world_x(self: WorldCamera, view_x: f32): f32 {
+    return self.origin_x +(view_x - self.viewport_x) / self.scale;
+}
+
+function view_to_world_y(self: WorldCamera, view_y: f32): f32 {
+    return self.origin_y +(view_y - self.viewport_y) / self.scale;
+}
+
+function visible_world_min_x(self: WorldCamera): f32 {
+    return self.origin_x;
+}
+
+function visible_world_min_y(self: WorldCamera): f32 {
+    return self.origin_y;
+}
+
+function visible_world_max_x(self: WorldCamera): f32 {
+    return self.origin_x + self.visible_world_width();
+}
+
+function visible_world_max_y(self: WorldCamera): f32 {
+    return self.origin_y + self.visible_world_height();
+}
+
+function world_camera_clip_begin(self: WorldCamera): void {
+    gfx_push_clip(self.viewport_x, self.viewport_y, self.viewport_w, self.viewport_h);
+}
+
+function world_camera_clip_end(self: WorldCamera): void {
+    gfx_pop_clip();
+}
+
+function world_camera_history_reset(self: WorldCameraHistory, world_x: f32, world_y: f32): void {
+    self.previous_x = world_x;
+    self.previous_y = world_y;
+    self.current_x = world_x;
+    self.current_y = world_y;
+}
+
+function world_camera_history_advance(self: WorldCameraHistory, world_x: f32, world_y: f32): void {
+    self.previous_x = self.current_x;
+    self.previous_y = self.current_y;
+    self.current_x = world_x;
+    self.current_y = world_y;
+}
+
+function world_camera_history_advance_or_teleport(self: WorldCameraHistory, world_x: f32, world_y: f32, teleport_distance: f32): void {
+    let dx: f32 = world_x - self.current_x;
+    let dy: f32 = world_y - self.current_y;
+    let limit: f32 = teleport_distance;
+    if (limit < 0.0) {
+        limit = 0.0;
+    }
+    if (dx > limit || dx < 0.0 - limit || dy > limit || dy < 0.0 - limit) {
+        self.world_camera_history_reset(world_x, world_y);
+        return;
+    }
+    self.world_camera_history_advance(world_x, world_y);
+}
+
+function interpolated_x(self: WorldCameraHistory, alpha: f32): f32 {
+    let bounded: f32 = world_camera_clamp(alpha, 0.0, 1.0);
+    return self.previous_x +(self.current_x - self.previous_x) * bounded;
+}
+
+function interpolated_y(self: WorldCameraHistory, alpha: f32): f32 {
+    let bounded: f32 = world_camera_clamp(alpha, 0.0, 1.0);
+    return self.previous_y +(self.current_y - self.previous_y) * bounded;
+}
+
+function world_camera_floor_positive(value: f32): i32 {
+    if (value <= 0.0) {
+        return 0;
+    }
+    return f32_to_i32(value);
+}
+
+function world_camera_ceil_positive(value: f32): i32 {
+    if (value <= 0.0) {
+        return 0;
+    }
+    let whole: i32 = f32_to_i32(value);
+    if (i32_to_f32(whole) < value) {
+        return whole + 1;
+    }
+    return whole;
+}
+
+function world_camera_tile_range_calculate(self: WorldTileRange, camera: WorldCamera, tile_world_size: f32, padding: i32): void {
+    self.first_x = 0;
+    self.first_y = 0;
+    self.end_x = 0;
+    self.end_y = 0;
+    self.count = 0;
+    self.effective_tile_world_size = 0.0;
+    self.coarsening_steps = 0;
+    self.status = -1;
+    if (tile_world_size <= 0.0) {
+        return;
+    }
+    let safe_padding: i32 = padding;
+    if (safe_padding < 0) {
+        safe_padding = 0;
+    }
+    if (safe_padding > 2) {
+        safe_padding = 2;
+    }
+    let effective: f32 = tile_world_size;
+    let attempt: i32 = 0;
+    for (attempt = 0; attempt < 64; attempt = attempt + 1) {
+        let map_x: i32 = world_camera_ceil_positive((camera.world_max_x - camera.world_min_x) / effective);
+        let map_y: i32 = world_camera_ceil_positive((camera.world_max_y - camera.world_min_y) / effective);
+        self.first_x = world_camera_floor_positive((camera.visible_world_min_x() - camera.world_min_x) / effective) - safe_padding;
+        self.first_y = world_camera_floor_positive((camera.visible_world_min_y() - camera.world_min_y) / effective) - safe_padding;
+        self.end_x = world_camera_ceil_positive((camera.visible_world_max_x() - camera.world_min_x) / effective) + safe_padding;
+        self.end_y = world_camera_ceil_positive((camera.visible_world_max_y() - camera.world_min_y) / effective) + safe_padding;
+        if (self.first_x < 0) {
+            self.first_x = 0;
+        }
+        if (self.first_y < 0) {
+            self.first_y = 0;
+        }
+        if (self.end_x > map_x) {
+            self.end_x = map_x;
+        }
+        if (self.end_y > map_y) {
+            self.end_y = map_y;
+        }
+        let count_x: i32 = self.end_x - self.first_x;
+        let count_y: i32 = self.end_y - self.first_y;
+        if (count_x <= WORLD_CAMERA_MAX_TILES_AXIS && count_y <= WORLD_CAMERA_MAX_TILES_AXIS) {
+            self.count = count_x * count_y;
+            self.effective_tile_world_size = effective;
+            self.coarsening_steps = attempt;
+            self.status = 0;
+            return;
+        }
+        effective = effective * 2.0;
+    }
+    self.first_x = 0;
+    self.first_y = 0;
+    self.end_x = 0;
+    self.end_y = 0;
+    self.count = 0;
+    self.effective_tile_world_size = effective;
+    self.coarsening_steps = 64;
+    self.status = -2;
+}
+
+function world_camera_raster_side(logical_tile_pixels: i32, density: i32, resident_tiles: i32): i32 {
+    if (logical_tile_pixels <= 0 || density <= 0 || resident_tiles <= 0) {
+        return 0;
+    }
+    let count: i32 = resident_tiles;
+    if (count > WORLD_CAMERA_MAX_RESIDENT_TILES) {
+        count = WORLD_CAMERA_MAX_RESIDENT_TILES;
+    }
+    let budget_side: i32 = 256;
+    if (count <= 64) {
+        budget_side = 512;
+    }
+    if (count <= 16) {
+        budget_side = 1024;
+    }
+    if (count <= 4) {
+        budget_side = WORLD_CAMERA_MAX_RASTER_SIDE;
+    }
+    if (logical_tile_pixels > WORLD_CAMERA_MAX_RASTER_SIDE / density) {
+        return budget_side;
+    }
+    let requested: i32 = logical_tile_pixels * density;
+    if (requested < budget_side) {
+        return requested;
+    }
+    return budget_side;
+}
+
+function world_camera_residency_bytes(raster_side: i32, resident_tiles: i32): i32 {
+    if (raster_side <= 0 || resident_tiles <= 0) {
+        return 0;
+    }
+    let count: i32 = resident_tiles;
+    if (count > WORLD_CAMERA_MAX_RESIDENT_TILES) {
+        count = WORLD_CAMERA_MAX_RESIDENT_TILES;
+    }
+    let budget_side: i32 = 256;
+    if (count <= 64) {
+        budget_side = 512;
+    }
+    if (count <= 16) {
+        budget_side = 1024;
+    }
+    if (count <= 4) {
+        budget_side = WORLD_CAMERA_MAX_RASTER_SIDE;
+    }
+    let side: i32 = raster_side;
+    if (side > budget_side) {
+        side = budget_side;
+    }
+    let bytes: i32 = side * side * 4 * count;
+    if (bytes > WORLD_CAMERA_RESIDENCY_BUDGET_BYTES) {
+        return WORLD_CAMERA_RESIDENCY_BUDGET_BYTES;
+    }
+    return bytes;
+}

@@ -6,20 +6,13 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from tools.ci.collect_staged_archive_evidence import collect_evidence
-
-
-SHARED_LOGS = (
-    "bundle-audit.json",
-    "bundle-audit.log",
-    "editor-info.log",
-    "vendor-rollback-probe.log",
-    "bundled-vendor-before.log",
-    "bundled-vendor-update.log",
-    "bundled-vendor-status.json.log",
-    "generated-project-new.log",
-    "generated-vendor-status.json.log",
+from tools.ci.collect_staged_archive_evidence import (
+    SHARED_QUALIFICATION_FILES,
+    collect_evidence,
 )
+
+
+SHARED_LOGS = SHARED_QUALIFICATION_FILES
 
 
 def write(root: Path, relative: str, content: bytes = b"review evidence\n") -> Path:
@@ -110,6 +103,12 @@ class CollectStagedArchiveEvidenceTests(unittest.TestCase):
             self.assertIn("android/generated/runtime/android-test-signer.json", paths)
             self.assertTrue(any(path.startswith("android/generated/test-package-manifests/") for path in paths))
             self.assertTrue(any(path.endswith("shipping-package-manifests/stasis_provenance.json") for path in paths))
+            for name in (
+                "historical-stale-vendor-before.log",
+                "historical-stale-vendor-update.log",
+                "historical-stale-vendor-status.json.log",
+            ):
+                self.assertIn(f"qualification/{name}", paths)
             self.assertFalse(any(path.endswith(".apk") or "/build/" in path for path in paths))
             self.assertNotIn("staged/hosted-chrome-version.txt", paths)
             for item in manifest["files"]:

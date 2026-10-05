@@ -1,0 +1,17 @@
+{
+  "fixture": "stale_generics_344",
+  "source_commit": "092db0bf9542636a66fca00a7c5699da22dafde1",
+  "source_path": "samples/generics_collections",
+  "sample_tree_sha256": "c5f8574ff86918ba55dd553f23ed12771ad8a2719be31c3577e1dd70d34defcf",
+  "pin": {
+    "release_id": "nightly-20260923-344",
+    "sha256": "1c91faa3e6baac7f72faecd11da75c781d688be7f0e817f9ea23e16a44b29623",
+    "hash_version": 2
+  },
+  "sample_file_count": 83,
+  "sample_raw_bytes": 280764,
+  "vendor_file_count": 64,
+  "vendor_raw_bytes": 262051,
+  "verified_canonical_vendor_sha256": "1c91faa3e6baac7f72faecd11da75c781d688be7f0e817f9ea23e16a44b29623",
+  "hash_contract": "Stasis vendor hash version 2: sorted relative paths, NUL separators, canonical LF for UTF-8 stasis/md/json/svg text"
+}

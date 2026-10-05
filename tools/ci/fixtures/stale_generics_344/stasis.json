@@ -1,0 +1,27 @@
+{
+  "manifest_version": 1,
+  "name": "generics_collections",
+  "entry": "src/main.stasis",
+  "tests": "tests",
+  "output": "build",
+  "vendor": {
+    "stasis": {
+      "release_id": "nightly-20260923-344",
+      "sha256": "1c91faa3e6baac7f72faecd11da75c781d688be7f0e817f9ea23e16a44b29623",
+      "hash_version": 2
+    }
+  },
+  "ai": {
+    "provider": null,
+    "openrouter": {
+      "approved_models": [
+        "openai/gpt-oss-120b"
+      ],
+      "min_throughput_tokens_per_second": 400,
+      "max_p50_latency_seconds": 2.0
+    },
+    "editor": {
+      "auto_persist_html_transcripts": false
+    }
+  }
+}
