@@ -1,0 +1,266 @@
+import "../src/game_patterns.stasis";
+
+test `invalid wave metadata does not activate a wave`(): bool {
+    reset_simulation();
+    set_wave_event(0, 3, 2);
+    set_wave_event(1, 2, 2);
+    let count_before: i32 = state.wave_count;
+    let cursor_before: i32 = state.wave_cursor;
+
+    return !activate_wave(2) && state.wave_count == count_before && state.wave_cursor == cursor_before;
+}
+
+test `target ties choose the lower stable slot id`(): bool {
+    reset_simulation();
+    let first_id: i32 = allocate_enemy(5);
+    let second_id: i32 = allocate_enemy(5);
+    enemies[first_id].path_position = 4;
+    enemies[second_id].path_position = enemies[first_id].path_position;
+
+    return first_id < second_id && select_target() == first_id;
+}
+
+test `invalid input never enters the queue`(): bool {
+    reset_simulation();
+
+    return !submit_tower_rules(3, -1, 2) && pending_input_count == 0;
+}
+
+test `queued input does not mutate live rules`(): bool {
+    reset_simulation();
+    let damage_before: i32 = tower_rules.damage;
+    let range_before: i32 = tower_rules.range_end;
+    let cooldown_before: i32 = tower_rules.cooldown_ticks;
+
+    if (!submit_tower_rules(4, 6, 3)) {
+        return false;
+    }
+
+    return pending_input_count == 1 && tower_rules.damage == damage_before && tower_rules.range_end == range_before && tower_rules.cooldown_ticks == cooldown_before;
+}
+
+test `accepted inputs apply in queue order`(): bool {
+    reset_simulation();
+    submit_tower_rules(3, 7, 1);
+    submit_tower_rules(5, 4, 2);
+    let last_damage: i32 = pending_inputs[1].damage;
+    let last_range: i32 = pending_inputs[1].range_end;
+    let last_cooldown: i32 = pending_inputs[1].cooldown_ticks;
+
+    apply_pending_inputs();
+
+    return tower_rules.damage == last_damage && tower_rules.range_end == last_range && tower_rules.cooldown_ticks == last_cooldown;
+}
+
+test `a full input queue preserves accepted entries`(): bool {
+    reset_simulation();
+    submit_tower_rules(3, 7, 1);
+    submit_tower_rules(5, 4, 2);
+    let accepted_damage: i32 = pending_inputs[1].damage;
+
+    let accepted: bool = submit_tower_rules(9, 9, 9);
+
+    return !accepted && pending_input_count == INPUT_CAPACITY && pending_inputs[1].damage == accepted_damage;
+}
+
+test `applied input is consumed once`(): bool {
+    reset_simulation();
+    submit_tower_rules(3, 7, 1);
+    apply_pending_inputs();
+    let applied_damage: i32 = tower_rules.damage;
+    pending_inputs[0].damage = applied_damage + 1;
+
+    apply_pending_inputs();
+
+    return pending_input_count == 0 && tower_rules.damage == applied_damage;
+}
+
+test `cooldown gates attack materialization until ready`(): bool {
+    reset_simulation();
+    let target_id: i32 = allocate_enemy(5);
+    state.cooldown_ticks = 1;
+
+    materialize_attack();
+    let blocked: bool = !pending_attack.valid;
+    advance_cooldown();
+    materialize_attack();
+
+    return blocked && pending_attack.valid && pending_attack.target_id == target_id;
+}
+
+test `spawn work stops at its per-step allowance`(): bool {
+    reset_simulation();
+    set_wave_event(0, 0, 2);
+    set_wave_event(1, 0, 3);
+    set_wave_event(2, 0, 4);
+    activate_wave(3);
+    let cursor_before: i32 = state.wave_cursor;
+    let active_before: i32 = active_enemy_count();
+
+    spawn_due_events();
+
+    return state.wave_cursor - cursor_before == MAX_SPAWNS_PER_STEP && active_enemy_count() - active_before == MAX_SPAWNS_PER_STEP && state.wave_cursor < state.wave_count;
+}
+
+test `capacity leaves an unprocessed spawn event pending`(): bool {
+    reset_simulation();
+    for (let index: i32 = 0; index < ENEMY_CAPACITY; index += 1) {
+        allocate_enemy(1);
+    }
+    set_wave_event(0, 0, 3);
+    activate_wave(1);
+    let cursor_before: i32 = state.wave_cursor;
+
+    spawn_due_events();
+
+    return state.capacity_blocked && state.wave_cursor == cursor_before && active_enemy_count() == ENEMY_CAPACITY;
+}
+
+test `movement changes active slots only`(): bool {
+    reset_simulation();
+    let active_id: i32 = allocate_enemy(5);
+    let inactive_id: i32 = 1;
+    enemies[active_id].path_position = 3;
+    enemies[inactive_id].path_position = 9;
+    let active_before: i32 = enemies[active_id].path_position;
+    let inactive_before: i32 = enemies[inactive_id].path_position;
+
+    move_enemies();
+
+    return enemies[active_id].path_position == active_before + 1 && enemies[inactive_id].path_position == inactive_before && !enemies[inactive_id].active;
+}
+
+test `attack materialization does not mutate gameplay state`(): bool {
+    reset_simulation();
+    let target_id: i32 = allocate_enemy(5);
+    enemies[target_id].path_position = 3;
+    let health_before: i32 = enemies[target_id].health;
+    let active_before: i32 = active_enemy_count();
+    let cooldown_before: i32 = state.cooldown_ticks;
+
+    materialize_attack();
+
+    if (!pending_attack.valid || pending_attack.target_id != target_id) {
+        return false;
+    }
+    return enemies[target_id].health == health_before && active_enemy_count() == active_before && state.cooldown_ticks == cooldown_before;
+}
+
+test `attack commit consumes one intent once`(): bool {
+    reset_simulation();
+    let target_id: i32 = allocate_enemy(5);
+    pending_attack.valid = true;
+    pending_attack.target_id = target_id;
+    pending_attack.damage = 3;
+    let health_before: i32 = enemies[target_id].health;
+    let damage: i32 = pending_attack.damage;
+
+    let first_commit: bool = commit_attack();
+    let health_after: i32 = enemies[target_id].health;
+    let second_commit: bool = commit_attack();
+
+    return first_commit && !second_commit && health_after == health_before - damage && enemies[target_id].health == health_after;
+}
+
+test `removal releases defeated slots and preserves survivors`(): bool {
+    reset_simulation();
+    let removed_id: i32 = allocate_enemy(1);
+    let survivor_id: i32 = allocate_enemy(4);
+    let survivor_health: i32 = enemies[survivor_id].health;
+    let defeated_before: i32 = state.defeated_count;
+    enemies[removed_id].health = 0;
+
+    remove_defeated();
+
+    return !enemies[removed_id].active && enemies[survivor_id].active && enemies[survivor_id].health == survivor_health && state.defeated_count == defeated_before + 1;
+}
+
+test `allocation reuses the lowest released slot`(): bool {
+    reset_simulation();
+    let released_id: i32 = allocate_enemy(1);
+    let survivor_id: i32 = allocate_enemy(4);
+    enemies[released_id].health = 0;
+    remove_defeated();
+
+    let reused_id: i32 = allocate_enemy(6);
+
+    return reused_id == released_id && enemies[survivor_id].active;
+}
+
+test `render projects active slots in stable order`(): bool {
+    reset_simulation();
+    let first_id: i32 = allocate_enemy(5);
+    let second_id: i32 = allocate_enemy(7);
+    enemies[first_id].path_position = 2;
+    enemies[second_id].path_position = 6;
+
+    render();
+
+    if (render_enemy_count != 2) {
+        return false;
+    }
+    let first_matches: bool = render_enemies[0].stable_id == first_id && render_enemies[0].path_position == enemies[first_id].path_position;
+    let second_matches: bool = render_enemies[1].stable_id == second_id && render_enemies[1].path_position == enemies[second_id].path_position;
+    return first_matches && second_matches;
+}
+
+test `render preserves authoritative gameplay state`(): bool {
+    reset_simulation();
+    let enemy_id: i32 = allocate_enemy(5);
+    enemies[enemy_id].path_position = 3;
+    let tick_before: i32 = state.tick_index;
+    let health_before: i32 = enemies[enemy_id].health;
+    let position_before: i32 = enemies[enemy_id].path_position;
+
+    render();
+
+    return state.tick_index == tick_before && enemies[enemy_id].health == health_before && enemies[enemy_id].path_position == position_before && enemies[enemy_id].active;
+}
+
+test `public tick applies input and movement before targeting`(): bool {
+    reset_simulation();
+    let target_id: i32 = allocate_enemy(5);
+    let health_before: i32 = enemies[target_id].health;
+    let position_before: i32 = enemies[target_id].path_position;
+    submit_tower_rules(4, 0, 3);
+
+    tick();
+
+    if (state.tick_index != 1 || pending_input_count != 0 || tower_rules.range_end != 0) {
+        return false;
+    }
+    return enemies[target_id].path_position == position_before + 1 && enemies[target_id].health == health_before && !pending_attack.valid;
+}
+
+test `short tick trace reveals the first divergent system`(): bool {
+    reset_simulation();
+    let target_id: i32 = allocate_enemy(9);
+    submit_tower_rules(2, 8, 2);
+    let damage: i32 = pending_inputs[0].damage;
+    let cooldown: i32 = pending_inputs[0].cooldown_ticks;
+    let initial_health: i32 = enemies[target_id].health;
+
+    tick();
+    if (
+        state.tick_index != 1
+        || enemies[target_id].path_position != 1
+        || enemies[target_id].health != initial_health - damage
+        || state.cooldown_ticks != cooldown
+    ) {
+        return false;
+    }
+
+    let health_after_attack: i32 = enemies[target_id].health;
+    tick();
+    if (
+        state.tick_index != 2
+        || enemies[target_id].path_position != 2
+        || enemies[target_id].health != health_after_attack
+        || state.cooldown_ticks != cooldown - 1
+    ) {
+        return false;
+    }
+
+    tick();
+    return state.tick_index == 3 && enemies[target_id].path_position == 3 && enemies[target_id].health == health_after_attack - damage && state.cooldown_ticks == cooldown;
+}

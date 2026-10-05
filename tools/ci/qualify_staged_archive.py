@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import Any, Callable
 
 
 ARCHIVE_LAYOUT = {
@@ -34,6 +34,27 @@ ARCHIVE_LAYOUT = {
         "runtime": "bin/libstasis_graphics.dylib",
     },
 }
+
+VENDOR_HASH_VERSION = 2
+HISTORICAL_STALE_FIXTURE = (
+    Path(__file__).resolve().parent / "fixtures" / "stale_generics_344"
+)
+HISTORICAL_STALE_FIXTURE_METADATA = (
+    Path(__file__).resolve().parent / "fixtures" / "stale_generics_344.provenance.json"
+)
+HISTORICAL_STALE_PIN = {
+    "release_id": "nightly-20260923-344",
+    "sha256": "1c91faa3e6baac7f72faecd11da75c781d688be7f0e817f9ea23e16a44b29623",
+    "hash_version": VENDOR_HASH_VERSION,
+}
+HISTORICAL_STALE_SOURCE_COMMIT = "092db0bf9542636a66fca00a7c5699da22dafde1"
+HISTORICAL_STALE_SAMPLE_TREE_SHA256 = (
+    "c5f8574ff86918ba55dd553f23ed12771ad8a2719be31c3577e1dd70d34defcf"
+)
+HISTORICAL_STALE_SAMPLE_FILE_COUNT = 83
+HISTORICAL_STALE_SAMPLE_RAW_BYTES = 280764
+HISTORICAL_STALE_VENDOR_FILE_COUNT = 64
+HISTORICAL_STALE_VENDOR_RAW_BYTES = 262051
 
 
 def toolchain_environment() -> dict[str, str]:
@@ -58,7 +79,10 @@ def sha256_file(path: Path) -> str:
 
 def tree_sha256(root: Path) -> str:
     digest = hashlib.sha256()
-    for path in sorted(root.rglob("*")):
+    paths = sorted(
+        root.rglob("*"), key=lambda path: path.relative_to(root).as_posix()
+    )
+    for path in paths:
         if path.is_symlink():
             raise RuntimeError(f"consumer contains an unexpected symlink: {path}")
         if path.is_file():
@@ -282,29 +306,260 @@ def verify_identity(
     }
 
 
+def require_vendor_snapshot_state(
+    status: Any, *, expected_release: str, label: str
+) -> str:
+    if not isinstance(status, dict):
+        raise RuntimeError(f"{label} vendor status omitted its result")
+    if status.get("local_changes") is not False:
+        raise RuntimeError(f"{label} vendor snapshot has local changes: {status}")
+    if (
+        status.get("pin_verified") is not True
+        or status.get("legacy_pin_unverified") is not False
+    ):
+        raise RuntimeError(f"{label} vendor pin is not verified: {status}")
+
+    recorded = status.get("recorded")
+    installed = status.get("installed")
+    if not isinstance(recorded, dict) or not isinstance(installed, dict):
+        raise RuntimeError(f"{label} vendor status omitted recorded or installed identity")
+    recorded_release = recorded.get("release_id")
+    if not isinstance(recorded_release, str) or not recorded_release:
+        raise RuntimeError(f"{label} recorded vendor release ID is malformed")
+    if installed.get("release_id") != expected_release:
+        raise RuntimeError(f"{label} is pinned to another release: {installed}")
+
+    hashes = {
+        "expected": status.get("expected_sha256"),
+        "recorded": status.get("recorded_sha256"),
+        "recorded identity": recorded.get("sha256"),
+        "actual": status.get("actual_sha256"),
+        "installed": installed.get("sha256"),
+    }
+    for field, digest in hashes.items():
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise RuntimeError(f"{label} {field} vendor SHA-256 is malformed")
+    versions = (
+        status.get("expected_hash_version"),
+        status.get("recorded_hash_version"),
+        recorded.get("hash_version"),
+        status.get("actual_hash_version"),
+        installed.get("hash_version"),
+    )
+    if any(type(version) is not int or version != VENDOR_HASH_VERSION for version in versions):
+        raise RuntimeError(f"{label} vendor hash version is not verified: {status}")
+    if hashes["expected"] != hashes["recorded"]:
+        raise RuntimeError(f"{label} expected and recorded vendor hashes differ: {status}")
+    if (
+        hashes["recorded"] != hashes["recorded identity"]
+        or hashes["recorded"] != hashes["actual"]
+    ):
+        raise RuntimeError(f"{label} recorded and actual vendor hashes differ: {status}")
+
+    current = status.get("current")
+    update_available = status.get("update_available")
+    if type(current) is not bool or type(update_available) is not bool:
+        raise RuntimeError(f"{label} vendor currentness flags are malformed: {status}")
+    hashes_match_installed = hashes["actual"] == hashes["installed"]
+    if current is True and update_available is False and hashes_match_installed:
+        return "current"
+    if current is False and update_available is True and not hashes_match_installed:
+        return "stale"
+    raise RuntimeError(
+        f"{label} vendor status contradicts its verified content hashes: {status}"
+    )
+
+
+def require_vendor_current_or_stale(
+    status: Any, *, expected_release: str, label: str
+) -> str:
+    return require_vendor_snapshot_state(
+        status, expected_release=expected_release, label=label
+    )
+
+
+def require_vendor_stale(
+    status: Any,
+    *,
+    expected_release: str,
+    expected_pin: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    state = require_vendor_snapshot_state(
+        status, expected_release=expected_release, label=label
+    )
+    if state != "stale":
+        raise RuntimeError(f"{label} historical vendor consumer was not stale: {status}")
+    recorded = status["recorded"]
+    if (
+        recorded.get("release_id") != expected_pin["release_id"]
+        or recorded.get("sha256") != expected_pin["sha256"]
+        or recorded.get("hash_version") != expected_pin["hash_version"]
+        or status.get("actual_sha256") != expected_pin["sha256"]
+    ):
+        raise RuntimeError(
+            f"{label} historical vendor pin or tree differs from its fixture: {status}"
+        )
+    return status
+
+
 def require_vendor_current(
+    status: Any, *, expected_release: str, label: str
+) -> dict[str, Any]:
+    state = require_vendor_snapshot_state(
+        status, expected_release=expected_release, label=label
+    )
+    if state != "current":
+        raise RuntimeError(f"{label} vendor snapshot is not current: {status}")
+    return status
+
+
+def require_package_vendor_matches_status(
+    package_vendor: Any,
+    status: Any,
+    *,
+    expected_release: str,
+    label: str,
+) -> None:
+    current = require_vendor_current(
+        status, expected_release=expected_release, label=label
+    )
+    vendor_fields = {
+        "release_id",
+        "recorded_sha256",
+        "actual_sha256",
+        "recorded_hash_version",
+        "actual_hash_version",
+    }
+    if not isinstance(package_vendor, dict) or set(package_vendor) != vendor_fields:
+        raise RuntimeError(f"{label} package provenance has malformed vendor identity")
+    if any(
+        type(package_vendor.get(field)) is not int
+        for field in ("recorded_hash_version", "actual_hash_version")
+    ):
+        raise RuntimeError(f"{label} package provenance has malformed vendor hash versions")
+
+    expected_vendor = {
+        "release_id": current["recorded"]["release_id"],
+        "recorded_sha256": current["recorded_sha256"],
+        "actual_sha256": current["actual_sha256"],
+        "recorded_hash_version": current["recorded_hash_version"],
+        "actual_hash_version": current["actual_hash_version"],
+    }
+    if package_vendor != expected_vendor:
+        raise RuntimeError(
+            f"{label} package vendor identity differs from its verified current consumer: "
+            f"expected {expected_vendor}, found {package_vendor}"
+        )
+
+
+def qualify_vendor_update(
     cli: Path,
     project: Path,
     *,
     expected_release: str,
     evidence: Path,
     label: str,
+    initial_state: str,
+    expected_pin: dict[str, Any] | None = None,
+    before_update: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
-    status = run_json(
+    before = run_json(
+        cli,
+        ["--workspace", str(project), "vendor", "status"],
+        cwd=project,
+        log=evidence / f"{label}-vendor-before.log",
+    ).get("result")
+    if initial_state == "current-or-stale":
+        starting_state = require_vendor_current_or_stale(
+            before, expected_release=expected_release, label=label
+        )
+    elif initial_state == "stale" and expected_pin is not None:
+        require_vendor_stale(
+            before,
+            expected_release=expected_release,
+            expected_pin=expected_pin,
+            label=label,
+        )
+        starting_state = "stale"
+    else:
+        raise ValueError("vendor update requires a supported initial state and pin")
+
+    before_update_result = before_update() if before_update is not None else None
+    run_json(
+        cli,
+        ["--workspace", str(project), "vendor", "update"],
+        cwd=project,
+        log=evidence / f"{label}-vendor-update.log",
+    )
+    after = run_json(
         cli,
         ["--workspace", str(project), "vendor", "status"],
         cwd=project,
         log=evidence / f"{label}-vendor-status.json.log",
     ).get("result")
-    if not isinstance(status, dict):
-        raise RuntimeError(f"{label} vendor status omitted its result")
-    if status.get("current") is not True or status.get("local_changes") is not False:
-        raise RuntimeError(f"{label} vendor snapshot is not current and clean: {status}")
-    if status.get("installed", {}).get("release_id") != expected_release:
-        raise RuntimeError(f"{label} is pinned to another release: {status.get('installed')}")
-    if status.get("recorded_sha256") != status.get("actual_sha256"):
-        raise RuntimeError(f"{label} recorded and actual vendor hashes differ")
-    return status
+    require_vendor_current(after, expected_release=expected_release, label=label)
+    return {
+        "initial_state": starting_state,
+        "before": before,
+        "after": after,
+        "before_update_result": before_update_result,
+    }
+
+
+def validate_historical_stale_fixture() -> Path:
+    if not HISTORICAL_STALE_FIXTURE.is_dir() or HISTORICAL_STALE_FIXTURE.is_symlink():
+        raise RuntimeError(
+            f"historical stale consumer fixture is missing: {HISTORICAL_STALE_FIXTURE}"
+        )
+    if (
+        HISTORICAL_STALE_FIXTURE_METADATA.is_symlink()
+        or not HISTORICAL_STALE_FIXTURE_METADATA.is_file()
+    ):
+        raise RuntimeError("historical stale consumer fixture provenance file is unsafe")
+    sample_tree_sha256 = tree_sha256(HISTORICAL_STALE_FIXTURE)
+    try:
+        manifest = json.loads(
+            (HISTORICAL_STALE_FIXTURE / "stasis.json").read_text(encoding="utf-8")
+        )
+        metadata = json.loads(
+            HISTORICAL_STALE_FIXTURE_METADATA.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"historical stale consumer fixture metadata is invalid: {error}"
+        ) from error
+
+    vendor = manifest.get("vendor") if isinstance(manifest, dict) else None
+    if not isinstance(vendor, dict) or vendor.get("stasis") != HISTORICAL_STALE_PIN:
+        raise RuntimeError("historical stale consumer fixture manifest pin changed")
+
+    sample_files = [path for path in HISTORICAL_STALE_FIXTURE.rglob("*") if path.is_file()]
+    vendor_root = HISTORICAL_STALE_FIXTURE / "vendor" / "stasis"
+    vendor_files = [path for path in vendor_root.rglob("*") if path.is_file()]
+    sample_raw_bytes = sum(path.stat().st_size for path in sample_files)
+    vendor_raw_bytes = sum(path.stat().st_size for path in vendor_files)
+
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("source_commit") != HISTORICAL_STALE_SOURCE_COMMIT
+        or metadata.get("source_path") != "samples/generics_collections"
+        or metadata.get("pin") != HISTORICAL_STALE_PIN
+        or metadata.get("verified_canonical_vendor_sha256")
+        != HISTORICAL_STALE_PIN["sha256"]
+        or metadata.get("sample_tree_sha256") != HISTORICAL_STALE_SAMPLE_TREE_SHA256
+        or metadata.get("sample_file_count") != HISTORICAL_STALE_SAMPLE_FILE_COUNT
+        or metadata.get("sample_raw_bytes") != HISTORICAL_STALE_SAMPLE_RAW_BYTES
+        or metadata.get("vendor_file_count") != HISTORICAL_STALE_VENDOR_FILE_COUNT
+        or metadata.get("vendor_raw_bytes") != HISTORICAL_STALE_VENDOR_RAW_BYTES
+        or len(sample_files) != HISTORICAL_STALE_SAMPLE_FILE_COUNT
+        or sample_raw_bytes != HISTORICAL_STALE_SAMPLE_RAW_BYTES
+        or len(vendor_files) != HISTORICAL_STALE_VENDOR_FILE_COUNT
+        or vendor_raw_bytes != HISTORICAL_STALE_VENDOR_RAW_BYTES
+        or sample_tree_sha256 != HISTORICAL_STALE_SAMPLE_TREE_SHA256
+    ):
+        raise RuntimeError("historical stale consumer fixture provenance changed")
+    return HISTORICAL_STALE_FIXTURE
 
 
 def run_consumer_checks(
@@ -435,29 +690,35 @@ def main() -> int:
     workspaces.mkdir(parents=True)
     bundled = workspaces / "bundled-generics"
     shutil.copytree(sample_source, bundled)
-    rollback = probe_vendor_failure_rollback(archive_root, cli, sample_source, evidence)
+    bundled_vendor = qualify_vendor_update(
+        cli,
+        bundled,
+        expected_release=args.release_id,
+        evidence=evidence,
+        label="bundled",
+        initial_state="current-or-stale",
+    )
+    bundled_before = bundled_vendor["before"]
+    bundled_after = bundled_vendor["after"]
 
-    bundled_before = run_json(
+    historical_fixture = validate_historical_stale_fixture()
+    historical_stale = workspaces / "historical-stale-generics-344"
+    shutil.copytree(historical_fixture, historical_stale)
+    historical_vendor = qualify_vendor_update(
         cli,
-        ["--workspace", str(bundled), "vendor", "status"],
-        cwd=bundled,
-        log=evidence / "bundled-vendor-before.log",
-    ).get("result")
-    if not isinstance(bundled_before, dict):
-        raise RuntimeError("bundled sample vendor status omitted its result")
-    if bundled_before.get("current") is not False or bundled_before.get("update_available") is not True:
-        raise RuntimeError("bundled sample did not start as a verified stale vendor consumer")
-    if bundled_before.get("local_changes") is not False:
-        raise RuntimeError("bundled sample contains local vendor changes before update")
-    run_json(
-        cli,
-        ["--workspace", str(bundled), "vendor", "update"],
-        cwd=bundled,
-        log=evidence / "bundled-vendor-update.log",
+        historical_stale,
+        expected_release=args.release_id,
+        evidence=evidence,
+        label="historical-stale",
+        initial_state="stale",
+        expected_pin=HISTORICAL_STALE_PIN,
+        before_update=lambda: probe_vendor_failure_rollback(
+            archive_root, cli, historical_fixture, evidence
+        ),
     )
-    bundled_after = require_vendor_current(
-        cli, bundled, expected_release=args.release_id, evidence=evidence, label="bundled"
-    )
+    rollback = historical_vendor["before_update_result"]
+    if not isinstance(rollback, dict):
+        raise RuntimeError("historical stale consumer rollback probe omitted its result")
 
     generated = workspaces / "generated-generics"
     generated_name = f"ArchiveFresh{args.target.title()}"
@@ -468,8 +729,14 @@ def main() -> int:
         log=evidence / "generated-project-new.log",
     )
     copy_sample_sources(sample_source, generated)
+    generated_vendor = run_json(
+        cli,
+        ["--workspace", str(generated), "vendor", "status"],
+        cwd=generated,
+        log=evidence / "generated-vendor-status.json.log",
+    ).get("result")
     generated_vendor = require_vendor_current(
-        cli, generated, expected_release=args.release_id, evidence=evidence, label="generated"
+        generated_vendor, expected_release=args.release_id, label="generated"
     )
 
     consumers = {
@@ -496,6 +763,7 @@ def main() -> int:
                 evidence / "desktop" / "bundled",
                 args.target,
                 identity=identity,
+                vendor_status=bundled_after,
                 expected_release=args.release_id,
                 expected_source=args.source_commit,
                 archive_root=archive_root,
@@ -506,6 +774,7 @@ def main() -> int:
                 evidence / "desktop" / "generated",
                 args.target,
                 identity=identity,
+                vendor_status=generated_vendor,
                 expected_release=args.release_id,
                 expected_source=args.source_commit,
                 archive_root=archive_root,
@@ -520,6 +789,7 @@ def main() -> int:
                 bundled,
                 evidence / "web" / "bundled",
                 identity=identity,
+                vendor_status=bundled_after,
                 expected_release=args.release_id,
                 expected_source=args.source_commit,
                 archive_root=archive_root,
@@ -529,6 +799,7 @@ def main() -> int:
                 generated,
                 evidence / "web" / "generated",
                 identity=identity,
+                vendor_status=generated_vendor,
                 expected_release=args.release_id,
                 expected_source=args.source_commit,
                 archive_root=archive_root,
@@ -607,6 +878,7 @@ def qualify_desktop(
     target: str,
     *,
     identity: dict[str, Any],
+    vendor_status: dict[str, Any],
     expected_release: str,
     expected_source: str,
     archive_root: Path,
@@ -660,12 +932,21 @@ def qualify_desktop(
         cwd=Path(__file__).resolve().parents[2],
         log=evidence / "desktop-provenance-audit.log",
     )
-    vendor = provenance.get("desktop_package", {}).get("project", {}).get("vendor", {})
-    if (
-        vendor.get("release_id") != expected_release
-        or vendor.get("recorded_sha256") != vendor.get("actual_sha256")
-    ):
-        raise RuntimeError("desktop package provenance reports vendor drift or wrong release")
+    desktop_package = provenance.get("desktop_package")
+    project_receipt = (
+        desktop_package.get("project")
+        if isinstance(desktop_package, dict)
+        else None
+    )
+    package_vendor = (
+        project_receipt.get("vendor") if isinstance(project_receipt, dict) else None
+    )
+    require_package_vendor_matches_status(
+        package_vendor,
+        vendor_status,
+        expected_release=expected_release,
+        label="desktop package",
+    )
 
     screenshot = evidence / "desktop-frame.png"
     environment = toolchain_environment()
@@ -748,6 +1029,7 @@ def qualify_web(
     evidence: Path,
     *,
     identity: dict[str, Any],
+    vendor_status: dict[str, Any],
     expected_release: str,
     expected_source: str,
     archive_root: Path,
@@ -782,12 +1064,19 @@ def qualify_web(
         package_release_identity.pop(package_field, None)
     if package_release_identity != archived_provenance:
         raise RuntimeError("Web package release provenance differs from the staged archive")
-    vendor = provenance.get("web_package", {}).get("project", {}).get("vendor", {})
-    if (
-        vendor.get("release_id") != expected_release
-        or vendor.get("recorded_sha256") != vendor.get("actual_sha256")
-    ):
-        raise RuntimeError("Web package provenance reports vendor drift or wrong release")
+    web_package = provenance.get("web_package")
+    project_receipt = (
+        web_package.get("project") if isinstance(web_package, dict) else None
+    )
+    package_vendor = (
+        project_receipt.get("vendor") if isinstance(project_receipt, dict) else None
+    )
+    require_package_vendor_matches_status(
+        package_vendor,
+        vendor_status,
+        expected_release=expected_release,
+        label="Web package",
+    )
     browser_evidence = evidence / "browser"
     command = [
         "node",

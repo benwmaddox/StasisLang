@@ -1,0 +1,286 @@
+const ENEMY_CAPACITY: i32 = 4;
+const WAVE_CAPACITY: i32 = 6;
+const MAX_SPAWNS_PER_STEP: i32 = 2;
+const INPUT_CAPACITY: i32 = 2;
+
+struct EnemySlot {
+    active: bool;
+    health: i32;
+    path_position: i32;
+}
+
+struct WaveEvent {
+    spawn_tick: i32;
+    health: i32;
+}
+
+struct TowerRules {
+    damage: i32;
+    range_end: i32;
+    cooldown_ticks: i32;
+}
+
+struct TowerRuleInput {
+    damage: i32;
+    range_end: i32;
+    cooldown_ticks: i32;
+}
+
+struct AttackIntent {
+    valid: bool;
+    target_id: i32;
+    damage: i32;
+}
+
+struct RenderEnemy {
+    visible: bool;
+    stable_id: i32;
+    path_position: i32;
+    health: i32;
+}
+
+struct SimulationState {
+    tick_index: i32;
+    wave_count: i32;
+    wave_cursor: i32;
+    cooldown_ticks: i32;
+    capacity_blocked: bool;
+    spawned_count: i32;
+    defeated_count: i32;
+}
+
+global state: SimulationState;
+global enemies: EnemySlot[4];
+global wave_events: WaveEvent[6];
+global tower_rules: TowerRules;
+global pending_inputs: TowerRuleInput[2];
+global pending_input_count: i32;
+global pending_attack: AttackIntent;
+global render_enemies: RenderEnemy[4];
+global render_enemy_count: i32;
+
+function reset_simulation(): void {
+    state.tick_index = 0;
+    state.wave_count = 0;
+    state.wave_cursor = 0;
+    state.cooldown_ticks = 0;
+    state.capacity_blocked = false;
+    state.spawned_count = 0;
+    state.defeated_count = 0;
+    tower_rules.damage = 2;
+    tower_rules.range_end = 8;
+    tower_rules.cooldown_ticks = 2;
+    pending_input_count = 0;
+    pending_attack.valid = false;
+    pending_attack.target_id = -1;
+    pending_attack.damage = 0;
+    render_enemy_count = 0;
+    for (let slot_id: i32 = 0; slot_id < ENEMY_CAPACITY; slot_id += 1) {
+        enemies[slot_id].active = false;
+        enemies[slot_id].health = 0;
+        enemies[slot_id].path_position = 0;
+        render_enemies[slot_id].visible = false;
+    }
+}
+
+function submit_tower_rules(damage: i32, range_end: i32, cooldown_ticks: i32): bool {
+    if (damage <= 0 || range_end < 0 || cooldown_ticks < 0) {
+        return false;
+    }
+    if (pending_input_count >= INPUT_CAPACITY) {
+        return false;
+    }
+    let input_index: i32 = pending_input_count;
+    pending_inputs[input_index].damage = damage;
+    pending_inputs[input_index].range_end = range_end;
+    pending_inputs[input_index].cooldown_ticks = cooldown_ticks;
+    pending_input_count += 1;
+    return true;
+}
+
+function apply_pending_inputs(): void {
+    for (let input_index: i32 = 0; input_index < pending_input_count; input_index += 1) {
+        tower_rules.damage = pending_inputs[input_index].damage;
+        tower_rules.range_end = pending_inputs[input_index].range_end;
+        tower_rules.cooldown_ticks = pending_inputs[input_index].cooldown_ticks;
+    }
+    pending_input_count = 0;
+}
+
+function set_wave_event(index: i32, spawn_tick: i32, health: i32): void {
+    wave_events[index].spawn_tick = spawn_tick;
+    wave_events[index].health = health;
+}
+
+function wave_is_valid(count: i32): bool {
+    if (count < 0 || count > WAVE_CAPACITY) {
+        return false;
+    }
+    for (let index: i32 = 0; index < count; index += 1) {
+        if (wave_events[index].spawn_tick < 0 || wave_events[index].health <= 0) {
+            return false;
+        }
+        if (index > 0 && wave_events[index].spawn_tick < wave_events[index - 1].spawn_tick) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function activate_wave(count: i32): bool {
+    if (!wave_is_valid(count)) {
+        return false;
+    }
+    state.wave_count = count;
+    state.wave_cursor = 0;
+    state.capacity_blocked = false;
+    return true;
+}
+
+function configure_example_wave(): bool {
+    set_wave_event(0, 0, 3);
+    set_wave_event(1, 0, 4);
+    set_wave_event(2, 2, 5);
+    set_wave_event(3, 4, 6);
+    return activate_wave(4);
+}
+
+function allocate_enemy(health: i32): i32 {
+    for (let slot_id: i32 = 0; slot_id < ENEMY_CAPACITY; slot_id += 1) {
+        if (!enemies[slot_id].active) {
+            enemies[slot_id].active = true;
+            enemies[slot_id].health = health;
+            enemies[slot_id].path_position = 0;
+            state.spawned_count += 1;
+            return slot_id;
+        }
+    }
+    return -1;
+}
+
+function spawn_due_events(): void {
+    state.capacity_blocked = false;
+    let attempts: i32 = 0;
+    for (attempts = 0; attempts < MAX_SPAWNS_PER_STEP && state.wave_cursor < state.wave_count; attempts += 1) {
+        let event_index: i32 = state.wave_cursor;
+        if (wave_events[event_index].spawn_tick > state.tick_index) {
+            return;
+        }
+        if (allocate_enemy(wave_events[event_index].health) < 0) {
+            state.capacity_blocked = true;
+            return;
+        }
+        state.wave_cursor += 1;
+    }
+}
+
+function advance_cooldown(): void {
+    if (state.cooldown_ticks > 0) {
+        state.cooldown_ticks -= 1;
+    }
+}
+
+function move_enemies(): void {
+    for (let slot_id: i32 = 0; slot_id < ENEMY_CAPACITY; slot_id += 1) {
+        if (enemies[slot_id].active) {
+            enemies[slot_id].path_position += 1;
+        }
+    }
+}
+
+function select_target(): i32 {
+    let selected_id: i32 = -1;
+    let selected_position: i32 = -1;
+    for (let slot_id: i32 = 0; slot_id < ENEMY_CAPACITY; slot_id += 1) {
+        if (enemies[slot_id].active && enemies[slot_id].path_position <= tower_rules.range_end) {
+            if (enemies[slot_id].path_position > selected_position) {
+                selected_id = slot_id;
+                selected_position = enemies[slot_id].path_position;
+            }
+        }
+    }
+    return selected_id;
+}
+
+function materialize_attack(): void {
+    pending_attack.valid = false;
+    pending_attack.target_id = -1;
+    pending_attack.damage = 0;
+    if (state.cooldown_ticks != 0) {
+        return;
+    }
+    let target_id: i32 = select_target();
+    if (target_id >= 0) {
+        pending_attack.valid = true;
+        pending_attack.target_id = target_id;
+        pending_attack.damage = tower_rules.damage;
+    }
+}
+
+function commit_attack(): bool {
+    if (!pending_attack.valid) {
+        return false;
+    }
+    let target_id: i32 = pending_attack.target_id;
+    if (target_id < 0 || target_id >= ENEMY_CAPACITY || !enemies[target_id].active) {
+        pending_attack.valid = false;
+        return false;
+    }
+    enemies[target_id].health -= pending_attack.damage;
+    state.cooldown_ticks = tower_rules.cooldown_ticks;
+    pending_attack.valid = false;
+    return true;
+}
+
+function remove_defeated(): void {
+    for (let slot_id: i32 = 0; slot_id < ENEMY_CAPACITY; slot_id += 1) {
+        if (enemies[slot_id].active && enemies[slot_id].health <= 0) {
+            enemies[slot_id].active = false;
+            state.defeated_count += 1;
+        }
+    }
+}
+
+function active_enemy_count(): i32 {
+    let count: i32 = 0;
+    for (let slot_id: i32 = 0; slot_id < ENEMY_CAPACITY; slot_id += 1) {
+        if (enemies[slot_id].active) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+function main(): i32 {
+    reset_simulation();
+    configure_example_wave();
+    return 0;
+}
+
+function tick(): i32 {
+    apply_pending_inputs();
+    advance_cooldown();
+    spawn_due_events();
+    move_enemies();
+    materialize_attack();
+    commit_attack();
+    remove_defeated();
+    state.tick_index += 1;
+    return 0;
+}
+
+function render(): i32 {
+    render_enemy_count = 0;
+    for (let slot_id: i32 = 0; slot_id < ENEMY_CAPACITY; slot_id += 1) {
+        render_enemies[slot_id].visible = false;
+        if (enemies[slot_id].active) {
+            let command_index: i32 = render_enemy_count;
+            render_enemies[command_index].visible = true;
+            render_enemies[command_index].stable_id = slot_id;
+            render_enemies[command_index].path_position = enemies[slot_id].path_position;
+            render_enemies[command_index].health = enemies[slot_id].health;
+            render_enemy_count += 1;
+        }
+    }
+    return 0;
+}

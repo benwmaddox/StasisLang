@@ -35,6 +35,20 @@ SKIPPED_DIRECTORIES = {
     "simulator-derived-data",
     "target",
 }
+SHARED_QUALIFICATION_FILES = (
+    "bundle-audit.json",
+    "bundle-audit.log",
+    "editor-info.log",
+    "vendor-rollback-probe.log",
+    "bundled-vendor-before.log",
+    "bundled-vendor-update.log",
+    "bundled-vendor-status.json.log",
+    "historical-stale-vendor-before.log",
+    "historical-stale-vendor-update.log",
+    "historical-stale-vendor-status.json.log",
+    "generated-project-new.log",
+    "generated-vendor-status.json.log",
+)
 
 
 def sha256(path: Path) -> str:
@@ -252,18 +266,7 @@ def collect_desktop(
     receipt = _collect_shared_qualification(collector, staged_root, archive_root, lane_passed, target)
     if lane_passed:
         collector.require(staged_root / "hosted-chrome-version.txt", "staged/hosted-chrome-version.txt")
-    shared_files = (
-        "bundle-audit.json",
-        "bundle-audit.log",
-        "editor-info.log",
-        "vendor-rollback-probe.log",
-        "bundled-vendor-before.log",
-        "bundled-vendor-update.log",
-        "bundled-vendor-status.json.log",
-        "generated-project-new.log",
-        "generated-vendor-status.json.log",
-    )
-    for name in shared_files:
+    for name in SHARED_QUALIFICATION_FILES:
         collector.require(staged_root / name, f"staged/{name}") if lane_passed else None
     for label, consumer_name in (("bundled", "bundled-generics"), ("generated", "generated-generics")):
         desktop_evidence = staged_root / "desktop" / label
@@ -307,17 +310,7 @@ def collect_android(
     lane_passed: bool,
 ) -> dict[str, Any] | None:
     receipt = _collect_shared_qualification(collector, staged_root, archive_root, lane_passed, "android")
-    for name in (
-        "bundle-audit.json",
-        "bundle-audit.log",
-        "editor-info.log",
-        "vendor-rollback-probe.log",
-        "bundled-vendor-before.log",
-        "bundled-vendor-update.log",
-        "bundled-vendor-status.json.log",
-        "generated-project-new.log",
-        "generated-vendor-status.json.log",
-    ):
+    for name in SHARED_QUALIFICATION_FILES:
         collector.require(staged_root / name, f"staged/{name}") if lane_passed else None
     for label, consumer_name in (("bundled", "bundled-generics"), ("generated", "generated-generics")):
         consumer_root = runtime_root / label
@@ -371,17 +364,7 @@ def collect_ios(
     lane_passed: bool,
 ) -> dict[str, Any] | None:
     receipt = _collect_shared_qualification(collector, staged_root, archive_root, lane_passed, "ios")
-    for name in (
-        "bundle-audit.json",
-        "bundle-audit.log",
-        "editor-info.log",
-        "vendor-rollback-probe.log",
-        "bundled-vendor-before.log",
-        "bundled-vendor-update.log",
-        "bundled-vendor-status.json.log",
-        "generated-project-new.log",
-        "generated-vendor-status.json.log",
-    ):
+    for name in SHARED_QUALIFICATION_FILES:
         collector.require(staged_root / name, f"staged/{name}") if lane_passed else None
     for label, consumer_name in (("bundled", "bundled-generics"), ("generated", "generated-generics")):
         consumer = staged_root / "consumers" / consumer_name
