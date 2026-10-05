@@ -1282,6 +1282,65 @@ fn new_refuses_to_overwrite_existing_git_ignore_policy() {
     fs::remove_dir_all(&parent).ok();
 }
 
+fn normalize_hook_diagnostic_whitespace(diagnostic: &str) -> String {
+    let bytes = diagnostic.as_bytes();
+    let mut without_color = String::with_capacity(diagnostic.len());
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset] == 0x1b && bytes.get(offset + 1) == Some(&b'[') {
+            let mut end = offset + 2;
+            while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b';') {
+                end += 1;
+            }
+            if bytes.get(end) == Some(&b'm') {
+                offset = end + 1;
+                continue;
+            }
+        }
+
+        let character = diagnostic[offset..]
+            .chars()
+            .next()
+            .expect("offset must remain on a UTF-8 character boundary");
+        without_color.push(character);
+        offset += character.len_utf8();
+    }
+
+    without_color
+        .lines()
+        .map(|line| {
+            let line = line.trim_start();
+            line.strip_prefix('|').unwrap_or(line).trim()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn hook_formatting_diagnostic_matching_ignores_terminal_wrapping() {
+    let captured_wrapped = concat!(
+        "\x1b[31;1m\x1b[0m\x1b[36;1m\x1b[36;1m\x1b[0m\x1b[36;1m\x1b[0m",
+        "\x1b[36;1m\x1b[31;1m\x1b[31;1m\x1b[36;1m     | \x1b[31;1m",
+        "Commit blocked: Stasis formatting changed source files. Review and stage\x1b[0m\n",
+        "\x1b[31;1m\x1b[0m\x1b[36;1m\x1b[36;1m\x1b[0m\x1b[36;1m\x1b[0m",
+        "\x1b[36;1m\x1b[31;1m\x1b[31;1m\x1b[36;1m\x1b[31;1m\x1b[36;1m     | \x1b[31;1m",
+        "the enforced formatting, then commit again.\x1b[0m",
+    );
+    let plain_wrapped =
+        "Commit blocked: Stasis formatting changed source files. Review and stage\n    the enforced formatting, then commit again.";
+    let different_error = "Commit blocked: stage the source before committing.";
+
+    assert!(normalize_hook_diagnostic_whitespace(captured_wrapped)
+        .contains("stage the enforced formatting"));
+    assert!(normalize_hook_diagnostic_whitespace(plain_wrapped)
+        .contains("stage the enforced formatting"));
+    assert!(!normalize_hook_diagnostic_whitespace(different_error)
+        .contains("stage the enforced formatting"));
+}
+
 #[test]
 fn new_project_enforces_formatting_before_commits() {
     let parent = temp_dir("format_hook");
@@ -1375,11 +1434,13 @@ fn new_project_enforces_formatting_before_commits() {
     assert!(git(&["add", "-A"], &project).status.success());
     let blocked = git_with_stasis_on_path(&["commit", "-m", "unformatted"], &project);
     assert!(!blocked.status.success());
+    let blocked_stderr = String::from_utf8_lossy(&blocked.stderr);
     assert!(
-        String::from_utf8_lossy(&blocked.stderr).contains("stage the enforced formatting"),
+        normalize_hook_diagnostic_whitespace(&blocked_stderr)
+            .contains("stage the enforced formatting"),
         "stdout={} stderr={}",
         String::from_utf8_lossy(&blocked.stdout),
-        String::from_utf8_lossy(&blocked.stderr)
+        blocked_stderr
     );
     assert_eq!(
         fs::read_to_string(project.join("src/main.stasis")).expect("read hook-formatted source"),
@@ -1387,12 +1448,13 @@ fn new_project_enforces_formatting_before_commits() {
     );
     let still_blocked = git_with_stasis_on_path(&["commit", "-m", "still unformatted"], &project);
     assert!(!still_blocked.status.success());
+    let still_blocked_stderr = String::from_utf8_lossy(&still_blocked.stderr);
     assert!(
-        String::from_utf8_lossy(&still_blocked.stderr)
+        normalize_hook_diagnostic_whitespace(&still_blocked_stderr)
             .contains("stage the source before committing"),
         "stdout={} stderr={}",
         String::from_utf8_lossy(&still_blocked.stdout),
-        String::from_utf8_lossy(&still_blocked.stderr)
+        still_blocked_stderr
     );
 
     assert!(git(&["add", "-A"], &project).status.success());
