@@ -1127,6 +1127,86 @@ if ($noPidState.LogCalls -ne 0) {{ throw 'The log was read without a package pro
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("readiness helper cases passed", result.stdout)
 
+    def test_resize_receipt_waits_for_later_exact_settled_surface(self):
+        pwsh = shutil.which("pwsh")
+        if not pwsh:
+            self.skipTest("PowerShell is unavailable for executable resize-helper checks")
+        start = self.workshop_script.index(
+            "function Resolve-PresentationBaselineResizeReceipt("
+        )
+        end = self.workshop_script.index(
+            "function Assert-PresentationBaselineMatrix(", start
+        )
+        helper = self.workshop_script[start:end]
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$RenderTimeoutSeconds = 45
+$script:waitCalls = 0
+function Read-SurfaceBounds {{ param($Description, $XmlPath, $Package) @(0, 102, 810, 1635) }}
+function Wait-PresentationBaselineReceipt {{
+    param($Package, $Predicate, $AfterReceiptCount, $TimeoutSeconds, $Description, $InitialProcessId)
+    $script:waitCalls += 1
+    if ($AfterReceiptCount -ne 8 -or $TimeoutSeconds -ne 45 -or
+        $Description -ne 'later surface-reset receipt matching settled UI bounds' -or
+        $InitialProcessId -ne '4098') {{
+        throw 'settled receipt wait did not preserve the bounded continuation identity'
+    }}
+    $transient = [pscustomobject]@{{
+        receipt_kind = 'renderer'; event = 'surface_reset_placeholder';
+        surface_generation = 3; surface_size = @(810, 1601)
+    }}
+    $sameGeneration = [pscustomobject]@{{
+        receipt_kind = 'renderer'; event = 'surface_reset_placeholder';
+        surface_generation = 3; surface_size = @(810, 1635)
+    }}
+    $settled = [pscustomobject]@{{
+        receipt_kind = 'renderer'; event = 'surface_reset_placeholder';
+        surface_generation = 4; surface_size = @(810, 1635)
+    }}
+    if (& $Predicate $transient) {{ throw 'transient resize receipt matched settled bounds' }}
+    if (& $Predicate $sameGeneration) {{ throw 'same-generation resize receipt matched settled bounds' }}
+    if (-not (& $Predicate $settled)) {{ throw 'settled resize receipt did not match exact bounds' }}
+    [pscustomobject]@{{ receipt = $settled; next_receipt_index = 9 }}
+}}
+{helper}
+$firstReceipt = [pscustomobject]@{{
+    receipt_kind = 'renderer'; event = 'surface_reset_placeholder';
+    surface_generation = 3; surface_size = @(810, 1601)
+}}
+$first = [pscustomobject]@{{ receipt = $firstReceipt; next_receipt_index = 8 }}
+$resolved = Resolve-PresentationBaselineResizeReceipt `
+    'com.stasislang.workshop' 'preview' $first 'missing.xml' '4098'
+if ($script:waitCalls -ne 1 -or $resolved.reset.receipt.surface_size[1] -ne 1635 -or
+    $resolved.transient_receipt.surface_size[1] -ne 1601 -or
+    ($resolved.settled_surface -join ',') -ne '0,102,810,1635') {{
+    throw 'transient-to-settled resize resolution was not preserved'
+}}
+$script:waitCalls = 0
+$matching = [pscustomobject]@{{
+    receipt = [pscustomobject]@{{
+        receipt_kind = 'renderer'; event = 'surface_reset_placeholder'; surface_size = @(810, 1635)
+        surface_generation = 4
+    }}
+    next_receipt_index = 10
+}}
+$direct = Resolve-PresentationBaselineResizeReceipt `
+    'com.stasislang.workshop' 'preview' $matching 'missing.xml' '4098'
+if ($script:waitCalls -ne 0 -or $null -ne $direct.transient_receipt -or
+    $direct.reset.next_receipt_index -ne 10) {{
+    throw 'already-settled resize receipt did not return directly'
+}}
+'resize helper cases passed'
+"""
+        result = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-Command", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("resize helper cases passed", result.stdout)
+
     def test_workshop_waits_for_terminal_soak_before_resolving_capture_viewport(self):
         readiness = self.workshop_script.index("Wait-ForWorkshopIT032Readiness `")
         viewport = self.workshop_script.index("$surface = Read-SurfaceBounds", readiness)

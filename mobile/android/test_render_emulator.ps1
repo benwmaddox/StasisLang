@@ -1278,6 +1278,47 @@ function Assert-PresentationResetReceipt([object]$Receipt) {
     }
 }
 
+function Resolve-PresentationBaselineResizeReceipt(
+    [string]$Package,
+    [string]$SurfaceDescription,
+    [object]$FirstReset,
+    [string]$XmlPath,
+    [string]$ProcessId
+) {
+    Remove-Item -LiteralPath $XmlPath -Force -ErrorAction SilentlyContinue
+    $surface = @(Read-SurfaceBounds $SurfaceDescription $XmlPath $Package)
+    $firstSize = @($FirstReset.receipt.surface_size | ForEach-Object { [int]$_ })
+    if ($firstSize.Count -eq 2 -and
+        $firstSize[0] -eq $surface[2] -and $firstSize[1] -eq $surface[3]) {
+        return [pscustomobject]@{
+            reset = $FirstReset
+            transient_receipt = $null
+            settled_surface = $surface
+        }
+    }
+
+    $settledWidth = [int]$surface[2]
+    $settledHeight = [int]$surface[3]
+    $firstGeneration = [long]$FirstReset.receipt.surface_generation
+    $settledPredicate = {
+        param($receipt)
+        $size = @($receipt.surface_size | ForEach-Object { [int]$_ })
+        $receipt.receipt_kind -eq "renderer" -and
+            $receipt.event -eq "surface_reset_placeholder" -and
+            [long]$receipt.surface_generation -gt $firstGeneration -and
+            $size.Count -eq 2 -and
+            $size[0] -eq $settledWidth -and $size[1] -eq $settledHeight
+    }.GetNewClosure()
+    $settled = Wait-PresentationBaselineReceipt $Package $settledPredicate `
+        $FirstReset.next_receipt_index $RenderTimeoutSeconds `
+        "later surface-reset receipt matching settled UI bounds" $ProcessId
+    return [pscustomobject]@{
+        reset = $settled
+        transient_receipt = $FirstReset.receipt
+        settled_surface = $surface
+    }
+}
+
 function Assert-PresentationBaselineMatrix(
     [string]$Package,
     [string]$SurfaceDescription,
@@ -1568,7 +1609,12 @@ function Assert-PresentationBaselineMatrix(
             param($receipt)
             $receipt.receipt_kind -eq "renderer" -and $receipt.event -eq "surface_reset_placeholder"
         }
-        $reset = Wait-PresentationBaselineReceipt $Package $resetPredicate $beforeReset $RenderTimeoutSeconds "resized surface reset placeholder" $processId
+        $firstReset = Wait-PresentationBaselineReceipt $Package $resetPredicate $beforeReset $RenderTimeoutSeconds "resized surface reset placeholder" $processId
+        Assert-PresentationResetReceipt $firstReset.receipt
+        $resizeSurfaceXml = Join-Path $artifactRoot "presentation-baseline-resize-settled-window.xml"
+        $resetResolution = Resolve-PresentationBaselineResizeReceipt `
+            $Package $SurfaceDescription $firstReset $resizeSurfaceXml $processId
+        $reset = $resetResolution.reset
         Assert-PresentationResetReceipt $reset.receipt
         $resetSize = @($reset.receipt.surface_size | ForEach-Object { [int]$_ })
         if ($resetSize[0] -eq $currentSurface[2] -and $resetSize[1] -eq $currentSurface[3]) {
@@ -1577,6 +1623,8 @@ function Assert-PresentationBaselineMatrix(
         $matrix.stages.Add([pscustomobject]@{
             name = "resize-reset-placeholder"
             requested_size = @($resizedWidth, $resizedHeight)
+            transient_receipt = $resetResolution.transient_receipt
+            settled_surface = $resetResolution.settled_surface
             receipt = $reset.receipt
         })
         $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "resize-reset-placeholder" "reset-placeholder" $reset.receipt))
