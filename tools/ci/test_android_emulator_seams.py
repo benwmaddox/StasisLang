@@ -1231,7 +1231,7 @@ function Invoke-Adb {{
     }}
 }}
 {helpers}
-$barrier = Wait-ForPackageBackgrounded 'com.stasislang.workshop' 1 1
+$barrier = Wait-ForPackageBackgrounded 'com.stasislang.workshop' 5 1
 if ($script:activityCalls -ne 3 -or
     $barrier.resumed_activity -notlike '*nexuslauncher*') {{
     throw 'background barrier did not wait for a different resumed activity'
