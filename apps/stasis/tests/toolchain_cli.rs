@@ -920,6 +920,18 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     assert!(agent_guide.contains("Rationale:"));
     assert!(agent_guide.contains("Extension:"));
     assert!(agent_guide.contains("Read `PROJECT_ARCHITECTURE.md`"));
+    assert!(agent_guide.contains("tools/local-validation.ps1"));
+    assert!(project.join("tools/local-validation.json").is_file());
+    assert!(project.join("tools/local-validation.ps1").is_file());
+    assert!(project.join("tools/resolve-pinned-stasis.ps1").is_file());
+    let validation_config: Value = serde_json::from_slice(
+        &fs::read(project.join("tools/local-validation.json")).expect("read validation config"),
+    )
+    .expect("parse validation config");
+    assert_eq!(validation_config["schema_version"], 1);
+    assert_eq!(validation_config["deterministic_tests"], json!([]));
+    assert_eq!(validation_config["web_package"], Value::Null);
+    assert_eq!(validation_config["after_web_package"], json!([]));
     let claude_guide = fs::read_to_string(project.join("CLAUDE.md")).expect("read Claude guide");
     assert_eq!(claude_guide, "# CLAUDE.md\n\n@AGENTS.md\n");
     let architecture_guide = fs::read_to_string(project.join("PROJECT_ARCHITECTURE.md"))
@@ -937,9 +949,18 @@ fn project_commands_emit_stable_json_from_nested_directories() {
         ".githooks"
     );
     let pre_commit = fs::read_to_string(project.join(".githooks/pre-commit"))
-        .expect("read generated pre-commit hook");
-    assert!(pre_commit.contains("stasis format"));
-    assert!(!pre_commit.contains("stasis format --check"));
+        .expect("read generated pre-commit wrapper");
+    assert!(pre_commit.contains("pwsh"));
+    assert!(pre_commit.contains(".githooks/pre-commit.ps1"));
+    let pre_commit_script = fs::read_to_string(project.join(".githooks/pre-commit.ps1"))
+        .expect("read generated pre-commit script");
+    assert!(pre_commit_script.contains("fmt --check"));
+    assert!(pre_commit_script.contains("$identity.executable format"));
+    assert!(!pre_commit_script.contains("format src tests"));
+    let pre_push = fs::read_to_string(project.join(".githooks/pre-push"))
+        .expect("read generated pre-push wrapper");
+    assert!(pre_push.contains("pwsh"));
+    assert!(project.join(".githooks/pre-push.ps1").is_file());
     let generated_attributes =
         fs::read_to_string(project.join(".gitattributes")).expect("read generated Git attributes");
     for required_rule in [

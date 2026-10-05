@@ -277,47 +277,83 @@ loading-state guidance without network access.
 
 `stasis new NAME` adds `.github/workflows/stasis-pr.yml`,
 `.github/workflows/stasis-weekly.yml`, `.github/workflows/stasis-quarterly.yml`, and the
-PowerShell restore, resolution, pin-update, and pre-PR validation helpers under `tools/`.
-`stasis init` does not add them. Conflicting or linked workflow/tool directories fail preflight
-without a partial scaffold. Generated `.gitignore` entries exclude restored toolchains, build and
-package output, and validation receipts while keeping `vendor/stasis` checked in.
+PowerShell restore, resolution, and pin-update helpers, the local validation gate, and `.githooks`
+wrappers. `stasis init` does not add them. Conflicting or linked workflow/tool directories fail
+preflight without a partial scaffold. Project creation copies the embedded templates and remains
+offline; it does not restore a toolchain or contact GitHub. Generated `.gitignore` entries exclude
+restored toolchains, build and package output, and validation receipts while keeping `vendor/stasis`
+checked in.
 
-The PR workflow runs for every pull request without path filters and also supports
-`workflow_dispatch`. It checks out the exact contributor head, emits a required relevant-change
-sentinel in one Ubuntu job, and keeps unrelated changes to that single billed job. Relevant changes validate the checked-in immutable
-`stasis.json` release and lowercase vendor SHA-256 pin, restore that exact release, verify the
-vendored snapshot, and run only `stasis fmt --check` and `stasis check`. The PR gate also
-requires an existing `android.launcher_resources` directory when the project declares Android
-packaging; desktop-only projects do not need launcher artwork. `stasis check` checks the
-directory whenever that manifest field is set. The broad local
-`tools/validate-before-pr.ps1` pass accepts an explicit restored Stasis executable, proves its
-release/checksum identity matches the checked-in pin, runs vendor status, format, check, test, and
-desktop package once, and writes both a machine-readable JSON receipt and a Markdown PR summary.
+All three generated workflows have only a manual `workflow_dispatch` trigger. Pull-request updates,
+pushes, tags, and the calendar do not start hosted game checks or releases. The `Stasis manual
+check` workflow validates the selected ref with `pin_only` defaulting to false; choosing true is an
+explicit no-game-check handoff for a mechanical pin-only PR. Neither mode creates an automatic PR
+status check or substitutes for the local gate.
 
-The scheduled Friday and manually dispatched weekly workflow consumes only the checked-in
-immutable Stasis pin. It compares that pin to the last published game release's
-`BUILD-MANIFEST.json` and compares game changes since that release, ignoring only the
-`vendor.stasis` portion of `stasis.json`; true no-ops skip all matrices. Actual releases run the
-Linux and Windows desktop matrix, archive the packages, and publish a prerelease with
-an immutable build manifest and checksums. A quarterly pin PR is therefore the only path that
-advances the Stasis release used by this matrix.
+The weekly release workflow uses the exact immutable Stasis release in `stasis.json`. A default
+manual dispatch builds when no qualified published release baseline exists, when shipped game
+inputs changed, or when the pin changed. It skips the expensive matrix only when a published
+release has the expected package set, matching checksums, valid manifest provenance, and a
+successful source run with successful build and publish jobs. `force_release` explicitly builds
+even when that qualified baseline is unchanged. Failed, skipped, incomplete, or unpublished runs
+cannot suppress the next required build. A successful run keeps the existing artifact names, release
+tag format, and manifest schema; its Android APK is unsigned and is not ready for app installation
+or upgrades.
 
-The quarterly workflow runs on the exact first day of January, April, July, or October. Every
-eligible run resolves the newest complete release once, restores it, and mechanically updates the
-pin and vendor snapshot; an unchanged pin simply skips the update PR. A stale pin is committed as
-`stasis.json` and `vendor/stasis` on a dedicated automation branch, opened as a PR, and merged
-without a game compatibility gate. A dispatched pin-only sentinel supplies the stable required
-status for repositories with branch protection, but deliberately runs no game commands. The normal
-weekly workflow then sees the changed pin and owns
-the authoritative all-target release matrix, including surfacing any incompatibility with the new
-Stasis release. The quarterly workflow never pushes the default branch directly.
+The quarterly pin workflow is also manual. It resolves a complete immutable nightly and, when the
+pin changed, updates the dedicated automation branch and opens or refreshes a PR. It does not run
+game compatibility commands, dispatch another workflow, or merge the PR. Review the PR and run the
+local gate before merging, then manually dispatch the weekly workflow to validate and package the
+new pin. The quarterly workflow never pushes the default branch directly.
+
+The generated local gate is the default project validation path. From the directory containing
+`stasis.json`, run:
+
+```powershell
+pwsh -NoProfile -File tools/local-validation.ps1
+```
+
+It verifies the installed Stasis executable, release pin, and checked-in vendor snapshot before
+running `stasis fmt --check`, `stasis check`, the project test command, configured deterministic
+tests, `git diff --check`, and a fresh Web package. By default the project test command is the
+exact pinned `stasis test`. A project may set an optional `stasis_tests` object with `command` and
+`args` in `tools/local-validation.json` to replace that one stage, for example when a complete
+suite runner needs to invoke multiple project test roots. The configured command must run the
+complete project test suite; it must not skip test roots. Its arguments support `{stasis}`,
+`{project_root}`, `{release_id}`, and `{vendor_sha256}` placeholders. The separate
+`deterministic_tests` entries still run as additional checks.
+
+The gate checks package provenance and WebAssembly hashes, removes only its own unique temporary
+package directory, verifies the toolchain identity again, and writes
+`build/local-validation/local-validation.json` plus a Markdown summary. The JSON receipt records
+the source HEAD and exact compiler/vendor identity; build output and receipts are ignored by Git.
+Repository-specific deterministic tests and post-package audits belong in
+`tools/local-validation.json`.
+
+Use PowerShell 7, Git, and the official Stasis release exactly pinned by the project's
+`stasis.json`. The gate never silently downloads a toolchain, changes the pin, or updates
+`vendor/stasis`. Select an already installed exact executable with `STASIS_BIN` or
+`git config --local stasis.executable <absolute-path>`. To explicitly restore the checked-in release
+through the generated helper, run `pwsh -NoProfile -File tools/local-validation.ps1 -RestoreToolchain`;
+that option may access GitHub. For a non-PATH Git installation, set `STASIS_GIT_EXE` or
+`git config --local stasis.gitExecutable <absolute-path>`. Any extra prerequisites for commands
+added to the project's local validation config must also be installed locally.
+
+`stasis new` activates `.githooks` in its new repository. After cloning, activate them with
+`git config --local core.hooksPath .githooks`. The pre-commit hook preserves the existing format
+check and requires Stasis source changes to be staged. The pre-push hook accepts only non-deletion
+refs that resolve to the exact current `HEAD`, requires a clean index and worktree including
+untracked files, runs the same local gate once, and verifies the receipt still matches that HEAD
+and pinned toolchain. Deletion-only pushes do not run the gate. Git hooks are local safeguards,
+not server-side enforcement: `--no-verify` can bypass them, so a bypassed push has no validated
+receipt and must not be treated as passing the gate.
 
 `stasis.json` records the immutable release identity and hash of the checked-in `vendor/stasis`
 snapshot; generated automation treats that pair as one release contract.
 
-All templates are embedded in `stasis`, so project creation itself remains offline. Only the
-generated Actions jobs access the public `benwmaddox/StasisLang` GitHub releases to resolve and
-restore release assets.
+All templates are embedded in `stasis`, so project creation itself remains offline. The normal
+local gate uses an already installed pinned release; only the explicit `-RestoreToolchain` option
+and manually dispatched hosted workflows access the public `benwmaddox/StasisLang` releases.
 
 ## Commands and outputs
 
@@ -616,19 +652,19 @@ while no Stasis command is running. Core create/format/check/test/run/native-bui
 offline after installation. Mobile builds still require the documented platform SDK/NDK and
 signing tools for their target.
 
-## CI
+## CI and platform acceptance
 
-A minimal CI job can install one release archive and run:
+The generated local gate is the normal feedback loop; hosted workflows run only when a maintainer
+dispatches them. The local gate covers formatting, compilation, deterministic project tests, a
+fresh Web package, and project-configured tooling checks. It does not establish Android AOT or
+emulator behavior, an installable signed Android release, or human gameplay acceptance. Run the
+project's targeted Android SDK/NDK and AVD checks when changing mobile packaging or runtime behavior.
+The generated weekly workflow can package its unsigned Android candidate, Web archive, and Windows
+desktop archive, but that manual run is not a substitute for device or signing acceptance.
 
-```text
-stasis fmt --check
-stasis check --json
-stasis test --json
-stasis build --mode release --json
-```
-
-Release workflows smoke-test a freshly assembled archive rather than borrowing compiler assets
-from the repository checkout.
+For local compiler-only checks, the equivalent pinned executable commands are `stasis fmt --check`,
+`stasis check`, and `stasis test`; use the generated gate to bind those checks to the exact pinned
+binary, cleanly capture their receipt, and validate a fresh Web package.
 
 Windows graphical launch coverage is defined in
 [Windows game launch integration testing](windows_game_launch_testing.md). It exercises `play`,
