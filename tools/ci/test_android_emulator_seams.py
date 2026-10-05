@@ -1207,6 +1207,80 @@ if ($script:waitCalls -ne 0 -or $null -ne $direct.transient_receipt -or
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("resize helper cases passed", result.stdout)
 
+    def test_background_barrier_separates_transition_receipts_from_quiescence(self):
+        pwsh = shutil.which("pwsh")
+        if not pwsh:
+            self.skipTest("PowerShell is unavailable for executable background-helper checks")
+        start = self.workshop_script.index("function Wait-ForPackageBackgrounded(")
+        end = self.workshop_script.index(
+            "function Assert-PresentationBaselineMatrix(", start
+        )
+        helpers = self.workshop_script[start:end]
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$script:activityCalls = 0
+function Invoke-Adb {{
+    param([string[]]$Arguments)
+    $script:activityCalls += 1
+    if ($script:activityCalls -eq 1) {{
+        'mResumedActivity: ActivityRecord{{1 com.stasislang.workshop/.MainActivity}}'
+    }} elseif ($script:activityCalls -eq 2) {{
+        'mResumedActivity: null'
+    }} else {{
+        'mResumedActivity: ActivityRecord{{2 com.google.android.apps.nexuslauncher/.NexusLauncherActivity}}'
+    }}
+}}
+{helpers}
+$barrier = Wait-ForPackageBackgrounded 'com.stasislang.workshop' 1 1
+if ($script:activityCalls -ne 3 -or
+    $barrier.resumed_activity -notlike '*nexuslauncher*') {{
+    throw 'background barrier did not wait for a different resumed activity'
+}}
+$transition = [pscustomobject]@{{
+    receipt_kind = 'renderer'; event = 'accepted_snapshot_captured'
+}}
+$control = [pscustomobject]@{{ receipt_kind = 'control'; event = 'pause' }}
+$quiet = [pscustomobject]@{{ receipts = @($transition, $control) }}
+Assert-NoBackgroundPresentationReceipt $quiet 1
+$late = [pscustomobject]@{{
+    receipts = @($transition, [pscustomobject]@{{
+        receipt_kind = 'renderer'; event = 'accepted_snapshot_captured'
+    }})
+}}
+$failedClosed = $false
+try {{
+    Assert-NoBackgroundPresentationReceipt $late 1
+}} catch {{
+    if ($_.Exception.Message -like '*while Workshop was backgrounded*') {{
+        $failedClosed = $true
+    }} else {{
+        throw
+    }}
+}}
+if (-not $failedClosed) {{ throw 'post-barrier accepted frame was not rejected' }}
+$failedClosed = $false
+try {{
+    Assert-NoBackgroundPresentationReceipt ([pscustomobject]@{{ receipts = @() }}) 1
+}} catch {{
+    if ($_.Exception.Message -like '*receipt stream shrank*') {{
+        $failedClosed = $true
+    }} else {{
+        throw
+    }}
+}}
+if (-not $failedClosed) {{ throw 'truncated receipt stream did not fail closed' }}
+'background helper cases passed'
+"""
+        result = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-Command", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("background helper cases passed", result.stdout)
+
     def test_workshop_waits_for_terminal_soak_before_resolving_capture_viewport(self):
         readiness = self.workshop_script.index("Wait-ForWorkshopIT032Readiness `")
         viewport = self.workshop_script.index("$surface = Read-SurfaceBounds", readiness)

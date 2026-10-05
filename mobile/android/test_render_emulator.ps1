@@ -1319,6 +1319,51 @@ function Resolve-PresentationBaselineResizeReceipt(
     }
 }
 
+function Wait-ForPackageBackgrounded(
+    [string]$Package,
+    [int]$TimeoutSeconds = 10,
+    [int]$PollMilliseconds = 100
+) {
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    do {
+        $activityState = @(Invoke-Adb @("shell", "dumpsys", "activity", "activities"))
+        $resumedActivity = @($activityState | Where-Object {
+            $_ -match '(?i)(mResumedActivity|topResumedActivity)'
+        })
+        $resumedRecords = @($resumedActivity | Where-Object {
+            $_ -match '(?i)ActivityRecord\{[^}\r\n]*\s[A-Za-z0-9._]+/[A-Za-z0-9._$]+'
+        })
+        if ($resumedRecords.Count -gt 0 -and
+            -not ($resumedRecords -match [regex]::Escape($Package))) {
+            return [pscustomobject]@{
+                resumed_activity = ($resumedRecords -join [Environment]::NewLine).Trim()
+                elapsed_seconds = [math]::Round($timer.Elapsed.TotalSeconds, 3)
+            }
+        }
+        $remaining = ($TimeoutSeconds * 1000) - [int]$timer.ElapsedMilliseconds
+        if ($remaining -gt 0) {
+            Start-Sleep -Milliseconds ([math]::Min($PollMilliseconds, $remaining))
+        }
+    } while ($timer.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+    throw "$Package did not yield the resumed activity within ${TimeoutSeconds}s"
+}
+
+function Assert-NoBackgroundPresentationReceipt(
+    [object]$ReceiptState,
+    [int]$AfterReceiptCount
+) {
+    if ($ReceiptState.receipts.Count -lt $AfterReceiptCount) {
+        throw "presentation receipt stream shrank during the background sample"
+    }
+    $backgroundPresents = @($ReceiptState.receipts | Select-Object -Skip $AfterReceiptCount | Where-Object {
+        $_.receipt_kind -eq "renderer" -and
+            $_.event -in @("present", "accepted_snapshot_captured")
+    })
+    if ($backgroundPresents.Count -gt 0) {
+        throw "renderer accepted a new presentation frame while Workshop was backgrounded"
+    }
+}
+
 function Assert-PresentationBaselineMatrix(
     [string]$Package,
     [string]$SurfaceDescription,
@@ -1646,15 +1691,26 @@ function Assert-PresentationBaselineMatrix(
         })
         $matrix.captures.Add((Save-AndVerifyPresentationBaselineCapture $Package $SurfaceDescription "post-resize-present" "present" $lastPresent))
 
-        $beforeHome = (Read-PresentationBaselineReceipts $Package).receipts.Count
+        $beforeHome = Read-PresentationBaselineReceipts $Package
         Invoke-Adb @("shell", "input", "keyevent", "KEYCODE_HOME") | Out-Null
+        $backgroundBarrier = Wait-ForPackageBackgrounded $Package
+        $backgroundBaseline = Read-PresentationBaselineReceipts $Package
+        if ($backgroundBaseline.process_id -ne $processId) {
+            throw "Workshop process changed before the background quiescence sample"
+        }
+        $transitionReceipts = @($backgroundBaseline.receipts | Select-Object -Skip $beforeHome.receipts.Count)
         Start-Sleep -Milliseconds 900
         $background = Read-PresentationBaselineReceipts $Package
         if ($background.process_id -ne $processId) { throw "Workshop process changed while backgrounded" }
-        $backgroundPresents = @($background.receipts | Select-Object -Skip $beforeHome | Where-Object {
-            $_.receipt_kind -eq "renderer" -and $_.event -in @("present", "accepted_snapshot_captured")
+        Assert-NoBackgroundPresentationReceipt $background $backgroundBaseline.receipts.Count
+        $matrix.stages.Add([pscustomobject]@{
+            name = "home-background-quiescence"
+            barrier = $backgroundBarrier
+            transition_receipts = $transitionReceipts
+            baseline_receipt_count = $backgroundBaseline.receipts.Count
+            sampled_receipt_count = $background.receipts.Count
+            sample_milliseconds = 900
         })
-        if ($backgroundPresents.Count -gt 0) { throw "renderer accepted a new presentation frame while Workshop was backgrounded" }
         Invoke-Adb @("shell", "am", "start", "-W", "--activity-single-top", "-n", "$Package/com.stasislang.workshop.MainActivity") | Out-Null
         $homePair = Wait-PresentationBaselinePresentPair $Package $background.receipts.Count $RenderTimeoutSeconds "HOME/background-resume PRESENT pair" $processId
         $lastPresent = $homePair.second
