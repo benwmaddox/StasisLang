@@ -5,11 +5,20 @@ param(
     [switch] $RestoreToolchain,
     [string] $RestoreCommand = '',
     [string[]] $RestoreArguments = @(),
-    [string] $RestoreAsset = ''
+    [string] $RestoreAsset = '',
+    [switch] $LocalFormatOnly
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+function Test-JsonIntegerValue {
+    param($Value)
+    if ($null -eq $Value) { return $false }
+    $type = $Value.GetType()
+    return $type -eq [sbyte] -or $type -eq [byte] -or $type -eq [int16] -or $type -eq [uint16] -or
+        $type -eq [int32] -or $type -eq [uint32] -or $type -eq [int64] -or $type -eq [uint64]
+}
 
 $project = [IO.Path]::GetFullPath($ProjectRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
 $manifestPath = Join-Path $project 'stasis.json'
@@ -18,12 +27,21 @@ try { $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 catch { throw "Could not parse stasis.json: $($_.Exception.Message)" }
 
 $pin = $manifest.vendor.stasis
-if ($null -eq $pin -or [string]$pin.release_id -notmatch '^nightly-[0-9]{8}-[0-9]+$' -or
-    [string]$pin.sha256 -cnotmatch '^[0-9a-f]{64}$' -or [int]$pin.hash_version -ne 2) {
+if ($null -eq $pin -or [string]$pin.sha256 -cnotmatch '^[0-9a-f]{64}$' -or [int]$pin.hash_version -ne 2) {
     throw 'stasis.json vendor.stasis must contain an immutable nightly release, lowercase SHA-256, and hash_version 2.'
+}
+$pinHashVersionIsInteger = Test-JsonIntegerValue $pin.hash_version
+if (-not $pinHashVersionIsInteger -or $pin.hash_version -ne 2) {
+    throw 'stasis.json vendor.stasis hash_version must be the integer 2.'
 }
 $releaseId = [string]$pin.release_id
 $vendorSha = [string]$pin.sha256
+$officialRelease = $releaseId -match '^nightly-[0-9]{8}-[0-9]+$'
+$localFormatRelease = $releaseId -ceq 'development' -or $releaseId -cmatch '^local-[A-Za-z0-9][A-Za-z0-9._-]*$'
+if (-not $officialRelease -and (-not $LocalFormatOnly -or -not $localFormatRelease)) {
+    throw 'stasis.json vendor.stasis must contain an immutable nightly release, lowercase SHA-256, and hash_version 2.'
+}
+$formatOnlyIdentity = -not $officialRelease
 
 function Resolve-GitExecutable {
     param([string] $Requested)
@@ -70,6 +88,12 @@ function Get-StasisCandidates {
     $configured = Get-LocalGitConfig 'stasis.executable'
     if ($configured) {
         $candidates.Add([pscustomobject]@{ path = (Resolve-ProjectPath $configured); required = $true; source = 'git config stasis.executable' })
+    }
+    if ($LocalFormatOnly) {
+        $pathStasis = Get-Command stasis -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($pathStasis) {
+            $candidates.Add([pscustomobject]@{ path = [IO.Path]::GetFullPath($pathStasis.Source); required = $false; source = 'PATH Stasis executable' })
+        }
     }
 
     $installRoots = [System.Collections.Generic.List[string]]::new()
@@ -127,21 +151,42 @@ function Get-JsonCommand {
 
 function Test-StasisCandidate {
     param([string] $Executable)
-    $identity = Get-JsonCommand $Executable @('--json', 'editor-info') 'Stasis editor-info'
-    if ($identity.ok -ne $true -or [string]$identity.result.release_id -cne $releaseId) {
-        throw "Stasis executable '$Executable' is not the pinned release '$releaseId'."
-    }
     $binarySha = (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ([string]$identity.result.executable.sha256 -cne $binarySha -or
-        [string]$identity.result.source_commit -notmatch '^[0-9a-f]{40}$' -or
-        [string]::IsNullOrWhiteSpace([string]$identity.result.build_fingerprint)) {
-        throw "Stasis editor-info for '$Executable' does not prove its binary and source identity."
+    $sourceCommit = $null
+    $buildFingerprint = $null
+    if (-not $formatOnlyIdentity) {
+        $identity = Get-JsonCommand $Executable @('--json', 'editor-info') 'Stasis editor-info'
+        if ($identity.ok -ne $true -or [string]$identity.result.release_id -cne $releaseId) {
+            throw "Stasis executable '$Executable' is not the pinned release '$releaseId'."
+        }
+        if ([string]$identity.result.executable.sha256 -cne $binarySha -or
+            [string]$identity.result.source_commit -notmatch '^[0-9a-f]{40}$' -or
+            [string]::IsNullOrWhiteSpace([string]$identity.result.build_fingerprint)) {
+            throw "Stasis editor-info for '$Executable' does not prove its binary and source identity."
+        }
+        $sourceCommit = [string]$identity.result.source_commit
+        $buildFingerprint = [string]$identity.result.build_fingerprint
     }
 
     $status = Get-JsonCommand $Executable @('--json', 'vendor', 'status', '--workspace', $project) 'Stasis vendor status'
     $result = $status.result
+    if ($null -eq $result -or $null -eq $result.recorded -or $null -eq $result.installed) {
+        throw "Stasis vendor status for '$Executable' did not return recorded and installed identities."
+    }
     $recorded = $result.recorded
     $installed = $result.installed
+    if ($status.ok -isnot [bool] -or $result.current -isnot [bool] -or
+        $result.update_available -isnot [bool] -or $result.pin_verified -isnot [bool] -or
+        $result.legacy_pin_unverified -isnot [bool] -or $result.local_changes -isnot [bool]) {
+        throw "Stasis vendor status for '$Executable' did not return strict boolean identity fields."
+    }
+    $hashVersions = @(
+        $result.actual_hash_version, $result.expected_hash_version, $result.recorded_hash_version,
+        $installed.hash_version, $recorded.hash_version
+    )
+    if (@($hashVersions | Where-Object { -not (Test-JsonIntegerValue $_) }).Count -gt 0) {
+        throw "Stasis vendor status for '$Executable' did not return integer hash-version fields."
+    }
     $requiredChecks = @(
         ($status.ok -eq $true),
         ([string]$status.command -ceq 'vendor'),
@@ -172,8 +217,9 @@ function Test-StasisCandidate {
         release_id = $releaseId
         vendor_sha256 = $vendorSha
         hash_version = 2
-        source_commit = [string]$identity.result.source_commit
-        build_fingerprint = [string]$identity.result.build_fingerprint
+        validation_scope = if ($formatOnlyIdentity) { 'vendor-match-format-only' } else { 'official-release' }
+        source_commit = $sourceCommit
+        build_fingerprint = $buildFingerprint
         git_executable = $git
     }
 }
