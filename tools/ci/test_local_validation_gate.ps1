@@ -19,6 +19,9 @@ $oldFailure = $env:STASIS_FIXTURE_FAIL_STAGE
 $oldWrongPin = $env:STASIS_FIXTURE_WRONG_PIN
 $oldLinkTarget = $env:STASIS_FIXTURE_LINK_TARGET
 $oldStderrDiagnostic = $env:STASIS_FIXTURE_STDERR_DIAGNOSTIC
+$oldFixtureRelease = $env:STASIS_FIXTURE_RELEASE
+$oldFixtureVendorSha = $env:STASIS_FIXTURE_VENDOR_SHA
+$oldVendorStatusMode = $env:STASIS_FIXTURE_VENDOR_STATUS_MODE
 $release = 'nightly-20261005-816'
 $vendorSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 $sourceCommit = '99a5b3943f1759b7abbdbf0e37634965749c1337'
@@ -52,6 +55,17 @@ function Invoke-Gate {
         Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json -ErrorAction Stop
     } else { $null }
     return [pscustomobject]@{ exit_code = $exitCode; output = $output; receipt = $receipt; invocation_id = $invocation }
+}
+
+function Invoke-Resolver {
+    param([string[]] $ExtraArguments = @(), [int[]] $ExpectedExit = @(0))
+    $resolver = Join-Path $project 'tools/resolve-pinned-stasis.ps1'
+    $output = @(& $pwshExe -NoProfile -NonInteractive -File $resolver -ProjectRoot $project -GitPath $gitExe @ExtraArguments 2>&1 | ForEach-Object { [string]$_ })
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -notin $ExpectedExit) {
+        throw "Pinned Stasis resolver returned $exitCode; expected $($ExpectedExit -join ','): $($output | Select-Object -Last 20 | Out-String)"
+    }
+    return [pscustomobject]@{ exit_code = $exitCode; output = $output }
 }
 
 function Assert-Step {
@@ -100,6 +114,7 @@ try {
         vendor = @{ stasis = @{ release_id = $release; sha256 = $vendorSha; hash_version = 2 } }
     }
     Write-JsonFile (Join-Path $project 'stasis.json') $manifest
+    $originalManifestContent = [IO.File]::ReadAllText((Join-Path $project 'stasis.json'))
     Set-Content -LiteralPath (Join-Path $project 'src/main.stasis') -Value 'function main(): i32 { return 0; }'
     Set-Content -LiteralPath (Join-Path $project 'tests/main.test.stasis') -Value 'test `fixture`(): bool { return true; }'
     Set-Content -LiteralPath (Join-Path $project '.gitignore') -Value "build/`ntools/local-validation.json`n"
@@ -108,8 +123,8 @@ try {
 param([Parameter(ValueFromRemainingArguments = $true)][string[]] $ToolArgs)
 $ErrorActionPreference = 'Stop'
 $global:LASTEXITCODE = 0
-$release = 'nightly-20261005-816'
-$vendorSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+$release = if ($env:STASIS_FIXTURE_RELEASE) { $env:STASIS_FIXTURE_RELEASE } else { 'nightly-20261005-816' }
+$vendorSha = if ($env:STASIS_FIXTURE_VENDOR_SHA) { $env:STASIS_FIXTURE_VENDOR_SHA } else { 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }
 $sourceCommit = '99a5b3943f1759b7abbdbf0e37634965749c1337'
 if ($env:STASIS_FIXTURE_STDERR_DIAGNOSTIC -eq 'true') { Write-Error 'cache_cleanup_removed_files=0 cache_cleanup_removed_dirs=1 cache_cleanup_ttl_days=7' -ErrorAction Continue }
 $manifestPath = Join-Path $env:STASIS_FIXTURE_PROJECT 'stasis.json'
@@ -121,11 +136,21 @@ if ($ToolArgs -contains 'editor-info') {
     return
 }
 if ($ToolArgs -contains 'vendor') {
+    if ($env:STASIS_FIXTURE_VENDOR_STATUS_MODE -eq 'malformed') { Write-Output '{"ok":'; return }
     $vendorMutated = Test-Path -LiteralPath (Join-Path $env:STASIS_FIXTURE_PROJECT 'vendor/stasis/mutated.txt') -PathType Leaf
-    $actualSha = if ($vendorMutated) { 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } else { $vendorSha }
-    $installed = @{ release_id = $release; sha256 = $vendorSha; hash_version = 2 }
+    $dirtyStatus = $env:STASIS_FIXTURE_VENDOR_STATUS_MODE -eq 'dirty'
+    $wrongRelease = $env:STASIS_FIXTURE_VENDOR_STATUS_MODE -eq 'wrong-release'
+    $wrongHash = $env:STASIS_FIXTURE_VENDOR_STATUS_MODE -eq 'wrong-hash'
+    $stringBoolean = $env:STASIS_FIXTURE_VENDOR_STATUS_MODE -eq 'string-boolean'
+    $floatHashVersion = $env:STASIS_FIXTURE_VENDOR_STATUS_MODE -eq 'float-hash-version'
+    $actualSha = if ($vendorMutated -or $dirtyStatus -or $wrongHash) { 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } else { $vendorSha }
+    $installedRelease = if ($wrongRelease) { 'local-mismatched' } else { $release }
+    $installedSha = if ($wrongHash) { $actualSha } else { $vendorSha }
+    $installed = @{ release_id = $installedRelease; sha256 = $installedSha; hash_version = 2 }
     $recorded = @{ release_id = $release; sha256 = $vendorSha; hash_version = 2 }
-    $result = @{ current = -not $vendorMutated; update_available = $false; pin_verified = -not $vendorMutated; legacy_pin_unverified = $false; local_changes = $vendorMutated; actual_hash_version = 2; expected_hash_version = 2; recorded_hash_version = 2; installed = $installed; recorded = $recorded; recorded_sha256 = $vendorSha; expected_sha256 = $vendorSha; actual_sha256 = $actualSha }
+    $result = @{ current = -not ($vendorMutated -or $dirtyStatus); update_available = $dirtyStatus; pin_verified = -not ($vendorMutated -or $dirtyStatus); legacy_pin_unverified = $false; local_changes = $vendorMutated -or $dirtyStatus; actual_hash_version = 2; expected_hash_version = 2; recorded_hash_version = 2; installed = $installed; recorded = $recorded; recorded_sha256 = $vendorSha; expected_sha256 = $vendorSha; actual_sha256 = $actualSha }
+    if ($stringBoolean) { $result.current = 'true' }
+    if ($floatHashVersion) { $result.actual_hash_version = [double]2.0 }
     [ordered]@{ ok = $true; command = 'vendor'; result = $result } | ConvertTo-Json -Depth 8 -Compress
     return
 }
@@ -180,6 +205,68 @@ return
     $env:STASIS_FIXTURE_WRONG_PIN = 'false'
     $env:STASIS_FIXTURE_LINK_TARGET = $outside
     $env:STASIS_FIXTURE_STDERR_DIAGNOSTIC = 'true'
+
+    $developmentSha = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+    foreach ($localReleaseId in @('development', 'local-format-fixture')) {
+        $env:STASIS_FIXTURE_RELEASE = $localReleaseId
+        $env:STASIS_FIXTURE_VENDOR_SHA = $developmentSha
+        $env:STASIS_FIXTURE_VENDOR_STATUS_MODE = ''
+        $manifest.vendor.stasis.release_id = $localReleaseId
+        $manifest.vendor.stasis.sha256 = $developmentSha
+        Write-JsonFile (Join-Path $project 'stasis.json') $manifest
+
+        $localFormat = Invoke-Resolver @('-LocalFormatOnly')
+        $localFormatIdentity = ($localFormat.output -join [Environment]::NewLine) | ConvertFrom-Json -ErrorAction Stop
+        if ($localFormatIdentity.validation_scope -cne 'vendor-match-format-only' -or
+            $localFormatIdentity.release_id -cne $localReleaseId -or
+            $localFormatIdentity.vendor_sha256 -cne $developmentSha -or
+            $localFormatIdentity.hash_version -ne 2 -or
+            $localFormatIdentity.binary_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            $null -ne $localFormatIdentity.source_commit -or $null -ne $localFormatIdentity.build_fingerprint) {
+            throw "The local-format resolver did not return a vendor-matched format-only identity for '$localReleaseId'."
+        }
+    }
+
+    $env:STASIS_FIXTURE_RELEASE = 'development'
+    $manifest.vendor.stasis.release_id = 'development'
+    Write-JsonFile (Join-Path $project 'stasis.json') $manifest
+    $strictDevelopment = Invoke-Resolver @() @(1)
+    if (-not (($strictDevelopment.output -join [Environment]::NewLine).Contains('immutable nightly release'))) {
+        throw 'The default resolver accepted or misreported a development pin.'
+    }
+    $strictDevelopmentGate = Invoke-Gate 'development pin stays rejected by the full gate' @(1)
+    if ($strictDevelopmentGate.receipt.ok) { throw 'The full local gate accepted a development-only formatting identity.' }
+    Assert-Step $strictDevelopmentGate.receipt 'validation-setup' $false
+
+    $manifest.vendor.stasis.hash_version = '2'
+    Write-JsonFile (Join-Path $project 'stasis.json') $manifest
+    $stringManifestVersion = Invoke-Resolver @('-LocalFormatOnly') @(1)
+    if (-not (($stringManifestVersion.output -join [Environment]::NewLine).Contains('hash_version must be the integer 2'))) {
+        throw 'The local-format resolver accepted or misreported a string manifest hash version.'
+    }
+    $manifest.vendor.stasis.hash_version = 2
+    Write-JsonFile (Join-Path $project 'stasis.json') $manifest
+
+    foreach ($mode in @('wrong-release', 'wrong-hash', 'dirty', 'string-boolean', 'float-hash-version', 'malformed')) {
+        $env:STASIS_FIXTURE_VENDOR_STATUS_MODE = $mode
+        $invalidLocalFormat = Invoke-Resolver @('-LocalFormatOnly') @(1)
+        $expectedDiagnostic = switch ($mode) {
+            'malformed' { 'returned invalid JSON' }
+            'string-boolean' { 'strict boolean identity fields' }
+            'float-hash-version' { 'integer hash-version fields' }
+            default { 'does not prove exact pin fidelity' }
+        }
+        if (-not (($invalidLocalFormat.output -join [Environment]::NewLine).Contains($expectedDiagnostic))) {
+            throw "The local-format resolver did not report the expected rejection for '$mode'."
+        }
+    }
+
+    $env:STASIS_FIXTURE_VENDOR_STATUS_MODE = ''
+    $env:STASIS_FIXTURE_RELEASE = $release
+    $env:STASIS_FIXTURE_VENDOR_SHA = $vendorSha
+    [IO.File]::WriteAllText((Join-Path $project 'stasis.json'), $originalManifestContent, [Text.UTF8Encoding]::new($false))
+    $cleanAfterResolverFixtures = Invoke-Git $project @('diff', '--quiet') @(0, 1)
+    if ($cleanAfterResolverFixtures.exit_code -ne 0) { throw 'The local-format resolver fixtures left stasis.json modified.' }
 
     $success = Invoke-Gate 'success control'
     if (-not $success.receipt.ok -or $success.receipt.invocation_id -cne $success.invocation_id -or $success.receipt.web_package.wasm_files.Count -ne 1) {
@@ -335,5 +422,8 @@ Set-Content -LiteralPath $mutationPath -Value 'mutated'
     if ($null -eq $oldWrongPin) { Remove-Item Env:STASIS_FIXTURE_WRONG_PIN -ErrorAction SilentlyContinue } else { $env:STASIS_FIXTURE_WRONG_PIN = $oldWrongPin }
     if ($null -eq $oldLinkTarget) { Remove-Item Env:STASIS_FIXTURE_LINK_TARGET -ErrorAction SilentlyContinue } else { $env:STASIS_FIXTURE_LINK_TARGET = $oldLinkTarget }
     if ($null -eq $oldStderrDiagnostic) { Remove-Item Env:STASIS_FIXTURE_STDERR_DIAGNOSTIC -ErrorAction SilentlyContinue } else { $env:STASIS_FIXTURE_STDERR_DIAGNOSTIC = $oldStderrDiagnostic }
+    if ($null -eq $oldFixtureRelease) { Remove-Item Env:STASIS_FIXTURE_RELEASE -ErrorAction SilentlyContinue } else { $env:STASIS_FIXTURE_RELEASE = $oldFixtureRelease }
+    if ($null -eq $oldFixtureVendorSha) { Remove-Item Env:STASIS_FIXTURE_VENDOR_SHA -ErrorAction SilentlyContinue } else { $env:STASIS_FIXTURE_VENDOR_SHA = $oldFixtureVendorSha }
+    if ($null -eq $oldVendorStatusMode) { Remove-Item Env:STASIS_FIXTURE_VENDOR_STATUS_MODE -ErrorAction SilentlyContinue } else { $env:STASIS_FIXTURE_VENDOR_STATUS_MODE = $oldVendorStatusMode }
     if (Test-Path -LiteralPath $tempRoot) { Remove-SafeTestTree $tempRoot }
 }

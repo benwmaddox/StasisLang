@@ -341,12 +341,15 @@ added to the project's local validation config must also be installed locally.
 
 `stasis new` activates `.githooks` in its new repository. After cloning, activate them with
 `git config --local core.hooksPath .githooks`. The pre-commit hook preserves the existing format
-check and requires Stasis source changes to be staged. The pre-push hook accepts only non-deletion
-refs that resolve to the exact current `HEAD`, requires a clean index and worktree including
-untracked files, runs the same local gate once, and verifies the receipt still matches that HEAD
-and pinned toolchain. Deletion-only pushes do not run the gate. Git hooks are local safeguards,
-not server-side enforcement: `--no-verify` can bypass them, so a bypassed push has no validated
-receipt and must not be treated as passing the gate.
+check and requires Stasis source changes to be staged. For formatting only, it accepts a
+`development` or `local-*` CLI when `vendor status` proves that the CLI's installed vendor snapshot
+exactly matches the project's recorded hash-version-2 pin. This does not satisfy the full gate. The
+pre-push hook accepts only non-deletion refs that resolve to the exact current `HEAD`, requires a
+clean index and worktree including untracked files, runs the same local gate once, and verifies the
+receipt still matches that HEAD and the pinned official nightly toolchain. Deletion-only pushes do
+not run the gate. Git hooks are local safeguards, not server-side enforcement: `--no-verify` can
+bypass them, so a bypassed push has no validated receipt and must not be treated as passing the
+gate.
 
 `stasis.json` records the immutable release identity and hash of the checked-in `vendor/stasis`
 snapshot; generated automation treats that pair as one release contract.

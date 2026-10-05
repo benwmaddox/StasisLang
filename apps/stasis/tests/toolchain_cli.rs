@@ -832,7 +832,13 @@ fn generated_project_contains_container_geometry_guidance() {
         String::from_utf8_lossy(&created.stderr)
     );
     let agent_guide = fs::read_to_string(parent.join("demo/AGENTS.md")).expect("read agent guide");
-    assert_eq!(agent_guide, include_str!("../../../docs/agent_workflow.md"));
+    let workflow_guide = include_str!("../../../docs/agent_workflow.md");
+    let local_validation_guide = include_str!("../templates/local-validation/agent-guidance.md");
+    assert_eq!(
+        agent_guide,
+        format!("{workflow_guide}{local_validation_guide}")
+    );
+    assert!(agent_guide.starts_with(workflow_guide));
     for rule in [
         "## Container-derived UI geometry",
         "real safe/current container",
@@ -955,6 +961,7 @@ fn project_commands_emit_stable_json_from_nested_directories() {
     let pre_commit_script = fs::read_to_string(project.join(".githooks/pre-commit.ps1"))
         .expect("read generated pre-commit script");
     assert!(pre_commit_script.contains("fmt --check"));
+    assert!(pre_commit_script.contains("-LocalFormatOnly"));
     assert!(pre_commit_script.contains("$identity.executable format"));
     assert!(!pre_commit_script.contains("format src tests"));
     let pre_push = fs::read_to_string(project.join(".githooks/pre-push"))
@@ -1286,6 +1293,67 @@ fn new_project_enforces_formatting_before_commits() {
             .code(),
         Some(0)
     );
+    let created_manifest_bytes =
+        fs::read(project.join("stasis.json")).expect("read created project manifest");
+    let created_manifest: Value =
+        serde_json::from_slice(&created_manifest_bytes).expect("parse created project manifest");
+    let created_pin = &created_manifest["vendor"]["stasis"];
+    assert_eq!(
+        created_pin["release_id"],
+        option_env!("STASIS_RELEASE_ID").unwrap_or("development")
+    );
+    assert_eq!(created_pin["hash_version"], 2);
+    let created_vendor = stasis(&["--json", "vendor", "status"], &project);
+    assert!(
+        created_vendor.status.success(),
+        "created project vendor status failed: {}",
+        String::from_utf8_lossy(&created_vendor.stderr)
+    );
+    let created_vendor_json = json_stdout(&created_vendor);
+    assert_eq!(created_vendor_json["result"]["current"], true);
+    assert_eq!(created_vendor_json["result"]["pin_verified"], true);
+    assert_eq!(created_vendor_json["result"]["update_available"], false);
+    assert_eq!(
+        created_vendor_json["result"]["legacy_pin_unverified"],
+        false
+    );
+    assert_eq!(created_vendor_json["result"]["local_changes"], false);
+    assert_eq!(created_vendor_json["result"]["actual_hash_version"], 2);
+    assert_eq!(created_vendor_json["result"]["expected_hash_version"], 2);
+    assert_eq!(created_vendor_json["result"]["recorded_hash_version"], 2);
+    assert_eq!(
+        created_vendor_json["result"]["installed"]["release_id"],
+        created_pin["release_id"]
+    );
+    assert_eq!(
+        created_vendor_json["result"]["recorded"]["release_id"],
+        created_pin["release_id"]
+    );
+    assert_eq!(
+        created_vendor_json["result"]["installed"]["hash_version"],
+        2
+    );
+    assert_eq!(created_vendor_json["result"]["recorded"]["hash_version"], 2);
+    assert_eq!(
+        created_vendor_json["result"]["recorded_sha256"],
+        created_pin["sha256"]
+    );
+    assert_eq!(
+        created_vendor_json["result"]["actual_sha256"],
+        created_pin["sha256"]
+    );
+    assert_eq!(
+        created_vendor_json["result"]["expected_sha256"],
+        created_pin["sha256"]
+    );
+    assert_eq!(
+        created_vendor_json["result"]["installed"]["sha256"],
+        created_pin["sha256"]
+    );
+    assert_eq!(
+        created_vendor_json["result"]["recorded"]["sha256"],
+        created_pin["sha256"]
+    );
     assert!(git(&["config", "user.name", "Stasis Test"], &project)
         .status
         .success());
@@ -1320,7 +1388,11 @@ fn new_project_enforces_formatting_before_commits() {
     let still_blocked = git_with_stasis_on_path(&["commit", "-m", "still unformatted"], &project);
     assert!(!still_blocked.status.success());
     assert!(
-        String::from_utf8_lossy(&still_blocked.stderr).contains("stage the enforced formatting")
+        String::from_utf8_lossy(&still_blocked.stderr)
+            .contains("stage the source before committing"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&still_blocked.stdout),
+        String::from_utf8_lossy(&still_blocked.stderr)
     );
 
     assert!(git(&["add", "-A"], &project).status.success());
@@ -1330,6 +1402,11 @@ fn new_project_enforces_formatting_before_commits() {
         "stdout={} stderr={}",
         String::from_utf8_lossy(&committed.stdout),
         String::from_utf8_lossy(&committed.stderr)
+    );
+    assert_eq!(
+        fs::read(project.join("stasis.json")).expect("read final project manifest"),
+        created_manifest_bytes,
+        "formatting hooks must not rewrite or promote the generated pin"
     );
 
     fs::remove_dir_all(&parent).ok();
