@@ -103,6 +103,47 @@ test("web storage load uses the runtime fallback for missing and corrupt values"
   assert.equal(imports.storage_load_i32(1, 2, 19), -12);
 });
 
+test("web storage saves printable ASCII atomically", async () => {
+  const runtime = await loadRuntime();
+  const { env, imports, storage, memory } = runtime;
+  const existingKey = env.storageKey(1, 2);
+  const missingKey = env.storageKey(3, 2);
+  const bytes = new Uint8Array(memory.buffer);
+  const save = (scope, key, reference, length) =>
+    imports.stasis_jit_storage_save_ascii(scope, key, reference, length);
+
+  env.storageSet(existingKey, "preserved");
+  for (const byte of [0, 21, 31, 127, 128, 233]) {
+    bytes.fill(0);
+    bytes[0] = byte;
+    assert.equal(save(1, 2, 7007, 1), 0, `reject byte ${byte}`);
+    assert.equal(env.storageGet(existingKey), "preserved", `keep existing value for byte ${byte}`);
+    assert.equal(save(3, 2, 7007, 1), 0, `reject byte ${byte} for missing key`);
+    assert.equal(storage.has(missingKey), false, `do not create a key for byte ${byte}`);
+  }
+
+  for (const [text, payload] of [[" ", [32]], ["~", [126]], [" ~", [32, 126]], ["", []]]) {
+    bytes.fill(0);
+    bytes.set(payload);
+    assert.equal(save(1, 2, 7007, payload.length), 1);
+    assert.equal(env.storageGet(existingKey), text);
+    assert.equal(imports.stasis_jit_storage_load_ascii(1, 2, 7007, 8), payload.length);
+    assert.equal(String.fromCharCode(...bytes.slice(0, payload.length)), text);
+  }
+  assert.equal(save(3, 2, 7007, 0), 1, "save a valid empty value for a missing key");
+  assert.equal(storage.has(missingKey), true);
+  assert.equal(env.storageGet(missingKey), "");
+
+  env.storageSet(existingKey, "malformed-preserved");
+  storage.delete(missingKey);
+  for (const [reference, length] of [[9999, 0], [7007, -1], [7007, 9], [7007, 1.5], [7007, Number.NaN]]) {
+    assert.equal(save(1, 2, reference, length), 0, `reject malformed span ${reference}/${length}`);
+    assert.equal(env.storageGet(existingKey), "malformed-preserved");
+    assert.equal(save(3, 2, reference, length), 0, `reject malformed span for missing key ${reference}/${length}`);
+    assert.equal(storage.has(missingKey), false);
+  }
+});
+
 test("web storage keeps a volatile fallback when browser storage is denied", async () => {
   const runtime = await loadRuntime();
   const { env, context } = runtime;
