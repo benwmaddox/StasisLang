@@ -241,6 +241,14 @@ fn evidence_root() -> PathBuf {
         .join("seam-tests")
 }
 
+fn presentation_poison_runtime_path() -> PathBuf {
+    // The loader verifies shared build compatibility; this path selects the test-only binary variant.
+    PathBuf::from(
+        std::env::var_os("STASIS_PRESENTATION_POISON_RUNTIME_DLL_PATH")
+            .expect("STASIS_PRESENTATION_POISON_RUNTIME_DLL_PATH must name the test-only poisoned runtime DLL"),
+    )
+}
+
 fn valid_frame() -> (Vec<i32>, Vec<f32>, Vec<u8>) {
     let mut i32s = vec![0; STASIS_RENDER_I32_COUNT];
     let mut f32s = vec![0.0; STASIS_RENDER_F32_COUNT];
@@ -415,10 +423,7 @@ fn present_only_frames_capture_through_the_installed_runtime_abi() {
 
 #[test]
 fn present_only_frame_initializes_a_poisoned_physical_target() {
-    let runtime_path = PathBuf::from(
-        std::env::var_os("STASIS_RUNTIME_DLL_PATH")
-            .expect("STASIS_RUNTIME_DLL_PATH must name the test-only poisoned runtime DLL"),
-    );
+    let runtime_path = presentation_poison_runtime_path();
     std::env::set_var("STASIS_ENABLE_TEST_INPUT", "1");
     let gfx = StasisGraphicsApi::load(&runtime_path).expect("load graphics runtime");
     assert!(gfx
@@ -520,10 +525,7 @@ fn present_only_frame_initializes_a_poisoned_physical_target() {
 
 #[test]
 fn failed_text_preparation_keeps_the_poisoned_target_unpublished() {
-    let runtime_path = PathBuf::from(
-        std::env::var_os("STASIS_RUNTIME_DLL_PATH")
-            .expect("STASIS_RUNTIME_DLL_PATH must name the test-only poisoned runtime DLL"),
-    );
+    let runtime_path = presentation_poison_runtime_path();
     std::env::set_var("STASIS_ENABLE_TEST_INPUT", "1");
     let gfx = StasisGraphicsApi::load(&runtime_path).expect("load graphics runtime");
     assert!(gfx
