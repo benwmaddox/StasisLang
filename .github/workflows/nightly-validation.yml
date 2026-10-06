@@ -734,10 +734,96 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/cargo_cache.py run -- cargo test -p stasis --test windows_game_launch -- --test-threads=1 --nocapture
 
+      - name: Build isolated presentation-poison runtime for Windows seams
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $generator = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/windows/select-cmake-vs-generator.ps1).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "Visual Studio generator detection failed." }
+          $env:STASIS_CMAKE_GENERATOR = $generator
+          # Release/fingerprint are the shared source compatibility context; binary identity is the separate path, poison option, exports, and hash.
+          $presentationReleaseId = $env:STASIS_RELEASE_ID
+          $presentationFingerprint = $env:STASIS_BUILD_FINGERPRINT
+          if ([string]::IsNullOrWhiteSpace($presentationReleaseId) -or [string]::IsNullOrWhiteSpace($presentationFingerprint)) {
+            throw "job release/fingerprint context is required for the presentation-poison runtime"
+          }
+          cmake -S runtime -B target/presentation-poison-runtime -G $generator -A x64 -DSTASIS_GRAPHICS_BUILD_SHARED=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_BUILD_TESTS=ON -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF -DSTASIS_TEST_PRESENTATION_POISON=ON "-DSTASIS_RELEASE_ID=$presentationReleaseId" "-DSTASIS_BUILD_FINGERPRINT=$presentationFingerprint"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build target/presentation-poison-runtime --config Release --target stasis_graphics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $normalRuntime = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll").Path
+          $poisonRuntime = (Resolve-Path "target/presentation-poison-runtime/bin/Release/stasis_graphics.dll").Path
+          if ([IO.Path]::GetFullPath($normalRuntime) -eq [IO.Path]::GetFullPath($poisonRuntime)) {
+            throw "ordinary and presentation-poison runtime paths must be distinct"
+          }
+          $normalCache = Get-Content -LiteralPath target/render-parity-runtime/CMakeCache.txt -Raw
+          $poisonCache = Get-Content -LiteralPath target/presentation-poison-runtime/CMakeCache.txt -Raw
+          foreach ($setting in @(
+              @{ Cache = $normalCache; Pattern = '^STASIS_TEST_PRESENTATION_POISON:BOOL=OFF\r?$'; Label = 'ordinary poison option OFF' },
+              @{ Cache = $poisonCache; Pattern = '^STASIS_TEST_PRESENTATION_POISON:BOOL=ON\r?$'; Label = 'test poison option ON' },
+              @{ Cache = $normalCache; Pattern = '^STASIS_GRAPHICS_BUNDLE_SDL:BOOL=ON\r?$'; Label = 'ordinary bundled SDL' },
+              @{ Cache = $poisonCache; Pattern = '^STASIS_GRAPHICS_BUNDLE_SDL:BOOL=ON\r?$'; Label = 'test bundled SDL' },
+              @{ Cache = $normalCache; Pattern = '^STASIS_GRAPHICS_BUILD_SHARED:BOOL=ON\r?$'; Label = 'ordinary shared graphics DLL' },
+              @{ Cache = $poisonCache; Pattern = '^STASIS_GRAPHICS_BUILD_SHARED:BOOL=ON\r?$'; Label = 'test shared graphics DLL' }
+          )) {
+            if ($setting.Cache -notmatch "(?m)$($setting.Pattern)") { throw "CMake cache is missing $($setting.Label)" }
+          }
+          $normalRelease = [regex]::Match($normalCache, '(?m)^STASIS_RELEASE_ID:STRING=(.*)$').Groups[1].Value.Trim()
+          $poisonRelease = [regex]::Match($poisonCache, '(?m)^STASIS_RELEASE_ID:STRING=(.*)$').Groups[1].Value.Trim()
+          $normalFingerprint = [regex]::Match($normalCache, '(?m)^STASIS_BUILD_FINGERPRINT:STRING=(.*)$').Groups[1].Value.Trim()
+          $poisonFingerprint = [regex]::Match($poisonCache, '(?m)^STASIS_BUILD_FINGERPRINT:STRING=(.*)$').Groups[1].Value.Trim()
+          if ($normalRelease -ne $env:STASIS_RELEASE_ID -or $poisonRelease -ne $env:STASIS_RELEASE_ID -or
+              $normalFingerprint -ne $env:STASIS_BUILD_FINGERPRINT -or $poisonFingerprint -ne $env:STASIS_BUILD_FINGERPRINT) {
+            throw "ordinary and presentation-poison runtimes must share the exact job source compatibility identity"
+          }
+
+          $poisonSymbols = @(
+            'stasis_test_fail_next_text_preparation',
+            'stasis_test_get_presentation_baseline_state',
+            'stasis_test_poison_physical_target',
+            'stasis_test_presentation_poison_target_kind',
+            'stasis_test_read_physical_target_pixel'
+          )
+          $normalExports = (& dumpbin.exe /exports $normalRuntime | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for the ordinary runtime" }
+          $poisonExports = (& dumpbin.exe /exports $poisonRuntime | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for the presentation-poison runtime" }
+          $evidenceDirectory = 'target/presentation-poison-runtime/ci-evidence'
+          New-Item -ItemType Directory -Force $evidenceDirectory | Out-Null
+          Set-Content -LiteralPath (Join-Path $evidenceDirectory 'ordinary-runtime-exports.txt') -Value $normalExports -Encoding utf8
+          Set-Content -LiteralPath (Join-Path $evidenceDirectory 'presentation-poison-runtime-exports.txt') -Value $poisonExports -Encoding utf8
+          foreach ($symbol in $poisonSymbols) {
+            if ($poisonExports -notmatch "(?m)\b$([regex]::Escape($symbol))\b") {
+              throw "presentation-poison runtime is missing required export $symbol"
+            }
+            if ($normalExports -match "(?m)\b$([regex]::Escape($symbol))\b") {
+              throw "ordinary runtime unexpectedly exports presentation-poison hook $symbol"
+            }
+          }
+          $normalHash = (Get-FileHash -LiteralPath $normalRuntime -Algorithm SHA256).Hash.ToLowerInvariant()
+          $poisonHash = (Get-FileHash -LiteralPath $poisonRuntime -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($normalHash -eq $poisonHash) { throw "ordinary and presentation-poison runtime DLL hashes must differ" }
+          @(
+            "ordinary_path=$normalRuntime",
+            "ordinary_release_id=$normalRelease",
+            "ordinary_build_fingerprint=$normalFingerprint",
+            "ordinary_poison_option=OFF",
+            "ordinary_sha256=$normalHash",
+            "presentation_poison_path=$poisonRuntime",
+            "presentation_poison_release_id=$poisonRelease",
+            "presentation_poison_build_fingerprint=$poisonFingerprint",
+            "presentation_poison_option=ON",
+            "binary_identity=separate_path_and_compile_flag_and_exports_and_hash",
+            "presentation_poison_sha256=$poisonHash"
+          ) | Set-Content -LiteralPath (Join-Path $evidenceDirectory 'runtime-identities-and-hashes.txt') -Encoding utf8
+
       - name: Test Windows desktop SDL seam suite
         shell: pwsh
         run: |
-          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll").Path
+          $env:STASIS_PRESENTATION_POISON_RUNTIME_DLL_PATH = (Resolve-Path "target/presentation-poison-runtime/bin/Release/stasis_graphics.dll").Path
           python tools/ci/run_windows_platform_seams.py --suite DesktopSdl
 
       - name: Test Windows mobile runtime seam suite
@@ -762,6 +848,7 @@ jobs:
             target/render-parity-ci/runtime.log
             target/render-parity-ci/evidence.json
             target/windows-platform-seams/**/*.log
+            target/presentation-poison-runtime/ci-evidence/
             build/codex-cargo-target/seam-tests/
 
       - name: Cleanup ephemeral CI signing certificate
