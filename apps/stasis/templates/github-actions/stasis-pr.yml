@@ -1,75 +1,45 @@
-name: Stasis PR
+name: Stasis manual check
 
 on:
-  pull_request:
-    types:
-      - opened
-      - reopened
-      - synchronize
-      - ready_for_review
   workflow_dispatch:
     inputs:
       pin_only:
-        description: Satisfy the required status for an automation-only Stasis pin bump
+        description: Skip game checks for a mechanical Stasis pin-only change
         required: true
         default: false
         type: boolean
 
 permissions:
   contents: read
-  pull-requests: read
 
 concurrency:
-  group: stasis-pr-${{ github.event.pull_request.number || github.ref }}
+  group: stasis-manual-check-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   gate:
-    name: Stasis PR gate
+    name: Stasis manual check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          # A pull_request checkout is normally the synthetic merge commit.
-          # Validate the contributor's exact current head instead.
-          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # A manual dispatch validates the exact selected ref.
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: Determine relevant change
+      - name: Honor explicit pin-only mode
         id: sentinel
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
           PIN_ONLY: ${{ inputs.pin_only }}
-          BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          relevant=false
-          if [[ "$EVENT_NAME" == "workflow_dispatch" && "${PIN_ONLY:-false}" != "true" ]]; then
-            relevant=true
-          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            relevant=false
-          else
-            if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
-              git remote add stasis-base "https://github.com/$BASE_REPOSITORY.git"
-              git fetch --no-tags --depth=1 stasis-base "$BASE_SHA"
-            fi
-            while IFS= read -r path; do
-              case "$path" in
-                .github/workflows/*|stasis.json|src/*|tests/*|assets/*|tools/*|vendor/stasis/*|AGENTS.md|CLAUDE.md|PROJECT_ARCHITECTURE.md)
-                  relevant=true
-                  break
-                  ;;
-              esac
-            done < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
-          fi
+          relevant=true
+          if [[ "${PIN_ONLY:-false}" == "true" ]]; then relevant=false; fi
           echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
-          echo "STASIS_PR_GATE_SENTINEL|relevant_change=$relevant" >> "$GITHUB_STEP_SUMMARY"
+          echo "STASIS_MANUAL_CHECK|game_checks=$relevant" >> "$GITHUB_STEP_SUMMARY"
           if [[ "$relevant" != "true" ]]; then
-            echo "No relevant Stasis project change; the one-job cheap gate is satisfied." >> "$GITHUB_STEP_SUMMARY"
+            echo "Pin-only mode requested; no game commands were run. This manual workflow does not provide an automatic pull-request check." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Read checked-in Stasis pin

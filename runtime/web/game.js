@@ -900,6 +900,17 @@
     const bytes = Array.from({ length }, (_, index) => readU8(memory, index));
     return String.fromCharCode(...bytes);
   };
+  const readPrintableAscii = (reference, length) => {
+    const memory = resolveU8Memory(reference);
+    if (!memory || !Number.isSafeInteger(length) || length < 0 || length > memory.length) return null;
+    let value = "";
+    for (let index = 0; index < length; index += 1) {
+      const byte = readU8(memory, index);
+      if (byte < 32 || byte > 126) return null;
+      value += String.fromCharCode(byte);
+    }
+    return value;
+  };
   const writeAscii = (reference, capacity, value) => {
     const memory = resolveU8Memory(reference);
     if (!memory || capacity <= 0 || capacity > memory.length) return -1;
@@ -2615,8 +2626,10 @@
       const value = storageGet(storageKey(scope, key));
       return value === null ? -1 : writeAscii(out, capacity, value);
     },
-    stasis_jit_storage_save_ascii: (scope, key, value, length) =>
-      storageSet(storageKey(scope, key), readAscii(value, length)),
+    stasis_jit_storage_save_ascii: (scope, key, value, length) => {
+      const text = readPrintableAscii(value, length);
+      return text === null ? 0 : storageSet(storageKey(scope, key), text);
+    },
     stasis_jit_clipboard_load_ascii: (out, capacity) =>
       clipboardText ? writeAscii(out, capacity, clipboardText) : -1,
     stasis_jit_clipboard_save_ascii: (value, length) => {

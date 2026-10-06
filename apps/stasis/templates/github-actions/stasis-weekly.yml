@@ -1,17 +1,16 @@
 name: Stasis Weekly Release
 
 on:
-  schedule:
-    - cron: "0 9 * * 5"
   workflow_dispatch:
     inputs:
       force_release:
-        description: Build even when neither the game nor Stasis advanced
+        description: Build even when game inputs and the pinned Stasis release are unchanged
         required: true
         default: false
         type: boolean
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -37,7 +36,6 @@ jobs:
         id: decision
         shell: pwsh
         env:
-          EVENT_NAME: ${{ github.event_name }}
           FORCE_RELEASE: ${{ inputs.force_release }}
           RUN_NUMBER: ${{ github.run_number }}
           SOURCE_COMMIT: ${{ github.sha }}
@@ -49,29 +47,110 @@ jobs:
           if ($pinned -notmatch '^nightly-[0-9]{8}-[0-9]+$') { throw "Invalid pinned Stasis release: $pinned" }
 
           # Release tags are created only by this workflow. Comparing the
-          # latest reachable tag and its immutable build manifest keeps an
-          # unchanged scheduled checkout cheap. The checked-in pin is the
-          # only Stasis release input; quarterly automation updates it in a PR.
-          $lastTag = [string](git tag --merged HEAD --list 'stasis-release-*' --sort=-creatordate | Select-Object -First 1)
+          # latest qualified published release keeps an unchanged manual
+          # dispatch cheap. The checked-in pin is the only Stasis input.
+          $tagLines = @(& git tag --merged HEAD --list 'stasis-release-*' --sort=-creatordate)
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to list prior Stasis release tags' }
+          $lastTag = [string]($tagLines | Select-Object -First 1)
           $lastReleaseStasis = $null
           $lastReleaseSource = $null
+          $baselineAvailable = $false
           if ($lastTag) {
             $manifestDir = Join-Path $env:RUNNER_TEMP "stasis-release-manifest-$env:GITHUB_RUN_ID"
-            New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
-            & gh release download $lastTag --repo $env:GITHUB_REPOSITORY --pattern BUILD-MANIFEST.json --dir $manifestDir --clobber
-            if ($LASTEXITCODE -ne 0) { throw "Unable to download BUILD-MANIFEST.json for $lastTag" }
-            $releaseManifestPath = Join-Path $manifestDir 'BUILD-MANIFEST.json'
-            if (-not (Test-Path -LiteralPath $releaseManifestPath -PathType Leaf)) { throw "Release $lastTag has no BUILD-MANIFEST.json" }
-            $releaseManifest = Get-Content -LiteralPath $releaseManifestPath -Raw | ConvertFrom-Json
-            $lastReleaseStasis = [string]$releaseManifest.stasis_release
-            $lastReleaseSource = [string]$releaseManifest.source_commit
-            if ($lastReleaseStasis -notmatch '^nightly-[0-9]{8}-[0-9]+$') { throw "Release $lastTag has an invalid Stasis identity: $lastReleaseStasis" }
+            try {
+              New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
+              $releaseJson = @(& gh api -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "/repos/$env:GITHUB_REPOSITORY/releases/tags/$lastTag")
+              if ($LASTEXITCODE -ne 0) { throw "Unable to query the published release for $lastTag" }
+              $release = ($releaseJson -join [Environment]::NewLine) | ConvertFrom-Json
+              if ($release.draft -ne $false -or [string]::IsNullOrWhiteSpace([string]$release.published_at) -or [string]$release.tag_name -cne $lastTag) { throw "Release $lastTag is not published under the expected tag" }
+              $expectedAssets = @('BUILD-MANIFEST.json', 'SHA256SUMS.txt', 'stasis-game-android-arm64-unsigned.apk', 'stasis-game-web.tar.gz', 'stasis-game-win-x64.zip') | Sort-Object -CaseSensitive
+              $assets = @($release.assets)
+              $assetNames = @($assets | ForEach-Object { [string]$_.name } | Sort-Object -CaseSensitive)
+              $assetDifferences = @(Compare-Object -ReferenceObject $expectedAssets -DifferenceObject $assetNames -CaseSensitive)
+              if ($assets.Count -ne $expectedAssets.Count -or $assetDifferences.Count -gt 0 -or
+                  @($assets | Where-Object { [string]$_.state -cne 'uploaded' -or [int]$_.size -le 0 }).Count -gt 0) {
+                throw "Release $lastTag does not contain the complete uploaded release asset set"
+              }
+              & gh release download $lastTag --repo $env:GITHUB_REPOSITORY --pattern BUILD-MANIFEST.json --pattern SHA256SUMS.txt --pattern stasis-game-android-arm64-unsigned.apk --pattern stasis-game-web.tar.gz --pattern stasis-game-win-x64.zip --dir $manifestDir --clobber
+              if ($LASTEXITCODE -ne 0) { throw "Unable to download the complete release evidence for $lastTag" }
+              $releaseManifestPath = Join-Path $manifestDir 'BUILD-MANIFEST.json'
+              $checksumsPath = Join-Path $manifestDir 'SHA256SUMS.txt'
+              if (-not (Test-Path -LiteralPath $releaseManifestPath -PathType Leaf) -or -not (Test-Path -LiteralPath $checksumsPath -PathType Leaf)) { throw "Release $lastTag has no complete baseline files" }
+              $releaseManifest = Get-Content -LiteralPath $releaseManifestPath -Raw | ConvertFrom-Json
+              $expectedPackages = @('stasis-game-android-arm64-unsigned.apk', 'stasis-game-web.tar.gz', 'stasis-game-win-x64.zip')
+              $checksumLines = @(Get-Content -LiteralPath $checksumsPath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+              if ($checksumLines.Count -ne $expectedPackages.Count) { throw "Release $lastTag checksums do not contain the exact package set" }
+              $checksumByName = [System.Collections.Generic.Dictionary[string, string]]::new([StringComparer]::Ordinal)
+              foreach ($line in $checksumLines) {
+                $checksumMatch = [regex]::Match([string]$line, '^(?<digest>[0-9a-f]{64})  (?<name>[^/\\]+)$')
+                if (-not $checksumMatch.Success -or $checksumByName.ContainsKey($checksumMatch.Groups['name'].Value)) { throw "Release $lastTag has malformed or duplicate checksum records" }
+                $checksumByName[$checksumMatch.Groups['name'].Value] = $checksumMatch.Groups['digest'].Value
+              }
+              $checksumNameDifferences = @(Compare-Object -ReferenceObject ($expectedPackages | Sort-Object -CaseSensitive) -DifferenceObject (@($checksumByName.Keys) | Sort-Object -CaseSensitive) -CaseSensitive)
+              if ($checksumNameDifferences.Count -gt 0) { throw "Release $lastTag checksums do not match the exact package set" }
+              foreach ($packageName in $expectedPackages) {
+                $packagePath = Join-Path $manifestDir $packageName
+                if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) { throw "Release $lastTag is missing package $packageName" }
+                $actualDigest = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($actualDigest -cne $checksumByName[$packageName]) { throw "Release $lastTag package checksum mismatch: $packageName" }
+              }
+              $lastReleaseStasis = [string]$releaseManifest.stasis_release
+              $lastReleaseSource = [string]$releaseManifest.source_commit
+              $runUrl = [string]$releaseManifest.workflow_run
+              $runPattern = '^https://github\.com/' + [regex]::Escape($env:GITHUB_REPOSITORY) + '/actions/runs/(?<id>[0-9]+)$'
+              $runMatch = [regex]::Match($runUrl, $runPattern)
+              $tagMatch = [regex]::Match($lastTag, '^stasis-release-[0-9]{8}-(?<run>[0-9]+)$')
+              if ([string]$releaseManifest.schema -cne 'stasis-scheduled-release' -or [int]$releaseManifest.version -ne 1 -or
+                  [string]$releaseManifest.repository -cne $env:GITHUB_REPOSITORY -or [string]$releaseManifest.release_tag -cne $lastTag -or
+                  $lastReleaseSource -notmatch '^[0-9a-f]{40}$' -or $lastReleaseStasis -notmatch '^nightly-[0-9]{8}-[0-9]+$' -or
+                  -not $runMatch.Success -or $runMatch.Groups['id'].Value -eq $env:GITHUB_RUN_ID -or -not $tagMatch.Success) {
+                throw "Release $lastTag has incomplete manifest provenance"
+              }
+              $tagCommit = [string](git rev-list -n 1 $lastTag)
+              if ($LASTEXITCODE -ne 0 -or $tagCommit -cne $lastReleaseSource) { throw "Release $lastTag manifest commit does not match its tag" }
+              $sourceRunJson = @(& gh api -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "/repos/$env:GITHUB_REPOSITORY/actions/runs/$($runMatch.Groups['id'].Value)")
+              if ($LASTEXITCODE -ne 0) { throw "Source workflow run for $lastTag is unavailable" }
+              $sourceRun = ($sourceRunJson -join [Environment]::NewLine) | ConvertFrom-Json
+              if ([string]$sourceRun.path -notmatch '^\.github/workflows/stasis-weekly\.yml@' -or [string]$sourceRun.status -cne 'completed' -or
+                  [string]$sourceRun.conclusion -cne 'success' -or [string]$sourceRun.head_sha -cne $lastReleaseSource -or
+                  [string]$sourceRun.event -notin @('workflow_dispatch', 'schedule') -or
+                  [string]$sourceRun.id -cne $runMatch.Groups['id'].Value -or [string]$sourceRun.repository.full_name -cne $env:GITHUB_REPOSITORY -or
+                  [string]$sourceRun.head_repository.full_name -cne $env:GITHUB_REPOSITORY -or [string]$sourceRun.run_number -cne $tagMatch.Groups['run'].Value) {
+                throw "Source workflow run for $lastTag did not complete successfully or match release provenance"
+              }
+              $sourceJobsJson = @(& gh api -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' "/repos/$env:GITHUB_REPOSITORY/actions/runs/$($runMatch.Groups['id'].Value)/jobs?per_page=100")
+              if ($LASTEXITCODE -ne 0) { throw "Source workflow jobs for $lastTag are unavailable" }
+              $sourceJobsResponse = ($sourceJobsJson -join [Environment]::NewLine) | ConvertFrom-Json
+              $sourceJobs = @($sourceJobsResponse.jobs)
+              $releaseJobNames = @('Publish manual release', 'Publish scheduled release')
+              $releaseJobs = @($sourceJobs | Where-Object { [string]$_.name -cin $releaseJobNames })
+              if ($releaseJobs.Count -ne 1) { throw "Source workflow run for $lastTag does not contain exactly one release job" }
+              $requiredJobs = @('Decide whether a Stasis release is needed', 'Build weekly targets (android-web)', 'Build weekly targets (win-x64)', [string]$releaseJobs[0].name)
+              $expectedJobs = @(($requiredJobs + 'Skip true no-op') | Sort-Object -CaseSensitive)
+              $actualJobs = @($sourceJobs | ForEach-Object { [string]$_.name } | Sort-Object -CaseSensitive)
+              $jobDifferences = @(Compare-Object -ReferenceObject $expectedJobs -DifferenceObject $actualJobs -CaseSensitive)
+              if ($actualJobs.Count -ne $expectedJobs.Count -or $jobDifferences.Count -gt 0) { throw "Source workflow run for $lastTag does not contain the exact expected job set" }
+              foreach ($name in $requiredJobs) {
+                $matching = @($sourceJobs | Where-Object { [string]$_.name -ceq $name })
+                if ($matching.Count -ne 1 -or [string]$matching[0].conclusion -cne 'success') { throw "Source workflow run for $lastTag lacks successful job '$name'" }
+              }
+              $noOpJob = @($sourceJobs | Where-Object { [string]$_.name -ceq 'Skip true no-op' })
+              if ($noOpJob.Count -ne 1 -or [string]$noOpJob[0].conclusion -cne 'skipped') { throw "Source workflow run for $lastTag was not a release build" }
+              $baselineAvailable = $true
+            } catch {
+              Write-Warning "Latest release $lastTag is not a qualified success baseline; rebuilding conservatively: $($_.Exception.Message)"
+              $lastTag = ''
+              $lastReleaseStasis = $null
+              $lastReleaseSource = $null
+            } finally {
+              Remove-Item -LiteralPath $manifestDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
           }
           # Treat every tracked project change as game advancement except the
           # vendored snapshot, whose content is represented by the Stasis pin.
           $gamePaths = @('.', ':(exclude)vendor/stasis/**')
-          $gameAdvanced = $true
-          if ($lastTag) {
+          $gameAdvanced = -not $baselineAvailable
+          if ($baselineAvailable) {
             $changed = @(git diff --name-only "$lastTag" HEAD -- $gamePaths)
             if ($LASTEXITCODE -ne 0) { throw "Unable to compare $lastTag with HEAD" }
             $gameAdvanced = $changed.Count -gt 0
@@ -87,8 +166,8 @@ jobs:
               }
             }
           }
-          $stasisAdvanced = -not $lastTag -or $pinned -ne $lastReleaseStasis
-          $force = $env:EVENT_NAME -eq 'workflow_dispatch' -and $env:FORCE_RELEASE -eq 'true'
+          $stasisAdvanced = -not $baselineAvailable -or $pinned -ne $lastReleaseStasis
+          $force = $env:FORCE_RELEASE -eq 'true'
           $shouldRelease = $force -or $gameAdvanced -or $stasisAdvanced
           $releaseTag = "stasis-release-$((Get-Date).ToUniversalTime().ToString('yyyyMMdd'))-$env:RUN_NUMBER"
 
@@ -312,7 +391,7 @@ jobs:
           retention-days: 7
 
   release:
-    name: Publish scheduled release
+    name: Publish manual release
     needs: [decide, build]
     if: needs.decide.outputs.should_release == 'true'
     runs-on: ubuntu-latest

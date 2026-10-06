@@ -1,0 +1,67 @@
+import "../src/display_spaces.stasis";
+
+function set_safe_viewport(): void {
+    display_frame.display.logical_width = 400.0;
+    display_frame.display.logical_height = 720.0;
+    display_frame.display.safe_x = 7.0;
+    display_frame.display.safe_y = 11.0;
+    display_frame.display.safe_width = 379.0;
+    display_frame.display.safe_height = 700.0;
+}
+
+test `drawable and density changes preserve logical button geometry`(): bool {
+    set_safe_viewport();
+    display_frame.display.drawable_width_px = 360;
+    display_frame.display.drawable_height_px = 720;
+    display_frame.display.content_scale = 1.0;
+    display_frame.display.raster_scale = 1.0;
+    display_frame.display.density_generation = 1;
+    resolve_button();
+    let x: f32 = button_rect.x;
+    let y: f32 = button_rect.y;
+    let w: f32 = button_rect.w;
+    let h: f32 = button_rect.h;
+
+    display_frame.display.drawable_width_px = 1440;
+    display_frame.display.drawable_height_px = 2880;
+    display_frame.display.content_scale = 4.0;
+    display_frame.display.raster_scale = 4.0;
+    display_frame.display.density_generation = 2;
+    resolve_button();
+    return button_rect.x == x && button_rect.y == y && button_rect.w == w && button_rect.h == h;
+}
+
+test `fractional safe fit uses one rectangle for drawing and hit testing`(): bool {
+    set_safe_viewport();
+    resolve_button();
+    let fit: f32 = 700.0 / 720.0;
+    let page_x: f32 = 7.0 +(379.0 - 360.0 * fit) / 2.0;
+    let page_y: f32 = 11.0;
+    let expected_x: f32 = page_x + 90.0 * fit;
+    let expected_y: f32 = page_y + 240.0 * fit;
+    let expected_w: f32 = 180.0 * fit;
+    let expected_h: f32 = 72.0 * fit;
+    if (button_rect.x != expected_x || button_rect.y != expected_y || button_rect.w != expected_w || button_rect.h != expected_h) {
+        return false;
+    }
+    display_frame.pointers[0].x_logical = button_rect.x + button_rect.w / 2.0;
+    display_frame.pointers[0].y_logical = button_rect.y + button_rect.h / 2.0;
+    let inside: bool = pointer_hits_button(display_frame.pointers[0]);
+    display_frame.pointers[0].x_logical = button_rect.x + button_rect.w;
+    let outside: bool = !pointer_hits_button(display_frame.pointers[0]);
+    render();
+    return inside && outside && button_presentation.count == 1 && button_presentation.kinds[0] == PresentationCommandKind.SolidRect && button_presentation.x[0] == button_rect.x && button_presentation.y[0] == button_rect.y && button_presentation.width[0] == button_rect.w && button_presentation.height[0] == button_rect.h;
+}
+
+test `logical pointer hit survives backing changes`(): bool {
+    set_safe_viewport();
+    resolve_button();
+    display_frame.pointers[0].x_logical = button_rect.x + 1.0;
+    display_frame.pointers[0].y_logical = button_rect.y + 1.0;
+    let initial_hit: bool = pointer_hits_button(display_frame.pointers[0]);
+    display_frame.display.drawable_width_px = 1920;
+    display_frame.display.drawable_height_px = 1080;
+    display_frame.display.raster_scale = 3.0;
+    resolve_button();
+    return initial_hit && pointer_hits_button(display_frame.pointers[0]);
+}

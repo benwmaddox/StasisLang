@@ -36,7 +36,7 @@ class RecordRuntimeTests(unittest.TestCase):
         write_json(
             path,
             {
-                "schema": "stasis.staged_archive_acceptance.v3",
+                "schema": "stasis.staged_archive_acceptance.v2",
                 "target": target,
                 "release_id": RELEASE_ID,
                 "source_commit": SOURCE_COMMIT,
@@ -210,25 +210,23 @@ class RecordRuntimeTests(unittest.TestCase):
             self.assertEqual(mobile["shipping_package"]["linked_artifact_sha256"], sha256(roots[label] / "shipping/app-debug.apk"))
             self.assertEqual(receipt["consumers"][label]["mobile_runtime"]["frame_sha256"], sha256(roots[label] / "artifacts/frame.png"))
 
-    def test_rejects_legacy_v1_and_v2_staged_archive_receipts(self) -> None:
+    def test_rejects_legacy_v1_staged_archive_receipt(self) -> None:
+        receipt_path = self.make_receipt("android")
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["schema"] = "stasis.staged_archive_acceptance.v1"
+        write_json(receipt_path, receipt)
         roots = {label: self.root / label for label in ("bundled", "generated")}
         for root in roots.values():
             root.mkdir()
-        for version in ("v1", "v2"):
-            with self.subTest(version=version):
-                receipt_path = self.make_receipt("android")
-                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-                receipt["schema"] = f"stasis.staged_archive_acceptance.{version}"
-                write_json(receipt_path, receipt)
-                with self.assertRaisesRegex(ValueError, "unsupported schema"):
-                    recorder.record_runtime(
-                        receipt_path,
-                        "android",
-                        roots["bundled"],
-                        roots["generated"],
-                        expected_release=RELEASE_ID,
-                        expected_source=SOURCE_COMMIT,
-                    )
+        with self.assertRaisesRegex(ValueError, "unsupported schema"):
+            recorder.record_runtime(
+                receipt_path,
+                "android",
+                roots["bundled"],
+                roots["generated"],
+                expected_release=RELEASE_ID,
+                expected_source=SOURCE_COMMIT,
+            )
 
     def test_accepts_android_producer_absolute_frame_with_relative_consumer_roots(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary:

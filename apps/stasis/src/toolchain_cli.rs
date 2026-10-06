@@ -158,6 +158,8 @@ const PROJECT_AGENT_GUIDE: &str = include_str!("../../../docs/agent_workflow.md"
 const PROJECT_CLAUDE_GUIDE: &str = "# CLAUDE.md\n\n@AGENTS.md\n";
 const PROJECT_ARCHITECTURE_GUIDE: &str = include_str!("../../../docs/project_architecture.md");
 const PROJECT_ARCHITECTURE_NAME: &str = "PROJECT_ARCHITECTURE.md";
+const PROJECT_LOCAL_VALIDATION_GUIDE: &str =
+    include_str!("../templates/local-validation/agent-guidance.md");
 const PROJECT_GIT_ATTRIBUTES: &str = r#"* text=auto eol=lf
 *.bat text eol=crlf
 *.cmd text eol=crlf
@@ -311,25 +313,6 @@ const PROJECT_VSCODE_EXTENSIONS: &str = r#"{
     "stasislang.stasis"
   ]
 }
-"#;
-const PROJECT_PRE_COMMIT_HOOK: &str = r#"#!/bin/sh
-set -eu
-
-if ! command -v stasis >/dev/null 2>&1; then
-    echo "Commit blocked: stasis is not available on PATH; install Stasis and run 'stasis format'." >&2
-    exit 1
-fi
-
-echo "Stasis pre-commit: enforcing canonical source format"
-if ! stasis format src tests; then
-    echo "Commit blocked: 'stasis format' failed." >&2
-    exit 1
-fi
-
-if ! git diff --quiet -- ':(glob)**/*.stasis'; then
-    echo "Commit blocked: review and stage the enforced formatting changes, then commit again." >&2
-    exit 1
-fi
 "#;
 const TARGET_BUILD_HELP: &str = r#"Build targets:
   Windows, Linux, or macOS (current host)
@@ -2194,6 +2177,7 @@ fn create_project_with_options(
     }
     let root = absolute_path(&path)?;
     let vendor_manifest = current_vendor_manifest()?;
+    let local_validation_templates = initialize_git || github_actions;
     let manifest_path = root.join(MANIFEST_NAME);
     let mut reserved_paths = vec![
         manifest_path.clone(),
@@ -2212,27 +2196,45 @@ fn create_project_with_options(
         reserved_paths.push(root.join(".editorconfig"));
         reserved_paths.push(root.join(".gitignore"));
         reserved_paths.push(root.join(".githooks/pre-commit"));
+        reserved_paths.push(root.join(".githooks/pre-commit.ps1"));
+        reserved_paths.push(root.join(".githooks/pre-push"));
+        reserved_paths.push(root.join(".githooks/pre-push.ps1"));
+    }
+    if local_validation_templates {
+        reserved_paths.extend([
+            root.join("tools/local-validation.json"),
+            root.join("tools/local-validation.ps1"),
+            root.join("tools/resolve-pinned-stasis.ps1"),
+            root.join("tools/restore-stasis-release.ps1"),
+        ]);
     }
     if github_actions {
         reserved_paths.extend([
             root.join(".github/workflows/stasis-pr.yml"),
             root.join(".github/workflows/stasis-weekly.yml"),
             root.join(".github/workflows/stasis-quarterly.yml"),
-            root.join("tools/restore-stasis-release.ps1"),
             root.join("tools/resolve-stasis-nightly.ps1"),
             root.join("tools/update-stasis-pin.ps1"),
             root.join("tools/validate-before-pr.ps1"),
         ]);
-        for directory in [
-            root.join(".github"),
-            root.join(".github/workflows"),
-            root.join("tools"),
-        ] {
+        for directory in [root.join(".github"), root.join(".github/workflows")] {
             validate_safe_project_directory(
                 &directory,
                 "refusing to generate GitHub Actions through",
             )?;
         }
+    }
+    if local_validation_templates {
+        validate_safe_project_directory(
+            &root.join("tools"),
+            "refusing to generate local validation tools through",
+        )?;
+    }
+    if initialize_git {
+        validate_safe_project_directory(
+            &root.join(".githooks"),
+            "refusing to install Git hooks through",
+        )?;
     }
     if android_defaults {
         reserved_paths.extend(
@@ -2300,7 +2302,12 @@ fn create_project_with_options(
     write_manifest(&manifest_path, &manifest)?;
     let vendor_package = root.join("vendor/stasis");
     copy_bundled_vendor_package(&vendor_package)?;
-    write_new_file(&root.join("AGENTS.md"), PROJECT_AGENT_GUIDE)?;
+    let agent_guide = if local_validation_templates {
+        format!("{PROJECT_AGENT_GUIDE}{PROJECT_LOCAL_VALIDATION_GUIDE}")
+    } else {
+        PROJECT_AGENT_GUIDE.to_string()
+    };
+    write_new_file(&root.join("AGENTS.md"), &agent_guide)?;
     write_new_file(&root.join("CLAUDE.md"), PROJECT_CLAUDE_GUIDE)?;
     write_new_file(
         &root.join(PROJECT_ARCHITECTURE_NAME),
@@ -2329,10 +2336,6 @@ fn create_project_with_options(
             include_str!("../templates/github-actions/stasis-quarterly.yml"),
         )?;
         write_new_file(
-            &root.join("tools/restore-stasis-release.ps1"),
-            include_str!("../templates/github-actions/restore-stasis-release.ps1"),
-        )?;
-        write_new_file(
             &root.join("tools/resolve-stasis-nightly.ps1"),
             include_str!("../templates/github-actions/resolve-stasis-nightly.ps1"),
         )?;
@@ -2344,6 +2347,31 @@ fn create_project_with_options(
             &root.join("tools/validate-before-pr.ps1"),
             include_str!("../templates/github-actions/validate-before-pr.ps1"),
         )?;
+    }
+    if local_validation_templates {
+        fs::create_dir_all(root.join("tools")).map_err(|error| {
+            format!("failed to create local validation tools directory: {error}")
+        })?;
+        for (relative, contents) in [
+            (
+                "tools/local-validation.json",
+                include_str!("../templates/local-validation/local-validation.json"),
+            ),
+            (
+                "tools/local-validation.ps1",
+                include_str!("../templates/local-validation/local-validation.ps1"),
+            ),
+            (
+                "tools/resolve-pinned-stasis.ps1",
+                include_str!("../templates/local-validation/resolve-pinned-stasis.ps1"),
+            ),
+            (
+                "tools/restore-stasis-release.ps1",
+                include_str!("../templates/github-actions/restore-stasis-release.ps1"),
+            ),
+        ] {
+            write_new_file(&root.join(relative), contents)?;
+        }
     }
     write_new_file(&root.join("src/main.stasis"), DEFAULT_PROJECT_SOURCE)?;
     write_new_file(&root.join("assets/manifest.json"), DEFAULT_ASSET_MANIFEST)?;
@@ -2362,11 +2390,32 @@ fn create_project_with_options(
         PROJECT_VSCODE_EXTENSIONS,
     )?;
     if initialize_git {
-        let hook = root.join(".githooks/pre-commit");
-        fs::create_dir_all(hook.parent().expect("hook parent"))
-            .map_err(|error| format!("failed to create {}: {error}", hook.display()))?;
-        write_new_file(&hook, PROJECT_PRE_COMMIT_HOOK)?;
-        make_executable(&hook)?;
+        fs::create_dir_all(root.join(".githooks"))
+            .map_err(|error| format!("failed to create Git hooks directory: {error}"))?;
+        for (relative, contents) in [
+            (
+                ".githooks/pre-commit",
+                include_str!("../templates/local-validation/pre-commit"),
+            ),
+            (
+                ".githooks/pre-commit.ps1",
+                include_str!("../templates/local-validation/pre-commit.ps1"),
+            ),
+            (
+                ".githooks/pre-push",
+                include_str!("../templates/local-validation/pre-push"),
+            ),
+            (
+                ".githooks/pre-push.ps1",
+                include_str!("../templates/local-validation/pre-push.ps1"),
+            ),
+        ] {
+            let hook = root.join(relative);
+            write_new_file(&hook, contents)?;
+            if relative.ends_with("pre-commit") || relative.ends_with("pre-push") {
+                make_executable(&hook)?;
+            }
+        }
         initialize_git_hooks(&root)?;
     }
     Ok(CommandResult::success(
@@ -14686,8 +14735,10 @@ mod tests {
                 original_vendor
             );
         }
-        assert!(PROJECT_PRE_COMMIT_HOOK.contains("stasis format src tests"));
-        assert!(!PROJECT_PRE_COMMIT_HOOK.contains("if ! stasis format;"));
+        let pre_commit = include_str!("../templates/local-validation/pre-commit.ps1");
+        assert!(pre_commit.contains("fmt --check"));
+        assert!(pre_commit.contains("$identity.executable format"));
+        assert!(!pre_commit.contains("format src tests"));
         remove_temp(&root);
     }
 
@@ -17019,7 +17070,247 @@ mod tests {
     }
 
     #[test]
-    fn github_actions_templates_are_offline_and_match_the_ci_contract() {
+    fn git_only_projects_generate_local_validation_and_activate_hooks() {
+        let root = temp_dir("git_only_local_validation");
+        create_project_with_options(root.clone(), "demo".to_string(), true, false, false)
+            .expect("generate a Git-only project");
+
+        for path in [
+            "tools/local-validation.json",
+            "tools/local-validation.ps1",
+            "tools/resolve-pinned-stasis.ps1",
+            "tools/restore-stasis-release.ps1",
+            ".githooks/pre-commit",
+            ".githooks/pre-commit.ps1",
+            ".githooks/pre-push",
+            ".githooks/pre-push.ps1",
+        ] {
+            assert!(root.join(path).is_file(), "missing generated {path}");
+        }
+        assert!(root.join(".git").is_dir());
+        assert!(!root.join(".github/workflows").exists());
+        assert!(fs::read_to_string(root.join("AGENTS.md"))
+            .expect("read generated guidance")
+            .contains("PowerShell 7 (`pwsh`)"));
+        let restore = fs::read_to_string(root.join("tools/restore-stasis-release.ps1"))
+            .expect("read generated explicit restore helper");
+        for expected in [
+            "[Parameter(Mandatory = $true)][string] $ReleaseId",
+            "[Parameter(Mandatory = $true)][string] $AssetName",
+            "[string] $ProjectRoot = (Get-Location).Path",
+            "[string] $Destination = '.stasis/toolchain'",
+        ] {
+            assert!(
+                restore.contains(expected),
+                "restore helper missing {expected}"
+            );
+        }
+
+        let hooks_path = Command::new("git")
+            .args(["config", "--local", "--get", "core.hooksPath"])
+            .current_dir(&root)
+            .output()
+            .expect("read generated Git hooksPath");
+        assert!(hooks_path.status.success());
+        assert_eq!(
+            String::from_utf8(hooks_path.stdout)
+                .expect("decode generated Git hooksPath")
+                .trim(),
+            ".githooks"
+        );
+
+        #[cfg(unix)]
+        for hook in [".githooks/pre-commit", ".githooks/pre-push"] {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(root.join(hook))
+                .expect("inspect executable hook")
+                .permissions()
+                .mode();
+            assert_ne!(mode & 0o111, 0, "{hook} must be executable");
+        }
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn plain_init_projects_do_not_generate_local_validation_or_workflows() {
+        let root = temp_dir("plain_init_no_ci");
+        create_project(root.clone(), "demo".to_string()).expect("generate plain init project");
+
+        assert!(!root.join("tools/local-validation.json").exists());
+        assert!(!root.join("tools/local-validation.ps1").exists());
+        assert!(!root.join(".githooks").exists());
+        assert!(!root.join(".github/workflows").exists());
+        let agent_guide = fs::read_to_string(root.join("AGENTS.md")).expect("read AGENTS.md");
+        assert!(!agent_guide.contains("## Local validation"));
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn local_validation_preflights_reserved_files_without_partial_writes() {
+        for relative in [
+            "tools/local-validation.json",
+            "tools/local-validation.ps1",
+            "tools/restore-stasis-release.ps1",
+            ".githooks/pre-push",
+            ".githooks/pre-push.ps1",
+        ] {
+            let root = temp_dir("local_validation_conflict");
+            let conflict = root.join(relative);
+            fs::create_dir_all(conflict.parent().expect("conflict parent"))
+                .expect("create conflict parent");
+            fs::write(&conflict, "user-owned file\n").expect("write conflict sentinel");
+
+            let error =
+                create_project_with_options(root.clone(), "demo".to_string(), true, false, false)
+                    .expect_err("reject local validation path conflict");
+            assert!(
+                error.contains(relative.rsplit('/').next().unwrap()),
+                "{error}"
+            );
+            assert!(!root.join(MANIFEST_NAME).exists());
+            assert!(!root.join("src/main.stasis").exists());
+            assert!(!root.join(".git").exists());
+            assert_eq!(
+                fs::read_to_string(conflict).expect("read preserved conflict"),
+                "user-owned file\n"
+            );
+            remove_temp(&root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_validation_rejects_linked_output_directories_without_partial_writes() {
+        use std::os::unix::fs::symlink;
+
+        for linked_name in ["tools", ".githooks"] {
+            let root = temp_dir("local_validation_linked_directory");
+            let outside = temp_dir("local_validation_linked_directory_outside");
+            fs::create_dir_all(&root).expect("create project root");
+            fs::create_dir_all(&outside).expect("create linked target");
+            fs::write(outside.join("sentinel.txt"), "external data\n")
+                .expect("write external sentinel");
+            symlink(&outside, root.join(linked_name)).expect("link generated output directory");
+
+            let error =
+                create_project_with_options(root.clone(), "demo".to_string(), true, false, false)
+                    .expect_err("reject linked generated output directory");
+            assert!(
+                error.contains("refusing to generate local validation tools through")
+                    || error.contains("refusing to install Git hooks through")
+            );
+            assert!(!root.join(MANIFEST_NAME).exists());
+            assert_eq!(
+                fs::read_dir(&outside)
+                    .expect("list external directory")
+                    .count(),
+                1,
+                "generation must not add files through {linked_name}"
+            );
+            assert_eq!(
+                fs::read_to_string(outside.join("sentinel.txt")).expect("read external sentinel"),
+                "external data\n"
+            );
+            remove_temp(&root);
+            remove_temp(&outside);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_validation_rejects_linked_output_directories_without_partial_writes() {
+        use std::os::windows::fs::symlink_dir;
+
+        for linked_name in ["tools", ".githooks"] {
+            let root = temp_dir("local_validation_linked_directory");
+            let outside = temp_dir("local_validation_linked_directory_outside");
+            fs::create_dir_all(&root).expect("create project root");
+            fs::create_dir_all(&outside).expect("create linked target");
+            fs::write(outside.join("sentinel.txt"), "external data\n")
+                .expect("write external sentinel");
+            if symlink_dir(&outside, root.join(linked_name)).is_err() {
+                eprintln!(
+                    "SKIP linked output directory fixture for {linked_name}: Windows denied directory symlink creation"
+                );
+                remove_temp(&root);
+                remove_temp(&outside);
+                return;
+            }
+
+            let error =
+                create_project_with_options(root.clone(), "demo".to_string(), true, false, false)
+                    .expect_err("reject linked generated output directory");
+            assert!(
+                error.contains("refusing to generate local validation tools through")
+                    || error.contains("refusing to install Git hooks through")
+            );
+            assert!(!root.join(MANIFEST_NAME).exists());
+            assert_eq!(
+                fs::read_dir(&outside)
+                    .expect("list external directory")
+                    .count(),
+                1,
+                "generation must not add files through {linked_name}"
+            );
+            assert_eq!(
+                fs::read_to_string(outside.join("sentinel.txt")).expect("read external sentinel"),
+                "external data\n"
+            );
+            remove_temp(&root);
+            remove_temp(&outside);
+        }
+    }
+
+    fn workflow_trigger_events(workflow: &str) -> Vec<String> {
+        let trigger_map_count = workflow.lines().filter(|line| *line == "on:").count();
+        assert_eq!(
+            trigger_map_count, 1,
+            "workflow must have one top-level on map"
+        );
+        let mut in_trigger_map = false;
+        let mut events = Vec::new();
+        for line in workflow.lines() {
+            if !in_trigger_map {
+                if line == "on:" {
+                    in_trigger_map = true;
+                }
+                continue;
+            }
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                continue;
+            }
+            let indentation = line.len() - line.trim_start().len();
+            if indentation == 0 {
+                break;
+            }
+            assert!(indentation >= 2, "invalid event map indentation: {line}");
+            if indentation == 2 {
+                let event = line.trim().strip_suffix(':').expect("event map key");
+                assert!(
+                    !event.is_empty() && !event.contains(':'),
+                    "invalid event key: {line}"
+                );
+                events.push(event.to_string());
+            }
+        }
+        assert!(!events.is_empty(), "workflow has an empty on map");
+        let unique: std::collections::BTreeSet<_> = events.iter().collect();
+        assert_eq!(unique.len(), events.len(), "workflow repeats an event key");
+        events
+    }
+
+    #[test]
+    fn workflow_trigger_map_reader_sees_each_top_level_event() {
+        let workflow = "name: sample\non:\n  workflow_dispatch:\n    inputs:\n      flag:\n        default: false\n  schedule:\n    - cron: '0 0 * * *'\njobs:\n  gate:\n    runs-on: ubuntu-latest\n";
+        assert_eq!(
+            workflow_trigger_events(workflow),
+            vec!["workflow_dispatch".to_string(), "schedule".to_string()]
+        );
+    }
+
+    #[test]
+    fn github_actions_templates_are_manual_only_and_match_the_local_first_contract() {
         let root = temp_dir("github_actions_templates");
         let result =
             create_project_with_options(root.clone(), "demo".to_string(), false, true, false)
@@ -17037,6 +17328,10 @@ mod tests {
         ] {
             assert!(root.join(path).is_file(), "missing generated {path}");
         }
+        assert!(!root.join(".git").exists());
+        assert!(!root.join(".githooks").exists());
+        assert!(root.join("tools/local-validation.json").is_file());
+        assert!(root.join("tools/local-validation.ps1").is_file());
 
         let manifest: ProjectManifest =
             serde_json::from_slice(&fs::read(root.join(MANIFEST_NAME)).expect("read manifest"))
@@ -17063,58 +17358,67 @@ mod tests {
 
         let pr = fs::read_to_string(root.join(".github/workflows/stasis-pr.yml"))
             .expect("read PR workflow");
-        assert!(pr.contains("pull_request:"));
-        assert!(pr.contains("workflow_dispatch:"));
-        assert!(pr.contains("pin_only:"));
-        assert!(pr.contains("PIN_ONLY: ${{ inputs.pin_only }}"));
-        assert!(!pr.contains("paths:"));
-        assert!(!pr.contains("./tools/resolve-stasis-nightly.ps1"));
-        assert!(pr.contains("github.event.pull_request.head.sha || github.sha"));
-        assert!(pr.contains("github.event.pull_request.head.repo.full_name || github.repository"));
-        assert!(pr.contains("git fetch --no-tags --depth=1 stasis-base \"$BASE_SHA\""));
-        assert!(pr.contains("STASIS_PR_GATE_SENTINEL|relevant_change="));
-        assert!(pr.contains("name: Stasis PR gate"));
-        assert!(pr.contains("name: Check Android launcher resources"));
-        assert!(pr.contains("$null -ne $manifest.android"));
-        assert!(pr.contains("$manifest.android.launcher_resources"));
-        assert!(pr.contains(
-            "Test-Path -LiteralPath (Join-Path (Get-Location).Path $resources) -PathType Container"
-        ));
-        assert_eq!(pr.matches("runs-on: ubuntu-latest").count(), 1);
-        assert!(!pr.contains("needs: relevant-change"));
-        assert!(pr.contains("$pin.release_id"));
-        assert!(pr.contains("$pin.sha256"));
-        assert!(pr.contains("nightly-[0-9]{8}-[0-9]+"));
-        assert!(pr.contains("GITHUB_STEP_SUMMARY"));
+        assert_eq!(
+            workflow_trigger_events(&pr),
+            vec!["workflow_dispatch".to_string()]
+        );
         for expected in [
+            "workflow_dispatch:",
+            "pin_only:",
+            "default: false",
+            "type: boolean",
+            "PIN_ONLY: ${{ inputs.pin_only }}",
+            "ref: ${{ github.sha }}",
+            "if [[ \"${PIN_ONLY:-false}\" == \"true\" ]]",
+            "run: stasis fmt --check",
+            "run: stasis check",
             "stasis --json vendor status --workspace .",
-            "$LASTEXITCODE -ne 0",
-            "ConvertFrom-Json -ErrorAction Stop",
-            "$status.ok -ne $true",
-            "$status.result.current -ne $true",
+            "the exact selected ref",
+            "manual workflow does not provide an automatic pull-request check",
         ] {
-            assert!(pr.contains(expected), "PR workflow missing {expected}");
+            assert!(
+                pr.contains(expected),
+                "manual PR workflow missing {expected}"
+            );
         }
-        assert!(pr.contains("cancel-in-progress: true"));
-        assert!(pr.contains("run: stasis fmt --check"));
-        assert!(pr.contains("run: stasis check"));
-        for forbidden in ["stasis test", "stasis build", "stasis package"] {
-            assert!(!pr.contains(forbidden), "PR workflow contains {forbidden}");
+        assert!(!pr.contains("pull_request:"));
+        assert!(!pr.contains("schedule:"));
+        assert!(!pr.contains("github.event.pull_request"));
+        assert!(!pr.contains("./tools/resolve-stasis-nightly.ps1"));
+        for forbidden in [
+            "run: stasis test",
+            "run: stasis build",
+            "run: stasis package",
+        ] {
+            assert!(
+                !pr.contains(forbidden),
+                "manual PR workflow contains {forbidden}"
+            );
         }
 
         let weekly = fs::read_to_string(root.join(".github/workflows/stasis-weekly.yml"))
             .expect("read weekly workflow");
+        assert_eq!(
+            workflow_trigger_events(&weekly),
+            vec!["workflow_dispatch".to_string()]
+        );
         for expected in [
-            "cron: \"0 9 * * 5\"",
             "workflow_dispatch:",
             "force_release",
-            "only Stasis release input",
+            "default: false",
+            "type: boolean",
+            "FORCE_RELEASE: ${{ inputs.force_release }}",
             "BUILD-MANIFEST.json",
             "lastReleaseStasis",
             ":(exclude)vendor/stasis/**",
             "stasis-release-*",
             "gameAdvanced",
             "stasisAdvanced",
+            "$baselineAvailable = $false",
+            "$gameAdvanced = -not $baselineAvailable",
+            "$stasisAdvanced = -not $baselineAvailable -or $pinned -ne $lastReleaseStasis",
+            "$force = $env:FORCE_RELEASE -eq 'true'",
+            "$shouldRelease = $force -or $gameAdvanced -or $stasisAdvanced",
             "True no-op",
             "ubuntu-latest",
             "windows-latest",
@@ -17171,6 +17475,8 @@ mod tests {
                 "weekly workflow missing {expected}"
             );
         }
+        assert!(!weekly.contains("cron:"));
+        assert!(!weekly.contains("pull_request:"));
         assert!(!weekly.contains("$lastTag = $lastTag.Trim()"));
         assert!(!weekly.contains("macos-"));
         assert!(!weekly.contains("osx-arm64"));
@@ -17188,26 +17494,26 @@ mod tests {
 
         let quarterly = fs::read_to_string(root.join(".github/workflows/stasis-quarterly.yml"))
             .expect("read quarterly workflow");
+        assert_eq!(
+            workflow_trigger_events(&quarterly),
+            vec!["workflow_dispatch".to_string()]
+        );
         for expected in [
-            "cron: \"0 9 1 1,4,7,10 *\"",
             "workflow_dispatch:",
             "Resolve newest complete Stasis release once",
             "./tools/update-stasis-pin.ps1",
             "branch=\"automation/stasis-pin-update\"",
             "git branch -f \"$branch\" \"origin/$default_branch\"",
             "git switch \"$branch\"",
-            "echo \"branch=$branch\" >> \"$GITHUB_OUTPUT\"",
-            "echo \"default_branch=$default_branch\" >> \"$GITHUB_OUTPUT\"",
             "git add stasis.json vendor/stasis",
             "git push --force-with-lease origin \"$BRANCH\"",
             "gh pr list",
             "gh pr edit",
             "gh pr create",
-            "gh workflow run stasis-pr.yml",
-            "-f pin_only=true",
-            "gh run watch",
-            "gh pr merge \"$PR_URL\"",
-            "without a game compatibility gate",
+            "no game compatibility checks",
+            "manually dispatch the weekly release workflow",
+            "No workflow is dispatched",
+            "no PR is merged automatically",
         ] {
             assert!(
                 quarterly.contains(expected),
@@ -17217,7 +17523,11 @@ mod tests {
         assert!(!quarterly.contains("compatibility:"));
         assert!(!quarterly.contains("package-mobile"));
         assert!(!quarterly.contains("validate-before-pr.ps1"));
-        assert!(!quarterly.contains("GITHUB_RUN_ID"));
+        assert!(!quarterly.contains("cron:"));
+        assert!(!quarterly.contains("pull_request:"));
+        assert!(!quarterly.contains("gh workflow run"));
+        assert!(!quarterly.contains("gh run watch"));
+        assert!(!quarterly.contains("gh pr merge"));
         assert_eq!(quarterly.matches("resolve-stasis-nightly.ps1").count(), 1);
         assert!(!quarterly.contains("git push origin main"));
 

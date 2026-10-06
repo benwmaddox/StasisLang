@@ -1,0 +1,17 @@
+struct Box<T: type, N: i32> {
+    value: T;
+}
+
+global value: Box<i32, 4>;
+
+function pick(self: Box<T, N>): i32 {
+    return N;
+}
+
+function pick(self: Box<T, N>): i32 {
+    return N + 1;
+}
+
+function main(): i32 {
+    return value.pick();
+}
