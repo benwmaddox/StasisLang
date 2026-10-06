@@ -63,7 +63,7 @@ final class WorkshopJniFrameAbiAcceptance {
             FrameDescriptor descriptor = readDescriptor();
             Guarded exact = Guarded.exact(descriptor);
             int status = MainActivity.nativeRunFrameInto(projectRoot, 0, 0, 0, 320, 240,
-                    exact.i32, exact.f32, exact.u8);
+                    true, exact.i32, exact.f32, exact.u8);
             if (status != 0 || !exact.guardsIntact() || !exact.innerChanged()) {
                 return fail("exact frame did not write only inside its guards: status=" + status);
             }
@@ -171,7 +171,7 @@ final class WorkshopJniFrameAbiAcceptance {
         byte[] beforeF32 = snapshot(f32);
         byte[] beforeU8 = snapshot(u8);
         int status = MainActivity.nativeRunFrameInto(projectRoot, 0, 0, 0, 320, 240,
-                i32, f32, u8);
+                true, i32, f32, u8);
         String nativeError = MainActivity.nativeLastFrameError();
         JSONObject error = new JSONObject(nativeError);
         boolean unchanged = java.util.Arrays.equals(beforeI32, snapshot(i32))

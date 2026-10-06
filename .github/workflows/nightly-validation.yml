@@ -464,6 +464,123 @@ jobs:
             python tools/cargo_cache.py run -- cargo test -p stasis --features packaged-desktop-acceptance --test generics_collections_desktop -- --exact full_generics_desktop_package_launches_with_provenance_and_digest_frame --test-threads=1 --nocapture
           fi
 
+      - name: Build isolated presentation-poison runtime on Linux
+        if: runner.os == 'Linux'
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          presentation_release_id="ci-presentation-desktop-${GITHUB_RUN_ID}"
+          presentation_fingerprint="$(python tools/compute_toolchain_fingerprint.py \
+            --source-commit "$STASIS_SOURCE_COMMIT" \
+            --release-id "$presentation_release_id")"
+          cmake -S runtime -B target/presentation-desktop-runtime \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSTASIS_GRAPHICS_BUILD_SHARED=ON \
+            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF \
+            -DSTASIS_GRAPHICS_BUNDLE_SDL=ON \
+            -DSTASIS_BUILD_RUNNER=ON \
+            -DSTASIS_BUILD_SYS=OFF \
+            -DSTASIS_TEST_PRESENTATION_POISON=ON \
+            -DSTASIS_RELEASE_ID="$presentation_release_id" \
+            -DSTASIS_BUILD_FINGERPRINT="$presentation_fingerprint"
+          cmake --build target/presentation-desktop-runtime --config Release \
+            --target stasis_graphics stasis_runner
+          instrumented_runtime="$GITHUB_WORKSPACE/target/presentation-desktop-runtime/bin/libstasis_graphics.so"
+          instrumented_runner="$GITHUB_WORKSPACE/target/presentation-desktop-runtime/bin/Release/stasis_runner"
+          normal_runtime="$GITHUB_WORKSPACE/target/generics-desktop-runtime/bin/libstasis_graphics.so"
+          normal_runner="$GITHUB_WORKSPACE/target/generics-desktop-runtime/bin/Release/stasis_runner"
+          test -f "$instrumented_runtime"
+          test -x "$instrumented_runner"
+          evidence="$GITHUB_WORKSPACE/target/presentation-baseline-linux-x64"
+          mkdir -p "$evidence"
+          nm -D "$instrumented_runtime" > "$evidence/instrumented-runtime-symbols.txt"
+          nm -D "$normal_runtime" > "$evidence/default-off-runtime-symbols.txt"
+          strings "$instrumented_runner" > "$evidence/instrumented-runner-strings.txt"
+          strings "$normal_runner" > "$evidence/default-off-runner-strings.txt"
+          grep -Fq 'stasis_test_poison_physical_target' \
+            "$evidence/instrumented-runtime-symbols.txt"
+          grep -Fq 'stasis_test_presentation_poison_target_kind' \
+            "$evidence/instrumented-runtime-symbols.txt"
+          grep -Fq 'STASIS_TEST_PRESENTATION_POISON_ONCE' \
+            "$evidence/instrumented-runner-strings.txt"
+          if grep -Eq 'stasis_test_(poison_physical_target|presentation_poison_target_kind)' \
+              "$evidence/default-off-runtime-symbols.txt"; then
+            echo "default-OFF production runtime unexpectedly exports presentation poison seams" >&2
+            exit 1
+          fi
+          if grep -Fq 'STASIS_TEST_PRESENTATION_POISON_ONCE' \
+              "$evidence/default-off-runner-strings.txt"; then
+            echo "default-OFF production runner unexpectedly contains the presentation poison hook" >&2
+            exit 1
+          fi
+          echo "STASIS_PRESENTATION_RELEASE_ID=$presentation_release_id" >> "$GITHUB_ENV"
+          echo "STASIS_PRESENTATION_BUILD_FINGERPRINT=$presentation_fingerprint" >> "$GITHUB_ENV"
+          sha256sum "$instrumented_runtime" "$instrumented_runner" \
+            > "$evidence/instrumented-runtime-hashes.txt"
+          sha256sum "$normal_runtime" "$normal_runner" \
+            > "$evidence/default-off-runtime-hashes.txt"
+          grep -E '^(STASIS_(BUILD_FINGERPRINT|RELEASE_ID)|STASIS_TEST_PRESENTATION_POISON):' \
+            target/presentation-desktop-runtime/CMakeCache.txt \
+            > "$evidence/instrumented-runtime-identity.txt"
+          grep -E '^(STASIS_(BUILD_FINGERPRINT|RELEASE_ID)|STASIS_TEST_PRESENTATION_POISON):' \
+            target/generics-desktop-runtime/CMakeCache.txt \
+            > "$evidence/default-off-runtime-identity.txt"
+
+      - name: Run packaged presentation baseline on Linux
+        if: runner.os == 'Linux'
+        timeout-minutes: 15
+        shell: bash
+        env:
+          STASIS_PRESENTATION_DESKTOP_EVIDENCE_DIR: ${{ github.workspace }}/target/presentation-baseline-linux-x64
+          STASIS_RUNTIME_LIBRARY_PATH: ${{ github.workspace }}/target/presentation-desktop-runtime/bin/libstasis_graphics.so
+          STASIS_RUNTIME_RUNNER_PATH: ${{ github.workspace }}/target/presentation-desktop-runtime/bin/Release/stasis_runner
+        run: |
+          set -o pipefail
+          STASIS_RELEASE_ID="$STASIS_PRESENTATION_RELEASE_ID" \
+          STASIS_BUILD_FINGERPRINT="$STASIS_PRESENTATION_BUILD_FINGERPRINT" \
+          xvfb-run -a python tools/cargo_cache.py run -- cargo test -p stasis \
+            --features packaged-desktop-acceptance \
+            --test presentation_baseline_desktop \
+            -- --exact packaged_presentation_baseline_initializes_poisoned_target_without_guest_clear \
+            --test-threads=1 --nocapture \
+            2>&1 | tee "$STASIS_PRESENTATION_DESKTOP_EVIDENCE_DIR/presentation-linux-test.log"
+
+      - name: Verify presentation baseline evidence on Linux
+        if: ${{ always() && runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          evidence="$GITHUB_WORKSPACE/target/presentation-baseline-linux-x64"
+          required=(
+            instrumented-runtime-hashes.txt
+            instrumented-runtime-identity.txt
+            instrumented-runtime-symbols.txt
+            instrumented-runner-strings.txt
+            default-off-runtime-hashes.txt
+            default-off-runtime-identity.txt
+            default-off-runtime-symbols.txt
+            default-off-runner-strings.txt
+            presentation-linux-test.log
+            presentation-desktop-frame.png
+            presentation-desktop-provenance.json
+            presentation-desktop-runtime.log
+            presentation-desktop-receipt.json
+          )
+          for file in "${required[@]}"; do
+            test -s "$evidence/$file" || {
+              echo "required Linux presentation evidence is missing: $evidence/$file" >&2
+              exit 1
+            }
+          done
+
+      - name: Upload Linux presentation baseline evidence
+        if: ${{ always() && runner.os == 'Linux' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          archive: true
+          name: presentation-baseline-linux-x64-${{ github.run_id }}
+          if-no-files-found: error
+          path: target/presentation-baseline-linux-x64/**
+
       - name: Run packaged Web replay acceptance on Linux
         if: runner.os == 'Linux'
         timeout-minutes: 15
@@ -617,10 +734,96 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/cargo_cache.py run -- cargo test -p stasis --test windows_game_launch -- --test-threads=1 --nocapture
 
+      - name: Build isolated presentation-poison runtime for Windows seams
+        timeout-minutes: 15
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $generator = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/windows/select-cmake-vs-generator.ps1).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "Visual Studio generator detection failed." }
+          $env:STASIS_CMAKE_GENERATOR = $generator
+          # Release/fingerprint are the shared source compatibility context; binary identity is the separate path, poison option, exports, and hash.
+          $presentationReleaseId = $env:STASIS_RELEASE_ID
+          $presentationFingerprint = $env:STASIS_BUILD_FINGERPRINT
+          if ([string]::IsNullOrWhiteSpace($presentationReleaseId) -or [string]::IsNullOrWhiteSpace($presentationFingerprint)) {
+            throw "job release/fingerprint context is required for the presentation-poison runtime"
+          }
+          cmake -S runtime -B target/presentation-poison-runtime -G $generator -A x64 -DSTASIS_GRAPHICS_BUILD_SHARED=ON -DSTASIS_GRAPHICS_BUILD_STATIC=OFF -DSTASIS_GRAPHICS_BUNDLE_SDL=ON -DSTASIS_GRAPHICS_BUILD_TESTS=ON -DSTASIS_BUILD_RUNNER=OFF -DSTASIS_BUILD_SYS=OFF -DSTASIS_TEST_PRESENTATION_POISON=ON "-DSTASIS_RELEASE_ID=$presentationReleaseId" "-DSTASIS_BUILD_FINGERPRINT=$presentationFingerprint"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build target/presentation-poison-runtime --config Release --target stasis_graphics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $normalRuntime = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll").Path
+          $poisonRuntime = (Resolve-Path "target/presentation-poison-runtime/bin/Release/stasis_graphics.dll").Path
+          if ([IO.Path]::GetFullPath($normalRuntime) -eq [IO.Path]::GetFullPath($poisonRuntime)) {
+            throw "ordinary and presentation-poison runtime paths must be distinct"
+          }
+          $normalCache = Get-Content -LiteralPath target/render-parity-runtime/CMakeCache.txt -Raw
+          $poisonCache = Get-Content -LiteralPath target/presentation-poison-runtime/CMakeCache.txt -Raw
+          foreach ($setting in @(
+              @{ Cache = $normalCache; Pattern = '^STASIS_TEST_PRESENTATION_POISON:BOOL=OFF\r?$'; Label = 'ordinary poison option OFF' },
+              @{ Cache = $poisonCache; Pattern = '^STASIS_TEST_PRESENTATION_POISON:BOOL=ON\r?$'; Label = 'test poison option ON' },
+              @{ Cache = $normalCache; Pattern = '^STASIS_GRAPHICS_BUNDLE_SDL:BOOL=ON\r?$'; Label = 'ordinary bundled SDL' },
+              @{ Cache = $poisonCache; Pattern = '^STASIS_GRAPHICS_BUNDLE_SDL:BOOL=ON\r?$'; Label = 'test bundled SDL' },
+              @{ Cache = $normalCache; Pattern = '^STASIS_GRAPHICS_BUILD_SHARED:BOOL=ON\r?$'; Label = 'ordinary shared graphics DLL' },
+              @{ Cache = $poisonCache; Pattern = '^STASIS_GRAPHICS_BUILD_SHARED:BOOL=ON\r?$'; Label = 'test shared graphics DLL' }
+          )) {
+            if ($setting.Cache -notmatch "(?m)$($setting.Pattern)") { throw "CMake cache is missing $($setting.Label)" }
+          }
+          $normalRelease = [regex]::Match($normalCache, '(?m)^STASIS_RELEASE_ID:STRING=(.*)$').Groups[1].Value.Trim()
+          $poisonRelease = [regex]::Match($poisonCache, '(?m)^STASIS_RELEASE_ID:STRING=(.*)$').Groups[1].Value.Trim()
+          $normalFingerprint = [regex]::Match($normalCache, '(?m)^STASIS_BUILD_FINGERPRINT:STRING=(.*)$').Groups[1].Value.Trim()
+          $poisonFingerprint = [regex]::Match($poisonCache, '(?m)^STASIS_BUILD_FINGERPRINT:STRING=(.*)$').Groups[1].Value.Trim()
+          if ($normalRelease -ne $env:STASIS_RELEASE_ID -or $poisonRelease -ne $env:STASIS_RELEASE_ID -or
+              $normalFingerprint -ne $env:STASIS_BUILD_FINGERPRINT -or $poisonFingerprint -ne $env:STASIS_BUILD_FINGERPRINT) {
+            throw "ordinary and presentation-poison runtimes must share the exact job source compatibility identity"
+          }
+
+          $poisonSymbols = @(
+            'stasis_test_fail_next_text_preparation',
+            'stasis_test_get_presentation_baseline_state',
+            'stasis_test_poison_physical_target',
+            'stasis_test_presentation_poison_target_kind',
+            'stasis_test_read_physical_target_pixel'
+          )
+          $normalExports = (& dumpbin.exe /exports $normalRuntime | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for the ordinary runtime" }
+          $poisonExports = (& dumpbin.exe /exports $poisonRuntime | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for the presentation-poison runtime" }
+          $evidenceDirectory = 'target/presentation-poison-runtime/ci-evidence'
+          New-Item -ItemType Directory -Force $evidenceDirectory | Out-Null
+          Set-Content -LiteralPath (Join-Path $evidenceDirectory 'ordinary-runtime-exports.txt') -Value $normalExports -Encoding utf8
+          Set-Content -LiteralPath (Join-Path $evidenceDirectory 'presentation-poison-runtime-exports.txt') -Value $poisonExports -Encoding utf8
+          foreach ($symbol in $poisonSymbols) {
+            if ($poisonExports -notmatch "(?m)\b$([regex]::Escape($symbol))\b") {
+              throw "presentation-poison runtime is missing required export $symbol"
+            }
+            if ($normalExports -match "(?m)\b$([regex]::Escape($symbol))\b") {
+              throw "ordinary runtime unexpectedly exports presentation-poison hook $symbol"
+            }
+          }
+          $normalHash = (Get-FileHash -LiteralPath $normalRuntime -Algorithm SHA256).Hash.ToLowerInvariant()
+          $poisonHash = (Get-FileHash -LiteralPath $poisonRuntime -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($normalHash -eq $poisonHash) { throw "ordinary and presentation-poison runtime DLL hashes must differ" }
+          @(
+            "ordinary_path=$normalRuntime",
+            "ordinary_release_id=$normalRelease",
+            "ordinary_build_fingerprint=$normalFingerprint",
+            "ordinary_poison_option=OFF",
+            "ordinary_sha256=$normalHash",
+            "presentation_poison_path=$poisonRuntime",
+            "presentation_poison_release_id=$poisonRelease",
+            "presentation_poison_build_fingerprint=$poisonFingerprint",
+            "presentation_poison_option=ON",
+            "binary_identity=separate_path_and_compile_flag_and_exports_and_hash",
+            "presentation_poison_sha256=$poisonHash"
+          ) | Set-Content -LiteralPath (Join-Path $evidenceDirectory 'runtime-identities-and-hashes.txt') -Encoding utf8
+
       - name: Test Windows desktop SDL seam suite
         shell: pwsh
         run: |
-          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll")
+          $env:STASIS_RUNTIME_DLL_PATH = (Resolve-Path "target/render-parity-runtime/bin/Release/stasis_graphics.dll").Path
+          $env:STASIS_PRESENTATION_POISON_RUNTIME_DLL_PATH = (Resolve-Path "target/presentation-poison-runtime/bin/Release/stasis_graphics.dll").Path
           python tools/ci/run_windows_platform_seams.py --suite DesktopSdl
 
       - name: Test Windows mobile runtime seam suite
@@ -645,6 +848,7 @@ jobs:
             target/render-parity-ci/runtime.log
             target/render-parity-ci/evidence.json
             target/windows-platform-seams/**/*.log
+            target/presentation-poison-runtime/ci-evidence/
             build/codex-cargo-target/seam-tests/
 
       - name: Cleanup ephemeral CI signing certificate

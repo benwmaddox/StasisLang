@@ -85,6 +85,14 @@ tasks.register('prepareWorkshopAssets', Sync) {
             include '*.stasis'
             into 'render_parity_sample/src'
         }
+        from(new File(repoRootDir, 'samples/presentation_baseline')) {
+            include 'stasis.json'
+            into 'presentation_baseline_sample'
+        }
+        from(new File(repoRootDir, 'samples/presentation_baseline/src')) {
+            include 'main.stasis'
+            into 'presentation_baseline_sample/src'
+        }
     }
     into(workshopAssetsDir)
     doLast {

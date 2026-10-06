@@ -15,6 +15,7 @@ WORKFLOW = ROOT / ".github/workflows/pr-ci.yml"
 NIGHTLY_WORKFLOW = ROOT / ".github/workflows/nightly-validation.yml"
 RUNNER = ROOT / "tools/ci/run_windows_platform_seams.py"
 STRATEGY = ROOT / "docs/integration_seam_testing_strategy.md"
+RECOVERY_SEAM = ROOT / "apps/stasis/tests/desktop_render_recovery_seam.rs"
 
 DESKTOP_SDL_TARGETS = (
     "desktop_input_frame_seam",
@@ -57,6 +58,7 @@ class PrCiSeamPlacementTests(unittest.TestCase):
         cls.nightly_workflow = NIGHTLY_WORKFLOW.read_text(encoding="utf-8")
         cls.runner = RUNNER.read_text(encoding="utf-8")
         cls.strategy = STRATEGY.read_text(encoding="utf-8")
+        cls.recovery_seam = RECOVERY_SEAM.read_text(encoding="utf-8")
         cls.linux = job(cls.workflow, "test")
         cls.nightly_summary = job(cls.nightly_workflow, "test")
         cls.linux_ordinary = "\n".join(
@@ -282,12 +284,12 @@ class PrCiSeamPlacementTests(unittest.TestCase):
                 self.assertIn(marker, self.generics)
         self.assertNotIn("macos-", self.generics)
         self.assertNotIn("STASIS_REQUIRE_SIGNED_EXECUTION", self.generics)
-        self.assertEqual(self.generics.count("-DSTASIS_BUILD_RUNNER=ON"), 2)
+        self.assertEqual(self.generics.count("-DSTASIS_BUILD_RUNNER=ON"), 3)
         self.assertEqual(
             self.generics.count(
                 "--target stasis_graphics stasis_runner"
             ),
-            2,
+            3,
         )
         self.assertEqual(self.generics.count("STASIS_RUNTIME_RUNNER_PATH="), 2)
         self.assertIn("if-no-files-found: error", self.generics)
@@ -305,6 +307,130 @@ class PrCiSeamPlacementTests(unittest.TestCase):
             "- name: Run packaged generics desktop acceptance on Unix", 1
         )[1].split("\n      - name:", 1)[0]
         self.assertIn("timeout-minutes: 15", unix_acceptance)
+
+    def test_linux_presentation_baseline_uses_an_isolated_test_runtime(self):
+        build = step(self.generics, "Build isolated presentation-poison runtime on Linux")
+        acceptance = step(self.generics, "Run packaged presentation baseline on Linux")
+        verification = step(self.generics, "Verify presentation baseline evidence on Linux")
+        upload = step(self.generics, "Upload Linux presentation baseline evidence")
+        normal_runtime = step(self.generics, "Build matching packaged desktop runtime on Unix")
+
+        self.assertIn("if: runner.os == 'Linux'", build)
+        self.assertIn("timeout-minutes: 15", build)
+        self.assertIn("target/presentation-desktop-runtime", build)
+        self.assertIn("-DSTASIS_TEST_PRESENTATION_POISON=ON", build)
+        self.assertIn("ci-presentation-desktop-${GITHUB_RUN_ID}", build)
+        self.assertIn("compute_toolchain_fingerprint.py", build)
+        self.assertNotIn("STASIS_TEST_PRESENTATION_POISON", normal_runtime)
+        self.assertIn("default-OFF production runtime unexpectedly exports", build)
+        self.assertIn("default-OFF production runner unexpectedly contains", build)
+        self.assertIn("default-off-runtime-symbols.txt", build)
+        self.assertIn("instrumented-runtime-symbols.txt", build)
+        self.assertIn("STASIS_TEST_PRESENTATION_POISON_ONCE", build)
+        self.assertIn("STASIS_PRESENTATION_DESKTOP_EVIDENCE_DIR", acceptance)
+        self.assertIn("target/presentation-desktop-runtime/bin/libstasis_graphics.so", acceptance)
+        self.assertIn("target/presentation-desktop-runtime/bin/Release/stasis_runner", acceptance)
+        self.assertIn("xvfb-run -a", acceptance)
+        self.assertIn('STASIS_RELEASE_ID="$STASIS_PRESENTATION_RELEASE_ID"', acceptance)
+        self.assertIn(
+            'STASIS_BUILD_FINGERPRINT="$STASIS_PRESENTATION_BUILD_FINGERPRINT"',
+            acceptance,
+        )
+        self.assertIn("--test presentation_baseline_desktop", acceptance)
+        self.assertIn(
+            "packaged_presentation_baseline_initializes_poisoned_target_without_guest_clear",
+            acceptance,
+        )
+        for artifact in (
+            "presentation-desktop-frame.png",
+            "presentation-desktop-provenance.json",
+            "presentation-desktop-runtime.log",
+            "presentation-desktop-receipt.json",
+        ):
+            with self.subTest(artifact=artifact):
+                self.assertIn(artifact, verification)
+        self.assertIn("if-no-files-found: error", upload)
+        self.assertIn("presentation-baseline-linux-x64-${{ github.run_id }}", upload)
+
+    def test_windows_poison_seams_use_an_isolated_runtime(self):
+        """The variant shares compatibility identity but has distinct binary identity."""
+        build = step(
+            self.windows,
+            "Build isolated presentation-poison runtime for Windows seams",
+        )
+        desktop = step(self.windows, "Test Windows desktop SDL seam suite")
+        mobile = step(self.windows, "Test Windows mobile runtime seam suite")
+        upload = step(self.windows, "Upload Windows platform seam evidence")
+
+        self.assertIn("timeout-minutes: 15", build)
+        self.assertIn("target/presentation-poison-runtime", build)
+        self.assertIn("-DSTASIS_TEST_PRESENTATION_POISON=ON", build)
+        self.assertIn("-DSTASIS_GRAPHICS_BUNDLE_SDL=ON", build)
+        self.assertIn("-DSTASIS_GRAPHICS_BUILD_SHARED=ON", build)
+        self.assertIn("-DSTASIS_GRAPHICS_BUILD_STATIC=OFF", build)
+        self.assertIn("STASIS_BUILD_RUNNER=OFF", build)
+        self.assertIn("$presentationReleaseId = $env:STASIS_RELEASE_ID", build)
+        self.assertIn("$presentationFingerprint = $env:STASIS_BUILD_FINGERPRINT", build)
+        self.assertIn("shared source compatibility context", build)
+        self.assertIn("CMakeCache.txt", build)
+        self.assertIn("STASIS_TEST_PRESENTATION_POISON:BOOL=OFF", build)
+        self.assertIn("STASIS_TEST_PRESENTATION_POISON:BOOL=ON", build)
+        self.assertIn("STASIS_GRAPHICS_BUNDLE_SDL:BOOL=ON", build)
+        self.assertIn("STASIS_GRAPHICS_BUILD_SHARED:BOOL=ON", build)
+        self.assertIn("dumpbin.exe /exports", build)
+        poison_symbols = (
+            "stasis_test_fail_next_text_preparation",
+            "stasis_test_get_presentation_baseline_state",
+            "stasis_test_poison_physical_target",
+            "stasis_test_presentation_poison_target_kind",
+            "stasis_test_read_physical_target_pixel",
+        )
+        for symbol in poison_symbols:
+            with self.subTest(symbol=symbol):
+                self.assertIn(symbol, build)
+        self.assertIn("ordinary-runtime-exports.txt", build)
+        self.assertIn("presentation-poison-runtime-exports.txt", build)
+        self.assertIn("runtime-identities-and-hashes.txt", build)
+        self.assertIn("Get-FileHash", build)
+        self.assertIn("if ([IO.Path]::GetFullPath($normalRuntime) -eq [IO.Path]::GetFullPath($poisonRuntime))", build)
+        self.assertIn("if ($normalHash -eq $poisonHash)", build)
+        self.assertIn("$normalRelease -ne $env:STASIS_RELEASE_ID", build)
+        self.assertIn("$poisonRelease -ne $env:STASIS_RELEASE_ID", build)
+        self.assertIn("$normalFingerprint -ne $env:STASIS_BUILD_FINGERPRINT", build)
+        self.assertIn("$poisonFingerprint -ne $env:STASIS_BUILD_FINGERPRINT", build)
+        self.assertIn("binary_identity=separate_path_and_compile_flag_and_exports_and_hash", build)
+        self.assertIn("target/presentation-poison-runtime/ci-evidence/", upload)
+        self.assertIn("STASIS_RUNTIME_DLL_PATH", desktop)
+        self.assertIn("STASIS_PRESENTATION_POISON_RUNTIME_DLL_PATH", desktop)
+        self.assertIn("--suite DesktopSdl", desktop)
+        self.assertNotIn("STASIS_PRESENTATION_POISON_RUNTIME_DLL_PATH", mobile)
+
+        test_routes = {
+            "present_only_frames_capture_through_the_installed_runtime_abi": False,
+            "present_only_frame_initializes_a_poisoned_physical_target": True,
+            "failed_text_preparation_keeps_the_poisoned_target_unpublished": True,
+            "malformed_frames_are_rejected_without_poisoning_the_next_valid_frame": False,
+        }
+        for test_name, poisoned in test_routes.items():
+            with self.subTest(test_name=test_name):
+                marker = f"fn {test_name}()"
+                start = self.recovery_seam.index(marker)
+                next_test = self.recovery_seam.find("\n#[test]", start)
+                body = self.recovery_seam[start : next_test if next_test >= 0 else None]
+                expected_path = (
+                    "presentation_poison_runtime_path()"
+                    if poisoned
+                    else 'std::env::var_os("STASIS_RUNTIME_DLL_PATH")'
+                )
+                self.assertIn(expected_path, body)
+        helper_start = self.recovery_seam.index("fn presentation_poison_runtime_path()")
+        helper_end = self.recovery_seam.index("\nfn valid_frame()", helper_start)
+        helper = self.recovery_seam[helper_start:helper_end]
+        self.assertIn("loader verifies shared build compatibility", helper)
+        self.assertIn('std::env::var_os("STASIS_PRESENTATION_POISON_RUNTIME_DLL_PATH")', helper)
+        self.assertIn(".expect(", helper)
+        self.assertNotIn("STASIS_RUNTIME_DLL_PATH", helper)
+        self.assertNotIn("unwrap_or", helper)
 
     def test_runner_uses_cached_cargo_and_names_grouped_failures(self):
         cargo_tokens = (

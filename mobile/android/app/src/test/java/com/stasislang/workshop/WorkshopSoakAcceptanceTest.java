@@ -83,4 +83,53 @@ public final class WorkshopSoakAcceptanceTest {
         assertTrue(presentation.matches(17, -1, beforeNormalSubmission));
         assertFalse(presentation.matches(17, 202, presentation.serial()));
     }
+
+    @Test
+    public void failedCandidatePublicationRetainsCommittedTargetsAndIdentity() {
+        StasisPreviewRenderer.AcceptedSnapshotState snapshot =
+                new StasisPreviewRenderer.AcceptedSnapshotState();
+        StasisPreviewRenderer.PresentationState presentation =
+                new StasisPreviewRenderer.PresentationState();
+        snapshot.initializeTargets(11, 22, 111, 222);
+        snapshot.setTargetStorage(624, 962);
+
+        assertTrue(snapshot.adoptCandidate(true, true, 624, 962, 3, 4, 5,
+                100, 7, 1L, presentation));
+        assertTrue(presentation.matches(100, 7, 0L));
+        int acceptedTexture = snapshot.acceptedTexture();
+        int candidateTexture = snapshot.candidateTexture();
+        int acceptedFramebuffer = snapshot.acceptedFramebuffer();
+        int candidateFramebuffer = snapshot.candidateFramebuffer();
+        long committedSerial = presentation.serial();
+
+        assertFalse(snapshot.adoptCandidate(true, false, 624, 962, 3, 4, 6,
+                101, 8, 2L, presentation));
+
+        assertTrue(snapshot.isAvailableFor(624, 962, 3, 4));
+        assertEquals(acceptedTexture, snapshot.acceptedTexture());
+        assertEquals(candidateTexture, snapshot.candidateTexture());
+        assertEquals(acceptedFramebuffer, snapshot.acceptedFramebuffer());
+        assertEquals(candidateFramebuffer, snapshot.candidateFramebuffer());
+        assertEquals(624, snapshot.width());
+        assertEquals(962, snapshot.height());
+        assertEquals(3, snapshot.surfaceGeneration());
+        assertEquals(4, snapshot.rendererGeneration());
+        assertEquals(5, snapshot.displayGeneration());
+        assertEquals(100, snapshot.frameToken());
+        assertEquals(1L, snapshot.presentationSerial());
+        assertEquals(committedSerial, presentation.serial());
+        assertEquals(100, presentation.token());
+        assertTrue(presentation.matches(100, 7, 0L));
+        assertFalse(presentation.matches(101, 8, committedSerial));
+
+        assertTrue(snapshot.adoptCandidate(true, true, 624, 962, 3, 4, 7,
+                102, 9, 2L, presentation));
+        assertEquals(candidateTexture, snapshot.acceptedTexture());
+        assertEquals(candidateFramebuffer, snapshot.acceptedFramebuffer());
+        assertEquals(102, snapshot.frameToken());
+        assertEquals(7, snapshot.displayGeneration());
+        assertEquals(2L, presentation.serial());
+        assertEquals(102, presentation.token());
+        assertTrue(presentation.matches(102, 9, committedSerial));
+    }
 }

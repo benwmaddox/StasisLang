@@ -66,6 +66,11 @@ option(
 option(STASIS_MOBILE_RUNTIME_BUILD_TESTS "Build mobile runtime lifecycle tests" OFF)
 option(STASIS_SVG_BUILD_TESTS "Build the ThorVG SVG bridge smoke and evaluation tests" OFF)
 option(STASIS_GRAPHICS_BUILD_TESTS "Build native renderer contract tests" OFF)
+option(
+    STASIS_TEST_PRESENTATION_POISON
+    "Build test-only native presentation poison, capture, and failure seams"
+    OFF
+)
 
 if(STASIS_BUILD_MONOLITH)
     set(STASIS_GRAPHICS_BUNDLE_SDL ON CACHE BOOL "" FORCE)
@@ -268,6 +273,9 @@ function(configure_stasis_target target is_static)
     target_sources(${target} PRIVATE stasis_graphics.c stasis_image_writer.c stasis_audio_assets.c stasis_platform_services.c stasis_svg.cpp)
     target_compile_definitions(${target} PRIVATE STASIS_RELEASE_ID="${STASIS_RELEASE_ID}")
     target_compile_definitions(${target} PRIVATE STASIS_BUILD_FINGERPRINT="${STASIS_BUILD_FINGERPRINT}")
+    if(STASIS_TEST_PRESENTATION_POISON)
+        target_compile_definitions(${target} PRIVATE STASIS_TEST_PRESENTATION_POISON)
+    endif()
     target_link_libraries(${target} PRIVATE
         stasis_thorvg
         $<IF:$<TARGET_EXISTS:SDL3::SDL3>,SDL3::SDL3,SDL3::SDL3-static>
@@ -900,6 +908,9 @@ endif()
 
 if(STASIS_BUILD_RUNNER)
     add_executable(stasis_runner stasis_runner.c stasis_data.c cJSON.c)
+    if(STASIS_TEST_PRESENTATION_POISON)
+        target_compile_definitions(stasis_runner PRIVATE STASIS_TEST_PRESENTATION_POISON_RUNNER)
+    endif()
     if(WIN32)
         target_sources(stasis_runner PRIVATE stasis_runner.manifest)
         target_compile_definitions(stasis_runner PRIVATE _CRT_SECURE_NO_WARNINGS)

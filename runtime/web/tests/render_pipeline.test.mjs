@@ -36,7 +36,7 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false,
     TRIANGLE_STRIP: 13, TEXTURE_2D: 14, TEXTURE_WRAP_S: 15, TEXTURE_WRAP_T: 16,
     TEXTURE_MIN_FILTER: 17, TEXTURE_MAG_FILTER: 18, CLAMP_TO_EDGE: 19, LINEAR: 20,
     RGBA: 21, UNSIGNED_BYTE: 22, TEXTURE0: 23, UNPACK_FLIP_Y_WEBGL: 24,
-    LINEAR_MIPMAP_LINEAR: 25, NO_ERROR: 0,
+    LINEAR_MIPMAP_LINEAR: 25, SCISSOR_TEST: 26, NO_ERROR: 0,
     createShader: () => { if (throwing) throw new Error("fake shader failure"); return {}; }, createProgram: () => ({}), createVertexArray: () => ({}), createBuffer: () => ({}), createTexture: () => { stats.createdTextures += 1; return {}; },
     deleteTexture() { stats.deletedTextures += 1; }, deleteBuffer() {}, deleteVertexArray() {}, deleteProgram() {},
     shaderSource() {}, compileShader() {}, getShaderParameter: () => true,
@@ -48,25 +48,42 @@ function fakeGl(stats, available = true, throwing = false, textureThrow = false,
     },
     enableVertexAttribArray() {}, disableVertexAttribArray() {}, vertexAttrib4f() {},
     vertexAttribPointer() {}, vertexAttribDivisor() {}, getUniformLocation: () => ({}),
-    viewport(_x, _y, width, height) { stats.viewports.push([width, height]); }, clearColor() {}, clear() {}, useProgram() {}, uniform2f(_location, width, height) {
+    viewport(x, y, width, height) {
+      stats.viewports.push([width, height]);
+      stats.glCalls.push({ name: "viewport", args: [x, y, width, height] });
+    }, clearColor(...args) { stats.glCalls.push({ name: "clearColor", args }); },
+    clear(mask) { stats.glCalls.push({ name: "clear", args: [mask] }); }, useProgram() {}, uniform2f(_location, width, height) {
       stats.uniforms.push([width, height]);
     }, uniform1i() {},
-    texParameteri() {}, pixelStorei() {}, texImage2D(_target, _level, _internal, width, height) { stats.texImageCalls += 1; stats.pageSizes.push([width, height]); if (textureThrow || (textureFailureAt && stats.texImageCalls === textureFailureAt)) throw new Error("fake texture failure"); }, texSubImage2D(...args) { stats.texSubImageCalls += 1; const source = args[args.length - 1]; stats.textureUploads.push({ width: Number(source?.width) || 0, height: Number(source?.height) || 0 }); if (textureThrow) throw new Error("fake texture failure"); if (textureGlErrorAt && stats.texSubImageCalls === textureGlErrorAt) pendingErrors.push(1280); }, generateMipmap() {}, activeTexture() {}, bindTexture() {}, getError() { stats.getErrorCalls += 1; return pendingErrors.shift() ?? 0; },
+    texParameteri() {}, pixelStorei() {}, texImage2D(_target, _level, _internal, width, height) { stats.texImageCalls += 1; stats.pageSizes.push([width, height]); if (stats.failNextTextureUpload || textureThrow || (textureFailureAt && stats.texImageCalls === textureFailureAt)) { stats.failNextTextureUpload = false; throw new Error("fake texture failure"); } }, texSubImage2D(...args) { stats.texSubImageCalls += 1; const source = args[args.length - 1]; stats.textureUploads.push({ width: Number(source?.width) || 0, height: Number(source?.height) || 0 }); if (stats.failNextTextureUpload || textureThrow) { stats.failNextTextureUpload = false; throw new Error("fake texture failure"); } if (textureGlErrorAt && stats.texSubImageCalls === textureGlErrorAt) pendingErrors.push(1280); }, generateMipmap() {}, activeTexture() {}, bindTexture() {}, getError() { stats.getErrorCalls += 1; return pendingErrors.shift() ?? 0; },
     isContextLost: () => stats.contextLost, getParameter: () => maxTextureSize,
-    enable() {}, disable() {}, scissor(x, y, width, height) { stats.scissors.push([x, y, width, height]); }, blendFunc() {}, blendFuncSeparate() {}, drawArraysInstanced(_mode, _first, _vertices, count) {
+    colorMask(...args) { stats.glCalls.push({ name: "colorMask", args }); },
+    enable(capability) { stats.glCalls.push({ name: "enable", args: [capability] }); },
+    disable(capability) { stats.glCalls.push({ name: "disable", args: [capability] }); },
+    scissor(x, y, width, height) {
+      stats.scissors.push([x, y, width, height]);
+      stats.glCalls.push({ name: "scissor", args: [x, y, width, height] });
+    }, blendFunc() {}, blendFuncSeparate(...args) { stats.glCalls.push({ name: "blendFuncSeparate", args }); }, drawArraysInstanced(_mode, _first, _vertices, count) {
       stats.instanced += 1;
       stats.instances.push(count);
+      stats.glCalls.push({ name: "drawArraysInstanced", args: [count] });
       if (drawError) pendingErrors.push(1280);
     }
   };
   return gl;
 }
 
-async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], spriteXOffset = null, spritePivot = [4, 5], spriteScale = [1, 1], instanceFlags = 0, runMetadata = [0, 0, 0, 0, 0], webgl = true, throwing = false, textureThrow = false, textureFailureAt = 0, drawError = false, textureGlErrorAt = 0, imageReady = true, timing = false, realTime = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null, hudQuery = "", atlasBudgetBytes = undefined, spriteAtlasPageSize = 512, omitSpriteAtlasPageSize = false, maxTextureSize = 4096, expectReady = true } = {}) {
+async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered = null, clips = [], sprites = 0, spriteHandles = [], spriteSize = null, spriteSizes = null, spriteUv = [0.1, 0.2, 0.9, 0.8], spriteXOffset = null, spritePivot = [4, 5], spriteScale = [1, 1], instanceFlags = 0, runMetadata = [0, 0, 0, 0, 0], webgl = true, throwing = false, textureThrow = false, textureFailureAt = 0, drawError = false, textureGlErrorAt = 0, imageReady = true, timing = false, realTime = false, dpr = 1, cssExtent = [640, 360], imageExtent = [16, 16], assetMetadata = {}, assets = {}, createImageBitmap = null, imageDecode = null, fetchBlob = null, hudQuery = "", atlasBudgetBytes = undefined, spriteAtlasPageSize = 512, omitSpriteAtlasPageSize = false, maxTextureSize = 4096, expectReady = true, renderContractVersion = 7, renderFlags = 0, clearColor = [0, 0, 0, 0], textRasterUnavailable = false } = {}) {
   const memory = new WebAssembly.Memory({ initial: 16 });
   const i32 = new Int32Array(memory.buffer, 0, I32_COUNT);
   const f32 = new Float32Array(memory.buffer, F32_OFFSET, F32_COUNT);
-  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], viewports: [], scissors: [], transforms: [], imageArgs: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [], createdTextures: 0, texImageCalls: 0, texSubImageCalls: 0, pageSizes: [], textureUploads: [], getErrorCalls: 0, deletedTextures: 0 };
+  let activeRenderFlags = renderFlags;
+  let activeClearColor = [...clearColor];
+  const activeRunMetadata = [...runMetadata];
+  let legacyRectOnNextRender = false;
+  let legacyClearOnNextRender = false;
+  let activeTextRasterUnavailable = textRasterUnavailable;
+  const stats = { instanced: 0, instances: [], uploadedFloats: [], uploads: [], uniforms: [], viewports: [], scissors: [], glCalls: [], transforms: [], imageArgs: [], images: 0, fills: 0, events: [], clipRects: [], clipCalls: 0, restores: 0, contextLost: false, imageDecodeCalls: 0, imageConstructed: 0, bitmapCalls: [], createdTextures: 0, texImageCalls: 0, texSubImageCalls: 0, pageSizes: [], textureUploads: [], getErrorCalls: 0, deletedTextures: 0, failNextTextureUpload: false };
   let now = 0;
   const context2d = {
     globalAlpha: 1,
@@ -105,7 +122,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     rasterStats.canvases += 1;
     const surface = {
       width: 0, height: 0,
-      getContext: kind => kind === "2d" ? rasterContext : gl,
+      getContext: kind => kind === "2d" ? (activeTextRasterUnavailable ? null : rasterContext) : gl,
       addEventListener(type, callback) { offscreenListeners.set(type, callback); }
     };
     activeOffscreen = surface;
@@ -140,8 +157,19 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     tick: () => { if (timing) now += 2; },
     render: () => {
       if (timing) now += 3;
-      if (!rects && !sprites && !clips.length && !textFixture) return;
-      i32[0] = MAGIC; i32[1] = 7; i32[2] = 0; i32[3] = ordered ? 1 : 0; i32[4] = sprites; i32[7] = 0; i32[24] = rects; i32[27] = clips.length;
+      if (legacyRectOnNextRender) {
+        env.web_draw_rect(1, 2, 3, 4, 10, 20, 30);
+        legacyRectOnNextRender = false;
+      }
+      if (legacyClearOnNextRender) {
+        env.web_begin_frame(25, 50, 75);
+        legacyClearOnNextRender = false;
+      }
+      if (renderContractVersion === 7 && !rects && !sprites && !clips.length && !textFixture) return;
+      i32[0] = MAGIC; i32[1] = renderContractVersion; i32[2] = activeRenderFlags;
+      i32[3] = ordered ? 1 : 0; i32[4] = sprites; i32[7] = 0; i32[24] = rects; i32[27] = clips.length;
+      f32[0] = activeClearColor[0]; f32[1] = activeClearColor[1];
+      f32[2] = activeClearColor[2]; f32[3] = activeClearColor[3];
       if (textFixture) {
         i32[7] = 1;
         i32[12320] = textFixture.font;
@@ -180,7 +208,7 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
       runs.forEach(([first, count], index) => {
         const base = RUN_BASE + index * 8;
         i32[base] = first; i32[base + 1] = count; i32[base + 2] = -1;
-        for (let field = 0; field < 5; field += 1) i32[base + 3 + field] = runMetadata[field];
+        for (let field = 0; field < 5; field += 1) i32[base + 3 + field] = activeRunMetadata[field];
       });
       for (let index = 0; index < rects; index += 1) {
         const base = 79996 - index * 8;
@@ -211,6 +239,10 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
       });
     }
   }};
+  if (renderContractVersion === 8) {
+    instance.exports.gfx_cmd_construction_reset = () => {};
+    instance.exports.gfx_cmd_construction_finish = result => result;
+  }
   const game = {
     memory: {
       gfx_cmd_i32: { offset: 0, length: I32_COUNT },
@@ -224,6 +256,8 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
     },
     views: { "101": { font: "run.font", handle: "run.handle", width: "run.width", height: "run.height" } },
     strings: {}, assets, asset_metadata: assetMetadata,
+    renderContractVersion,
+    renderConstructionLifecycleVersion: renderContractVersion === 8 ? 1 : 0,
   };
   if (atlasBudgetBytes !== undefined) game.atlasBudgetBytes = atlasBudgetBytes;
   if (!omitSpriteAtlasPageSize) game.spriteAtlasPageSize = spriteAtlasPageSize;
@@ -263,6 +297,13 @@ async function loadRuntime({ rects = 0, rectSizes = null, rectAlpha = 1, ordered
       cssExtent[1] = height;
       contextObject.devicePixelRatio = nextDpr;
     },
+    setRenderFlags(flags) { activeRenderFlags = flags; },
+    setClearColor(color) { activeClearColor = [...color]; },
+    setRunMetadata(field, value) { activeRunMetadata[field] = value; },
+    queueLegacyRect() { legacyRectOnNextRender = true; },
+    queueLegacyClear() { legacyClearOnNextRender = true; },
+    failNextTextureUpload() { stats.failNextTextureUpload = true; },
+    setTextRasterUnavailable(unavailable) { activeTextRasterUnavailable = unavailable; },
     setTextFixture(font, text, textId = 1) {
       contextObject.window.STASIS_GAME.strings[textId] = text;
       textFixture = { font, handle: env.stasis_jit_gfx_cache_text(font, textId) };
@@ -306,6 +347,143 @@ test("visible WebGL2 uses the physical framebuffer with logical shader dimension
   assert.equal(runtime.canvas.height, 900);
   assert.ok(runtime.stats.viewports.some(value => value[0] === 1600 && value[1] === 900));
   assert.equal(runtime.stats.images, 0);
+});
+
+test("accepted v8 frames clear the full target opaque black before legacy and guest rendering", async () => {
+  const runtime = await loadRuntime({
+    rects: 1, timing: true, renderContractVersion: 8, renderFlags: 3,
+    clearColor: [0.13, 0.23, 0.33, 0.43], cssExtent: [800, 600]
+  });
+  runtime.stats.glCalls.length = 0;
+  runtime.frame();
+
+  const calls = runtime.stats.glCalls;
+  const names = calls.map(call => call.name);
+  const clearColors = calls.filter(call => call.name === "clearColor").map(call => call.args);
+  const clears = names.reduce((indices, name, index) => {
+    if (name === "clear") indices.push(index);
+    return indices;
+  }, []);
+  const draws = names.reduce((indices, name, index) => {
+    if (name === "drawArraysInstanced") indices.push(index);
+    return indices;
+  }, []);
+
+  assert.deepEqual(calls[0], { name: "colorMask", args: [true, true, true, true] });
+  assert.deepEqual(calls[1], { name: "disable", args: [26] });
+  assert.deepEqual(calls[2], { name: "viewport", args: [0, 0, 800, 600] });
+  assert.deepEqual(clearColors, [[0, 0, 0, 1], Array.from(new Float32Array([0.13, 0.23, 0.33, 0.43]))]);
+  assert.equal(clears.length, 2, "baseline and guest CLEAR each clear once");
+  assert.equal(draws.length, 2, "legacy and canonical geometry both replay");
+  assert.ok(clears[0] < draws[0] && draws[0] < clears[1] && clears[1] < draws[1]);
+  assert.ok(calls.some(call => call.name === "scissor"
+    && JSON.stringify(call.args) === JSON.stringify([0, 75, 800, 450])),
+  "guest CLEAR is limited to the centered 16:9 logical canvas");
+  assert.ok(calls.some(call => call.name === "disable" && call.args[0] === 26
+    && calls.indexOf(call) > clears[1]), "logical CLEAR restores full-target drawing after scissoring");
+  assert.ok(calls.some(call => call.name === "enable" && call.args[0] === 10));
+  assert.ok(calls.some(call => call.name === "blendFuncSeparate"));
+});
+
+test("v8 legacy CLEAR preserves the physical baseline outside the logical aspect-fit canvas", async () => {
+  const runtime = await loadRuntime({
+    rects: 1, renderContractVersion: 8, renderFlags: 2, cssExtent: [800, 600]
+  });
+  runtime.stats.glCalls.length = 0;
+  runtime.queueLegacyClear();
+  runtime.frame();
+
+  const calls = runtime.stats.glCalls;
+  assert.deepEqual(calls.filter(call => call.name === "clearColor").map(call => call.args), [
+    [0, 0, 0, 1], [25 / 255, 50 / 255, 75 / 255, 1]
+  ]);
+  assert.deepEqual(calls.filter(call => call.name === "scissor").map(call => call.args), [[0, 75, 800, 450]]);
+  assert.equal(calls.filter(call => call.name === "clear").length, 2,
+    "the physical baseline and logical legacy CLEAR are separate operations");
+  assert.equal(calls.filter(call => call.name === "drawArraysInstanced").length, 1,
+    "canonical no-CLEAR geometry still draws after the legacy clear");
+  assert.ok(calls.findIndex(call => call.name === "clear")
+    < calls.findIndex(call => call.name === "scissor"));
+  assert.ok(calls.findIndex(call => call.name === "scissor")
+    < calls.findIndex(call => call.name === "drawArraysInstanced"));
+});
+
+test("explicit v7 legacy-only CLEAR uses the logical aspect-fit region", async () => {
+  const runtime = await loadRuntime({ renderContractVersion: 7, cssExtent: [800, 600] });
+  runtime.stats.glCalls.length = 0;
+  runtime.queueLegacyClear();
+  runtime.frame();
+
+  assert.deepEqual(runtime.stats.glCalls.filter(call => call.name === "scissor").map(call => call.args), [[0, 75, 800, 450]]);
+  assert.deepEqual(runtime.stats.glCalls.filter(call => call.name === "clearColor").map(call => call.args), [
+    [0, 0, 0, 1], [25 / 255, 50 / 255, 75 / 255, 1]
+  ]);
+});
+
+test("v8 no-PRESENT and rejected frames preserve the accepted image and discard legacy commands", async () => {
+  const runtime = await loadRuntime({ rects: 1, renderContractVersion: 8, renderFlags: 2 });
+  runtime.frame();
+  assert.equal(runtime.stats.instanced, 1);
+
+  const framebufferCalls = () => runtime.stats.glCalls.filter(call =>
+    ["clearColor", "clear", "drawArraysInstanced"].includes(call.name));
+  runtime.stats.glCalls.length = 0;
+  runtime.queueLegacyRect();
+  runtime.setRenderFlags(0);
+  runtime.frame();
+  assert.deepEqual(framebufferCalls(), []);
+
+  runtime.stats.glCalls.length = 0;
+  runtime.queueLegacyRect();
+  runtime.setRenderFlags(6);
+  runtime.frame();
+  assert.deepEqual(framebufferCalls(), []);
+
+  runtime.stats.glCalls.length = 0;
+  runtime.setRunMetadata(0, 0);
+  runtime.setRenderFlags(2);
+  runtime.frame();
+  assert.equal(runtime.stats.instanced, 2, "only canonical geometry appears after the rejected frames");
+  assert.equal(framebufferCalls().filter(call => call.name === "drawArraysInstanced").length, 1,
+    "discarded legacy commands do not leak into the next accepted frame");
+});
+
+test("atlas preparation failure keeps the accepted WebGL image until a later frame is ready", async () => {
+  const runtime = await loadRuntime({ rects: 1, renderContractVersion: 8, renderFlags: 2 });
+  runtime.frame();
+  assert.equal(runtime.stats.instanced, 1);
+  const font = runtime.env.load_font(0, 18);
+  await new Promise(resolve => setImmediate(resolve));
+  runtime.setTextFixture(font, "atlas failure");
+  runtime.queueLegacyRect();
+  runtime.failNextTextureUpload();
+  runtime.stats.glCalls.length = 0;
+  runtime.frame();
+  assert.deepEqual(runtime.stats.glCalls.filter(call =>
+    ["clearColor", "clear", "drawArraysInstanced"].includes(call.name)), []);
+  assert.match(runtime.body.dataset.gpuError, /fake texture failure/);
+
+  runtime.stats.glCalls.length = 0;
+  runtime.frame();
+  assert.equal(runtime.stats.instanced, 3);
+  assert.equal(runtime.stats.glCalls.filter(call => call.name === "drawArraysInstanced").length, 2,
+    "the failed frame's legacy rectangle was discarded");
+});
+
+test("text resource preparation failure leaves the prior accepted image untouched", async () => {
+  const runtime = await loadRuntime({ rects: 1, renderContractVersion: 8, renderFlags: 2 });
+  runtime.frame();
+  const font = runtime.env.load_font(0, 18);
+  await new Promise(resolve => setImmediate(resolve));
+  runtime.setTextFixture(font, "unavailable");
+  runtime.setTextRasterUnavailable(true);
+  runtime.stats.glCalls.length = 0;
+  const drawsBefore = runtime.stats.instanced;
+  runtime.frame();
+  assert.equal(runtime.stats.instanced, drawsBefore);
+  assert.deepEqual(runtime.stats.glCalls.filter(call =>
+    ["clearColor", "clear", "drawArraysInstanced"].includes(call.name)), []);
+  assert.match(runtime.body.dataset.gpuError, /Canvas2D text resource preparation unavailable/);
 });
 
 test("ordered clipping intersects nested logical clips through WebGL scissor", async () => {

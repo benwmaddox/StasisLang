@@ -107,6 +107,48 @@ typedef void (*stasis_set_window_size_fn)(int width, int height);
 typedef int (*stasis_graphics_runtime_abi_version_fn)(void);
 typedef int (*stasis_graphics_set_asset_root_fn)(const char *path);
 typedef int (*stasis_graphics_set_sprite_atlas_page_size_fn)(int page_size);
+#if defined(STASIS_TEST_PRESENTATION_POISON_RUNNER) && !defined(_WIN32)
+typedef int (*stasis_test_poison_physical_target_fn)(int32_t *out_state, int32_t capacity);
+typedef int (*stasis_test_presentation_poison_target_kind_fn)(void);
+
+static int stasis_test_poison_before_submit(void *graphics, int *completed)
+{
+    if (!graphics || !completed || *completed)
+    {
+        return 1;
+    }
+    const char *requested = getenv("STASIS_TEST_PRESENTATION_POISON_ONCE");
+    if (!requested || requested[0] != '1' || requested[1] != '\0')
+    {
+        return 1;
+    }
+    const char *test_input = getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!test_input || test_input[0] != '1' || test_input[1] != '\0')
+    {
+        fprintf(stderr, "error: presentation poison requires STASIS_ENABLE_TEST_INPUT=1\n");
+        return 0;
+    }
+    stasis_test_poison_physical_target_fn poison =
+        (stasis_test_poison_physical_target_fn)dlsym(
+            graphics, "stasis_test_poison_physical_target");
+    stasis_test_presentation_poison_target_kind_fn target_kind =
+        (stasis_test_presentation_poison_target_kind_fn)dlsym(
+            graphics, "stasis_test_presentation_poison_target_kind");
+    int32_t state[40] = {0};
+    if (!poison || !target_kind || !poison(state, 40) || target_kind() != 1 ||
+        memcmp(state, state + 20, 20 * sizeof(int32_t)) != 0)
+    {
+        fprintf(stderr, "error: test-only physical presentation poison failed or changed renderer state\n");
+        return 0;
+    }
+    *completed = 1;
+    fprintf(
+        stderr,
+        "RUNNER_DIAG: presentation_poison target=physical-window state_restored=1\n");
+    fflush(stderr);
+    return 1;
+}
+#endif
 
 static int stasis_env_flag(const char *name, int default_value)
 {
@@ -3181,6 +3223,9 @@ int main(int argc, char **argv)
         clock_gettime(CLOCK_MONOTONIC, &ts_last);
         long long last_us = ts_last.tv_sec * 1000000LL + ts_last.tv_nsec / 1000LL;
         int tick_diag_count = 0;
+#if defined(STASIS_TEST_PRESENTATION_POISON_RUNNER)
+        int presentation_poison_completed = 0;
+#endif
 
         /* Bulk host loop API (stasis_graphics.so). */
         stasis_host_bulk_init_fn host_bulk_init = NULL;
@@ -3595,6 +3640,14 @@ int main(int argc, char **argv)
                 }
                 if (gfx_submit_u8 && gfx_cmd_i32 && gfx_cmd_f32 && gfx_cmd_u8)
                 {
+#if defined(STASIS_TEST_PRESENTATION_POISON_RUNNER)
+                    if (!stasis_test_poison_before_submit(
+                            gfx_lib, &presentation_poison_completed))
+                    {
+                        result = 1;
+                        break;
+                    }
+#endif
                     stasis_try_atlas_optimize(gfx_lib, lib);
                     gfx_submit_u8(gfx_cmd_i32, gfx_cmd_f32, gfx_cmd_u8);
                 }

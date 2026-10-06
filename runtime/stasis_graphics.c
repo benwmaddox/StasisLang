@@ -201,6 +201,13 @@ static float g_pixel_scale = 1.0f;
 static StasisDisplayPreparationScale g_sprite_preparation_scale = {0, 0};
 static StasisDisplayPreparationScale g_text_preparation_scale = {0, 0};
 static bool g_recording_presentation = false;
+#if defined(STASIS_TEST_PRESENTATION_POISON)
+static bool g_test_capture_physical_target = false;
+static bool g_test_presentation_baseline_state_ready = false;
+static int32_t g_test_presentation_baseline_state[40];
+static bool g_test_fail_next_text_preparation = false;
+static int g_test_presentation_poison_target_kind = 0;
+#endif
 static bool g_x11_scale_controlled_window = false;
 static int g_recording_width = 0;
 static int g_recording_height = 0;
@@ -358,6 +365,9 @@ static void stasis_gfx_draw_sprite_internal(int handle, float x, float y, float 
 static int sprite_build_into_entry_sized(SpriteEntry* e, const char* path, int max_w, int max_h);
 static void stasis_prepare_frame_sprite_requirements(
     const int32_t* cmd_i32, const float* cmd_f32, int sprite_count);
+static int stasis_prepare_frame_text_resources(
+    const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8,
+    int text_count, int text_bytes_used, int order_count);
 static void stasis_sync_display_metrics(void);
 static void stasis_set_logical_size(int width, int height);
 static void stasis_reset_text_cache(void);
@@ -3382,10 +3392,36 @@ static void capture_scheduled_screenshot(void) {
         g_debug_frame_counter + 1 != g_screenshot_frame) {
         return;
     }
+#if defined(STASIS_TEST_PRESENTATION_POISON)
+    const bool physical_test_capture = g_test_capture_physical_target;
+    const bool saved_recording_presentation = g_recording_presentation;
+    const int saved_recording_width = g_recording_width;
+    const int saved_recording_height = g_recording_height;
+    if (physical_test_capture) {
+        int output_w = 0;
+        int output_h = 0;
+        if (!SDL_GetRenderOutputSize(g_renderer, &output_w, &output_h) ||
+            output_w <= 0 || output_h <= 0) {
+            SDL_Log("failed to query physical target for presentation poison capture: %s", SDL_GetError());
+            return;
+        }
+        g_recording_presentation = true;
+        g_recording_width = output_w;
+        g_recording_height = output_h;
+    }
+#endif
     int ok = stasis_gfx_dump_image(
         g_screenshot_path,
         ends_with_ci(g_screenshot_path, ".png"),
         0);
+#if defined(STASIS_TEST_PRESENTATION_POISON)
+    if (physical_test_capture) {
+        g_recording_presentation = saved_recording_presentation;
+        g_recording_width = saved_recording_width;
+        g_recording_height = saved_recording_height;
+        g_test_capture_physical_target = false;
+    }
+#endif
     if (!ok) {
         SDL_Log("failed to capture screenshot: %s", g_screenshot_path);
         if (g_screenshot_exit_after) g_should_quit = true;
@@ -4679,6 +4715,237 @@ static void stasis_perf_draw_overlay(void) {
     }
 }
 
+#if defined(STASIS_TEST_PRESENTATION_POISON)
+static int stasis_renderer_presentation_state(SDL_Renderer* renderer, int32_t* out) {
+    if (!renderer || !out) return 0;
+    int logical_w = 0;
+    int logical_h = 0;
+    SDL_RendererLogicalPresentation logical_mode = SDL_LOGICAL_PRESENTATION_DISABLED;
+    SDL_Rect viewport = {0, 0, 0, 0};
+    SDL_Rect clip = {0, 0, 0, 0};
+    SDL_BlendMode blend = SDL_BLENDMODE_NONE;
+    float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+    int output_w = 0;
+    int output_h = 0;
+    if (!SDL_GetRenderOutputSize(renderer, &output_w, &output_h) ||
+        !SDL_GetRenderLogicalPresentation(renderer, &logical_w, &logical_h, &logical_mode) ||
+        !SDL_GetRenderViewport(renderer, &viewport) ||
+        !SDL_GetRenderClipRect(renderer, &clip) ||
+        !SDL_GetRenderDrawBlendMode(renderer, &blend) ||
+        !SDL_GetRenderDrawColorFloat(renderer, &r, &g, &b, &a)) {
+        return 0;
+    }
+    out[0] = output_w;
+    out[1] = output_h;
+    out[2] = logical_w;
+    out[3] = logical_h;
+    out[4] = (int32_t)logical_mode;
+    out[5] = SDL_RenderViewportSet(renderer) ? 1 : 0;
+    out[6] = viewport.x;
+    out[7] = viewport.y;
+    out[8] = viewport.w;
+    out[9] = viewport.h;
+    out[10] = SDL_RenderClipEnabled(renderer) ? 1 : 0;
+    out[11] = clip.x;
+    out[12] = clip.y;
+    out[13] = clip.w;
+    out[14] = clip.h;
+    out[15] = (int32_t)blend;
+    /* Preserve exact SDL float color bits; the byte getter quantizes state. */
+    memcpy(&out[16], &r, sizeof(r));
+    memcpy(&out[17], &g, sizeof(g));
+    memcpy(&out[18], &b, sizeof(b));
+    memcpy(&out[19], &a, sizeof(a));
+    return 1;
+}
+
+static int stasis_restore_renderer_presentation_state(
+    SDL_Renderer* renderer, const int32_t* state
+) {
+    if (!renderer || !state) return 0;
+    const int logical_w = state[2];
+    const int logical_h = state[3];
+    const SDL_RendererLogicalPresentation logical_mode =
+        (SDL_RendererLogicalPresentation)state[4];
+    const SDL_Rect viewport = {state[6], state[7], state[8], state[9]};
+    const SDL_Rect clip = {state[11], state[12], state[13], state[14]};
+    const SDL_BlendMode blend = (SDL_BlendMode)state[15];
+    float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+    memcpy(&r, &state[16], sizeof(r));
+    memcpy(&g, &state[17], sizeof(g));
+    memcpy(&b, &state[18], sizeof(b));
+    memcpy(&a, &state[19], sizeof(a));
+    return SDL_SetRenderLogicalPresentation(
+               renderer, logical_w, logical_h, logical_mode) &&
+        SDL_SetRenderViewport(renderer, state[5] ? &viewport : NULL) &&
+        SDL_SetRenderClipRect(renderer, state[10] ? &clip : NULL) &&
+        SDL_SetRenderDrawBlendMode(renderer, blend) &&
+        SDL_SetRenderDrawColorFloat(renderer, r, g, b, a);
+}
+#endif
+
+/* Reset the complete drawable before a publishable frame. In letterbox mode,
+ * guest CLEAR only owns the logical canvas, so no-CLEAR frames otherwise leave
+ * pixels outside that canvas dependent on prior surface contents. */
+static int stasis_clear_presentation_background(void) {
+    if (!g_renderer) {
+        stasis_report_runtime_errorf("Presentation background target unavailable");
+        return 0;
+    }
+
+    float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+#if defined(STASIS_TEST_PRESENTATION_POISON)
+    int32_t before[20] = {0};
+    int32_t after[20] = {0};
+    g_test_presentation_baseline_state_ready = false;
+    if (!stasis_renderer_presentation_state(g_renderer, before)) {
+        stasis_report_runtime_errorf(
+            "Presentation background state query failed: %s", SDL_GetError());
+        return 0;
+    }
+#endif
+    if (!SDL_GetRenderDrawColorFloat(g_renderer, &r, &g, &b, &a)) {
+        stasis_report_runtime_errorf(
+            "Presentation background color query failed: %s", SDL_GetError());
+        return 0;
+    }
+    const bool set_black = SDL_SetRenderDrawColorFloat(g_renderer, 0.0f, 0.0f, 0.0f, 1.0f);
+    const bool cleared = set_black && SDL_RenderClear(g_renderer);
+    const bool restored = SDL_SetRenderDrawColorFloat(g_renderer, r, g, b, a);
+
+#if defined(STASIS_TEST_PRESENTATION_POISON)
+    if (restored && stasis_renderer_presentation_state(g_renderer, after)) {
+        memcpy(g_test_presentation_baseline_state, before, sizeof(before));
+        memcpy(g_test_presentation_baseline_state + 20, after, sizeof(after));
+        g_test_presentation_baseline_state_ready = true;
+    }
+#endif
+
+    if (!set_black || !cleared || !restored) {
+        stasis_report_runtime_errorf(
+            "Presentation background initialization failed (set=%d clear=%d restore=%d): %s",
+            set_black ? 1 : 0, cleared ? 1 : 0, restored ? 1 : 0, SDL_GetError());
+        return 0;
+    }
+#if defined(STASIS_TEST_PRESENTATION_POISON)
+    if (!g_test_presentation_baseline_state_ready) {
+        stasis_report_runtime_errorf(
+            "Presentation background state verification failed: %s", SDL_GetError());
+        return 0;
+    }
+#endif
+    return 1;
+}
+
+#if defined(STASIS_TEST_PRESENTATION_POISON)
+/* Inject a failure after real frame text resources have been prepared but
+ * before the physical target is cleared. This verifies the publication gate. */
+STASIS_EXPORT int stasis_test_fail_next_text_preparation(void) {
+    const char* enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!g_renderer || !enabled || enabled[0] != '1' || enabled[1] != '\0') {
+        return 0;
+    }
+    g_test_fail_next_text_preparation = true;
+    return 1;
+}
+
+STASIS_EXPORT int stasis_test_get_presentation_baseline_state(
+    int32_t* out_state, int32_t capacity) {
+    const char* enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!out_state || capacity < 40 || !g_test_presentation_baseline_state_ready ||
+        !enabled || enabled[0] != '1' || enabled[1] != '\0') {
+        return 0;
+    }
+    memcpy(out_state, g_test_presentation_baseline_state,
+        sizeof(g_test_presentation_baseline_state));
+    return 1;
+}
+
+/* This test-only seam poisons the real SDL window target before a guest frame.
+ * It is compiled only into an explicitly configured native test runtime. */
+STASIS_EXPORT int stasis_test_poison_physical_target(int32_t* out_state, int32_t capacity) {
+    const char* enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!g_window || !g_renderer || !out_state || capacity < 40 || !enabled ||
+        enabled[0] != '1' || enabled[1] != '\0') {
+        return 0;
+    }
+
+    g_test_presentation_poison_target_kind = 0;
+    SDL_Texture* const selected_target = SDL_GetRenderTarget(g_renderer);
+    int32_t before[20] = {0};
+    if (!stasis_renderer_presentation_state(g_renderer, before)) return 0;
+    if (selected_target && !SDL_SetRenderTarget(g_renderer, NULL)) return 0;
+
+    int32_t window_state[20] = {0};
+    const bool captured_window_state =
+        stasis_renderer_presentation_state(g_renderer, window_state) != 0;
+    const bool poisoned = captured_window_state &&
+        SDL_SetRenderLogicalPresentation(
+            g_renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED) &&
+        SDL_SetRenderViewport(g_renderer, NULL) &&
+        SDL_SetRenderClipRect(g_renderer, NULL) &&
+        SDL_SetRenderDrawBlendMode(g_renderer, SDL_BLENDMODE_NONE) &&
+        SDL_SetRenderDrawColor(g_renderer, 255, 0, 255, 255) &&
+        SDL_RenderClear(g_renderer);
+    const bool window_restored = captured_window_state &&
+        stasis_restore_renderer_presentation_state(g_renderer, window_state);
+    int32_t restored_window_state[20] = {0};
+    const bool window_state_verified = window_restored &&
+        stasis_renderer_presentation_state(g_renderer, restored_window_state) &&
+        memcmp(window_state, restored_window_state, sizeof(window_state)) == 0;
+    const bool target_restored = !selected_target ||
+        SDL_SetRenderTarget(g_renderer, selected_target);
+    int32_t after[20] = {0};
+    bool selected_state_verified = target_restored &&
+        SDL_GetRenderTarget(g_renderer) == selected_target &&
+        stasis_renderer_presentation_state(g_renderer, after) &&
+        memcmp(before, after, sizeof(before)) == 0;
+    if (!selected_state_verified && target_restored && selected_target) {
+        const bool restored_selected_state =
+            stasis_restore_renderer_presentation_state(g_renderer, before) &&
+            stasis_renderer_presentation_state(g_renderer, after) &&
+            memcmp(before, after, sizeof(before)) == 0;
+        selected_state_verified = restored_selected_state &&
+            SDL_GetRenderTarget(g_renderer) == selected_target;
+    }
+    if (!poisoned || !window_state_verified || !selected_state_verified) return 0;
+    memcpy(out_state, before, sizeof(before));
+    memcpy(out_state + 20, after, sizeof(after));
+    g_test_capture_physical_target = true;
+    g_test_presentation_poison_target_kind = 1;
+    return 1;
+}
+
+/* 1 means the test seam poisoned the physical SDL window target. */
+STASIS_EXPORT int stasis_test_presentation_poison_target_kind(void) {
+    const char* enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!enabled || enabled[0] != '1' || enabled[1] != '\0') return 0;
+    return g_test_presentation_poison_target_kind;
+}
+
+/* Read one unconverted pixel from SDL's current window-target readback. The
+ * acceptance seam uses a full magenta poison, so this proves a failed
+ * preflight left that target untouched without publishing a new frame. */
+STASIS_EXPORT int stasis_test_read_physical_target_pixel(int32_t* out_rgba, int32_t capacity) {
+    const char* enabled = SDL_getenv("STASIS_ENABLE_TEST_INPUT");
+    if (!g_renderer || !out_rgba || capacity < 4 || !enabled ||
+        enabled[0] != '1' || enabled[1] != '\0' || SDL_GetRenderTarget(g_renderer)) {
+        return 0;
+    }
+    SDL_Surface* readback = SDL_RenderReadPixels(g_renderer, NULL);
+    if (!readback) return 0;
+    Uint8 pixel[4] = {0, 0, 0, 0};
+    const int read = SDL_ReadSurfacePixel(
+        readback, 0, 0, &pixel[0], &pixel[1], &pixel[2], &pixel[3]);
+    SDL_DestroySurface(readback);
+    g_test_capture_physical_target = false;
+    if (read) {
+        for (int channel = 0; channel < 4; channel++) out_rgba[channel] = pixel[channel];
+    }
+    return read;
+}
+#endif
+
 /*
  * End frame: flush lines, swap buffers, poll events
  */
@@ -5154,7 +5421,29 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
         g_perf_render_started_counter = 0;
         return;
     }
+    const int32_t order_count = stasis_render_clamp_count(
+        cmd_i32[STASIS_RENDER_I_ORDER_COUNT], STASIS_RENDER_MAX_ORDER);
+    /* Sprite sampling may reraster offscreen resources. Complete that work
+     * before touching the target so a resource-side failure cannot replace
+     * the last accepted image with a partial frame. */
     stasis_prepare_frame_sprite_requirements(cmd_i32, cmd_f32, sprite_count);
+    if ((flags & STASIS_RENDER_FLAG_PRESENT) != 0 &&
+        !stasis_prepare_frame_text_resources(
+            cmd_i32, cmd_f32, cmd_u8, text_count, text_bytes_used, order_count)) {
+        SDL_Log("Stasis renderer withheld PRESENT: stage=text_resource_preparation_failed");
+        /* No target writes or swap have happened. Keep the last accepted
+         * image and pump events again on the next submission. */
+        g_perf_render_started_counter = 0;
+        g_line_count = 0;
+        g_events_pumped_this_frame = 0;
+        return;
+    }
+    if ((flags & STASIS_RENDER_FLAG_PRESENT) != 0 &&
+        !stasis_clear_presentation_background()) {
+        g_resource_frame_ready = false;
+        g_perf_render_started_counter = 0;
+        return;
+    }
 
     if ((flags & STASIS_RENDER_FLAG_CLEAR) != 0) {
         stasis_clear(cmd_f32[0], cmd_f32[1], cmd_f32[2], cmd_f32[3]);
@@ -5162,8 +5451,6 @@ static void stasis_gfx_submit_frame(int32_t* cmd_i32, const float* cmd_f32, cons
 
     const int32_t clip_count = stasis_render_clamp_count(
         cmd_i32[STASIS_RENDER_I_CLIP_COUNT], gfx_cmd_max_clips);
-    const int32_t order_count = stasis_render_clamp_count(
-        cmd_i32[STASIS_RENDER_I_ORDER_COUNT], STASIS_RENDER_MAX_ORDER);
     const int32_t sprite_run_count = stasis_render_clamp_count(
         cmd_i32[STASIS_RENDER_I_SPRITE_RUN_COUNT], STASIS_RENDER_MAX_SPRITE_RUNS);
 #if defined(STASIS_DESKTOP_ATLAS_PLANNING)
@@ -9308,6 +9595,82 @@ static int stasis_ensure_font_ready(int font_handle) {
         if (!stasis_rebuild_text_runs()) return 0;
     }
     return 1;
+}
+
+static int stasis_prepare_frame_text_font(int font_handle, int* prepared) {
+    if (font_handle <= 0 || !stasis_font_get(font_handle)) return 1;
+    if (*prepared) return 1;
+    if (!stasis_ensure_font_ready(font_handle)) return 0;
+    /* stasis_ensure_font_ready refreshes every dirty font and all retained
+     * runs, so later ordered text draws only consume ready resources. */
+    *prepared = 1;
+    return 1;
+}
+
+static int stasis_prepare_frame_text_record(
+    const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8,
+    int text_bytes_used, int index, int* prepared
+) {
+    (void)cmd_f32;
+    const int base_i = STASIS_RENDER_I_TEXT_BASE +
+        index * STASIS_RENDER_TEXT_I32_STRIDE;
+    const int font_handle = cmd_i32[base_i + 0];
+    const int byte_off = cmd_i32[base_i + 1];
+    const int byte_len = cmd_i32[base_i + 2];
+    if (font_handle <= 0) return 1;
+
+    if (byte_off < 0) {
+        if (byte_off == INT32_MIN) return 1;
+        StasisTextRun* run = stasis_text_run_get(-byte_off);
+        return !run || stasis_prepare_frame_text_font(run->font_handle, prepared);
+    }
+    if (!cmd_u8 || text_bytes_used <= 0 ||
+        !stasis_render_text_span_is_valid(byte_off, byte_len, text_bytes_used)) {
+        return 1;
+    }
+    return stasis_prepare_frame_text_font(font_handle, prepared);
+}
+
+static int stasis_frame_text_preparation_is_complete(void) {
+#if defined(STASIS_TEST_PRESENTATION_POISON)
+    if (g_test_fail_next_text_preparation) {
+        g_test_fail_next_text_preparation = false;
+        return 0;
+    }
+#endif
+    return 1;
+}
+
+static int stasis_prepare_frame_text_resources(
+    const int32_t* cmd_i32, const float* cmd_f32, const uint8_t* cmd_u8,
+    int text_count, int text_bytes_used, int order_count
+) {
+    (void)cmd_f32;
+    if (!cmd_i32 || text_count <= 0) return 1;
+    int prepared = 0;
+    if (order_count <= 0) {
+        for (int index = 0; index < text_count; index++) {
+            if (!stasis_prepare_frame_text_record(
+                    cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index, &prepared)) {
+                return 0;
+            }
+        }
+        return stasis_frame_text_preparation_is_complete();
+    }
+
+    for (int order_index = 0; order_index < order_count; order_index++) {
+        const int32_t entry = cmd_i32[STASIS_RENDER_I_ORDER_BASE + order_index];
+        if (entry < 0 || entry / STASIS_RENDER_ORDER_KIND_SCALE != STASIS_RENDER_ORDER_TEXT) {
+            continue;
+        }
+        const int index = entry % STASIS_RENDER_ORDER_KIND_SCALE;
+        if (index >= text_count) continue;
+        if (!stasis_prepare_frame_text_record(
+                cmd_i32, cmd_f32, cmd_u8, text_bytes_used, index, &prepared)) {
+            return 0;
+        }
+    }
+    return stasis_frame_text_preparation_is_complete();
 }
 
 static int stasis_restore_renderer_resources(void) {

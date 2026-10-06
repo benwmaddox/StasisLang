@@ -8,6 +8,7 @@ final class WorkshopTemplateCatalog {
     static final String DEFAULT_TEMPLATE_ID = "exploration";
     static final String LEGACY_TEMPLATE_ID = "pong";
     static final String RENDER_ACCEPTANCE_TEMPLATE_ID = "render-parity";
+    static final String PRESENTATION_BASELINE_TEMPLATE_ID = "presentation-baseline";
     private static final DirectoryMount VENDORED_STDLIB = new DirectoryMount(
             "stasis_stdlib", "vendor/stasis/src/stdlib", false);
     private static final DirectoryMount TOOLCHAIN_STDLIB = new DirectoryMount(
@@ -95,17 +96,28 @@ final class WorkshopTemplateCatalog {
                     "assets/parity.ttf"
             }, false);
 
+    private static final Template PRESENTATION_BASELINE = new Template(
+            PRESENTATION_BASELINE_TEMPLATE_ID,
+            "Present-only Pixel Baseline",
+            "presentation_baseline_sample/",
+            new String[] { "src/main.stasis" },
+            new String[] {},
+            new DirectoryMount[] { TOOLCHAIN_STDLIB },
+            new String[] { "stasis.json" }, false);
+
     private WorkshopTemplateCatalog() {}
 
     static Template require(String id) {
         if (PONG.id.equals(id)) return PONG;
         if (EXPLORATION.id.equals(id)) return EXPLORATION;
         if (RENDER_ACCEPTANCE.id.equals(id)) return RENDER_ACCEPTANCE;
+        if (PRESENTATION_BASELINE.id.equals(id)) return PRESENTATION_BASELINE;
         throw new IllegalArgumentException("unknown Workshop template: " + id);
     }
 
     static boolean isKnown(String id) {
-        return PONG.id.equals(id) || EXPLORATION.id.equals(id) || RENDER_ACCEPTANCE.id.equals(id);
+        return PONG.id.equals(id) || EXPLORATION.id.equals(id) || RENDER_ACCEPTANCE.id.equals(id)
+                || PRESENTATION_BASELINE.id.equals(id);
     }
 
     static List<Template> list() {

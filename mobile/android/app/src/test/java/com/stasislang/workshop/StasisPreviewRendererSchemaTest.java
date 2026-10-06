@@ -232,6 +232,44 @@ public final class StasisPreviewRendererSchemaTest {
     }
 
     @Test
+    public void glDrawIsScheduledOnlyForSuccessfulValidatedPresentFrames() {
+        IntBuffer frame = IntBuffer.allocate(StasisPreviewRenderer.FRAME_I32_CAPACITY);
+        FloatBuffer floats = FloatBuffer.allocate(StasisPreviewRenderer.FRAME_F32_CAPACITY);
+        frame.put(StasisPreviewRenderer.I_MAGIC, StasisPreviewRenderer.RENDER_MAGIC);
+        frame.put(StasisPreviewRenderer.I_VERSION, StasisPreviewRenderer.RENDER_VERSION);
+
+        assertTrue(StasisPreviewRenderer.isValidFrame(frame, floats));
+        assertFalse(StasisPreviewRenderer.shouldPresent(frame, floats));
+        assertFalse(StasisPreviewRenderer.shouldSchedulePresentationDraw(
+                0, StasisPreviewRenderer.shouldPresent(frame, floats)));
+
+        frame.put(StasisPreviewRenderer.I_FLAGS, StasisPreviewRenderer.FLAG_PRESENT);
+        assertTrue(StasisPreviewRenderer.shouldSchedulePresentationDraw(
+                0, StasisPreviewRenderer.shouldPresent(frame, floats)));
+        assertFalse(StasisPreviewRenderer.shouldSchedulePresentationDraw(
+                -1, StasisPreviewRenderer.shouldPresent(frame, floats)));
+
+        frame.put(StasisPreviewRenderer.I_MAGIC, 0);
+        assertFalse(StasisPreviewRenderer.shouldPresent(frame, floats));
+        assertFalse(StasisPreviewRenderer.shouldSchedulePresentationDraw(
+                0, StasisPreviewRenderer.shouldPresent(frame, floats)));
+    }
+
+    @Test
+    public void restorePlaceholderDoesNotPublishWithoutAPresentFrame() {
+        assertFalse(StasisPreviewRenderer.shouldDrawRestorePlaceholder(
+                false, false, false, android.opengl.GLES20.GL_NO_ERROR));
+        assertTrue(StasisPreviewRenderer.shouldDrawRestorePlaceholder(
+                true, false, false, android.opengl.GLES20.GL_NO_ERROR));
+        assertFalse(StasisPreviewRenderer.shouldDrawRestorePlaceholder(
+                true, true, false, android.opengl.GLES20.GL_NO_ERROR));
+        assertFalse(StasisPreviewRenderer.shouldDrawRestorePlaceholder(
+                true, false, true, android.opengl.GLES20.GL_NO_ERROR));
+        assertFalse(StasisPreviewRenderer.shouldDrawRestorePlaceholder(
+                true, false, false, android.opengl.GLES20.GL_INVALID_OPERATION));
+    }
+
+    @Test
     public void malformedCountsSpansAndOrderRejectAndRecover() {
         IntBuffer frame = validSpriteFrame();
         FloatBuffer floats = validSpriteFloats();
