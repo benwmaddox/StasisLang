@@ -275,6 +275,7 @@ int main(void) {
     int32_t overlapping_i32[5] = {1, 2, 3, 4, 5};
     float overlapping_f32[5] = {1, 2, 3, 4, 5};
     uint8_t external_u8[4] = {1, 2, 3, 4};
+    uint16_t external_u16[2] = {0x1234, 0x2345};
     uint8_t aot_text_out[16] = {0};
     uint8_t dynamic_path[] = "sprite.bmp";
     uint8_t dynamic_price[] = {0xe2, 0x82, 0xac, '2', '.', '9', '9'};
@@ -384,6 +385,7 @@ int main(void) {
     stasis_jit_sys_memcpy_u8(22, 2, 22, 0, 2);
     CHECK(external_u8[2] == 1 && external_u8[3] == 2);
     stasis_jit_upsert_string_literal(22, "literal-must-not-win");
+    CHECK(stasis_jit_global_i32_array_load(22, 0, 4) == 0);
     stasis_jit_register_global_u8_array(54, 0, raw_out, sizeof(raw_out));
     stasis_jit_sys_memcpy_u8(54, 0, 22, 0, 4);
     CHECK(memcmp(raw_out, external_u8, sizeof(raw_out)) == 0);
@@ -398,12 +400,25 @@ int main(void) {
 
     stasis_jit_register_global_i32_array(24, 0, overlapping_i32, 5);
     stasis_jit_upsert_string_literal(24, "i32-array-must-win");
+    CHECK(stasis_jit_global_i32_array_load(24, 0, 5) == 0);
     memset(raw_out, 0, sizeof(raw_out));
     stasis_jit_sys_memcpy_u8(54, 0, 24, 0, 4);
     CHECK(memcmp(raw_out, "\1\2\3\4", sizeof(raw_out)) == 0);
     stasis_jit_sys_memmove_i32(24, 1, 24, 0, 4);
     CHECK(overlapping_i32[0] == 1 && overlapping_i32[1] == 1 &&
             overlapping_i32[2] == 2 && overlapping_i32[3] == 3 && overlapping_i32[4] == 4);
+    stasis_jit_register_global_u16_array(70, 0, external_u16, 2);
+    stasis_jit_upsert_string_literal(70, "u16-array-must-win");
+    CHECK(stasis_jit_global_i32_array_load(70, 0, 1) == 0x2345);
+    CHECK(stasis_jit_global_i32_array_load(70, 0, 2) == 0);
+    stasis_jit_upsert_string_literal(90, "A\xC3\xA9");
+    CHECK(stasis_jit_global_i32_array_load(90, 0, 0) == 'A');
+    CHECK(stasis_jit_global_i32_array_load(90, 0, 1) == 0xC3);
+    CHECK(stasis_jit_global_i32_array_load(90, 0, 2) == 0xA9);
+    CHECK(stasis_jit_global_i32_array_load(90, 0, 3) == 0);
+    CHECK(stasis_jit_global_i32_array_load(90, 0, 64) == 0);
+    CHECK(stasis_jit_global_i32_array_load(90, 0, -1) == 0);
+    CHECK(stasis_jit_global_i32_array_load(90, 1, 0) == 0);
     stasis_jit_register_global_f32_array(25, 0, overlapping_f32, 5);
     stasis_jit_sys_memmove_f32(25, 1, 25, 0, 4);
     CHECK(overlapping_f32[0] == 1 && overlapping_f32[1] == 1 &&

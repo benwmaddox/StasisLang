@@ -1585,13 +1585,28 @@ DEFINE_ARRAY_ACCESSORS(f64, double, STASIS_VALUE_F64)
 
 int32_t stasis_jit_global_i32_array_load(int32_t c, int32_t f, int32_t i) {
     StasisArray *entry;
+    const char *literal;
     if (i < 0) return 0;
     entry = find_array(c, f, STASIS_VALUE_I32, 0);
-    if (entry != NULL && (size_t)i < entry->length) return ((int32_t *)entry->data)[i];
+    if (entry != NULL) {
+        if ((size_t)i < entry->length) return ((int32_t *)entry->data)[i];
+        return 0;
+    }
     entry = find_array(c, f, STASIS_VALUE_U8, 0);
-    if (entry != NULL && (size_t)i < entry->length) return ((uint8_t *)entry->data)[i];
+    if (entry != NULL) {
+        if ((size_t)i < entry->length) return ((uint8_t *)entry->data)[i];
+        return 0;
+    }
     entry = find_array(c, f, STASIS_VALUE_U16, 0);
-    if (entry != NULL && (size_t)i < entry->length) return ((uint16_t *)entry->data)[i];
+    if (entry != NULL) {
+        if ((size_t)i < entry->length) return ((uint16_t *)entry->data)[i];
+        return 0;
+    }
+    if (f != 0) return 0;
+    literal = find_string(c);
+    if (literal != NULL && (size_t)i < strlen(literal)) {
+        return (unsigned char)literal[i];
+    }
     return 0;
 }
 

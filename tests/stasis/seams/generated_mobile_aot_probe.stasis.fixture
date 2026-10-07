@@ -28,8 +28,21 @@ function emit_text_outer(text: utf8[]): void {
     emit_text_middle(text);
 }
 
+function probe_ascii_literal_byte(value: ascii[], index: i32): i32 {
+    return to_i32(value[index]);
+}
+
 function main(): i32 {
     entry_trace = 1;
+    if (probe_ascii_literal_byte("A", 0) != 65) {
+        return 41;
+    }
+    if (probe_ascii_literal_byte("é", 0) != 195) {
+        return 42;
+    }
+    if (probe_ascii_literal_byte("é", 1) != 169) {
+        return 43;
+    }
     score = 10;
     fixed_walls[0].length = 3;
     generic_walls.runs[0].length = 4;

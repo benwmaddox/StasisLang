@@ -784,3 +784,32 @@ Visual evidence: inspected `D:\code\.automation-evidence\nightly-20261007\math83
 Theory gained: the base argument selects the power result lane, while explicit local types make f64 intent visible before overload resolution. Relative error alone can misstate subnormal behavior, so the shared oracle pairs it with an absolute minimum-subnormal allowance and a separate zero/subnormal classification check.
 
 Good: one shared Stasis oracle covers both precision lanes and exact ASCII output before the retained digest, while focused evidence has a concrete bounded receipt. Bad: focused host evidence and numerical review do not yet prove the final artifact on every backend. Adjustment: finish the source/vendor freeze, then record exact-source backend receipts separately and keep the focused result clearly bounded.
+
+The packaged mobile check exposed a separate runtime parity gap in indexed text
+views. An unchanged Android sample returned 21; a temporary diagnostic narrowed
+the failure to comparison with the literal `1.00e-300`. The destination had
+length 9, a NUL terminator, and first byte 49, while the literal's first indexed
+byte read as zero. Desktop indexed loads already resolve unbound literal hashes;
+the mobile loader omitted that lookup. The repair gives registered integer,
+byte, and UTF-16 arrays priority, including out-of-range reads, and resolves
+literal bytes only for an unbound field-zero view. It adds no ABI export, layout,
+capacity, or format version.
+
+The regression first failed through both the native runtime contract and a
+generated Stasis executable linked to the real mobile runtime. The generated
+fixture checks valid ASCII and UTF-8 indices; native contract checks cover
+unsigned bytes, field selection, bounds, and registered-array collisions.
+Language-level bounds traps remain separate from the native accessor's zero
+result. Temporary diagnostic instrumentation is removed from the production
+sample. Final mobile, merge, and subsequent official-nightly receipts remain
+external acceptance gates recorded with PR #917 and the task ledger.
+
+Theory gained: a text-view argument carries a hash that can name either an
+array or a literal. Runtime array registration must win even when an index is
+outside that array; only an unbound view may resolve the literal table.
+
+Good: controlled original-versus-diagnostic Android runs localized the failure
+before changing math kernels. Bad: host parity checks did not expose the mobile
+literal lookup omission. Adjustment: retain a generated executable regression
+for indexed literal arguments and require packaged mobile acceptance before
+merging this slice.
