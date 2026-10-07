@@ -7,21 +7,8 @@
   "vendor": {
     "stasis": {
       "release_id": "development",
-      "sha256": "ecc6d516797ac0e84d9b4b9ca86925dee09d0ba06c559f4536248dd66f4779a1",
+      "sha256": "3eba85e9e727e01f41ad8c8725ca58e1bd485953d4e7005d70141ca7d4ae207c",
       "hash_version": 2
-    }
-  },
-  "ai": {
-    "provider": null,
-    "openrouter": {
-      "approved_models": [
-        "openai/gpt-oss-120b"
-      ],
-      "min_throughput_tokens_per_second": 400,
-      "max_p50_latency_seconds": 2.0
-    },
-    "editor": {
-      "auto_persist_html_transcripts": false
     }
   }
 }

@@ -8,12 +8,76 @@ function math_sqrt(value: f32): f32 {
     return f32_sqrt(value);
 }
 
+function math_positive_infinity_f64(): f64 {
+    return 1.0 / 0.0;
+}
+
+function math_nan_f64(): f64 {
+    return 0.0 / 0.0;
+}
+
+function math_sqrt(value: f64): f64 {
+    if (value != value) {
+        return value;
+    }
+    let infinity: f64 = math_positive_infinity_f64();
+    if (value == infinity) {
+        return value;
+    }
+    if (value <= 0.0) {
+        return 0.0;
+    }
+
+    let scaled: f64 = value;
+    let scale: f64 = 1.0;
+    let index: i32 = 0;
+    let two_to_64: f64 = 18446744073709551616.0;
+    let one_over_two_to_64: f64 = 0.00000000000000000005421010862427522;
+    for (index = 0; index < 20; index = index + 1) {
+        if (scaled >= two_to_64) {
+            scaled = scaled / two_to_64;
+            scale = scale * 4294967296.0;
+        }
+        if (scaled < one_over_two_to_64) {
+            scaled = scaled * two_to_64;
+            scale = scale / 4294967296.0;
+        }
+    }
+    for (index = 0; index < 80; index = index + 1) {
+        if (scaled >= 4.0) {
+            scaled = scaled / 4.0;
+            scale = scale * 2.0;
+        }
+        if (scaled < 1.0) {
+            scaled = scaled * 4.0;
+            scale = scale / 2.0;
+        }
+    }
+
+    let estimate: f64 =(scaled + 1.0) / 2.0;
+    let iteration: i32 = 0;
+    for (iteration = 0; iteration < 10; iteration = iteration + 1) {
+        estimate =(estimate + scaled / estimate) / 2.0;
+    }
+    return estimate * scale;
+}
+
 function math_abs(value: f32): f32 {
     if (value == 0.0) {
         return 0.0;
     }
     if (value < 0.0) {
         return -value;
+    }
+    return value;
+}
+
+function math_abs(value: f64): f64 {
+    if (value == 0.0) {
+        return 0.0;
+    }
+    if (value < 0.0) {
+        return 0.0 - value;
     }
     return value;
 }
@@ -26,6 +90,502 @@ function math_abs(value: i32): i32 {
         return -value;
     }
     return value;
+}
+
+function math_floor(value: f64): f64 {
+    let infinity: f64 = math_positive_infinity_f64();
+    if (value != value || value == infinity || value == 0.0 - infinity || value == 0.0) {
+        return value;
+    }
+    if (value >= 4503599627370496.0 || value <= -4503599627370496.0) {
+        return value;
+    }
+
+    let negative: bool = value < 0.0;
+    let remainder: f64 = math_abs(value);
+    let integer: f64 = 0.0;
+    let place: f64 = 4503599627370496.0;
+    let step: i32 = 0;
+    for (step = 0; step < 53; step = step + 1) {
+        if (remainder >= place) {
+            remainder = remainder - place;
+            integer = integer + place;
+        }
+        place = place / 2.0;
+    }
+    if (negative) {
+        if (remainder > 0.0) {
+            return 0.0 - integer - 1.0;
+        }
+        return 0.0 - integer;
+    }
+    return integer;
+}
+
+function math_floor(value: f32): f32 {
+    let widened: f64 = 0.0;
+    widened.from_f32(value);
+    let floored: f64 = math_floor(widened);
+    let result: f32 = 0.0;
+    result.from_f64(floored);
+    return result;
+}
+
+function math_ceil(value: f64): f64 {
+    let infinity: f64 = math_positive_infinity_f64();
+    if (value != value || value == infinity || value == 0.0 - infinity || value == 0.0) {
+        return value;
+    }
+    return -1.0 * math_floor(0.0 - value);
+}
+
+function math_ceil(value: f32): f32 {
+    let widened: f64 = 0.0;
+    widened.from_f32(value);
+    let ceiled: f64 = math_ceil(widened);
+    let result: f32 = 0.0;
+    result.from_f64(ceiled);
+    return result;
+}
+
+function math_round(value: f64): f64 {
+    let infinity: f64 = math_positive_infinity_f64();
+    if (value != value || value == infinity || value == 0.0 - infinity || value == 0.0) {
+        return value;
+    }
+    if (value >= 4503599627370496.0 || value <= -4503599627370496.0) {
+        return value;
+    }
+    let lower_integer: f64 = math_floor(value);
+    let rounded: f64 = lower_integer;
+    if (value - lower_integer >= 0.5) {
+        rounded = lower_integer + 1.0;
+    }
+    if (rounded == 0.0 && value < 0.0) {
+        return value * 0.0;
+    }
+    return rounded;
+}
+
+function math_round(value: f32): f32 {
+    let widened: f64 = 0.0;
+    widened.from_f32(value);
+    let rounded: f64 = math_round(widened);
+    let result: f32 = 0.0;
+    result.from_f64(rounded);
+    return result;
+}
+
+function math_min(left: f64, right: f64): f64 {
+    if (left != left) {
+        return left;
+    }
+    if (right != right) {
+        return right;
+    }
+    if (left == 0.0 && right == 0.0) {
+        if (1.0 / left < 0.0) {
+            return left;
+        }
+        if (1.0 / right < 0.0) {
+            return right;
+        }
+        return left;
+    }
+    if (left <= right) {
+        return left;
+    }
+    return right;
+}
+
+function math_min(left: f32, right: f32): f32 {
+    let left64: f64 = 0.0;
+    let right64: f64 = 0.0;
+    left64.from_f32(left);
+    right64.from_f32(right);
+    let result64: f64 = math_min(left64, right64);
+    let result: f32 = 0.0;
+    result.from_f64(result64);
+    return result;
+}
+
+function math_max(left: f64, right: f64): f64 {
+    if (left != left) {
+        return left;
+    }
+    if (right != right) {
+        return right;
+    }
+    if (left == 0.0 && right == 0.0) {
+        if (1.0 / left > 0.0) {
+            return left;
+        }
+        if (1.0 / right > 0.0) {
+            return right;
+        }
+        return left;
+    }
+    if (left >= right) {
+        return left;
+    }
+    return right;
+}
+
+function math_max(left: f32, right: f32): f32 {
+    let left64: f64 = 0.0;
+    let right64: f64 = 0.0;
+    left64.from_f32(left);
+    right64.from_f32(right);
+    let result64: f64 = math_max(left64, right64);
+    let result: f32 = 0.0;
+    result.from_f64(result64);
+    return result;
+}
+
+function math_clamp(value: f64, lower: f64, upper: f64): f64 {
+    if (value != value) {
+        return value;
+    }
+    if (lower != lower) {
+        return lower;
+    }
+    if (upper != upper) {
+        return upper;
+    }
+    let minimum: f64 = lower;
+    let maximum: f64 = upper;
+    if (minimum > maximum) {
+        minimum = upper;
+        maximum = lower;
+    }
+    if (value < minimum) {
+        return minimum;
+    }
+    if (value > maximum) {
+        return maximum;
+    }
+    return value;
+}
+
+function math_clamp(value: f32, lower: f32, upper: f32): f32 {
+    let value64: f64 = 0.0;
+    let lower64: f64 = 0.0;
+    let upper64: f64 = 0.0;
+    value64.from_f32(value);
+    lower64.from_f32(lower);
+    upper64.from_f32(upper);
+    let result64: f64 = math_clamp(value64, lower64, upper64);
+    let result: f32 = 0.0;
+    result.from_f64(result64);
+    return result;
+}
+
+function math_exp(value: f64): f64 {
+    if (value != value) {
+        return value;
+    }
+    let infinity: f64 = math_positive_infinity_f64();
+    if (value == infinity) {
+        return infinity;
+    }
+    if (value == 0.0 - infinity) {
+        return 0.0;
+    }
+    if (value > 709.782712893384) {
+        return infinity;
+    }
+    if (value < -745.1332191019411) {
+        return 0.0;
+    }
+
+    let binary_exponent: f64 = math_floor(value * 1.44269504088896340736 + 0.5);
+    let exponent: i32 = 0;
+    exponent.from_f64(binary_exponent);
+    let exponent64: f64 = 0.0;
+    exponent64.from_i32(exponent);
+    let reduced: f64 = value - exponent64 * 0.6931471803691238;
+    reduced = reduced - exponent64 * 0.00000000019082149292705877;
+    let sum: f64 = 1.0;
+    let term: f64 = 1.0;
+    let index: i32 = 0;
+    for (index = 1; index <= 20; index = index + 1) {
+        let denominator: f64 = 0.0;
+        denominator.from_i32(index);
+        term = term * reduced / denominator;
+        sum = sum + term;
+    }
+
+    let factor: f64 = 1.0;
+    if (exponent > 512) {
+        let two_to_512: f64 = 18446744073709551616.0;
+        for (index = 0; index < 7; index = index + 1) {
+            two_to_512 = two_to_512 * 18446744073709551616.0;
+        }
+        sum = sum * two_to_512;
+        for (index = 0; index < exponent - 512; index = index + 1) {
+            factor = factor * 2.0;
+        }
+        return sum * factor;
+    }
+    if (exponent < -512) {
+        let two_to_512: f64 = 18446744073709551616.0;
+        for (index = 0; index < 7; index = index + 1) {
+            two_to_512 = two_to_512 * 18446744073709551616.0;
+        }
+        sum = sum / two_to_512;
+        for (index = 0; index < 0 - exponent - 512; index = index + 1) {
+            factor = factor / 2.0;
+        }
+        return sum * factor;
+    }
+    if (exponent > 0) {
+        for (index = 0; index < exponent; index = index + 1) {
+            factor = factor * 2.0;
+        }
+    } else if (exponent < 0) {
+        for (index = 0; index < 0 - exponent; index = index + 1) {
+            factor = factor / 2.0;
+        }
+    }
+    return sum * factor;
+}
+
+function math_exp(value: f32): f32 {
+    let widened: f64 = 0.0;
+    widened.from_f32(value);
+    let result64: f64 = math_exp(widened);
+    let result: f32 = 0.0;
+    result.from_f64(result64);
+    return result;
+}
+
+function math_ln(value: f64): f64 {
+    if (value != value) {
+        return value;
+    }
+    let infinity: f64 = math_positive_infinity_f64();
+    if (value == infinity) {
+        return infinity;
+    }
+    if (value == 0.0) {
+        return 0.0 - infinity;
+    }
+    if (value < 0.0) {
+        return math_nan_f64();
+    }
+
+    let normalized: f64 = value;
+    let exponent: i32 = 0;
+    let index: i32 = 0;
+    let two_to_64: f64 = 18446744073709551616.0;
+    let one_over_two_to_64: f64 = 0.00000000000000000005421010862427522;
+    if (value < 0.75 || value > 1.5) {
+        for (index = 0; index < 20; index = index + 1) {
+            if (normalized >= two_to_64) {
+                normalized = normalized / two_to_64;
+                exponent = exponent + 64;
+            }
+            if (normalized < one_over_two_to_64) {
+                normalized = normalized * two_to_64;
+                exponent = exponent - 64;
+            }
+        }
+        for (index = 0; index < 80; index = index + 1) {
+            if (normalized >= 2.0) {
+                normalized = normalized / 2.0;
+                exponent = exponent + 1;
+            }
+            if (normalized < 1.0) {
+                normalized = normalized * 2.0;
+                exponent = exponent - 1;
+            }
+        }
+    }
+
+    let ratio: f64 =(normalized - 1.0) /(normalized + 1.0);
+    let ratio_squared: f64 = ratio * ratio;
+    let power: f64 = ratio;
+    let sum: f64 = ratio;
+    for (index = 1; index <= 32; index = index + 1) {
+        power = power * ratio_squared;
+        let denominator: f64 = 0.0;
+        denominator.from_i32(2 * index + 1);
+        sum = sum + power / denominator;
+    }
+    let exponent64: f64 = 0.0;
+    exponent64.from_i32(exponent);
+    return 2.0 * sum + exponent64 * 0.69314718055994530942;
+}
+
+function math_ln(value: f32): f32 {
+    let widened: f64 = 0.0;
+    widened.from_f32(value);
+    let result64: f64 = math_ln(widened);
+    let result: f32 = 0.0;
+    result.from_f64(result64);
+    return result;
+}
+
+function math_log10(value: f64): f64 {
+    return math_ln(value) * 0.43429448190325182765;
+}
+
+function math_log10(value: f32): f32 {
+    let widened: f64 = 0.0;
+    widened.from_f32(value);
+    let result64: f64 = math_log10(widened);
+    let result: f32 = 0.0;
+    result.from_f64(result64);
+    return result;
+}
+
+function math_is_odd_integer_f64(value: f64): bool {
+    let half_floor: f64 = math_floor(value / 2.0);
+    return value - half_floor * 2.0 == 1.0;
+}
+
+function math_pow(base: f64, exponent: i32): f64 {
+    if (exponent == 0) {
+        return 1.0;
+    }
+    if (base != base) {
+        return base;
+    }
+
+    let negative_zero: bool = base == 0.0 && 1.0 / base < 0.0;
+    let negative_base: bool = base < 0.0 || negative_zero;
+    if (base == 0.0) {
+        if (exponent < 0) {
+            if (negative_base && exponent % 2 != 0) {
+                return 0.0 - math_positive_infinity_f64();
+            }
+            return math_positive_infinity_f64();
+        }
+        if (negative_base && exponent % 2 != 0) {
+            return base;
+        }
+        return 0.0;
+    }
+
+    let remaining: i32 = exponent;
+    let factor: f64 = math_abs(base);
+    let result: f64 = 1.0;
+    let step: i32 = 0;
+    if (exponent < 0) {
+        factor = 1.0 / factor;
+    }
+    for (step = 0; step < 32; step = step + 1) {
+        if (remaining != 0) {
+            if (remaining % 2 != 0) {
+                result = result * factor;
+            }
+            remaining = remaining / 2;
+            if (remaining != 0) {
+                factor = factor * factor;
+            }
+        }
+    }
+    if (negative_base && exponent % 2 != 0) {
+        return -result;
+    }
+    return result;
+}
+
+function math_pow(base: f32, exponent: i32): f32 {
+    let widened: f64 = 0.0;
+    widened.from_f32(base);
+    let result64: f64 = math_pow(widened, exponent);
+    let result: f32 = 0.0;
+    result.from_f64(result64);
+    return result;
+}
+
+function math_pow(base: f64, exponent: f64): f64 {
+    if (exponent == 0.0) {
+        return 1.0;
+    }
+    if (base == 1.0) {
+        return 1.0;
+    }
+    if (exponent != exponent || base != base) {
+        return math_nan_f64();
+    }
+
+    let infinity: f64 = math_positive_infinity_f64();
+    if (exponent == infinity || exponent == 0.0 - infinity) {
+        let magnitude: f64 = math_abs(base);
+        if (magnitude == 1.0) {
+            return 1.0;
+        }
+        if (magnitude > 1.0) {
+            if (exponent > 0.0) {
+                return infinity;
+            }
+            return 0.0;
+        }
+        if (exponent > 0.0) {
+            return 0.0;
+        }
+        return infinity;
+    }
+
+    let negative_zero: bool = base == 0.0 && 1.0 / base < 0.0;
+    if (base == 0.0) {
+        if (exponent > 0.0) {
+            if (negative_zero && math_floor(exponent) == exponent && math_is_odd_integer_f64(exponent)) {
+                return base;
+            }
+            return 0.0;
+        }
+        if (negative_zero && math_floor(exponent) == exponent && math_is_odd_integer_f64(exponent)) {
+            return 0.0 - infinity;
+        }
+        return infinity;
+    }
+
+    if (base < 0.0 && math_floor(exponent) != exponent) {
+        return math_nan_f64();
+    }
+
+    let integer_exponent: bool = math_floor(exponent) == exponent;
+    if (integer_exponent && exponent >= -1000000.0 && exponent <= 1000000.0) {
+        let exponent_i32: i32 = 0;
+        exponent_i32.from_f64(exponent);
+        return math_pow(base, exponent_i32);
+    }
+
+    let magnitude: f64 = math_abs(base);
+    let result: f64 = math_exp(exponent * math_ln(magnitude));
+    if (base < 0.0 && math_is_odd_integer_f64(exponent)) {
+        return -result;
+    }
+    return result;
+}
+
+function math_pow(base: f32, exponent: f32): f32 {
+    let base64: f64 = 0.0;
+    let exponent64: f64 = 0.0;
+    base64.from_f32(base);
+    exponent64.from_f32(exponent);
+    let result64: f64 = math_pow(base64, exponent64);
+    let result: f32 = 0.0;
+    result.from_f64(result64);
+    return result;
+}
+
+function math_pow(base: f64, exponent: f32): f64 {
+    let widened_exponent: f64 = 0.0;
+    widened_exponent.from_f32(exponent);
+    return math_pow(base, widened_exponent);
+}
+
+function math_pow(base: f32, exponent: f64): f32 {
+    let widened_base: f64 = 0.0;
+    widened_base.from_f32(base);
+    let result64: f64 = math_pow(widened_base, exponent);
+    let result: f32 = 0.0;
+    result.from_f64(result64);
+    return result;
 }
 
 function math_atan_series(value: f32): f32 {

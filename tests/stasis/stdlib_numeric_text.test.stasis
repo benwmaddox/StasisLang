@@ -4,6 +4,8 @@ global numeric_text_value: ascii[64];
 global numeric_text_exact_i32: ascii[12];
 global numeric_text_short_i32: ascii[11];
 global numeric_text_exact_f32: ascii[48];
+global numeric_text_f64: ascii[64];
+global numeric_text_short_f64: ascii[8];
 
 function numeric_text_is(ascii_value: ascii[], expected_length: i32, first: u8, last: u8): bool {
     return length(ascii_value) == expected_length && ascii_value[0] == first && ascii_value[expected_length - 1] == last && ascii_value[expected_length] == 0;
@@ -55,4 +57,122 @@ test `numeric text rejection leaves length and payload unchanged`(): bool {
     }
     ascii_copy(numeric_text_value, "keep");
     return ascii_from_f32_fixed(numeric_text_value, 1.0 / 0.0, 2) == -1 && length(numeric_text_value) == 4 && numeric_text_value[0] == 107 && numeric_text_value[3] == 112 && numeric_text_value[4] == 0;
+}
+
+test `short f64 text formats fixed values and rounds carries`(): bool {
+    let first_length: i32 = ascii_from_f64_short(numeric_text_f64, 1.25, 2);
+    if (first_length != 4 || !numeric_text_is(numeric_text_f64, 4, 49, 53)) {
+        return false;
+    }
+    if (numeric_text_f64[1] != 46 || numeric_text_f64[2] != 50 || numeric_text_f64[3] != 53) {
+        return false;
+    }
+    let carry_length: i32 = ascii_from_f64_short(numeric_text_f64, 999.995, 2);
+    if (carry_length != 7 || !numeric_text_is(numeric_text_f64, 7, 49, 48)) {
+        return false;
+    }
+    if (
+        numeric_text_f64[1] != 48
+        || numeric_text_f64[2] != 48
+        || numeric_text_f64[3] != 48
+        || numeric_text_f64[4] != 46
+        || numeric_text_f64[5] != 48
+        || numeric_text_f64[6] != 48
+    ) {
+        return false;
+    }
+    let integral_length: i32 = ascii_from_f64_short(numeric_text_f64, 999999.5, 0);
+    if (integral_length != 7 || !numeric_text_is(numeric_text_f64, 7, 49, 48)) {
+        return false;
+    }
+    if (ascii_from_f64_short(numeric_text_f64, -0.0, 2) != 4 || !numeric_text_is(numeric_text_f64, 4, 48, 48)) {
+        return false;
+    }
+    return numeric_text_f64[1] == 46 && numeric_text_f64[2] == 48 && numeric_text_f64[3] == 48;
+}
+
+test `short f64 text uses scientific notation for very small and large values`(): bool {
+    let tiny: f64 = 1.0;
+    let large: f64 = 1.0;
+    let index: i32 = 0;
+    for (index = 0; index < 300; index = index + 1) {
+        tiny = tiny / 10.0;
+        large = large * 10.0;
+    }
+    let tiny_length: i32 = ascii_from_f64_short(numeric_text_f64, tiny, 2);
+    if (tiny_length != 9 || !numeric_text_is(numeric_text_f64, 9, 49, 48)) {
+        return false;
+    }
+    if (
+        numeric_text_f64[1] != 46
+        || numeric_text_f64[2] != 48
+        || numeric_text_f64[3] != 48
+        || numeric_text_f64[4] != 101
+        || numeric_text_f64[5] != 45
+        || numeric_text_f64[6] != 51
+        || numeric_text_f64[7] != 48
+        || numeric_text_f64[8] != 48
+    ) {
+        return false;
+    }
+    let large_length: i32 = ascii_from_f64_short(numeric_text_f64, large, 2);
+    if (large_length != 8 || !numeric_text_is(numeric_text_f64, 8, 49, 48)) {
+        return false;
+    }
+    return numeric_text_f64[4] == 101 && numeric_text_f64[5] == 51 && numeric_text_f64[6] == 48 && numeric_text_f64[7] == 48;
+}
+
+test `short f64 scientific rounding carries the exponent and appends`(): bool {
+    let carry: f64 = 9.999;
+    let index: i32 = 0;
+    for (index = 0; index < 300; index = index + 1) {
+        carry = carry * 10.0;
+    }
+    let carry_length: i32 = ascii_from_f64_short(numeric_text_f64, carry, 2);
+    if (carry_length != 8 || !numeric_text_is(numeric_text_f64, 8, 49, 49)) {
+        return false;
+    }
+    if (numeric_text_f64[4] != 101 || numeric_text_f64[5] != 51 || numeric_text_f64[6] != 48 || numeric_text_f64[7] != 49) {
+        return false;
+    }
+    let prefix_length: i32 = ascii_copy(numeric_text_value, "prefix");
+    let append_length: i32 = ascii_append_f64_short(numeric_text_value, 1.0, 2);
+    return prefix_length == 6 && append_length == 10 && length(numeric_text_value) == 10 && numeric_text_value[6] == 49 && numeric_text_value[7] == 46 && numeric_text_value[8] == 48 && numeric_text_value[9] == 48;
+}
+
+test `short f64 text handles nonfinite values and rejects short capacity without mutation`(): bool {
+    let infinity: f64 = 1.0 / 0.0;
+    let nan: f64 = 0.0 / 0.0;
+    let large: f64 = 1.0;
+    let index: i32 = 0;
+    for (index = 0; index < 300; index = index + 1) {
+        large = large * 10.0;
+    }
+    ascii_copy(numeric_text_short_f64, "keep");
+    numeric_text_short_f64[7] = to_u8_trunc(83);
+    if (
+        ascii_from_f64_short(numeric_text_short_f64, large, 2) != -1
+        || length(numeric_text_short_f64) != 4
+        || numeric_text_short_f64[0] != 107
+        || numeric_text_short_f64[3] != 112
+        || numeric_text_short_f64[4] != 0
+        || numeric_text_short_f64[7] != 83
+    ) {
+        return false;
+    }
+    if (
+        ascii_from_f64_short(numeric_text_f64, infinity, 2) != 3
+        || !numeric_text_is(numeric_text_f64, 3, 105, 102)
+        || numeric_text_f64[1] != 110
+    ) {
+        return false;
+    }
+    if (
+        ascii_from_f64_short(numeric_text_f64, 0.0 - infinity, 2) != 4
+        || !numeric_text_is(numeric_text_f64, 4, 45, 102)
+        || numeric_text_f64[1] != 105
+    ) {
+        return false;
+    }
+    return ascii_from_f64_short(numeric_text_f64, nan, 2) == 3 && numeric_text_is(numeric_text_f64, 3, 110, 110) && numeric_text_f64[1] == 97;
 }

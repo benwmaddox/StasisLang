@@ -755,3 +755,61 @@ Limits: the initial broad repository validator failed with a stale/mismatched ru
 Visual evidence: inspected D:/code/.automation-evidence/stash625-integration/windows/present-only-physical-poison.png (red logical canvas within fully initialized black physical margins) and it-009-recovered-valid-frame.png (valid scene recovered after malformed submissions). These stills do not establish motion or lifecycle timing.
 
 Theory gained: test instrumentation changes binary identity while preserving source compatibility identity. Distinct paths, compile flags, exports, and hashes distinguish variants; a matching release/fingerprint lets both exercise the same loader contract. A CLI-sibling runtime takes priority over an environment path, so fresh native validation must provision the matching sibling as well.
+
+## 2026-10-07 - Maddox #832 scalar math and short f64 text
+
+Added the shared f32/f64 scalar math API, with signed-zero, NaN, infinity,
+power-domain, and rounding behavior, plus its current tolerance bounds. Decimal
+float literals default to f32, so callers use explicitly typed f64 locals when
+they need wider overloads. Integer powers use a bounded 32-step repeated-square
+path; floating powers with negative bases require integral exponents. The
+sample's added f32/f64 math and short-text assertions run before the unchanged
+13-value f32 raw-bit digest `-1430176193`.
+
+Added `ascii_write_f64_short`, `ascii_from_f64_short`, and
+`ascii_append_f64_short`, including precision `0..6`, magnitude-based fixed or
+scientific notation, carry behavior, lowercase specials, unsigned signed-zero
+output, and full-capacity transactional rejection. It stages digits as local
+integers, then writes to the destination after capacity preflight, preserving
+the caller-owned buffer contract.
+
+Focused validation: `python tools/cargo_cache.py run -- cargo test -p stasis --test stasis_behavior_suite -- --test-threads=1 --nocapture` passed 22 math and 7 numeric-text assertions in 48.645 seconds. The recorded receipt is `D:\code\.automation-evidence\nightly-20261007\math832\focused-final\run-format-refactor\result.json`. The source snapshot reviewed here had `src/stdlib/math.stasis` SHA-256 `801FA3722E0E91815095795F60914393A45F06E9B132B7910CC71EC6887B0327` and `src/stdlib/stdlib.stasis` SHA-256 `09FCBBFD89EECA84BF50E9320DBE7276992E085C4CC947C05097BD91C8C203A8`.
+
+This is bounded focused evidence. No final exact-source JIT/native AOT/Wasm/Android/iOS parity matrix, complete repository validator, hosted gate, or nightly publication pass is claimed here. The separate numerical-review artifacts at `D:\code\.automation-evidence\nightly-20261007\math832\numerical-review\review_final.md` and `review_rounding.md` are review evidence, not backend executions. Final identity-bound backend, full-gate, and hosted receipts will be recorded with the reviewed PR and Maddox ledger when they are available.
+
+The desktop presentation prerequisite was also rechecked: its recovery seam waits for matching physical, drawable, native, and readback state across three continuous observations spanning 500 ms, with a five-second bound; existing pixel and counter assertions remain. The exact four-test target and five fresh whole-target processes passed. This prerequisite result does not establish math parity.
+
+Visual evidence: inspected `D:\code\.automation-evidence\nightly-20261007\math832\post-fix-five-full-recovery-fresh\run-5\artifacts\seam-tests\present-only-physical-poison.png`. It shows the red logical rectangle with black physical margins and no magenta contamination for the desktop presentation prerequisite; it is not a visual test of scalar math.
+
+Theory gained: the base argument selects the power result lane, while explicit local types make f64 intent visible before overload resolution. Relative error alone can misstate subnormal behavior, so the shared oracle pairs it with an absolute minimum-subnormal allowance and a separate zero/subnormal classification check.
+
+Good: one shared Stasis oracle covers both precision lanes and exact ASCII output before the retained digest, while focused evidence has a concrete bounded receipt. Bad: focused host evidence and numerical review do not yet prove the final artifact on every backend. Adjustment: finish the source/vendor freeze, then record exact-source backend receipts separately and keep the focused result clearly bounded.
+
+The packaged mobile check exposed a separate runtime parity gap in indexed text
+views. An unchanged Android sample returned 21; a temporary diagnostic narrowed
+the failure to comparison with the literal `1.00e-300`. The destination had
+length 9, a NUL terminator, and first byte 49, while the literal's first indexed
+byte read as zero. Desktop indexed loads already resolve unbound literal hashes;
+the mobile loader omitted that lookup. The repair gives registered integer,
+byte, and UTF-16 arrays priority, including out-of-range reads, and resolves
+literal bytes only for an unbound field-zero view. It adds no ABI export, layout,
+capacity, or format version.
+
+The regression first failed through both the native runtime contract and a
+generated Stasis executable linked to the real mobile runtime. The generated
+fixture checks valid ASCII and UTF-8 indices; native contract checks cover
+unsigned bytes, field selection, bounds, and registered-array collisions.
+Language-level bounds traps remain separate from the native accessor's zero
+result. Temporary diagnostic instrumentation is removed from the production
+sample. Final mobile, merge, and subsequent official-nightly receipts remain
+external acceptance gates recorded with PR #917 and the task ledger.
+
+Theory gained: a text-view argument carries a hash that can name either an
+array or a literal. Runtime array registration must win even when an index is
+outside that array; only an unbound view may resolve the literal table.
+
+Good: controlled original-versus-diagnostic Android runs localized the failure
+before changing math kernels. Bad: host parity checks did not expose the mobile
+literal lookup omission. Adjustment: retain a generated executable regression
+for indexed literal arguments and require packaged mobile acceptance before
+merging this slice.

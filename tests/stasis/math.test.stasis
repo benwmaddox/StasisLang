@@ -97,3 +97,334 @@ test `f32 raw bit conversion observes signed zero and exact math results`(): boo
         math_atan2_degrees(0.0, 1.0)
     ) == 0 && f32_to_bits(math_sqrt(2.0)) == 1068827891;
 }
+
+function math_test_abs_f64(value: f64): f64 {
+    if (value < 0.0) {
+        return 0.0 - value;
+    }
+    return value;
+}
+
+function math_test_close_f64(actual: f64, expected: f64, relative_tolerance: f64, absolute_tolerance: f64): bool {
+    return math_test_abs_f64(actual - expected) <= math_test_abs_f64(expected) * relative_tolerance + absolute_tolerance;
+}
+
+test `f64 square root and exponential logarithms stay accurate across scale`(): bool {
+    let two: f64 = 2.0;
+    let one: f64 = 1.0;
+    let negative_one: f64 = 0.0 - 1.0;
+    let zero: f64 = 0.0;
+    let seven_hundred: f64 = 700.0;
+    let thousand: f64 = 1000.0;
+    let one_e_300: f64 = 1.0;
+    let one_e_minus_300: f64 = 1.0;
+    let one_e_150: f64 = 1.0;
+    let infinity: f64 = 1.0 / 0.0;
+    let exp_700_expected: f64 = 1.0142320547350045;
+    let index: i32 = 0;
+    for (index = 0; index < 300; index = index + 1) {
+        one_e_300 = one_e_300 * 10.0;
+        one_e_minus_300 = one_e_minus_300 / 10.0;
+    }
+    for (index = 0; index < 150; index = index + 1) {
+        one_e_150 = one_e_150 * 10.0;
+    }
+    for (index = 0; index < 304; index = index + 1) {
+        exp_700_expected = exp_700_expected * 10.0;
+    }
+    return math_test_close_f64(math_sqrt(two), 1.4142135623730951, 0.000000000000002, 0.000000000000001) && math_test_close_f64(
+        math_sqrt(one_e_300),
+        one_e_150,
+        0.000000000000002,
+        0.0
+    ) && math_test_close_f64(math_sqrt(one_e_minus_300), 1.0 / one_e_150, 0.000000000000002, 0.0) && math_sqrt(infinity) == infinity && math_test_close_f64(
+        math_exp(one),
+        2.718281828459045,
+        0.000000001,
+        0.000000000001
+    ) && math_test_close_f64(math_exp(negative_one), 0.36787944117144233, 0.000000001, 0.000000000001) && math_test_close_f64(
+        math_ln(two),
+        0.6931471805599453,
+        0.000000001,
+        0.000000000001
+    ) && math_test_close_f64(math_log10(thousand), 3.0, 0.000000001, 0.000000000001) && math_ln(one) == 0.0 && math_exp(zero) == 1.0 && math_test_close_f64(
+        math_ln(one_e_minus_300),
+        -690.7755278982137,
+        0.000000001,
+        0.000000001
+    ) && math_test_close_f64(math_exp(seven_hundred), exp_700_expected, 0.000000001, 0.0);
+}
+
+test `f64 logarithm retains adjacent values near one`(): bool {
+    let half_ulp_below: f64 = 0.00000000000000011102230246251565;
+    let epsilon_above: f64 = 0.0000000000000002220446049250313;
+    let below_one: f64 = 1.0 - half_ulp_below;
+    let above_one: f64 = 1.0 + epsilon_above;
+    return math_test_close_f64(math_ln(below_one), 0.0 - half_ulp_below, 0.000000001, 0.000000000000000000000000000001) && math_test_close_f64(
+        math_ln(above_one),
+        epsilon_above,
+        0.000000001,
+        0.000000000000000000000000000001
+    );
+}
+
+test `f64 logarithm accepts a positive subnormal`(): bool {
+    let smallest_subnormal: f64 = 1.0;
+    let index: i32 = 0;
+    for (index = 0; index < 1074; index = index + 1) {
+        smallest_subnormal = smallest_subnormal / 2.0;
+    }
+    return smallest_subnormal > 0.0 && math_test_close_f64(math_ln(smallest_subnormal), -744.4400719213812, 0.000000000001, 0.000000000001);
+}
+
+test `f64 logarithms preserve zero and negative domain results`(): bool {
+    let infinity: f64 = 1.0 / 0.0;
+    let zero: f64 = 0.0;
+    let negative_one: f64 = 0.0 - 1.0;
+    let nan: f64 = 0.0 / 0.0;
+    return math_ln(zero) ==(0.0 - infinity) && math_ln(negative_one) != math_ln(negative_one) && math_log10(zero) ==(0.0 - infinity) && math_ln(nan) != math_ln(
+        nan
+    );
+}
+
+test `f64 exponential handles overflow underflow infinity and NaN`(): bool {
+    let nan: f64 = 0.0 / 0.0;
+    let infinity: f64 = 1.0 / 0.0;
+    let negative_infinity: f64 = 0.0 - infinity;
+    let overflow_input: f64 = 709.782712893384;
+    let underflow_input: f64 = -745.0;
+    let negative_seven_hundred: f64 = -700.0;
+    let below_overflow: f64 = math_exp(overflow_input);
+    let one: f64 = 1.0;
+    let exp_700_expected: f64 = 1.0142320547350045;
+    let expected_overflow_boundary: f64 = 1.7976931348622732;
+    let ten_to_308: f64 = 1.0;
+    let index: i32 = 0;
+    for (index = 0; index < 304; index = index + 1) {
+        exp_700_expected = exp_700_expected * 10.0;
+    }
+    for (index = 0; index < 308; index = index + 1) {
+        ten_to_308 = ten_to_308 * 10.0;
+    }
+    expected_overflow_boundary = expected_overflow_boundary * ten_to_308;
+    return math_exp(infinity) == infinity && math_exp(negative_infinity) == 0.0 && math_exp(nan) != math_exp(nan) && math_exp(710.0) == infinity && math_exp(
+        -750.0
+    ) == 0.0 && math_exp(underflow_input) > 0.0 && below_overflow != infinity && math_test_close_f64(
+        math_exp(negative_seven_hundred),
+        one / exp_700_expected,
+        0.000000001,
+        0.0
+    ) && math_test_close_f64(below_overflow, expected_overflow_boundary, 0.000000001, 0.0);
+}
+
+test `f64 integer and real powers define zero and negative-base behavior`(): bool {
+    let infinity: f64 = 1.0 / 0.0;
+    let zero: f64 = 0.0;
+    let negative_one: f64 = 0.0 - 1.0;
+    let negative_two: f64 = 0.0 - 2.0;
+    let three: f64 = 3.0;
+    return math_pow(zero, 0) == 1.0 && math_pow(zero, -1) == infinity && math_pow(negative_two, 3) ==(0.0 - 8.0) && math_pow(negative_two, three) ==(
+        0.0 - 8.0
+    ) && math_pow(negative_two, 0.5) != math_pow(negative_two, 0.5) && math_pow(negative_one, 0 - 2147483647 - 1) == 1.0;
+}
+
+test `f64 integer powers preserve signed zero for odd and even exponents`(): bool {
+    let negative_zero: f64 = 0.0 /(0.0 - 1.0);
+    let infinity: f64 = 1.0 / 0.0;
+    return 1.0 / math_pow(negative_zero, 3) < 0.0 && 1.0 / math_pow(negative_zero, 2) > 0.0 && math_pow(negative_zero, -3) ==(0.0 - infinity) && math_pow(
+        negative_zero,
+        -2
+    ) == infinity;
+}
+
+test `f64 integer powers keep representable subnormal reciprocals`(): bool {
+    let two: f64 = 2.0;
+    let power_of_two: f64 = 1.0;
+    let index: i32 = 0;
+    for (index = 0; index < 1024; index = index + 1) {
+        power_of_two = power_of_two / 2.0;
+    }
+    return power_of_two > 0.0 && math_test_close_f64(math_pow(two, -1024), power_of_two, 0.000000001, 0.0) && math_pow(-1.0, 0 - 2147483647 - 1) == 1.0;
+}
+
+test `f64 integer powers preserve subnormal classification within mixed tolerance`(): bool {
+    let ten: f64 = 10.0;
+    let expected: f64 = 1.0;
+    let minimum_subnormal: f64 = 1.0;
+    let relative_allowance: f64 = 0.0;
+    let index: i32 = 0;
+    for (index = 0; index < 309; index = index + 1) {
+        expected = expected / ten;
+    }
+    for (index = 0; index < 1074; index = index + 1) {
+        minimum_subnormal = minimum_subnormal / 2.0;
+    }
+    relative_allowance = math_abs(expected) * 0.000000001;
+    if (relative_allowance < minimum_subnormal) {
+        relative_allowance = minimum_subnormal;
+    }
+    let actual: f64 = math_pow(ten, -309);
+    return actual > 0.0 && math_test_close_f64(actual, expected, 0.0, relative_allowance);
+}
+
+test `f32 integer powers preserve subnormal classification within mixed tolerance`(): bool {
+    let ten: f32 = 10.0;
+    let expected: f32 = 1.0;
+    let minimum_subnormal: f32 = 1.0;
+    let relative_allowance: f32 = 0.0;
+    let index: i32 = 0;
+    for (index = 0; index < 40; index = index + 1) {
+        expected = expected / ten;
+    }
+    for (index = 0; index < 149; index = index + 1) {
+        minimum_subnormal = minimum_subnormal / 2.0;
+    }
+    relative_allowance = math_abs(expected) * 0.000003;
+    if (relative_allowance < minimum_subnormal) {
+        relative_allowance = minimum_subnormal;
+    }
+    let actual: f32 = math_pow(ten, -40);
+    return actual > 0.0 && math_abs(actual - expected) <= relative_allowance;
+}
+
+test `f64 general powers meet the stated finite exponent accuracy bound`(): bool {
+    let slightly_above_one: f64 = 1.0000001;
+    let slightly_below_one: f64 = 0.9999999;
+    let one_million: f64 = 1000000.0;
+    return math_test_close_f64(math_pow(slightly_above_one, one_million), 1.1051709126143208, 0.000000001, 0.0) && math_test_close_f64(
+        math_pow(slightly_below_one, one_million),
+        0.904837413511,
+        0.000000001,
+        0.0
+    );
+}
+
+test `f64 square root preserves NaN and returns positive zero for negatives`(): bool {
+    let infinity: f64 = 1.0 / 0.0;
+    let nan: f64 = 0.0 / 0.0;
+    let negative_one: f64 = 0.0 - 1.0;
+    let negative_zero: f64 = 0.0 /(0.0 - 1.0);
+    return math_sqrt(infinity) == infinity && math_sqrt(nan) != math_sqrt(nan) && math_sqrt(negative_one) == 0.0 && 1.0 / math_sqrt(negative_zero) > 0.0;
+}
+
+test `f32 exponential preserves subnormal classification at its range edge`(): bool {
+    let negative_one_hundred: f32 = 0.0 - 100.0;
+    let negative_one_hundred_ten: f32 = 0.0 - 110.0;
+    let positive_eighty_nine: f32 = 89.0;
+    let infinity: f32 = 1.0 / 0.0;
+    return math_exp(negative_one_hundred) > 0.0 && math_exp(negative_one_hundred_ten) == 0.0 && math_exp(positive_eighty_nine) == infinity;
+}
+
+test `f32 power and square root preserve exceptional classifications`(): bool {
+    let negative_two: f32 = 0.0 - 2.0;
+    let three: i32 = 3;
+    let half: f32 = 0.5;
+    let infinity: f32 = 1.0 / 0.0;
+    let nan: f32 = 0.0 / 0.0;
+    return math_pow(negative_two, three) ==(0.0 - 8.0) && math_pow(negative_two, half) != math_pow(negative_two, half) && math_sqrt(infinity) == infinity && math_sqrt(
+        nan
+    ) != math_sqrt(nan);
+}
+
+test `f32 and f64 min max and clamp propagate NaN`(): bool {
+    let nan32: f32 = 0.0 / 0.0;
+    let nan64: f64 = 0.0 / 0.0;
+    let zero32: f32 = 0.0;
+    let zero64: f64 = 0.0;
+    let one32: f32 = 1.0;
+    let one64: f64 = 1.0;
+    return math_min(nan32, one32) != math_min(nan32, one32) && math_max(one32, nan32) != math_max(one32, nan32) && math_clamp(nan32, zero32, one32) != math_clamp(
+        nan32,
+        zero32,
+        one32
+    ) && math_min(nan64, one64) != math_min(nan64, one64) && math_max(one64, nan64) != math_max(one64, nan64) && math_clamp(nan64, zero64, one64) != math_clamp(
+        nan64,
+        zero64,
+        one64
+    );
+}
+
+test `f32 and f64 power floor ceil round min max and clamp are available`(): bool {
+    let base32: f32 = 2.0;
+    let base64: f64 = 2.0;
+    let one32: f32 = 1.0;
+    let two32: f32 = 2.0;
+    let thousand32: f32 = 1000.0;
+    let one64: f64 = 1.0;
+    let two64: f64 = 2.0;
+    let thousand64: f64 = 1000.0;
+    let half64: f64 = 0.5;
+    let nan64: f64 = 0.0 / 0.0;
+    let infinity64: f64 = 1.0 / 0.0;
+    let beyond_i32: f64 = 2147483648.75;
+    let two_to_52: f64 = 4503599627370496.0;
+    let negative_one32: f32 = 0.0 - 1.0;
+    let negative_one_and_a_half32: f32 = 0.0 - 1.5;
+    let negative_one_and_a_quarter32: f32 = 0.0 - 1.25;
+    let two_and_a_half32: f32 = 2.5;
+    let three32: f32 = 3.0;
+    let four32: f32 = 4.0;
+    let five32: f32 = 5.0;
+    let nine32: f32 = 9.0;
+    let negative_one64: f64 = 0.0 - 1.0;
+    let negative_one_and_a_half64: f64 = 0.0 - 1.5;
+    let negative_one_and_a_quarter64: f64 = 0.0 - 1.25;
+    let two_and_a_half64: f64 = 2.5;
+    let three64: f64 = 3.0;
+    let four64: f64 = 4.0;
+    let five64: f64 = 5.0;
+    let nine64: f64 = 9.0;
+    let precision_boundary64: f64 = 4503599627370496.0;
+    let almost_half64: f64 = 0.49999999999999994;
+    let large_integer64: f64 = 2251799813685249.0;
+    let large_integer32: f32 = 16777218.0;
+    let negative_quarter32: f32 = 0.0 - 0.25;
+    let negative_quarter64: f64 = 0.0 - 0.25;
+    let positive_zero64: f64 = 0.0;
+    let negative_zero64: f64 = 0.0 /(0.0 - 1.0);
+    let positive_zero32: f32 = 0.0;
+    let negative_zero32: f32 = 0.0 /(0.0 - 1.0);
+    let expected_two_to_100: f64 = 1267650600228229401496703205376.0;
+    return math_pow(base32, 10) == 1024.0 && math_pow(base32, -3) == 0.125 && math_test_relative_near(math_pow(base32, 0.5), 1.4142135, 0.000003) && math_test_relative_near(
+        math_exp(one32),
+        2.7182817,
+        0.000003
+    ) && math_test_relative_near(math_ln(two32), 0.6931472, 0.000003) && math_test_relative_near(math_log10(thousand32), 3.0, 0.000003) && math_test_close_f64(
+        math_pow(base64, 100),
+        expected_two_to_100,
+        0.000000001,
+        0.0
+    ) && math_test_close_f64(math_pow(base64, half64), 1.4142135623730951, 0.000000001, 0.000000000001) && math_test_close_f64(
+        math_exp(one64),
+        2.718281828459045,
+        0.000000001,
+        0.000000000001
+    ) && math_test_close_f64(math_ln(two64), 0.6931471805599453, 0.000000001, 0.000000000001) && math_test_close_f64(
+        math_log10(thousand64),
+        3.0,
+        0.000000001,
+        0.000000000001
+    ) && math_floor(negative_one_and_a_quarter32) == -2.0 && math_ceil(negative_one_and_a_quarter32) == -1.0 && 1.0 / math_ceil(negative_one_and_a_quarter32) < 0.0 && math_round(
+        negative_one_and_a_half32
+    ) == -1.0 && math_round(two_and_a_half32) == 3.0 && math_floor(negative_one_and_a_quarter64) == -2.0 && math_ceil(negative_one_and_a_quarter64) == -1.0 && 1.0 / math_ceil(
+        negative_one_and_a_quarter64
+    ) < 0.0 && math_round(negative_one_and_a_half64) == -1.0 && math_round(two_and_a_half64) == 3.0 && math_round(almost_half64) == 0.0 && math_round(
+        large_integer64
+    ) == large_integer64 && math_round(large_integer32) == large_integer32 && 1.0 / math_round(negative_quarter32) < 0.0 && 1.0 / math_round(
+        negative_quarter64
+    ) < 0.0 && math_floor(beyond_i32) == 2147483648.0 && math_ceil(0.0 - beyond_i32) == -2147483648.0 && math_floor(two_to_52) == two_to_52 && math_floor(
+        nan64
+    ) != math_floor(nan64) && math_ceil(infinity64) == infinity64 && math_round(infinity64) == infinity64 && math_min(three32, four32) == three32 && math_max(
+        three32,
+        four32
+    ) == four32 && math_clamp(nine32, one32, five32) == five32 && 1.0 / math_min(positive_zero32, negative_zero32) < 0.0 && 1.0 / math_max(
+        positive_zero32,
+        negative_zero32
+    ) > 0.0 && math_min(three64, four64) == three64 && math_max(three64, four64) == four64 && math_clamp(nine64, one64, five64) == five64 && math_clamp(
+        three64,
+        five64,
+        one64
+    ) == three64 && 1.0 / math_min(positive_zero64, negative_zero64) < 0.0 && 1.0 / math_max(positive_zero64, negative_zero64) > 0.0 && math_floor(
+        precision_boundary64
+    ) == precision_boundary64;
+}
