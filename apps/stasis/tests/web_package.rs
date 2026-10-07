@@ -719,7 +719,39 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     assert!(index.contains(r#"<h1 id="stasis-loading-title">web_export_smoke</h1>"#));
     assert!(index.contains(r#"id="stasis-loading-status">Preparing…</div>"#));
     assert_eq!(index.matches("viewport-fit=cover").count(), 1);
-    assert_eq!(index.matches("safe-area-inset-").count(), 8);
+    let (page_and_loading_styles, ad_controls_styles) = index
+        .split_once("#stasis-ad-controls {")
+        .expect("ad controls safe-area CSS");
+    let ad_controls_rule = ad_controls_styles
+        .split_once('}')
+        .map(|(rule, _)| rule)
+        .expect("ad controls rule terminator");
+    let ad_status_rule = index
+        .split_once("#stasis-ad-status {")
+        .and_then(|(_, styles)| styles.split_once('}').map(|(rule, _)| rule))
+        .expect("ad status rule terminator");
+    assert_eq!(
+        page_and_loading_styles.matches("safe-area-inset-").count(),
+        8
+    );
+    assert_eq!(ad_controls_rule.matches("safe-area-inset-").count(), 4);
+    assert_eq!(ad_status_rule.matches("safe-area-inset-").count(), 3);
+    assert_eq!(index.matches("safe-area-inset-").count(), 15);
+    for inset in [
+        "safe-area-inset-top",
+        "safe-area-inset-right",
+        "safe-area-inset-bottom",
+        "safe-area-inset-left",
+    ] {
+        assert_eq!(ad_controls_rule.matches(inset).count(), 1, "{inset}");
+    }
+    for inset in [
+        "safe-area-inset-right",
+        "safe-area-inset-bottom",
+        "safe-area-inset-left",
+    ] {
+        assert_eq!(ad_status_rule.matches(inset).count(), 1, "{inset}");
+    }
     assert_eq!(index.matches("100svh").count(), 1);
     assert_eq!(index.matches("100dvh").count(), 1);
     assert_eq!(index.matches("<script>\n    (() => {").count(), 1);
