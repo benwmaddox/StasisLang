@@ -99,6 +99,11 @@ int32_t stasis_mobile_runtime_step(void);
 /* Paused runtimes remain initialized but do not tick or render. */
 void stasis_mobile_runtime_set_paused(int32_t paused);
 int32_t stasis_mobile_runtime_is_initialized(void);
+#if defined(STASIS_DESKTOP_NATIVE_ADAPTER)
+/* Borrowed platform window owner. Valid only while initialized, on this thread. */
+uintptr_t stasis_mobile_runtime_native_window(uint32_t *kind);
+int32_t stasis_mobile_runtime_window_is_foreground(void);
+#endif
 /* Exact non-zero main/tick/render result; read before shutdown resets state. */
 int32_t stasis_mobile_runtime_last_entry_result(void);
 /* Entry associated with last_entry_result; read before shutdown resets state. */

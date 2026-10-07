@@ -26,6 +26,8 @@ SWAP_CONTRACTS = Path("crates/stasis_runner/src/swap/contracts.rs")
 DEVELOPMENT_SWAP = Path("crates/stasis_compiler/src/backend/development_swap.rs")
 DYNLOAD = Path("crates/stasis_dynload/src/lib.rs")
 MOBILE = Path("runtime/stasis_mobile_runtime.h")
+DESKTOP_ADAPTER = Path("runtime/stasis_desktop_adapter.h")
+DESKTOP_SHELL = Path("mobile/shells/common/stasis_mobile_main.c")
 WEB = Path("runtime/web/game.js")
 WASM = Path("crates/stasis_compiler/src/backend/wasm.rs")
 TOOLCHAIN = Path("apps/stasis/src/toolchain_cli.rs")
@@ -34,6 +36,7 @@ EXPECTED_TOP_LEVEL = {
     "schema", "version", "host_frame", "render_command", "renderer_lifecycle",
     "guest_entrypoints", "diagnostics", "compile_transaction", "development_swap",
     "asset_package", "wasm_collection_view",
+    "desktop_native_adapter",
 }
 
 
@@ -134,6 +137,87 @@ def check(
         java_name = name.removeprefix("STASIS_RENDERER_")
         if not re.search(rf"\b{re.escape(java_name)}\b", java_text):
             failures.append(Failure(f"renderer_lifecycle.java.{java_name}", JAVA_LIFECYCLE.as_posix(), "present", "missing"))
+
+    adapter = registry["desktop_native_adapter"]
+    adapter_text = _read(DESKTOP_ADAPTER, overlays)
+    adapter_version = re.search(
+        r"#define STASIS_DESKTOP_ADAPTER_ABI_VERSION (\d+)U", adapter_text
+    )
+    actual_adapter_version = int(adapter_version.group(1)) if adapter_version else "missing"
+    if adapter["version"] != actual_adapter_version:
+        failures.append(Failure("desktop_native_adapter.version", DESKTOP_ADAPTER.as_posix(), actual_adapter_version, adapter["version"]))
+    layout_constants = {
+        "native_window_offset": "STASIS_DESKTOP_ADAPTER_CONTEXT_NATIVE_WINDOW_OFFSET",
+        "size_32": "STASIS_DESKTOP_ADAPTER_CONTEXT_SIZE_32",
+        "size_64": "STASIS_DESKTOP_ADAPTER_CONTEXT_SIZE_64",
+    }
+    for field, constant in layout_constants.items():
+        match = re.search(rf"#define {constant} (\d+)U", adapter_text)
+        actual = int(match.group(1)) if match else "missing"
+        if adapter["context_layout"][field] != actual:
+            failures.append(Failure(f"desktop_native_adapter.context_layout.{field}", DESKTOP_ADAPTER.as_posix(), actual, adapter["context_layout"][field]))
+    pump_results = {
+        name: int(value)
+        for name, value in re.findall(
+            r"#define (STASIS_DESKTOP_ADAPTER_PUMP_[A-Z_]+) (-?\d+)",
+            adapter_text,
+        )
+    }
+    failures += _compare_map(
+        "desktop_native_adapter.pump_results",
+        adapter["pump_results"],
+        pump_results,
+        DESKTOP_ADAPTER,
+    )
+    for width, oracle in (
+        ("32", "StasisDesktopAdapterContextLayout32Oracle"),
+        ("64", "StasisDesktopAdapterContextLayout64Oracle"),
+    ):
+        for operation in ("offsetof", "sizeof"):
+            if not re.search(
+                rf"{operation}\s*\(\s*{oracle}(?:\s*,\s*native_window)?\s*\)",
+                adapter_text,
+            ):
+                failures.append(
+                    Failure(
+                        f"desktop_native_adapter.context_layout.oracle_{width}_{operation}",
+                        DESKTOP_ADAPTER.as_posix(),
+                        f"{operation}({oracle})",
+                        "missing",
+                    )
+                )
+    adapter_struct = re.search(
+        r"typedef struct StasisDesktopAdapterContext \{(?P<body>.*?)\} StasisDesktopAdapterContext;",
+        adapter_text,
+        re.S,
+    )
+    adapter_fields = (
+        re.findall(r"\b([a-z][a-z0-9_]*)\s*;", adapter_struct.group("body"))
+        if adapter_struct
+        else []
+    )
+    if adapter["context_fields"] != adapter_fields:
+        failures.append(Failure("desktop_native_adapter.context_fields", DESKTOP_ADAPTER.as_posix(), adapter_fields, adapter["context_fields"]))
+    for field, prefix in (
+        ("platforms", "STASIS_DESKTOP_ADAPTER_PLATFORM_"),
+        ("window_kinds", "STASIS_DESKTOP_ADAPTER_WINDOW_"),
+        ("window_ownership", "STASIS_DESKTOP_ADAPTER_WINDOW_BORROWED_"),
+    ):
+        failures += _compare_map(
+            f"desktop_native_adapter.{field}",
+            adapter[field],
+            _enum_constants(adapter_text, prefix),
+            DESKTOP_ADAPTER,
+        )
+    shell_text = _read(DESKTOP_SHELL, overlays)
+    for hook in (
+        "stasis_desktop_adapter_initialize",
+        "stasis_desktop_adapter_pump",
+        "stasis_desktop_adapter_on_foreground",
+        "stasis_desktop_adapter_shutdown",
+    ):
+        if hook not in shell_text:
+            failures.append(Failure(f"desktop_native_adapter.hook.{hook}", DESKTOP_SHELL.as_posix(), hook, "missing"))
 
     compiler_text = _read(COMPILER, overlays)
     source_codes = sorted(set(re.findall(r'"(stasis\.[A-Za-z]+)"', compiler_text)))
@@ -323,7 +407,7 @@ def check(
     abi_failures, abi_evidence = abi.check(overlays={path: text for path, text in overlays.items() if path in abi.REQUIRED})
     for failure in abi_failures:
         failures.append(Failure(f"existing_abi.{failure.field}", failure.consumer, failure.expected, failure.actual))
-    checks = len(host["constants"]) + len(render["constants"]) + len(lifecycle["states"]) + len(lifecycle["reasons"]) + len(source_codes) + len(asset_codes) + len(actual_receipt_fields) + len(actual_status_tags) + 7 + int(abi_evidence.get("checks", 0))
+    checks = len(host["constants"]) + len(render["constants"]) + len(lifecycle["states"]) + len(lifecycle["reasons"]) + len(adapter["platforms"]) + len(adapter["window_kinds"]) + len(adapter["window_ownership"]) + len(adapter["pump_results"]) + len(source_codes) + len(asset_codes) + len(actual_receipt_fields) + len(actual_status_tags) + 17 + int(abi_evidence.get("checks", 0))
     return failures, {"schema": "stasis.host_contract.evidence.v1", "checks": checks, "status": "failed" if failures else "passed"}
 
 

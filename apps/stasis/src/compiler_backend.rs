@@ -561,6 +561,118 @@ pub struct ProjectCompilationConfiguration {
     pub generated_path: String,
     pub generated_source: String,
     pub sprite_atlas_page_size: u32,
+    pub desktop_native_adapter: Option<DesktopNativeAdapterConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopNativeAdapterConfig {
+    pub abi_version: u32,
+    pub source: PathBuf,
+    #[serde(default, skip_serializing_if = "DesktopSystemLinks::is_empty")]
+    pub system_links: DesktopSystemLinks,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopSystemLinks {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<WindowsSystemLibrary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linux: Vec<LinuxSystemLibrary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub macos: Vec<MacosSystemFramework>,
+}
+
+impl DesktopSystemLinks {
+    pub fn is_empty(&self) -> bool {
+        self.windows.is_empty() && self.linux.is_empty() && self.macos.is_empty()
+    }
+
+    fn current_cmake_links(&self) -> Vec<&'static str> {
+        if cfg!(windows) {
+            self.windows
+                .iter()
+                .map(|library| library.cmake_name())
+                .collect()
+        } else if cfg!(target_os = "macos") {
+            self.macos
+                .iter()
+                .map(|framework| framework.cmake_name())
+                .collect()
+        } else {
+            self.linux
+                .iter()
+                .map(|library| library.cmake_name())
+                .collect()
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsSystemLibrary {
+    Advapi32,
+    Ole32,
+    RuntimeObject,
+    Shell32,
+    User32,
+    WindowsApp,
+}
+
+impl WindowsSystemLibrary {
+    fn cmake_name(self) -> &'static str {
+        match self {
+            Self::Advapi32 => "advapi32",
+            Self::Ole32 => "ole32",
+            Self::RuntimeObject => "runtimeobject",
+            Self::Shell32 => "shell32",
+            Self::User32 => "user32",
+            Self::WindowsApp => "windowsapp",
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LinuxSystemLibrary {
+    Dl,
+    M,
+    Pthread,
+}
+
+impl LinuxSystemLibrary {
+    fn cmake_name(self) -> &'static str {
+        match self {
+            Self::Dl => "${CMAKE_DL_LIBS}",
+            Self::M => "m",
+            Self::Pthread => "Threads::Threads",
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MacosSystemFramework {
+    AppKit,
+    Foundation,
+    StoreKit,
+}
+
+impl MacosSystemFramework {
+    fn cmake_name(self) -> &'static str {
+        match self {
+            Self::AppKit => "-framework AppKit",
+            Self::Foundation => "-framework Foundation",
+            Self::StoreKit => "-framework StoreKit",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5080,6 +5192,7 @@ fn monolith_configure_arguments(
     output_dir: &Path,
     output_name: &str,
     desktop_network: Option<&DesktopNetworkLink>,
+    desktop_native_adapter: Option<&DesktopNativeAdapterConfig>,
 ) -> Vec<String> {
     let mut arguments = vec![
         "-S".to_string(),
@@ -5095,7 +5208,7 @@ fn monolith_configure_arguments(
     ];
     if cfg!(windows) {
         let prebuilt = runtime_root.join("prebuilt/windows-x64");
-        if prebuilt.is_dir() {
+        if prebuilt.is_dir() && desktop_native_adapter.is_none() {
             if desktop_network.is_some() {
                 eprintln!(
                     "Stasis desktop package: reusing prebuilt Windows graphics dependencies at {} for the network runtime source build",
@@ -5126,6 +5239,19 @@ fn monolith_configure_arguments(
             "-DSTASIS_MONOLITH_NETWORK_MODE={}",
             network.mode.cmake_value()
         ));
+    }
+    if let Some(adapter) = desktop_native_adapter {
+        arguments.push(format!(
+            "-DSTASIS_MONOLITH_ADAPTER_SOURCE={}",
+            cmake_path(&adapter.source)
+        ));
+        let links = adapter.system_links.current_cmake_links();
+        if !links.is_empty() {
+            arguments.push(format!(
+                "-DSTASIS_MONOLITH_ADAPTER_SYSTEM_LINKS={}",
+                links.join(";")
+            ));
+        }
     }
     arguments
 }
@@ -5161,12 +5287,72 @@ fn read_project_sprite_atlas_page_size(project_dir: &Path) -> Result<u32, String
     Ok(page_size)
 }
 
+fn freeze_desktop_native_adapter_source(
+    project_dir: &Path,
+    aot_root: &Path,
+    adapter: &DesktopNativeAdapterConfig,
+) -> Result<DesktopNativeAdapterConfig, String> {
+    if adapter.abi_version != 1
+        || adapter.source.is_absolute()
+        || adapter.source.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+        || adapter.source.extension().and_then(|value| value.to_str()) != Some("c")
+    {
+        return Err("invalid desktop native adapter configuration".to_string());
+    }
+    let source = project_dir.join(&adapter.source);
+    let bytes = std::fs::read(&source).map_err(|error| {
+        format!(
+            "failed to freeze desktop native adapter source {}: {error}",
+            source.display()
+        )
+    })?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(format!(
+            "desktop native adapter source exceeds 1048576 bytes: {}",
+            source.display()
+        ));
+    }
+    let input_root = aot_root.join("desktop_adapter_input");
+    if input_root.exists() {
+        std::fs::remove_dir_all(&input_root).map_err(|error| {
+            format!(
+                "failed to clear frozen desktop adapter input {}: {error}",
+                input_root.display()
+            )
+        })?;
+    }
+    std::fs::create_dir_all(&input_root).map_err(|error| {
+        format!(
+            "failed to create frozen desktop adapter input {}: {error}",
+            input_root.display()
+        )
+    })?;
+    let frozen_source = input_root.join("project_adapter.c");
+    std::fs::write(&frozen_source, bytes).map_err(|error| {
+        format!(
+            "failed to write frozen desktop adapter input {}: {error}",
+            frozen_source.display()
+        )
+    })?;
+    let mut resolved = adapter.clone();
+    resolved.source = frozen_source;
+    Ok(resolved)
+}
+
 fn package_engine_bundle_monolithic_desktop(
     backend: &IncrementalCompilerBackend,
     bundle: &AotEngineBundle,
     output_exe: &Path,
     project_dir: &Path,
     desktop_network: Option<&DesktopNetworkLink>,
+    desktop_native_adapter: Option<&DesktopNativeAdapterConfig>,
     apply_release_asset_transforms: bool,
 ) -> Result<SelfHostedAotCliSummary, String> {
     let repo_root = self_host_repo_root()?;
@@ -5341,6 +5527,10 @@ fn package_engine_bundle_monolithic_desktop(
     std::fs::write(&shell_source_path, shell_source)
         .map_err(|error| format!("failed to write {}: {error}", shell_source_path.display()))?;
 
+    let resolved_adapter = desktop_native_adapter
+        .map(|adapter| freeze_desktop_native_adapter_source(project_dir, &aot_root, adapter))
+        .transpose()?;
+
     let output_dir = output_exe.parent().unwrap_or_else(|| Path::new("."));
     let output_name = output_exe
         .file_stem()
@@ -5356,6 +5546,7 @@ fn package_engine_bundle_monolithic_desktop(
         output_dir,
         output_name,
         desktop_network,
+        resolved_adapter.as_ref(),
     ));
     let configure = cmake.run(&configure_arguments)?;
     if !configure.status.success() {
@@ -5584,6 +5775,7 @@ fn package_engine_bundle_release(
     project_dir: &Path,
     entry_file_override: Option<&Path>,
     desktop_network: Option<&DesktopNetworkLink>,
+    desktop_native_adapter: Option<&DesktopNativeAdapterConfig>,
     apply_release_asset_transforms: bool,
 ) -> Result<SelfHostedAotCliSummary, String> {
     let manifest = backend.read_engine_bundle_manifest(&bundle.manifest_path)?;
@@ -5613,8 +5805,11 @@ fn package_engine_bundle_release(
         )
     })?;
 
-    let monolithic_desktop =
-        uses_monolithic_desktop_package(&backend.aot_compile_config.target, desktop_network);
+    let monolithic_desktop = uses_monolithic_desktop_package(
+        &backend.aot_compile_config.target,
+        desktop_network,
+        desktop_native_adapter,
+    );
     let support_root = if monolithic_desktop {
         output_exe.parent().unwrap_or_else(|| Path::new("."))
     } else {
@@ -5641,6 +5836,7 @@ fn package_engine_bundle_release(
             packaged_output_exe,
             project_dir,
             desktop_network,
+            desktop_native_adapter,
             apply_release_asset_transforms,
         );
     }
@@ -5901,9 +6097,11 @@ fn package_engine_bundle_release(
 fn uses_monolithic_desktop_package(
     target: &stasis_jit::AotTarget,
     desktop_network: Option<&DesktopNetworkLink>,
+    desktop_native_adapter: Option<&DesktopNativeAdapterConfig>,
 ) -> bool {
     // The reusable Windows runner does not yet consume packaged --replay.
-    matches!(target, stasis_jit::AotTarget::Native) && (cfg!(windows) || desktop_network.is_some())
+    matches!(target, stasis_jit::AotTarget::Native)
+        && (cfg!(windows) || desktop_network.is_some() || desktop_native_adapter.is_some())
 }
 
 #[cfg(test)]
@@ -5952,20 +6150,38 @@ mod tests {
         };
 
         assert_eq!(
-            uses_monolithic_desktop_package(&stasis_jit::AotTarget::Native, None),
+            uses_monolithic_desktop_package(&stasis_jit::AotTarget::Native, None, None),
             cfg!(windows),
         );
         assert!(uses_monolithic_desktop_package(
             &stasis_jit::AotTarget::Native,
             Some(&host),
+            None,
         ));
         assert!(uses_monolithic_desktop_package(
             &stasis_jit::AotTarget::Native,
             Some(&client),
+            None,
         ));
         assert!(!uses_monolithic_desktop_package(
             &stasis_jit::AotTarget::AndroidArm64 { min_sdk: 26 },
             Some(&host),
+            None,
+        ));
+        let adapter = DesktopNativeAdapterConfig {
+            abi_version: 1,
+            source: PathBuf::from("native/adapter.c"),
+            system_links: DesktopSystemLinks::default(),
+        };
+        assert!(uses_monolithic_desktop_package(
+            &stasis_jit::AotTarget::Native,
+            None,
+            Some(&adapter),
+        ));
+        assert!(!uses_monolithic_desktop_package(
+            &stasis_jit::AotTarget::AndroidArm64 { min_sdk: 26 },
+            None,
+            Some(&adapter),
         ));
     }
 
@@ -5991,6 +6207,7 @@ mod tests {
             &root.join("output"),
             "game",
             None,
+            None,
         );
         assert!(arguments
             .iter()
@@ -6008,6 +6225,7 @@ mod tests {
             &root.join("output"),
             "network-game",
             Some(&network),
+            None,
         );
         assert!(network_arguments
             .iter()
@@ -6028,6 +6246,7 @@ mod tests {
             &root.join("output"),
             "client-game",
             Some(&client),
+            None,
         );
         assert!(client_arguments
             .iter()
@@ -6035,6 +6254,24 @@ mod tests {
         assert!(client_arguments
             .iter()
             .any(|argument| argument == "-DSTASIS_MONOLITH_NETWORK_MODE=client"));
+        let adapter = DesktopNativeAdapterConfig {
+            abi_version: 1,
+            source: root.join("adapter.c"),
+            system_links: DesktopSystemLinks::default(),
+        };
+        let adapter_arguments = monolith_configure_arguments(
+            &runtime,
+            &root.join("adapter-build"),
+            &root.join("aot"),
+            &root.join("main.c"),
+            &root.join("output"),
+            "adapter-game",
+            None,
+            Some(&adapter),
+        );
+        assert!(!adapter_arguments
+            .iter()
+            .any(|argument| argument.starts_with("-DSTASIS_MONOLITH_PREBUILT_RUNTIME_DIR=")));
         std::fs::remove_dir_all(&root).expect("clean test directory");
     }
 
@@ -6398,6 +6635,7 @@ mod tests {
             Path::new("dist"),
             "game",
             None,
+            None,
         );
         assert!(!base.iter().any(|arg| arg.contains("NETWORK")));
         assert!(base.iter().any(|arg| arg == "-DCMAKE_BUILD_TYPE=Release"));
@@ -6415,6 +6653,7 @@ mod tests {
             Path::new("dist"),
             "game",
             Some(&network),
+            None,
         );
         assert!(configured
             .iter()
@@ -6439,10 +6678,97 @@ mod tests {
             Path::new("dist"),
             "game",
             Some(&client),
+            None,
         );
         assert!(configured
             .iter()
             .any(|arg| arg == "-DSTASIS_MONOLITH_NETWORK_MODE=client"));
+    }
+
+    #[test]
+    fn desktop_adapter_configuration_is_bounded_and_separate() {
+        let adapter = DesktopNativeAdapterConfig {
+            abi_version: 1,
+            source: PathBuf::from("captured/native/store_adapter.c"),
+            system_links: DesktopSystemLinks {
+                windows: vec![
+                    WindowsSystemLibrary::WindowsApp,
+                    WindowsSystemLibrary::RuntimeObject,
+                ],
+                linux: vec![LinuxSystemLibrary::Dl, LinuxSystemLibrary::Pthread],
+                macos: vec![
+                    MacosSystemFramework::Foundation,
+                    MacosSystemFramework::StoreKit,
+                ],
+            },
+        };
+        let configured = monolith_configure_arguments(
+            Path::new("runtime"),
+            Path::new("build"),
+            Path::new("aot"),
+            Path::new("main.c"),
+            Path::new("dist"),
+            "game",
+            None,
+            Some(&adapter),
+        );
+        assert!(configured.iter().any(|arg| {
+            arg == "-DSTASIS_MONOLITH_ADAPTER_SOURCE=captured/native/store_adapter.c"
+        }));
+        let expected = if cfg!(windows) {
+            "-DSTASIS_MONOLITH_ADAPTER_SYSTEM_LINKS=windowsapp;runtimeobject"
+        } else if cfg!(target_os = "macos") {
+            "-DSTASIS_MONOLITH_ADAPTER_SYSTEM_LINKS=-framework Foundation;-framework StoreKit"
+        } else {
+            "-DSTASIS_MONOLITH_ADAPTER_SYSTEM_LINKS=${CMAKE_DL_LIBS};Threads::Threads"
+        };
+        assert!(configured.iter().any(|arg| arg == expected));
+
+        let cmake = include_str!("../../../runtime/CMakeLists.txt");
+        assert!(cmake.contains("${_stasis_monolith_adapter_sources}"));
+        assert!(cmake.contains("STASIS_DESKTOP_NATIVE_ADAPTER=1"));
+        assert!(cmake.contains(
+            "target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_DESKTOP_NATIVE_ADAPTER=1)"
+        ));
+        assert!(cmake.contains(
+            "target_link_libraries(stasis_monolith PRIVATE ${STASIS_MONOLITH_ADAPTER_SYSTEM_LINKS})"
+        ));
+
+        let root = std::env::temp_dir().join(format!(
+            "stasis_adapter_freeze_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let project = root.join("project");
+        let aot = root.join("aot");
+        std::fs::create_dir_all(project.join("native")).expect("create adapter fixture");
+        let original = b"int adapter_revision(void) { return 1; }\n";
+        std::fs::write(project.join("native/store_adapter.c"), original)
+            .expect("write adapter fixture");
+        let frozen = freeze_desktop_native_adapter_source(
+            &project,
+            &aot,
+            &DesktopNativeAdapterConfig {
+                source: PathBuf::from("native/store_adapter.c"),
+                ..adapter
+            },
+        )
+        .expect("freeze exact adapter source");
+        std::fs::write(
+            project.join("native/store_adapter.c"),
+            b"int adapter_revision(void) { return 2; }\n",
+        )
+        .expect("mutate live adapter source");
+        assert_eq!(
+            std::fs::read(&frozen.source).expect("read frozen adapter source"),
+            original,
+            "the CMake input must retain the exact captured bytes"
+        );
+        assert!(frozen.source.starts_with(&aot));
+        std::fs::remove_dir_all(root).expect("clean adapter freeze fixture");
     }
 
     #[test]
@@ -6490,6 +6816,46 @@ mod tests {
         assert!(source.contains("SDL_SetMainReady();"));
         assert!(source.contains("network_join_shortcut_down"));
         assert!(source.contains("snprintf(path, sizeof(path), \"%s../../../\", base)"));
+    }
+
+    #[test]
+    fn desktop_adapter_lifecycle_stays_between_guest_boundaries() {
+        let source = include_str!("../../../mobile/shells/common/stasis_mobile_main.c")
+            .replace("\r\n", "\n");
+        let runtime_init = source
+            .find("stasis_mobile_runtime_initialize(&config, &game)")
+            .expect("runtime initialize");
+        let adapter_init = source
+            .find("stasis_desktop_adapter_initialize(&desktop_adapter_context)")
+            .expect("adapter initialize");
+        let adapter_pump = source
+            .find("stasis_desktop_adapter_pump(&desktop_adapter_context)")
+            .expect("adapter pump");
+        let runtime_step = source
+            .find("status = stasis_mobile_runtime_step();")
+            .expect("runtime step");
+        let foreground = source
+            .find("stasis_desktop_adapter_on_foreground(")
+            .expect("foreground callback");
+        let adapter_shutdown = source
+            .find("stasis_desktop_adapter_shutdown(&desktop_adapter_context)")
+            .expect("adapter shutdown");
+        let runtime_shutdown = source
+            .find("stasis_mobile_runtime_shutdown();")
+            .expect("runtime shutdown");
+        assert!(runtime_init < adapter_init);
+        assert!(adapter_init < adapter_pump);
+        assert!(adapter_pump < runtime_step);
+        assert!(runtime_step < foreground);
+        assert!(foreground < adapter_shutdown);
+        assert!(adapter_shutdown < runtime_shutdown);
+
+        let header = include_str!("../../../runtime/stasis_desktop_adapter.h");
+        assert!(header.contains("#define STASIS_DESKTOP_ADAPTER_ABI_VERSION 1U"));
+        assert!(header.contains("#define STASIS_DESKTOP_ADAPTER_PUMP_REQUEST_EXIT 1"));
+        assert!(header.contains("uint32_t struct_size;"));
+        assert!(header.contains("uintptr_t native_window;"));
+        assert!(header.contains("generated stasis_host_exports.h"));
     }
 
     #[test]
@@ -10450,6 +10816,10 @@ fn run_self_host_aot_cli_with_backend_and_options(
             project_dir,
             options.entry_file.as_deref(),
             options.desktop_network.as_ref(),
+            options
+                .project_configuration
+                .as_ref()
+                .and_then(|configuration| configuration.desktop_native_adapter.as_ref()),
             options.apply_release_asset_transforms,
         )?
     } else {

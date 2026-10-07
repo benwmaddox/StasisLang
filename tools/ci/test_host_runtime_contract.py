@@ -59,6 +59,26 @@ class HostRuntimeContractTests(unittest.TestCase):
             )
         )
 
+    def test_desktop_adapter_layout_oracle_drift_is_rejected(self):
+        source = (contract.ROOT / contract.DESKTOP_ADAPTER).read_text(encoding="utf-8")
+        overlays = {
+            contract.DESKTOP_ADAPTER: source.replace(
+                "sizeof(StasisDesktopAdapterContextLayout32Oracle)",
+                "sizeof(StasisDesktopAdapterContext)",
+                1,
+            )
+        }
+        failures, _ = contract.check(
+            registry=copy.deepcopy(self.registry), overlays=overlays
+        )
+        self.assertTrue(
+            any(
+                failure.field
+                == "desktop_native_adapter.context_layout.oracle_32_sizeof"
+                for failure in failures
+            )
+        )
+
     def test_collection_view_abi_version_drift_names_compiler_and_web_runtime(self):
         registry = copy.deepcopy(self.registry)
         registry["wasm_collection_view"]["version"] = 3

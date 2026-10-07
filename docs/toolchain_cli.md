@@ -440,6 +440,8 @@ and manually dispatched hosted workflows access the public `benwmaddox/StasisLan
   keep the game-named executable as the only root file and place support files under `app/`;
   network-enabled packages additionally keep `stasis_network.dll` beside the executable so the OS
   loader resolves it normally.
+  Manifest-v3 projects may add one bounded project-owned desktop C adapter; see
+  [Desktop native adapters](desktop_native_adapters.md).
 - `package-mobile --target android-arm64|ios-arm64|ios-simulator-arm64 [--entry PATH]`: atomically assemble the
   shared AOT output, SDL-only runtime, bundled assets, verified provenance, and thin Gradle or
   Xcode app shell. Network-enabled iOS packages require macOS/Xcode, stage and link the

@@ -121,6 +121,18 @@
     "snapshot_fields": ["surface_generation", "renderer_generation", "restore_attempts", "restore_failures", "state", "state_before_pause", "reason"],
     "platform_extensions": {"java_reasons": ["renderer_created"], "javascript_snapshot": "unsupported"}
   },
+  "desktop_native_adapter": {
+    "version": 1,
+    "source": "runtime/stasis_desktop_adapter.h",
+    "context_layout": {"native_window_offset": 24, "size_32": 28, "size_64": 32},
+    "pump_results": {"STASIS_DESKTOP_ADAPTER_PUMP_CONTINUE": 0, "STASIS_DESKTOP_ADAPTER_PUMP_REQUEST_EXIT": 1},
+    "context_fields": ["struct_size", "abi_version", "platform", "native_window_kind", "native_window_ownership", "reserved", "native_window"],
+    "platforms": {"STASIS_DESKTOP_ADAPTER_PLATFORM_WINDOWS": 1, "STASIS_DESKTOP_ADAPTER_PLATFORM_LINUX": 2, "STASIS_DESKTOP_ADAPTER_PLATFORM_MACOS": 3},
+    "window_kinds": {"STASIS_DESKTOP_ADAPTER_WINDOW_NONE": 0, "STASIS_DESKTOP_ADAPTER_WINDOW_WIN32_HWND": 1, "STASIS_DESKTOP_ADAPTER_WINDOW_COCOA": 2, "STASIS_DESKTOP_ADAPTER_WINDOW_X11": 3, "STASIS_DESKTOP_ADAPTER_WINDOW_WAYLAND": 4},
+    "window_ownership": {"STASIS_DESKTOP_ADAPTER_WINDOW_BORROWED_RUNTIME": 1},
+    "hook_order": ["initialize_after_guest_main", "pump_between_ticks", "on_foreground_before_next_tick", "shutdown_before_runtime_teardown"],
+    "guest_call_rule": "generated host exports may be invoked only from runtime-thread hooks"
+  },
   "wasm_collection_view": {
     "version": 2,
     "package_field": "collectionViewAbiVersion",

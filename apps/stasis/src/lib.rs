@@ -35,7 +35,10 @@ pub use compiler_backend::run_self_host_aot_cli_with_project_configuration;
 #[doc(hidden)]
 pub use compiler_backend::run_self_host_aot_cli_with_project_configuration_and_release_asset_transforms;
 pub use compiler_backend::sign_output_artifact_if_configured;
-pub use compiler_backend::{DesktopNetworkMode, ProjectCompilationConfiguration};
+pub use compiler_backend::{
+    DesktopNativeAdapterConfig, DesktopNetworkMode, DesktopSystemLinks, LinuxSystemLibrary,
+    MacosSystemFramework, ProjectCompilationConfiguration, WindowsSystemLibrary,
+};
 pub use events::RunnerEvent;
 pub use live_workspace::{
     run_project_tests_bounded, run_project_tests_bounded_with_receipt,

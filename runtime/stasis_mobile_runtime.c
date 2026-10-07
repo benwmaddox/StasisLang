@@ -27,6 +27,10 @@ uint64_t stasis_host_performance_counter(void);
 uint64_t stasis_host_performance_elapsed_us(uint64_t started, uint64_t finished);
 void stasis_host_set_performance_metrics(uint64_t tick_us, uint64_t render_us);
 int stasis_host_performance_metrics_enabled(void);
+#if defined(STASIS_DESKTOP_NATIVE_ADAPTER)
+uintptr_t stasis_get_native_window_handle(uint32_t *kind);
+int32_t stasis_window_is_foreground(void);
+#endif
 void stasis_shutdown(void);
 
 static int32_t *host_i32;
@@ -318,6 +322,20 @@ void stasis_mobile_runtime_set_paused(int32_t paused) {
 int32_t stasis_mobile_runtime_is_initialized(void) {
     return runtime_state.initialized;
 }
+
+#if defined(STASIS_DESKTOP_NATIVE_ADAPTER)
+uintptr_t stasis_mobile_runtime_native_window(uint32_t *kind) {
+    if (!runtime_state.initialized) {
+        if (kind) *kind = 0;
+        return (uintptr_t)0;
+    }
+    return stasis_get_native_window_handle(kind);
+}
+
+int32_t stasis_mobile_runtime_window_is_foreground(void) {
+    return runtime_state.initialized ? stasis_window_is_foreground() : 0;
+}
+#endif
 
 int32_t stasis_mobile_runtime_last_entry_result(void) {
     return runtime_state.last_entry_result;
