@@ -532,6 +532,238 @@ function ascii_append_f32_fixed(dst: ascii[], value: f32, decimals: i32): i32 {
     return ascii_write_f32_fixed(dst, value, decimals, length(dst));
 }
 
+function ascii_write_f64_short(dst: ascii[], value: f64, decimals: i32, base: i32): i32 {
+    if (decimals < 0 || decimals > 6 || base < 0) {
+        return -1;
+    }
+
+    let capacity: i32 = ascii_max_length(dst);
+    if (value != value) {
+        let result_length: i32 = base + 3;
+        if (result_length < base || capacity <= result_length) {
+            return -1;
+        }
+        dst[base] = 110;
+        dst[base + 1] = 97;
+        dst[base + 2] = 110;
+        dst[result_length] = 0;
+        ascii_set_len(dst, result_length);
+        return result_length;
+    }
+
+    let infinity: f64 = 1.0 / 0.0;
+    if (value == infinity || value == 0.0 - infinity) {
+        let negative_infinity: bool = value < 0.0;
+        let sign_count: i32 = 0;
+        if (negative_infinity) {
+            sign_count = 1;
+        }
+        let result_length: i32 = base + sign_count + 3;
+        if (result_length < base || capacity <= result_length) {
+            return -1;
+        }
+        let cursor: i32 = base;
+        if (negative_infinity) {
+            dst[cursor] = 45;
+            cursor = cursor + 1;
+        }
+        dst[cursor] = 105;
+        dst[cursor + 1] = 110;
+        dst[cursor + 2] = 102;
+        dst[result_length] = 0;
+        ascii_set_len(dst, result_length);
+        return result_length;
+    }
+
+    let negative: bool = value < 0.0;
+    let magnitude: f64 = value;
+    if (negative) {
+        magnitude = 0.0 - magnitude;
+    }
+    let scientific: bool = magnitude > 0.0 &&(magnitude < 0.01 || magnitude >= 1000000.0);
+    let work_value: f64 = magnitude;
+    let work_decimals: i32 = decimals;
+    let exponent: i32 = 0;
+    let index: i32 = 0;
+    if (!scientific && magnitude >= 1000.0) {
+        work_decimals = 0;
+    }
+    if (scientific) {
+        for (index = 0; index < 400; index = index + 1) {
+            if (work_value >= 10.0) {
+                work_value = work_value / 10.0;
+                exponent = exponent + 1;
+            }
+            if (work_value > 0.0 && work_value < 1.0) {
+                work_value = work_value * 10.0;
+                exponent = exponent - 1;
+            }
+        }
+    }
+
+    let digits: i32[24];
+    let count: i32 = 0;
+    let integer_count: i32 = 0;
+    let remainder: f64 = work_value;
+    let place: f64 = 100000000.0;
+    let place_index: i32 = 0;
+    let repeat: i32 = 0;
+    for (place_index = 0; place_index < 9; place_index = place_index + 1) {
+        let digit: i32 = 0;
+        for (repeat = 0; repeat < 9; repeat = repeat + 1) {
+            if (remainder >= place) {
+                remainder = remainder - place;
+                digit = digit + 1;
+            }
+        }
+        if (count > 0 || digit > 0 || place_index == 8) {
+            digits[count] = digit;
+            count = count + 1;
+        }
+        place = place / 10.0;
+    }
+    integer_count = count;
+
+    let guard_digit: i32 = 0;
+    let fraction_index: i32 = 0;
+    for (fraction_index = 0; fraction_index <= work_decimals; fraction_index = fraction_index + 1) {
+        remainder = remainder * 10.0;
+        let digit: i32 = 0;
+        for (repeat = 0; repeat < 9; repeat = repeat + 1) {
+            if (remainder >= 1.0) {
+                remainder = remainder - 1.0;
+                digit = digit + 1;
+            }
+        }
+        if (remainder >= 1.0) {
+            return -1;
+        }
+        if (fraction_index < work_decimals) {
+            digits[count] = digit;
+            count = count + 1;
+        } else {
+            guard_digit = digit;
+        }
+    }
+
+    if (guard_digit >= 5) {
+        let carry: i32 = 1;
+        let digit_index: i32 = 0;
+        for (digit_index = count - 1; digit_index >= 0; digit_index = digit_index - 1) {
+            if (carry > 0) {
+                if (digits[digit_index] >= 9) {
+                    digits[digit_index] = 0;
+                } else {
+                    digits[digit_index] = digits[digit_index] + 1;
+                    carry = 0;
+                }
+            }
+        }
+        if (carry > 0) {
+            for (digit_index = count; digit_index > 0; digit_index = digit_index - 1) {
+                digits[digit_index] = digits[digit_index - 1];
+            }
+            digits[0] = 1;
+            count = count + 1;
+            integer_count = integer_count + 1;
+        }
+    }
+
+    if (scientific && integer_count > 1) {
+        exponent = exponent + 1;
+        digits[0] = 1;
+        integer_count = 1;
+        count = 1 + work_decimals;
+        for (place_index = 0; place_index < work_decimals; place_index = place_index + 1) {
+            digits[place_index + 1] = 0;
+        }
+    }
+
+    let exponent_negative: bool = exponent < 0;
+    let exponent_magnitude: i32 = exponent;
+    if (exponent_negative) {
+        exponent_magnitude = 0 - exponent_magnitude;
+    }
+    let exponent_digits: i32 = 0;
+    let exponent_sign_count: i32 = 0;
+    let scientific_suffix_length: i32 = 0;
+    if (scientific) {
+        exponent_digits = 1;
+        if (exponent_magnitude >= 10) {
+            exponent_digits = 2;
+        }
+        if (exponent_magnitude >= 100) {
+            exponent_digits = 3;
+        }
+        if (exponent_negative) {
+            exponent_sign_count = 1;
+        }
+        scientific_suffix_length = 1 + exponent_sign_count + exponent_digits;
+    }
+
+    let sign_count: i32 = 0;
+    if (negative && magnitude != 0.0) {
+        sign_count = 1;
+    }
+    let decimal_separator_count: i32 = 0;
+    if (work_decimals > 0) {
+        decimal_separator_count = 1;
+    }
+    let result_length: i32 = base + sign_count + integer_count + decimal_separator_count + work_decimals + scientific_suffix_length;
+    if (result_length < base || capacity <= result_length) {
+        return -1;
+    }
+
+    let cursor: i32 = base;
+    if (sign_count > 0) {
+        dst[cursor] = 45;
+        cursor = cursor + 1;
+    }
+    let digit_index: i32 = 0;
+    for (digit_index = 0; digit_index < integer_count; digit_index = digit_index + 1) {
+        dst[cursor] = to_u8_trunc(48 + digits[digit_index]);
+        cursor = cursor + 1;
+    }
+    if (work_decimals > 0) {
+        dst[cursor] = 46;
+        cursor = cursor + 1;
+        for (digit_index = 0; digit_index < work_decimals; digit_index = digit_index + 1) {
+            dst[cursor] = to_u8_trunc(48 + digits[integer_count + digit_index]);
+            cursor = cursor + 1;
+        }
+    }
+    if (scientific) {
+        dst[cursor] = 101;
+        cursor = cursor + 1;
+        if (exponent_negative) {
+            dst[cursor] = 45;
+            cursor = cursor + 1;
+        }
+        let divisor: i32 = 1;
+        for (digit_index = 1; digit_index < exponent_digits; digit_index = digit_index + 1) {
+            divisor = divisor * 10;
+        }
+        for (digit_index = 0; digit_index < exponent_digits; digit_index = digit_index + 1) {
+            let digit: i32 = exponent_magnitude / divisor;
+            dst[cursor] = to_u8_trunc(48 + digit);
+            cursor = cursor + 1;
+            exponent_magnitude = exponent_magnitude - digit * divisor;
+            divisor = divisor / 10;
+        }
+    }
+    dst[result_length] = 0;
+    ascii_set_len(dst, result_length);
+    return result_length;
+}
+
+function ascii_from_f64_short(dst: ascii[], value: f64, decimals: i32): i32 {
+    return ascii_write_f64_short(dst, value, decimals, 0);
+}
+
+function ascii_append_f64_short(dst: ascii[], value: f64, decimals: i32): i32 {
+    return ascii_write_f64_short(dst, value, decimals, length(dst));
+}
+
 function ascii_pad_left(dst: ascii[], width: i32, fill: u8): i32 {
     let current: i32 = length(dst);
     if (width < 0) {

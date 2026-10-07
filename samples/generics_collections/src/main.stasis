@@ -1,6 +1,7 @@
 import "live_edit_helper.stasis";
 import "bitwise_oracle.stasis";
 import "/vendor/stasis/stdlib/math.stasis";
+import "/vendor/stasis/stdlib/stdlib.stasis";
 import "/vendor/stasis/stdlib/rig2d.stasis";
 import "/vendor/stasis/stdlib/graphics.stasis";
 
@@ -205,6 +206,9 @@ global web_bounds_probe_index: i32;
 global generics_collections_digest_value: i32;
 global math_oracle_raw_digest_value: i32;
 global math_oracle_raw_bits: i32[13];
+global math_oracle_text_buffer: ascii[32];
+global math_oracle_text_exact: ascii[9];
+global math_oracle_text_short: ascii[8];
 global math_oracle_sqrt_two: f32;
 global math_oracle_sqrt_tiny: f32;
 global math_oracle_sqrt_large: f32;
@@ -248,6 +252,246 @@ function math_oracle_relative_near(actual: f32, expected: f32, tolerance: f32): 
     return math_abs(actual - expected) <= math_abs(expected) * tolerance;
 }
 
+function math_oracle_close_f64(actual: f64, expected: f64, relative_tolerance: f64, absolute_tolerance: f64): bool {
+    return math_abs(actual - expected) <= math_abs(expected) * relative_tolerance + absolute_tolerance;
+}
+
+function math_oracle_relative_near_f64(actual: f64, expected: f64, tolerance: f64): bool {
+    return math_abs(actual - expected) <= math_abs(expected) * tolerance;
+}
+
+function math_oracle_extended_f32(): bool {
+    let one: f32 = 1.0;
+    let two: f32 = 2.0;
+    let three: f32 = 3.0;
+    let half_f64: f64 = 0.5;
+    let negative_one: f32 = 0.0 - 1.0;
+    let negative_two: f32 = 0.0 - 2.0;
+    let negative_103: f32 = 0.0 - 103.0;
+    let zero: f32 = 0.0;
+    let negative_zero: f32 = zero / negative_one;
+    let infinity: f32 = one / zero;
+    let nan: f32 = zero / zero;
+    let negative_infinity: f32 = 0.0 - infinity;
+    let just_below_half: f32 = 0.49999997;
+    let negative_ceil: f32 = math_ceil(0.0 - 0.1);
+    let smallest_subnormal: f32 = 1.0;
+    let index: i32 = 0;
+    for (index = 0; index < 149; index = index + 1) {
+        smallest_subnormal = smallest_subnormal / 2.0;
+    }
+    return math_sqrt(two) == 1.4142135381698608 && math_sqrt(infinity) == infinity && math_oracle_relative_near(math_pow(two, 3), 8.0, 0.000001) && math_oracle_near(
+        math_pow(two, 0.5),
+        1.4142135,
+        0.00001
+    ) && math_oracle_near(math_pow(two, half_f64), 1.4142135, 0.00001) && math_pow(negative_two, three) ==(0.0 - 8.0) && math_pow(negative_two, 0.5) != math_pow(
+        negative_two,
+        0.5
+    ) && math_oracle_relative_near(math_exp(one), 2.7182817, 0.000003) && math_exp(infinity) == infinity && math_exp(0.0 - infinity) == 0.0 && math_exp(nan) != math_exp(
+        nan
+    ) && smallest_subnormal > 0.0 && f32_to_bits(smallest_subnormal) == 1 && math_exp(negative_103) == smallest_subnormal && math_oracle_relative_near(
+        math_ln(smallest_subnormal),
+        0.0 - 103.27893,
+        0.000003
+    ) && math_ln(nan) != math_ln(nan) && math_sqrt(nan) != math_sqrt(nan) && math_oracle_relative_near(math_log10(1000.0), 3.0, 0.000003) && math_floor(
+        0.0 - 1.2
+    ) ==(0.0 - 2.0) && math_ceil(1.2) == 2.0 && negative_ceil == 0.0 && 1.0 / negative_ceil < 0.0 && math_round(1.5) == 2.0 && math_round(0.0 - 1.5) ==(
+        0.0 - 1.0
+    ) && math_round(just_below_half) == 0.0 && math_min(negative_zero, zero) == zero && 1.0 / math_min(negative_zero, zero) < 0.0 && math_max(
+        negative_zero,
+        zero
+    ) == zero && 1.0 / math_max(negative_zero, zero) > 0.0 && math_min(nan, one) != math_min(nan, one) && math_max(one, nan) != math_max(one, nan) && math_clamp(
+        6.0,
+        5.0,
+        1.0
+    ) == 5.0 && math_clamp(negative_zero, negative_one, one) == 0.0 && 1.0 / math_clamp(negative_zero, negative_one, one) < 0.0 && math_clamp(
+        nan,
+        negative_one,
+        one
+    ) != math_clamp(nan, negative_one, one) && math_ln(negative_infinity) != math_ln(negative_infinity);
+}
+
+function math_oracle_extended_f64(): bool {
+    let one: f64 = 1.0;
+    let two: f64 = 2.0;
+    let three: f64 = 3.0;
+    let half: f64 = 0.5;
+    let sqrt_two_expected: f64 = 1.4142135623730951;
+    let negative_one: f64 = 0.0 - 1.0;
+    let negative_two: f64 = 0.0 - 2.0;
+    let zero: f64 = 0.0;
+    let negative_zero: f64 = zero / negative_one;
+    let infinity: f64 = one / zero;
+    let negative_infinity: f64 = 0.0 - infinity;
+    let nan: f64 = zero / zero;
+    let thousand: f64 = 1000.0;
+    let negative_one_point_two: f64 = 0.0 - 1.2;
+    let one_point_two: f64 = 1.2;
+    let negative_zero_point_one: f64 = 0.0 - 0.1;
+    let one_point_five: f64 = 1.5;
+    let negative_one_point_five: f64 = 0.0 - 1.5;
+    let six: f64 = 6.0;
+    let five: f64 = 5.0;
+    let negative_745: f64 = 0.0 - 745.0;
+    let overflow_boundary: f64 = 709.782712893384;
+    let ten: f64 = 10.0;
+    let just_below_half: f64 = 0.49999999999999994;
+    let below_one: f64 = 0.9999999999999999;
+    let smallest_subnormal: f64 = one;
+    let expected_pow_subnormal: f64 = one;
+    let expected_pow_tiny: f64 = one;
+    let index: i32 = 0;
+    for (index = 0; index < 1074; index = index + 1) {
+        smallest_subnormal = smallest_subnormal / 2.0;
+    }
+    for (index = 0; index < 1024; index = index + 1) {
+        expected_pow_subnormal = expected_pow_subnormal / 2.0;
+    }
+    for (index = 0; index < 309; index = index + 1) {
+        expected_pow_tiny = expected_pow_tiny / 10.0;
+    }
+    return math_oracle_relative_near_f64(math_sqrt(two), sqrt_two_expected, 0.000000000001) && math_sqrt(infinity) == infinity && math_sqrt(nan) != math_sqrt(
+        nan
+    ) && math_oracle_relative_near_f64(math_pow(two, 3), 8.0, 0.000000001) && math_oracle_close_f64(
+        math_pow(two, half),
+        1.4142135623730951,
+        0.000000001,
+        0.000000000000001
+    ) && math_oracle_close_f64(math_pow(two, 0.5), 1.4142135623730951, 0.000000001, 0.000000000000001) && math_pow(negative_two, three) ==(0.0 - 8.0) && math_pow(
+        negative_two,
+        half
+    ) != math_pow(negative_two, half) && math_pow(negative_two, 0.5) != math_pow(negative_two, 0.5) && math_pow(two, 0 - 2147483647 - 1) == 0.0 && math_pow(
+        two,
+        0 - 1024
+    ) == expected_pow_subnormal && math_pow(ten, 0 - 309) > 0.0 && math_oracle_close_f64(
+        math_pow(ten, 0 - 309),
+        expected_pow_tiny,
+        0.000000001,
+        smallest_subnormal
+    ) && math_oracle_close_f64(math_exp(one), 2.718281828459045, 0.000000001, 0.000000000000001) && math_exp(infinity) == infinity && math_exp(
+        negative_infinity
+    ) == 0.0 && math_exp(negative_745) == smallest_subnormal && math_exp(overflow_boundary) < infinity && math_exp(nan) != math_exp(nan) && math_ln(
+        smallest_subnormal
+    ) < 0.0 && math_oracle_relative_near_f64(math_ln(smallest_subnormal), 0.0 - 744.4400719213812, 0.000000000001) && math_oracle_close_f64(
+        math_ln(below_one),
+        0.0 - 0.00000000000000011102230246251565,
+        0.000000001,
+        0.000000000000000000000000000001
+    ) && math_ln(zero) == negative_infinity && math_ln(negative_one) != math_ln(negative_one) && math_oracle_relative_near_f64(
+        math_log10(thousand),
+        3.0,
+        0.000000000001
+    ) && math_floor(negative_one_point_two) ==(0.0 - 2.0) && math_ceil(one_point_two) == 2.0 && 1.0 / math_ceil(negative_zero_point_one) < 0.0 && math_round(
+        one_point_five
+    ) == 2.0 && math_round(negative_one_point_five) ==(0.0 - 1.0) && math_round(just_below_half) == 0.0 && math_min(negative_zero, zero) == zero && 1.0 / math_min(
+        negative_zero,
+        zero
+    ) < 0.0 && math_max(negative_zero, zero) == zero && 1.0 / math_max(negative_zero, zero) > 0.0 && math_min(nan, one) != math_min(nan, one) && math_max(
+        one,
+        nan
+    ) != math_max(one, nan) && math_clamp(six, five, one) == five && math_clamp(negative_zero, negative_one, one) == 0.0 && 1.0 / math_clamp(
+        negative_zero,
+        negative_one,
+        one
+    ) < 0.0 && math_clamp(nan, negative_one, one) != math_clamp(nan, negative_one, one);
+}
+
+function math_oracle_one_e300(): f64 {
+    let large: f64 = 1.0;
+    let index: i32 = 0;
+    for (index = 0; index < 300; index = index + 1) {
+        large = large * 10.0;
+    }
+    return large;
+}
+
+function math_oracle_text_equals(actual: ascii[], expected: ascii[], expected_length: i32): bool {
+    if (length(actual) != expected_length || actual[expected_length] != 0) {
+        return false;
+    }
+    let index: i32 = 0;
+    for (index = 0; index < expected_length; index = index + 1) {
+        if (actual[index] != expected[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function math_oracle_text_magnitudes(): bool {
+    let tiny: f64 = 1.0;
+    let large: f64 = 1.0;
+    let carry: f64 = 9.999;
+    let index: i32 = 0;
+    for (index = 0; index < 300; index = index + 1) {
+        tiny = tiny / 10.0;
+        large = large * 10.0;
+        carry = carry * 10.0;
+    }
+    if (
+        ascii_from_f64_short(math_oracle_text_buffer, tiny, 2) != 9
+        || !math_oracle_text_equals(math_oracle_text_buffer, "1.00e-300", 9)
+        || ascii_from_f64_short(math_oracle_text_buffer, large, 2) != 8
+        || !math_oracle_text_equals(math_oracle_text_buffer, "1.00e300", 8)
+        || ascii_from_f64_short(math_oracle_text_buffer, carry, 2) != 8
+        || !math_oracle_text_equals(math_oracle_text_buffer, "1.00e301", 8)
+    ) {
+        return false;
+    }
+    return true;
+}
+
+function math_oracle_text_capacity(): bool {
+    let large: f64 = math_oracle_one_e300();
+    if (
+        ascii_from_f64_short(math_oracle_text_exact, large, 2) != 8
+        || !math_oracle_text_equals(math_oracle_text_exact, "1.00e300", 8)
+        || math_oracle_text_exact[8] != 0
+    ) {
+        return false;
+    }
+    ascii_copy(math_oracle_text_short, "keep");
+    math_oracle_text_short[7] = 83;
+    if (
+        ascii_from_f64_short(math_oracle_text_short, large, 2) != -1
+        || length(math_oracle_text_short) != 4
+        || !math_oracle_text_equals(math_oracle_text_short, "keep", 4)
+        || math_oracle_text_short[7] != 83
+    ) {
+        return false;
+    }
+    return true;
+}
+
+function math_oracle_text_specials(): bool {
+    let infinity: f64 = 1.0 / 0.0;
+    let nan: f64 = 0.0 / 0.0;
+    let negative_zero: f64 = 0.0 /(0.0 - 1.0);
+    if (
+        ascii_from_f64_short(math_oracle_text_buffer, infinity, 2) != 3
+        || !math_oracle_text_equals(math_oracle_text_buffer, "inf", 3)
+        || ascii_from_f64_short(math_oracle_text_buffer, 0.0 - infinity, 2) != 4
+        || !math_oracle_text_equals(math_oracle_text_buffer, "-inf", 4)
+        || ascii_from_f64_short(math_oracle_text_buffer, nan, 2) != 3
+        || !math_oracle_text_equals(math_oracle_text_buffer, "nan", 3)
+        || ascii_from_f64_short(math_oracle_text_buffer, negative_zero, 2) != 4
+        || !math_oracle_text_equals(math_oracle_text_buffer, "0.00", 4)
+    ) {
+        return false;
+    }
+    return true;
+}
+
+function math_oracle_text_append(): bool {
+    let large: f64 = math_oracle_one_e300();
+    ascii_copy(math_oracle_text_buffer, "v=");
+    return ascii_append_f64_short(math_oracle_text_buffer, large, 2) == 10 && math_oracle_text_equals(math_oracle_text_buffer, "v=1.00e300", 10);
+}
+
+function math_oracle_extended_text(): bool {
+    return math_oracle_text_magnitudes() && math_oracle_text_capacity() && math_oracle_text_specials() && math_oracle_text_append();
+}
+
 function math_oracle_hash_raw_bits(): i32 {
     let digest: i32 = -2128831035;
     let index: i32 = 0;
@@ -287,6 +531,10 @@ function math_oracle_run(): bool {
         || f32_to_bits(math_atan2_degrees(negative_zero, 1.0)) != 0
         || math_atan2_degrees(negative_zero, -1.0) != 180.0
     ) {
+        return false;
+    }
+
+    if (!math_oracle_extended_f32() || !math_oracle_extended_f64() || !math_oracle_extended_text()) {
         return false;
     }
 
