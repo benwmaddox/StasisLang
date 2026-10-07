@@ -1128,6 +1128,119 @@ if ($noPidState.LogCalls -ne 0) {{ throw 'The log was read without a package pro
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("readiness helper cases passed", result.stdout)
 
+    def test_workshop_lifecycle_video_start_is_platform_safe_and_preserves_contract(self):
+        pwsh = shutil.which("pwsh")
+        if not pwsh:
+            self.skipTest("PowerShell is unavailable for executable lifecycle-video checks")
+        start = self.workshop_script.index("function Start-PresentationLifecycleVideo(")
+        end = self.workshop_script.index("function Invoke-VideoProbe(", start)
+        helper = self.workshop_script[start:end]
+        script = f"""
+$ErrorActionPreference = 'Stop'
+{helper}
+$runningOnWindows = $false
+$AvdName = 'Stasis_API_35'
+$serial = 'emulator-5554'
+$adb = '/android-sdk/platform-tools/adb'
+$artifactRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'stasis-lifecycle-video-contract'
+$TotalTimeoutSeconds = 30
+$script:expectedWindows = $false
+$script:failStartProcess = $false
+$script:adbCalls = [System.Collections.Generic.List[string]]::new()
+$script:lastStart = $null
+$script:fakeProcess = [pscustomobject]@{{ Id = 4242; HasExited = $false; ExitCode = 0 }}
+$script:fakeProcess | Add-Member ScriptMethod Refresh {{}}
+$script:fakeProcess | Add-Member ScriptMethod WaitForExit {{ param([int]$TimeoutMilliseconds) return $true }}
+$script:fakeProcess | Add-Member ScriptMethod Kill {{}}
+function Assert-In-Time([string]$Step) {{ }}
+function Invoke-Adb([string[]]$Arguments) {{
+    $joined = $Arguments -join ' '
+    [void]$script:adbCalls.Add($joined)
+    if ($joined -like '*cat /sdcard/Movies/stasis-present-only-*') {{ return '8123' }}
+    return @()
+}}
+function Start-Process {{
+    param(
+        [string]$FilePath,
+        [string]$ArgumentList,
+        [switch]$PassThru,
+        [string]$RedirectStandardOutput,
+        [string]$RedirectStandardError,
+        [string]$WindowStyle
+    )
+    if ($script:failStartProcess) {{ throw 'simulated process start failure' }}
+    $hasWindowStyle = $PSBoundParameters.ContainsKey('WindowStyle')
+    if ($FilePath -ne $script:adb -or -not $PassThru.IsPresent) {{
+        throw 'lifecycle recorder lost its ADB path or returned-process contract'
+    }}
+    if ($script:expectedWindows -and (-not $hasWindowStyle -or $WindowStyle -ne 'Hidden')) {{
+        throw 'Windows lifecycle recorder did not request a hidden process'
+    }}
+    if (-not $script:expectedWindows -and $hasWindowStyle) {{
+        throw 'WindowStyle is unsupported on non-Windows PowerShell'
+    }}
+    if ($ArgumentList -notmatch '^-s emulator-5554 shell "screenrecord --size 720x1280 --time-limit 165 ') {{
+        throw 'lifecycle recorder lost its quoted ADB screenrecord arguments'
+    }}
+    if ($RedirectStandardOutput -notmatch '-adb-stdout\\.log$' -or
+        $RedirectStandardError -notmatch '-adb-stderr\\.log$') {{
+        throw 'lifecycle recorder lost stdout/stderr capture paths'
+    }}
+    $script:lastStart = [pscustomobject]@{{
+        FilePath = $FilePath
+        ArgumentList = $ArgumentList
+        RedirectStandardOutput = $RedirectStandardOutput
+        RedirectStandardError = $RedirectStandardError
+        WindowStyle = $WindowStyle
+        HasWindowStyle = $hasWindowStyle
+    }}
+    return $script:fakeProcess
+}}
+foreach ($testWindows in @($false, $true)) {{
+    $script:expectedWindows = [bool]$testWindows
+    $runningOnWindows = $script:expectedWindows
+    $script:lastStart = $null
+    $session = Start-PresentationLifecycleVideo 'video-probe' 165
+    if (-not $session.process -or $session.process.Id -ne 4242 -or
+        $session.remote_pid -ne '8123' -or $session.record.host_adb_pid -ne 4242 -or
+        $session.record.device_screenrecord_pid -ne 8123 -or
+        $session.record.status -ne 'recording' -or
+        $session.record.duration_limit_seconds -ne 165 -or
+        $session.record.output_size -ne '720x1280') {{
+        throw 'lifecycle video did not publish its owned host/device PIDs and readiness record'
+    }}
+    if ($session.adb_stdout -ne $script:lastStart.RedirectStandardOutput -or
+        $session.adb_stderr -ne $script:lastStart.RedirectStandardError) {{
+        throw 'lifecycle video session lost its redirected ADB logs'
+    }}
+}}
+$script:expectedWindows = $false
+$runningOnWindows = $false
+$script:failStartProcess = $true
+$script:adbCalls.Clear()
+try {{
+    Start-PresentationLifecycleVideo 'cleanup-probe' 100 | Out-Null
+    throw 'expected a simulated host-process startup failure'
+}} catch {{
+    if ($_.Exception.Message -notlike '*host process could not start: simulated process start failure*') {{ throw }}
+}}
+$cleanupCalls = $script:adbCalls -join "`n"
+if ($cleanupCalls -notmatch 'shell rm -f /sdcard/Movies/stasis-present-only-' -or
+    $cleanupCalls -notmatch 'shell rmdir /sdcard/Movies/stasis-present-only-') {{
+    throw 'lifecycle recorder startup failure did not clean up its remote video files'
+}}
+'lifecycle video process contract passed'
+"""
+        result = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-Command", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("lifecycle video process contract passed", result.stdout)
+
     def test_resize_receipt_waits_for_later_exact_settled_surface(self):
         pwsh = shutil.which("pwsh")
         if not pwsh:

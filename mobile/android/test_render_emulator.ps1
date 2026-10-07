@@ -235,8 +235,17 @@ function Start-PresentationLifecycleVideo([string]$Stage, [int]$DurationSeconds)
         if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
     }
     try {
-        $process = Start-Process -FilePath $adb -ArgumentList ($quotedArguments -join ' ') `
-            -PassThru -WindowStyle Hidden -RedirectStandardOutput $adbStdout -RedirectStandardError $adbStderr
+        $startProcessParameters = @{
+            FilePath = $adb
+            ArgumentList = ($quotedArguments -join ' ')
+            PassThru = $true
+            RedirectStandardOutput = $adbStdout
+            RedirectStandardError = $adbStderr
+        }
+        if ($runningOnWindows) {
+            $startProcessParameters.WindowStyle = "Hidden"
+        }
+        $process = Start-Process @startProcessParameters
     } catch {
         try {
             Invoke-Adb @("shell", "rm", "-f", $remoteVideo, $remoteStderr, $remotePidFile) | Out-Null
