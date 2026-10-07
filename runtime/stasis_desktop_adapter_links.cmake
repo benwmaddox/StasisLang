@@ -1,0 +1,8 @@
+function(stasis_resolve_desktop_adapter_system_links output_variable)
+    set(resolved_links ${ARGN})
+    if("STASIS_CMAKE_DL_LIBS" IN_LIST resolved_links)
+        list(REMOVE_ITEM resolved_links "STASIS_CMAKE_DL_LIBS")
+        list(APPEND resolved_links ${CMAKE_DL_LIBS})
+    endif()
+    set(${output_variable} "${resolved_links}" PARENT_SCOPE)
+endfunction()

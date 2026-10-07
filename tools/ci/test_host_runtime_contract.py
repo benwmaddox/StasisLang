@@ -79,6 +79,29 @@ class HostRuntimeContractTests(unittest.TestCase):
             )
         )
 
+    def test_desktop_adapter_unexpected_window_kind_is_rejected(self):
+        source = (contract.ROOT / contract.DESKTOP_ADAPTER).read_text(encoding="utf-8")
+        overlays = {
+            contract.DESKTOP_ADAPTER: source.replace(
+                "STASIS_DESKTOP_ADAPTER_WINDOW_WAYLAND = 4",
+                "STASIS_DESKTOP_ADAPTER_WINDOW_WAYLAND = 4,\n"
+                "    STASIS_DESKTOP_ADAPTER_WINDOW_UNEXPECTED = 5",
+                1,
+            )
+        }
+        failures, _ = contract.check(
+            registry=copy.deepcopy(self.registry), overlays=overlays
+        )
+        failure = next(
+            item
+            for item in failures
+            if item.field == "desktop_native_adapter.window_kinds.keys"
+        )
+        self.assertIn("STASIS_DESKTOP_ADAPTER_WINDOW_UNEXPECTED", failure.actual)
+        self.assertNotIn(
+            "STASIS_DESKTOP_ADAPTER_WINDOW_BORROWED_RUNTIME", failure.actual
+        )
+
     def test_collection_view_abi_version_drift_names_compiler_and_web_runtime(self):
         registry = copy.deepcopy(self.registry)
         registry["wasm_collection_view"]["version"] = 3

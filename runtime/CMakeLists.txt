@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(stasis_graphics C CXX)
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/stasis_desktop_adapter_links.cmake")
+
 # Prefer static CRT when possible (for single-exe bundling).
 if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
@@ -588,10 +590,13 @@ if(STASIS_BUILD_MONOLITH)
         PRIVATE "${STASIS_MONOLITH_AOT_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(stasis_monolith PRIVATE stasis_mobile_runtime)
     if(STASIS_MONOLITH_ADAPTER_SYSTEM_LINKS)
-        if("Threads::Threads" IN_LIST STASIS_MONOLITH_ADAPTER_SYSTEM_LINKS)
+        stasis_resolve_desktop_adapter_system_links(
+            _stasis_monolith_adapter_system_links
+            ${STASIS_MONOLITH_ADAPTER_SYSTEM_LINKS})
+        if("Threads::Threads" IN_LIST _stasis_monolith_adapter_system_links)
             find_package(Threads REQUIRED)
         endif()
-        target_link_libraries(stasis_monolith PRIVATE ${STASIS_MONOLITH_ADAPTER_SYSTEM_LINKS})
+        target_link_libraries(stasis_monolith PRIVATE ${_stasis_monolith_adapter_system_links})
     endif()
     if(NOT _stasis_monolith_use_prebuilt_runtime)
         target_link_libraries(

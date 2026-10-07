@@ -68,10 +68,43 @@ def _compare_map(
     ]
 
 
+def _compare_exact_map(
+    prefix: str, expected: dict[str, int], actual: dict[str, int], source: Path
+) -> list[Failure]:
+    failures: list[Failure] = []
+    if set(expected) != set(actual):
+        failures.append(
+            Failure(
+                f"{prefix}.keys",
+                source.as_posix(),
+                sorted(expected),
+                sorted(actual),
+            )
+        )
+    failures += _compare_map(prefix, expected, actual, source)
+    return failures
+
+
 def _enum_constants(text: str, prefix: str) -> dict[str, int]:
     return {
         name: int(value)
         for name, value in re.findall(rf"\b({prefix}[A-Z0-9_]+)\s*=\s*(-?\d+)", text)
+    }
+
+
+def _named_enum_constants(text: str, enum_name: str) -> dict[str, int]:
+    match = re.search(
+        rf"\benum\s+{re.escape(enum_name)}\s*\{{(?P<body>.*?)\}}\s*;",
+        text,
+        re.S,
+    )
+    if not match:
+        return {}
+    return {
+        name: int(value)
+        for name, value in re.findall(
+            r"\b([A-Z][A-Z0-9_]+)\s*=\s*(-?\d+)", match.group("body")
+        )
     }
 
 
@@ -163,7 +196,7 @@ def check(
             adapter_text,
         )
     }
-    failures += _compare_map(
+    failures += _compare_exact_map(
         "desktop_native_adapter.pump_results",
         adapter["pump_results"],
         pump_results,
@@ -198,15 +231,15 @@ def check(
     )
     if adapter["context_fields"] != adapter_fields:
         failures.append(Failure("desktop_native_adapter.context_fields", DESKTOP_ADAPTER.as_posix(), adapter_fields, adapter["context_fields"]))
-    for field, prefix in (
-        ("platforms", "STASIS_DESKTOP_ADAPTER_PLATFORM_"),
-        ("window_kinds", "STASIS_DESKTOP_ADAPTER_WINDOW_"),
-        ("window_ownership", "STASIS_DESKTOP_ADAPTER_WINDOW_BORROWED_"),
+    for field, enum_name in (
+        ("platforms", "StasisDesktopAdapterPlatform"),
+        ("window_kinds", "StasisDesktopAdapterWindowKind"),
+        ("window_ownership", "StasisDesktopAdapterWindowOwnership"),
     ):
-        failures += _compare_map(
+        failures += _compare_exact_map(
             f"desktop_native_adapter.{field}",
             adapter[field],
-            _enum_constants(adapter_text, prefix),
+            _named_enum_constants(adapter_text, enum_name),
             DESKTOP_ADAPTER,
         )
     shell_text = _read(DESKTOP_SHELL, overlays)

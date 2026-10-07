@@ -648,7 +648,7 @@ pub enum LinuxSystemLibrary {
 impl LinuxSystemLibrary {
     fn cmake_name(self) -> &'static str {
         match self {
-            Self::Dl => "${CMAKE_DL_LIBS}",
+            Self::Dl => "STASIS_CMAKE_DL_LIBS",
             Self::M => "m",
             Self::Pthread => "Threads::Threads",
         }
@@ -6720,18 +6720,28 @@ mod tests {
         } else if cfg!(target_os = "macos") {
             "-DSTASIS_MONOLITH_ADAPTER_SYSTEM_LINKS=-framework Foundation;-framework StoreKit"
         } else {
-            "-DSTASIS_MONOLITH_ADAPTER_SYSTEM_LINKS=${CMAKE_DL_LIBS};Threads::Threads"
+            "-DSTASIS_MONOLITH_ADAPTER_SYSTEM_LINKS=STASIS_CMAKE_DL_LIBS;Threads::Threads"
         };
         assert!(configured.iter().any(|arg| arg == expected));
 
+        assert_eq!(
+            LinuxSystemLibrary::Dl.cmake_name(),
+            "STASIS_CMAKE_DL_LIBS",
+            "the Rust-to-CMake cache boundary must carry a token, not nested CMake syntax"
+        );
+        assert!(!LinuxSystemLibrary::Dl.cmake_name().contains("${"));
+
         let cmake = include_str!("../../../runtime/CMakeLists.txt");
+        let adapter_links = include_str!("../../../runtime/stasis_desktop_adapter_links.cmake");
         assert!(cmake.contains("${_stasis_monolith_adapter_sources}"));
         assert!(cmake.contains("STASIS_DESKTOP_NATIVE_ADAPTER=1"));
         assert!(cmake.contains(
             "target_compile_definitions(stasis_mobile_runtime PRIVATE STASIS_DESKTOP_NATIVE_ADAPTER=1)"
         ));
+        assert!(adapter_links.contains("list(REMOVE_ITEM resolved_links \"STASIS_CMAKE_DL_LIBS\")"));
+        assert!(adapter_links.contains("list(APPEND resolved_links ${CMAKE_DL_LIBS})"));
         assert!(cmake.contains(
-            "target_link_libraries(stasis_monolith PRIVATE ${STASIS_MONOLITH_ADAPTER_SYSTEM_LINKS})"
+            "target_link_libraries(stasis_monolith PRIVATE ${_stasis_monolith_adapter_system_links})"
         ));
 
         let root = std::env::temp_dir().join(format!(
@@ -6744,6 +6754,47 @@ mod tests {
         ));
         let project = root.join("project");
         let aot = root.join("aot");
+        let configure_fixture = root.join("cmake-link-fixture");
+        let configure_build = root.join("cmake-link-build");
+        std::fs::create_dir_all(&configure_fixture).expect("create CMake link fixture");
+        let adapter_link_module = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../runtime/stasis_desktop_adapter_links.cmake")
+            .canonicalize()
+            .expect("canonical adapter link module");
+        std::fs::write(
+            configure_fixture.join("CMakeLists.txt"),
+            format!(
+                "cmake_minimum_required(VERSION 3.16)\n\
+                 project(stasis_adapter_link_fixture NONE)\n\
+                 set(CMAKE_DL_LIBS fixture-dl)\n\
+                 include(\"{}\")\n\
+                 stasis_resolve_desktop_adapter_system_links(RESOLVED_LINKS STASIS_CMAKE_DL_LIBS Threads::Threads)\n\
+                 if(NOT \"${{RESOLVED_LINKS}}\" STREQUAL \"Threads::Threads;fixture-dl\")\n\
+                   message(FATAL_ERROR \"unexpected resolved links: ${{RESOLVED_LINKS}}\")\n\
+                 endif()\n\
+                 file(WRITE \"${{CMAKE_BINARY_DIR}}/resolved-links.txt\" \"${{RESOLVED_LINKS}}\")\n",
+                cmake_path(&adapter_link_module)
+            ),
+        )
+        .expect("write CMake link fixture");
+        let configured_fixture = std::process::Command::new("cmake")
+            .arg("-S")
+            .arg(&configure_fixture)
+            .arg("-B")
+            .arg(&configure_build)
+            .output()
+            .expect("run CMake link fixture");
+        assert!(
+            configured_fixture.status.success(),
+            "CMake must expand the dl token during configure: stdout={} stderr={}",
+            String::from_utf8_lossy(&configured_fixture.stdout),
+            String::from_utf8_lossy(&configured_fixture.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(configure_build.join("resolved-links.txt"))
+                .expect("read resolved CMake links"),
+            "Threads::Threads;fixture-dl"
+        );
         std::fs::create_dir_all(project.join("native")).expect("create adapter fixture");
         let original = b"int adapter_revision(void) { return 1; }\n";
         std::fs::write(project.join("native/store_adapter.c"), original)
