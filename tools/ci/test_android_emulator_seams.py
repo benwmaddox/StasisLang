@@ -562,10 +562,11 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         release_body = job_bodies["release-shell-seams"]
         workshop_body = job_bodies["workshop-seams"]
         self.assertIn("timeout-minutes: 75", workshop_body)
+        self.assertIn("avd-name: Stasis_API_35", workshop_body)
         release_script = "pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1"
         workshop_script = (
             "pwsh -NoProfile -File ./mobile/android/test_render_emulator.ps1 "
-            "-Headless -AvdName test -StepTimeoutSeconds 1200 -TotalTimeoutSeconds 1500 "
+            "-Headless -AvdName Stasis_API_35 -StepTimeoutSeconds 1200 -TotalTimeoutSeconds 1500 "
             "-RenderTimeoutSeconds 90 "
             "-MaxRenderP50Millis 1.05 -MaxRenderP95Millis 8.94"
         )
@@ -1295,7 +1296,7 @@ if (-not $failedClosed) {{ throw 'truncated receipt stream did not fail closed' 
         self.assertIn('Destination $capture -Force', self.workshop_script)
         self.assertIn("Take-WorkshopSurfaceProbe $surfaceProbeState", self.workshop_script)
 
-    def test_observed_workshop_surface_maps_to_exact_crop_on_test_avd(self):
+    def test_observed_workshop_surface_maps_to_exact_crop_on_dedicated_avd(self):
         app_window = (0, 136, 1080, 2337)
         surface = (
             app_window[0],
@@ -1321,7 +1322,8 @@ if (-not $failedClosed) {{ throw 'truncated receipt stream did not fail closed' 
         self.assertEqual((0, 933, 1080, 607), reported_pre_fix_viewport)
         self.assertEqual((0, 933, 1080, 608), viewport)
         self.assertNotEqual(reported_pre_fix_viewport, viewport)
-        self.assertIn("-Headless -AvdName test", self.workflow)
+        self.assertIn("avd-name: Stasis_API_35", self.workflow)
+        self.assertIn("-Headless -AvdName Stasis_API_35", self.workflow)
         self.assertIn(
             "$viewportHeight = [int][math]::Floor(($width * $logicalHeight / $logicalWidth) + 0.5)",
             self.workshop_script,
