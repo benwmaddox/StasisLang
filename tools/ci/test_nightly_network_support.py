@@ -264,6 +264,26 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
             self.workflow.count("generate_release_provenance.py"), 2
         )
 
+    def test_nightly_release_copies_web_ad_docs_and_stdlib_modules(self):
+        unix_docs_copy = next(
+            line for line in self.workflow.splitlines()
+            if line.lstrip().startswith("cp docs/agent_workflow.md")
+        )
+        windows_docs_copy = next(
+            line for line in self.workflow.splitlines()
+            if line.lstrip().startswith("Copy-Item docs/agent_workflow.md,")
+        )
+        for path in ("docs/web_packaging.md", "docs/web_ads.md"):
+            with self.subTest(path=path):
+                self.assertIn(path, unix_docs_copy)
+                self.assertIn(path, windows_docs_copy)
+        for path in ("src/stdlib/ad_tasks.stasis", "src/stdlib/portal_lifecycle.stasis"):
+            with self.subTest(path=path):
+                for platform in ("windows", "linux", "macos"):
+                    self.assertIn(path, required_files(platform))
+        self.assertIn('cp -R src "${out}/"', self.workflow)
+        self.assertIn('Copy-Item src "$out/" -Recurse -Force', self.workflow)
+
     def test_relocated_network_smoke_keeps_android_and_rejects_unavailable_ios_archive(self):
         self.assertIn('"capabilities"] = {"network": True}', self.workflow)
         self.assertIn('"stasis.network": {"features": ["host"]}', self.workflow)

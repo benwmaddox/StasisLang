@@ -403,7 +403,7 @@ jobs:
           cp runtime/CMakeLists.txt runtime/MINIMP3-LICENSE.txt runtime/minimp3.h runtime/minimp3_ex.h runtime/cJSON.c runtime/cJSON.h runtime/stasis_svg.cpp runtime/stasis_svg.h runtime/stasis_asset_path.h runtime/stasis_display_scale.h runtime/stasis_render_contract.h runtime/stasis_renderer_lifecycle.h runtime/stasis_performance_metrics.h runtime/stasis_package_provenance_reader.h runtime/stasis_audio_assets.c runtime/stasis_audio_assets.h runtime/stasis_recording_audio.h runtime/stasis_graphics.c runtime/stasis_mixed_quad_planner.h runtime/stasis_sprite_atlas_policy.h runtime/stasis_image_writer.c runtime/stasis_image_writer.h runtime/stasis_runner.manifest runtime/stasis_runner_macos.plist.in runtime/stasis_mobile_aot_runtime.c runtime/stasis_mobile_aot_runtime.h runtime/stasis_mobile_runtime.c runtime/stasis_mobile_runtime.h runtime/stasis_replay_consumer.c runtime/stasis_replay_consumer.h runtime/stasis_network_join_card.h runtime/stasis_platform_storage.c runtime/stasis_platform_storage.h runtime/stasis_platform_services.c runtime/stasis_platform_services.h runtime/stb_truetype.h "${out}/runtime/"
           cp -R runtime/third_party "${out}/runtime/"
           mkdir -p "${out}/docs"
-          cp docs/agent_workflow.md docs/mobile_packaging.md docs/mobile_packaging_abi.md docs/mobile_aot_artifacts.md docs/release_provenance.md docs/sdl3_migration.md "${out}/docs/"
+          cp docs/agent_workflow.md docs/mobile_packaging.md docs/mobile_packaging_abi.md docs/mobile_aot_artifacts.md docs/release_provenance.md docs/sdl3_migration.md docs/web_packaging.md docs/web_ads.md "${out}/docs/"
           cp -R docs/knowledge "${out}/docs/"
           python3 tools/generate_release_provenance.py \
             --archive-root "${out}" \
@@ -467,7 +467,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $prebuiltRuntimeIncludeDir | Out-Null
           Copy-Item "runtime/build_ci/export/include/*" $prebuiltRuntimeIncludeDir -Recurse -Force
           New-Item -ItemType Directory -Force -Path "$out/docs" | Out-Null
-          Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md,docs/release_provenance.md,docs/sdl3_migration.md,docs/network_supervision.md "$out/docs/" -Force
+          Copy-Item docs/agent_workflow.md,docs/mobile_packaging.md,docs/mobile_packaging_abi.md,docs/mobile_aot_artifacts.md,docs/release_provenance.md,docs/sdl3_migration.md,docs/network_supervision.md,docs/web_packaging.md,docs/web_ads.md "$out/docs/" -Force
           Copy-Item docs/knowledge "$out/docs/knowledge" -Recurse -Force
           python tools/ci/windows_signing_manifest.py create `
             --root "$out" `

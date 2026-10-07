@@ -1,0 +1,42 @@
+global task: AdTask;
+
+function main(): i32 {
+    task.reset();
+    if (task.begin(AdKind.Midgame) != AdBeginResult.Unavailable) {
+        return 1;
+    }
+    if (task.status() != AdState.Unavailable) {
+        return 2;
+    }
+    if (task.should_block_gameplay()) {
+        return 3;
+    }
+    if (task.take_reward()) {
+        return 4;
+    }
+
+    task.handle = 7;
+    task.state = AdState.Playing;
+    if (task.begin(AdKind.Rewarded) != AdBeginResult.HandleOpen) {
+        return 5;
+    }
+    if (task.handle != 7 || task.state != AdState.Playing) {
+        return 6;
+    }
+    if (task.status() != AdState.Failed) {
+        return 7;
+    }
+    if (task.take_reward()) {
+        return 8;
+    }
+    task.release();
+    if (task.handle != 0 || task.state != AdState.Idle) {
+        return 9;
+    }
+
+    notify_portal_lifecycle(PortalLifecycleEvent.LoadingStarted);
+    notify_portal_lifecycle(PortalLifecycleEvent.LoadingFinished);
+    notify_portal_lifecycle(PortalLifecycleEvent.GameplayStarted);
+    notify_portal_lifecycle(PortalLifecycleEvent.GameplayStopped);
+    return 0;
+}

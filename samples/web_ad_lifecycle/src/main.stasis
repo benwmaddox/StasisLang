@@ -1,0 +1,137 @@
+import "/vendor/stasis/src/stdlib/ad_tasks.stasis";
+import "/vendor/stasis/src/stdlib/portal_lifecycle.stasis";
+
+global browser_ad_task: AdTask;
+global browser_ad_handle: i32;
+global browser_ad_state: AdState;
+global browser_ad_last_terminal_state: AdState;
+global browser_ad_simulation_steps: i32;
+global browser_ad_poll_ticks: i32;
+global browser_ad_render_count: i32;
+global browser_ad_rewards_granted: i32;
+global browser_ad_second_take_zero: i32;
+global browser_ad_request_latched: bool;
+global browser_ad_reward_latched: bool;
+global browser_ad_gameplay_active: bool;
+global browser_ad_reward_pending: bool;
+global host_i32: i32[768];
+global host_f32: f32[64];
+
+function @extern("web_input_fire") web_input_fire(): i32;
+function @extern("web_begin_frame") web_begin_frame(red: i32, green: i32, blue: i32): void;
+function @extern("web_draw_rect") web_draw_rect(x: i32, y: i32, width: i32, height: i32, red: i32, green: i32, blue: i32): void;
+
+function main(): i32 {
+    notify_portal_lifecycle(PortalLifecycleEvent.LoadingStarted);
+    browser_ad_task.handle = 0;
+    browser_ad_task.state = AdState.Idle;
+    browser_ad_handle = 0;
+    browser_ad_state = AdState.Idle;
+    browser_ad_last_terminal_state = AdState.Idle;
+    browser_ad_simulation_steps = 0;
+    browser_ad_poll_ticks = 0;
+    browser_ad_render_count = 0;
+    browser_ad_rewards_granted = 0;
+    browser_ad_second_take_zero = 0;
+    browser_ad_request_latched = false;
+    browser_ad_reward_latched = false;
+    browser_ad_gameplay_active = false;
+    browser_ad_reward_pending = false;
+    notify_portal_lifecycle(PortalLifecycleEvent.LoadingFinished);
+    return 0;
+}
+
+function tick(): i32 {
+    browser_ad_poll_ticks += 1;
+    let fire: i32 = web_input_fire();
+    let reward_key: i32 = host_i32[32 + 21];
+    if (fire == 0) {
+        browser_ad_request_latched = false;
+    } else if (!browser_ad_request_latched && browser_ad_task.handle == 0) {
+        let result: AdBeginResult = browser_ad_task.begin(AdKind.Midgame);
+        browser_ad_handle = browser_ad_task.handle;
+        browser_ad_state = browser_ad_task.state;
+        if (result == AdBeginResult.Accepted && browser_ad_gameplay_active) {
+            notify_portal_lifecycle(PortalLifecycleEvent.GameplayStopped);
+            browser_ad_gameplay_active = false;
+        }
+        browser_ad_request_latched = true;
+    }
+    if (reward_key == 0) {
+        browser_ad_reward_latched = false;
+    } else if (!browser_ad_reward_latched && browser_ad_task.handle == 0) {
+        let result: AdBeginResult = browser_ad_task.begin(AdKind.Rewarded);
+        browser_ad_handle = browser_ad_task.handle;
+        browser_ad_state = browser_ad_task.state;
+        if (result == AdBeginResult.Accepted) {
+            browser_ad_reward_pending = true;
+            if (browser_ad_gameplay_active) {
+                notify_portal_lifecycle(PortalLifecycleEvent.GameplayStopped);
+                browser_ad_gameplay_active = false;
+            }
+        }
+        browser_ad_reward_latched = true;
+    }
+
+    // This poll-and-guard runs before gameplay simulation. The host keeps
+    // calling tick and render so SDK callbacks and polling continue during a break.
+    if (browser_ad_task.should_block_gameplay()) {
+        if (browser_ad_gameplay_active) {
+            notify_portal_lifecycle(PortalLifecycleEvent.GameplayStopped);
+            browser_ad_gameplay_active = false;
+        }
+        browser_ad_state = browser_ad_task.state;
+        return 0;
+    }
+    browser_ad_state = browser_ad_task.state;
+
+    if (!browser_ad_gameplay_active) {
+        notify_portal_lifecycle(PortalLifecycleEvent.GameplayStarted);
+        browser_ad_gameplay_active = true;
+    }
+    if (
+        browser_ad_reward_pending
+        && browser_ad_task.handle > 0
+        &&(browser_ad_task.state == AdState.Finished || browser_ad_task.state == AdState.Failed || browser_ad_task.state == AdState.Unavailable)
+    ) {
+        let consumed: bool = browser_ad_task.take_reward();
+        if (consumed) {
+            browser_ad_rewards_granted += 1;
+            if (!browser_ad_task.take_reward()) {
+                browser_ad_second_take_zero += 1;
+            }
+        }
+        browser_ad_reward_pending = false;
+    }
+    if (
+        browser_ad_task.handle > 0
+        &&(browser_ad_task.state == AdState.Finished || browser_ad_task.state == AdState.Failed || browser_ad_task.state == AdState.Unavailable)
+    ) {
+        browser_ad_last_terminal_state = browser_ad_task.state;
+        ad_tasks.release(browser_ad_task);
+        browser_ad_handle = 0;
+        browser_ad_state = AdState.Idle;
+    }
+    browser_ad_simulation_steps += 1;
+    return 0;
+}
+
+function render(): i32 {
+    browser_ad_render_count += 1;
+    web_begin_frame(8, 22, 38);
+    web_draw_rect(0, 0, 640, 360, 8, 22, 38);
+    web_draw_rect(32, 86, 576, 12, 38, 92, 112);
+    if (browser_ad_state == AdState.Requesting) {
+        web_draw_rect(32, 86, 576, 12, 246, 171, 72);
+    } else if (browser_ad_state == AdState.Playing) {
+        web_draw_rect(32, 86, 576, 12, 218, 80, 80);
+    } else if (browser_ad_last_terminal_state == AdState.Failed) {
+        web_draw_rect(32, 86, 576, 12, 172, 112, 214);
+    } else if (browser_ad_last_terminal_state == AdState.Finished) {
+        web_draw_rect(32, 86, 576, 12, 92, 190, 120);
+    } else {
+        web_draw_rect(32, 86, 576, 12, 70, 158, 198);
+    }
+    web_draw_rect(32, 52, browser_ad_simulation_steps % 576 + 1, 16, 216, 196, 115);
+    return 0;
+}

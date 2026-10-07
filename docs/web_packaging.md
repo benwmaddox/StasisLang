@@ -23,6 +23,68 @@ For the current renderer mapping, measured Web baseline, and staged design for
 larger rectangle and sprite workloads, see
 [GPU instancing for large Stasis scenes](gpu_instancing_report.md).
 
+## Portal ad profiles
+
+Web packages default to the `none` profile and load no portal SDK. A project may set one default in
+`stasis.json`:
+
+```json
+{
+  "web": {
+    "portal": {
+      "provider": "gamedistribution",
+      "game_id": "your-public-game-id"
+    }
+  }
+}
+```
+
+The supported providers are `none`, `crazygames`, `gamemonetize`, `gamedistribution`, and `poki`.
+GameMonetize and GameDistribution require a public `game_id`; the other providers reject one. A
+package command can override the manifest profile. These commands omit `--development-build` and
+therefore make the release web package:
+
+```text
+stasis package --target web --portal-profile crazygames --out dist/web-crazygames
+stasis package --target web --portal-profile gamemonetize --portal-game-id "your-public-game-id" --out dist/web-gamemonetize
+stasis package --target web --portal-profile gamedistribution --portal-game-id "your-public-game-id" --out dist/web-gamedistribution
+stasis package --target web --portal-profile poki --out dist/web-poki
+stasis package --target web --portal-profile none --out dist/web-none
+```
+
+If a required ID is already present for the same provider in the manifest, the command may omit
+`--portal-game-id`. An explicit `--portal-profile none` clears a manifest selection. With no
+`--out`, the `none` package goes to `dist/<project-name>-web/`, and each portal profile gets its
+own `dist/<project-name>-web-<provider>/` directory. When scripting several builds, keep those
+directories distinct; a supplied `--out` is used as that exact package directory. `--out` must be a
+non-empty path relative to the project root; absolute paths are rejected.
+
+A portal output contains the normal web package and a deterministic `<provider>-upload.zip` next
+to it. Its entries are sorted, have normalized timestamps, and begin at the package root (`index.html`,
+`game.js`, `game.wasm`, and retained assets); the ZIP does not contain itself. The `none` profile
+does not emit an upload ZIP. The package config selects just one SDK. It includes the shared
+`ad_lifecycle.js` module and injects the selected public configuration; the module loads only that
+provider's SDK. This SDK wiring is not portal approval, live ad fill, or permission to use an
+intrusive placement. Follow the [request, reward, and placement contract](web_ads.md) for the
+
+For local browser acceptance, build a development package and use the CDP runner. Its SDK
+interception supplies a deterministic test fake at script evaluation; it does not contact the
+selected vendor. Node 24, Chrome, and `ffmpeg` must be available:
+
+```text
+stasis package --target web --development-build --portal-profile gamedistribution --portal-game-id "your-public-game-id" --out target/web-gamedistribution-test
+node tools/run_web_ad_browser_acceptance.mjs target/web-gamedistribution-test target/web-ad-browser-acceptance gamedistribution
+node tools/run_web_ad_browser_acceptance.mjs target/web-gamedistribution-test target/web-ad-browser-acceptance gamedistribution --pointer=touch
+```
+
+The runner also accepts `--sdk-failure` and `--module-failure` to exercise SDK-script and dynamic
+`ad_lifecycle.js` import failures in Chrome. These flags are validation modes, not package profiles.
+
+Desktop and mobile packages may stage `network_guest.bundle` so their LAN browser can play the
+game. That embedded LAN guest is deliberately packaged with the `none` profile and does not load
+a portal SDK. A `web.portal` manifest entry does not enable third-party SDKs inside the native LAN
+guest. To select a portal, package the direct Web target with `--target web` and its profile.
+
 Release packaging runs Binaryen's `wasm-opt -Oz` when `wasm-opt` is on `PATH` and also accepts the
 unhyphenated `wasmopt` executable name used by some Windows tool layouts. Set
 `STASIS_WASM_OPT` to an explicit executable path for pinned toolchains or CI. A configured

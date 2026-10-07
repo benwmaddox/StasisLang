@@ -99,6 +99,12 @@ pub(crate) const AOT_RUNTIME_EXPORT_SYMBOLS: &[&str] = &[
     "stasis_jit_network_host_port",
     "stasis_jit_network_host_stop",
     "stasis_jit_open_external_url",
+    "stasis_jit_ad_request",
+    "stasis_jit_ad_poll",
+    "stasis_jit_ad_gameplay_blocked",
+    "stasis_jit_ad_take_reward",
+    "stasis_jit_ad_release",
+    "stasis_jit_portal_lifecycle",
     "stasis_web_network_supported",
     "stasis_web_network_connect",
     "stasis_web_network_status",
@@ -152,6 +158,16 @@ mod tests {
             "stasis_web_network_resume_seat",
             "stasis_web_network_last_sequence",
             "stasis_web_network_checkpoint",
+        ] {
+            assert!(is_aot_runtime_export_symbol(symbol), "missing {symbol}");
+        }
+        for symbol in [
+            "stasis_jit_ad_request",
+            "stasis_jit_ad_poll",
+            "stasis_jit_ad_gameplay_blocked",
+            "stasis_jit_ad_take_reward",
+            "stasis_jit_ad_release",
+            "stasis_jit_portal_lifecycle",
         ] {
             assert!(is_aot_runtime_export_symbol(symbol), "missing {symbol}");
         }

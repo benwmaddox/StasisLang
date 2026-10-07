@@ -124,6 +124,37 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
     let bundle = process
         .write_engine_bundle(&EngineEntrypoints::runtime_default(), &bundle_dir)
         .expect("write native engine bundle");
+    use object::{Object, ObjectSymbol};
+    let undefined_guest_symbols = bundle
+        .object_paths_by_function_id
+        .values()
+        .flat_map(|path| {
+            let bytes = fs::read(path).expect("read generated mobile object");
+            let object =
+                object::File::parse(bytes.as_slice()).expect("parse generated mobile object");
+            object
+                .symbols()
+                .filter(|symbol| symbol.is_undefined())
+                .filter_map(|symbol| symbol.name().ok().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let native_ad_symbols = [
+        "stasis_jit_ad_request",
+        "stasis_jit_ad_poll",
+        "stasis_jit_ad_gameplay_blocked",
+        "stasis_jit_ad_take_reward",
+        "stasis_jit_ad_release",
+        "stasis_jit_portal_lifecycle",
+    ];
+    for expected_symbol in native_ad_symbols {
+        assert!(
+            undefined_guest_symbols
+                .iter()
+                .any(|symbol| symbol.trim_start_matches('_') == expected_symbol),
+            "generated mobile objects must reference native shim {expected_symbol}"
+        );
+    }
     let manifest: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(&bundle.manifest_path).expect("read engine manifest"),
     )
@@ -218,7 +249,6 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         String::from_utf8_lossy(&output.stderr)
     );
     sign_output_artifact_if_configured(&executable).expect("sign generated mobile runtime harness");
-    use object::Object;
     let executable_bytes = fs::read(&executable).expect("read linked PE");
     let pe = object::File::parse(executable_bytes.as_slice()).expect("parse linked PE");
     assert!(pe
@@ -262,6 +292,11 @@ fn generated_aot_objects_and_bindings_run_through_real_mobile_runtime() {
         "test_id": "IT-012",
         "status": "passed",
         "target": "windows-native-aot+c-mobile-runtime",
+        "native_ad_unavailable_contract": {
+            "generated_external_symbols": native_ad_symbols,
+            "guest_main_result": 0,
+            "runtime": "linked native C mobile runtime"
+        },
         "generated_objects": bundle.object_paths_by_function_id.len(),
         "bindings": bindings_path,
         "main_state": 10,

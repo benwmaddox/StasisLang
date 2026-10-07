@@ -147,6 +147,19 @@ fn package_with_mode(workspace: &Path, relative_output: &Path, development: bool
     output
 }
 
+fn package_with_extra_args(workspace: &Path, args: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_stasis"));
+    command
+        .arg("package")
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("--target")
+        .arg("web")
+        .args(args)
+        .arg("--json");
+    command.output().expect("run configured Web package")
+}
+
 fn package(workspace: &Path, relative_output: &Path) -> PathBuf {
     package_with_mode(workspace, relative_output, false)
 }
@@ -684,6 +697,9 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
         .replace("\r\n", "\n");
     let runtime_config = runtime_config(&runtime);
     assert_eq!(runtime_config["strings"], serde_json::json!({}));
+    assert_eq!(runtime_config["portal"]["provider"], "none");
+    assert!(runtime_config.get("adLifecycleUrl").is_none());
+    assert!(!output.join("ad_lifecycle.js").exists());
     assert_eq!(
         runtime_config["stringLiteralTableVersion"],
         serde_json::json!(1)
@@ -794,6 +810,347 @@ fn web_package_contains_runnable_static_bundle_without_standalone_html() {
     assert!(!output.join("web_export_smoke.html").exists());
 
     fs::remove_dir_all(&output).expect("clean web package test output");
+}
+
+#[test]
+fn web_package_portal_profile_emits_ad_runtime_and_deterministic_upload_zip() {
+    let root = repo_root();
+    let workspace = root
+        .join("build")
+        .join(format!("web-portal-profile-test-{}", stamp()));
+    fs::create_dir_all(workspace.join("src")).expect("create portal fixture");
+    fs::write(
+        workspace.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"web_portal_probe","entry":"src/main.stasis","tests":"tests","output":"build","web":{"portal":{"provider":"gamedistribution","game_id":"public-game-833"}}}"#,
+    )
+    .expect("write portal manifest");
+    fs::write(
+        workspace.join("src/main.stasis"),
+        r#"
+function @extern("stasis_jit_ad_request") ad_request(kind: i32): i32;
+function @extern("stasis_jit_ad_poll") ad_poll(handle: i32): i32;
+function @extern("stasis_jit_ad_gameplay_blocked") ad_gameplay_blocked(): i32;
+function @extern("stasis_jit_ad_take_reward") ad_take_reward(handle: i32): i32;
+function @extern("stasis_jit_ad_release") ad_release(handle: i32): void;
+function @extern("stasis_jit_portal_lifecycle") portal_lifecycle(event: i32): void;
+function main(): i32 {
+    let handle: i32 = ad_request(0);
+    return ad_poll(handle) + ad_gameplay_blocked() + ad_take_reward(handle);
+}
+function tick(): i32 { ad_release(0); portal_lifecycle(1); return 0; }
+function render(): i32 { return 0; }
+"#,
+    )
+    .expect("write ad-importing fixture");
+
+    let package = || {
+        let result = package_with_extra_args(&workspace, &["--portal-profile", "gamedistribution"]);
+        assert!(
+            result.status.success(),
+            "portal package failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        workspace.join("dist/web_portal_probe-web-gamedistribution")
+    };
+    let output = package();
+    let archive_path = output.join("gamedistribution-upload.zip");
+    let first_zip = fs::read(&archive_path).expect("provider upload archive");
+    let first_hash = Sha256::digest(&first_zip);
+
+    let runtime = fs::read_to_string(output.join("game.js")).expect("portal game runtime");
+    let config = runtime_config(&runtime);
+    assert_eq!(config["portal"]["provider"], "gamedistribution");
+    assert_eq!(config["portal"]["game_id"], "public-game-833");
+    let module_bytes = fs::read(output.join("ad_lifecycle.js")).expect("ad lifecycle module");
+    assert_eq!(
+        config["adLifecycleUrl"],
+        format!("ad_lifecycle.js?hash={:x}", Sha256::digest(&module_bytes))
+    );
+    let index = fs::read_to_string(output.join("index.html")).expect("portal index");
+    for expected in [
+        "id=\"stasis-ad-controls\"",
+        "id=\"stasis-ad-watch\"",
+        "id=\"stasis-ad-cancel\"",
+        "id=\"stasis-ad-status\"",
+    ] {
+        assert!(
+            index.contains(expected),
+            "missing accessible ad control {expected}"
+        );
+    }
+
+    let imports = Command::new("node")
+        .arg("-e")
+        .arg("const fs = require('node:fs'); const module = new WebAssembly.Module(fs.readFileSync(process.argv[1])); process.stdout.write(JSON.stringify(WebAssembly.Module.imports(module).filter(item => item.module === 'env').map(item => item.name).filter(name => name.startsWith('stasis_jit_ad_') || name === 'stasis_jit_portal_lifecycle').sort()));")
+        .arg(output.join("game.wasm"))
+        .output()
+        .expect("inspect portal Wasm imports");
+    assert!(
+        imports.status.success(),
+        "portal import inspection failed: {}",
+        String::from_utf8_lossy(&imports.stderr)
+    );
+    let imports: Vec<String> = serde_json::from_slice(&imports.stdout).expect("decode imports");
+    assert_eq!(
+        imports,
+        [
+            "stasis_jit_ad_gameplay_blocked",
+            "stasis_jit_ad_poll",
+            "stasis_jit_ad_release",
+            "stasis_jit_ad_request",
+            "stasis_jit_ad_take_reward",
+            "stasis_jit_portal_lifecycle",
+        ]
+    );
+
+    let inspect_zip = Command::new("python")
+        .arg("-c")
+        .arg("import json,pathlib,sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); bad=z.testzip(); names=z.namelist(); assert bad is None, f'bad member: {bad}'; assert names == sorted(names), 'entries are not sorted'; assert 'index.html' in names, 'index.html is not at archive root'; assert all(not n.startswith('/') and '..' not in pathlib.PurePosixPath(n).parts for n in names), 'unsafe archive path'; assert not any(n.endswith('.zip') for n in names), 'archive includes itself'; print(json.dumps(names))")
+        .arg(&archive_path)
+        .output()
+        .expect("inspect upload archive with Python zipfile");
+    assert!(
+        inspect_zip.status.success(),
+        "upload ZIP is invalid: {}",
+        String::from_utf8_lossy(&inspect_zip.stderr)
+    );
+    let entries: Vec<String> =
+        serde_json::from_slice(&inspect_zip.stdout).expect("decode ZIP files");
+    for required in ["game.js", "game.wasm", "ad_lifecycle.js", "index.html"] {
+        assert!(
+            entries.iter().any(|entry| entry == required),
+            "ZIP missing {required}"
+        );
+    }
+
+    let second = package();
+    assert_eq!(
+        Sha256::digest(fs::read(second.join("gamedistribution-upload.zip")).expect("second ZIP")),
+        first_hash,
+        "same package inputs must produce the same upload archive"
+    );
+    fs::remove_dir_all(&workspace).expect("clean portal package fixture");
+}
+
+#[test]
+fn web_package_rejects_invalid_portal_cli_combinations_before_building() {
+    let root = repo_root();
+    let workspace = root
+        .join("build")
+        .join(format!("web-portal-cli-test-{}", stamp()));
+    fs::create_dir_all(workspace.join("src")).expect("create portal CLI fixture");
+    fs::write(
+        workspace.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"web_portal_cli_probe","entry":"src/main.stasis","tests":"tests","output":"build"}"#,
+    )
+    .expect("write no-portal manifest");
+    fs::write(
+        workspace.join("src/main.stasis"),
+        "function main(): i32 { return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+    )
+    .expect("write CLI fixture source");
+
+    for (args, expected) in [
+        (
+            vec!["--portal-profile", "none", "--portal-game-id", "id-1"],
+            "does not accept a game ID",
+        ),
+        (
+            vec!["--portal-profile", "gamedistribution"],
+            "requires --portal-game-id",
+        ),
+        (
+            vec!["--portal-profile", "poki", "--portal-game-id", "id-1"],
+            "does not accept a game ID",
+        ),
+        (
+            vec!["--portal-game-id", "gm-public-833"],
+            "requires a manifest profile",
+        ),
+        (
+            vec![
+                "--portal-profile",
+                "gamemonetize",
+                "--portal-game-id",
+                "bad/id",
+            ],
+            "game ID",
+        ),
+    ] {
+        let result = package_with_extra_args(&workspace, &args);
+        assert!(
+            !result.status.success(),
+            "invalid args unexpectedly succeeded: {args:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(expected),
+            "expected error {expected:?}, got {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    let result = Command::new(env!("CARGO_BIN_EXE_stasis"))
+        .arg("package")
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--target")
+        .arg("desktop")
+        .arg("--portal-profile")
+        .arg("crazygames")
+        .arg("--json")
+        .output()
+        .expect("run non-Web portal CLI check");
+    assert!(
+        !result.status.success(),
+        "portal options must reject non-Web targets"
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("only supported for --target web"),
+        "unexpected non-Web validation: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        !workspace.join("dist/web_portal_cli_probe-web").exists(),
+        "invalid option must fail before package output is created"
+    );
+    fs::remove_dir_all(&workspace).expect("clean portal CLI fixture");
+}
+
+#[test]
+fn web_package_profiles_cover_all_providers_and_none_without_guest_imports() {
+    let root = repo_root();
+    let workspace = root
+        .join("build")
+        .join(format!("web-portal-switch-test-{}", stamp()));
+    fs::create_dir_all(workspace.join("src")).expect("create profile-switch fixture");
+    fs::write(
+        workspace.join("stasis.json"),
+        r#"{"manifest_version":1,"name":"web_portal_switch","entry":"src/main.stasis","tests":"tests","output":"build","web":{"portal":{"provider":"crazygames"}}}"#,
+    )
+    .expect("write CrazyGames manifest profile");
+    fs::write(
+        workspace.join("src/main.stasis"),
+        "function main(): i32 { return 0; } function tick(): i32 { return 0; } function render(): i32 { return 0; }",
+    )
+    .expect("write no-ad-import source");
+
+    let profiles = [
+        ("crazygames", Vec::<&str>::new(), None),
+        (
+            "gamemonetize",
+            vec![
+                "--portal-profile",
+                "gamemonetize",
+                "--portal-game-id",
+                "gm-public-833",
+            ],
+            Some("gm-public-833"),
+        ),
+        (
+            "gamedistribution",
+            vec![
+                "--portal-profile",
+                "gamedistribution",
+                "--portal-game-id",
+                "gd-public-833",
+            ],
+            Some("gd-public-833"),
+        ),
+        ("poki", vec!["--portal-profile", "poki"], None),
+    ];
+    for (provider, args, game_id) in profiles {
+        let result = package_with_extra_args(&workspace, &args);
+        assert!(
+            result.status.success(),
+            "{provider} package failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let output = workspace.join(format!("dist/web_portal_switch-web-{provider}"));
+        assert!(
+            output.join("ad_lifecycle.js").is_file(),
+            "{provider} module missing without guest imports"
+        );
+        assert!(
+            output.join(format!("{provider}-upload.zip")).is_file(),
+            "{provider} upload archive missing"
+        );
+        let runtime = fs::read_to_string(output.join("game.js")).expect("read profile runtime");
+        let config = runtime_config(&runtime);
+        assert_eq!(config["portal"]["provider"], provider);
+        if let Some(game_id) = game_id {
+            assert_eq!(config["portal"]["game_id"], game_id);
+        } else {
+            assert!(config["portal"].get("game_id").is_none());
+        }
+        let inspect_zip = Command::new("python")
+            .arg("-c")
+            .arg("import json,sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); bad=z.testzip(); names=z.namelist(); assert bad is None, f'bad member: {bad}'; assert names == sorted(names), 'entries are not sorted'; assert 'index.html' in names, 'index.html is not at archive root'; print(json.dumps(names))")
+            .arg(output.join(format!("{provider}-upload.zip")))
+            .output()
+            .expect("validate profile ZIP");
+        assert!(
+            inspect_zip.status.success(),
+            "{provider} upload ZIP is invalid: {}",
+            String::from_utf8_lossy(&inspect_zip.stderr)
+        );
+        let wasm_ad_imports = Command::new("node")
+            .arg("-e")
+            .arg("const fs = require('node:fs'); const module = new WebAssembly.Module(fs.readFileSync(process.argv[1])); const imports = WebAssembly.Module.imports(module).filter(item => item.module === 'env' && (item.name.startsWith('stasis_jit_ad_') || item.name === 'stasis_jit_portal_lifecycle')); process.stdout.write(JSON.stringify(imports));")
+            .arg(output.join("game.wasm"))
+            .output()
+            .expect("inspect no-ad-import Wasm");
+        assert!(wasm_ad_imports.status.success());
+        let wasm_ad_imports: Vec<serde_json::Value> =
+            serde_json::from_slice(&wasm_ad_imports.stdout).expect("decode Wasm imports");
+        assert!(
+            wasm_ad_imports.is_empty(),
+            "portal SDK loading is independent of guest ad imports"
+        );
+    }
+
+    let explicit_output = Path::new("build/explicit-portal-output");
+    let explicit_result = package_with_extra_args(
+        &workspace,
+        &[
+            "--portal-profile",
+            "gamedistribution",
+            "--portal-game-id",
+            "gd-explicit-833",
+            "--out",
+            explicit_output.to_str().expect("UTF-8 package path"),
+        ],
+    );
+    assert!(
+        explicit_result.status.success(),
+        "explicit portal output failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&explicit_result.stdout),
+        String::from_utf8_lossy(&explicit_result.stderr)
+    );
+    assert!(
+        workspace
+            .join(explicit_output)
+            .join("gamedistribution-upload.zip")
+            .is_file(),
+        "--out must be the exact portal package directory"
+    );
+
+    let result = package_with_extra_args(&workspace, &["--portal-profile", "none"]);
+    assert!(
+        result.status.success(),
+        "none override failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let none_output = workspace.join("dist/web_portal_switch-web");
+    let none_runtime = fs::read_to_string(none_output.join("game.js")).expect("none runtime");
+    let none_config = runtime_config(&none_runtime);
+    assert_eq!(none_config["portal"]["provider"], "none");
+    assert!(none_config.get("adLifecycleUrl").is_none());
+    assert!(!none_output.join("ad_lifecycle.js").exists());
+    assert!(!none_output.join("crazygames-upload.zip").exists());
+    fs::remove_dir_all(&workspace).expect("clean profile-switch fixture");
 }
 
 #[test]
