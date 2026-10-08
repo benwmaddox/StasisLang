@@ -36,7 +36,69 @@
   let externalActionGeneration = 0;
   let pendingExternalActionGeneration = 0;
   const commands = [];
-  const game = window.STASIS_GAME || { strings: {}, memory: {}, assets: {} };
+  const playgroundBoot = window.STASIS_PLAYGROUND_BOOT || null;
+  const playgroundEnabled = Boolean(playgroundBoot);
+  let playgroundMetadata = playgroundBoot?.metadata || null;
+  let game = playgroundMetadata?.config || window.STASIS_GAME || { strings: {}, memory: {}, assets: {} };
+  const PLAYGROUND_PURE_IMPORTS = new Set([
+    "sin_fast", "cos_fast", "stasis_jit_sin_fast", "stasis_jit_cos_fast",
+  ]);
+  const PLAYGROUND_REJECT_IMPORTS = new Set(["reject_code_swap", "stasis_jit_reject_code_swap"]);
+  const PLAYGROUND_ALLOWED_IMPORTS = new Set([
+    "sin_fast", "cos_fast", "stasis_jit_sin_fast", "stasis_jit_cos_fast",
+    "print_i32", "print_int", "print_char", "print_string",
+    "stasis_jit_print_i32", "stasis_jit_print_string",
+    "sys_memcpy_u8", "sys_memcpy_i32", "sys_memcpy_f32",
+    "sys_memmove_u8", "sys_memmove_i32", "sys_memmove_f32",
+    "stasis_jit_sys_memcpy_u8", "stasis_jit_sys_memcpy_i32", "stasis_jit_sys_memcpy_f32",
+    "stasis_jit_sys_memmove_u8", "stasis_jit_sys_memmove_i32", "stasis_jit_sys_memmove_f32",
+    // @stasis-import web_input_axis begin
+    "web_input_axis",
+    // @stasis-import web_input_axis end
+    // @stasis-import web_input_fire begin
+    "web_input_fire",
+    // @stasis-import web_input_fire end
+    // @stasis-import web_pointer_x begin
+    "web_pointer_x",
+    // @stasis-import web_pointer_x end
+    // @stasis-import web_pointer_down begin
+    "web_pointer_down",
+    // @stasis-import web_pointer_down end
+    "web_begin_frame", "web_draw_rect", "web_draw_text",
+    "gfx_load_sprite", "stasis_gfx_load_sprite", "gfx_release_sprite",
+    "stasis_gfx_release_sprite", "stasis_jit_gfx_release_sprite",
+    "gfx_release_font", "stasis_gfx_release_font", "stasis_jit_gfx_release_font",
+    "font_status", "stasis_font_status", "stasis_jit_font_status",
+    "stasis_jit_asset_request_sprite",
+    "stasis_jit_asset_task_poll", "stasis_jit_asset_task_take_handle", "stasis_jit_asset_task_cancel",
+    "load_font", "stasis_load_font", "measure_text", "stasis_measure_text", "stasis_jit_measure_text",
+    "stasis_jit_sprite_load_from", "stasis_jit_gfx_cache_text",
+    "stasis_jit_text_run_load_from", "stasis_jit_text_run_replace_from",
+    "reject_code_swap", "stasis_jit_reject_code_swap",
+  ]);
+  let playgroundGeneration = 0;
+  let playgroundPaused = false;
+  let playgroundSteps = 0;
+  let playgroundRequestId = 0;
+  let pendingPlaygroundSwap = null;
+  const playgroundSnapshotScratch = new WeakMap();
+  let resolvePlaygroundReady;
+  let rejectPlaygroundReady;
+  const playgroundReady = new Promise((resolve, reject) => {
+    resolvePlaygroundReady = resolve;
+    rejectPlaygroundReady = reject;
+  });
+  void playgroundReady.catch(() => {});
+  if (playgroundEnabled) {
+    window.STASIS_PLAYGROUND = Object.freeze({
+      ready: playgroundReady,
+      swap: request => queuePlaygroundSwap(request),
+      pause: value => pausePlayground(value),
+      step: () => stepPlayground(),
+      snapshot: () => snapshotPlaygroundState(),
+      get generation() { return playgroundGeneration; },
+    });
+  }
   const AD_STATE_FAILED = 4;
   const AD_PROVIDERS = new Set(["crazygames", "gamemonetize", "gamedistribution", "poki"]);
   const portalProfile = game.portal && typeof game.portal === "object" ? game.portal : { provider: "none" };
@@ -111,8 +173,8 @@
     catch (error) { setAdStatus(`Ad request could not be canceled. ${String(error?.message || error)}`); }
   });
   const STRING_LITERAL_TABLE_VERSION = 1;
-  const stringLiteralTableVersion = game.stringLiteralTableVersion ?? 1;
-  const stringLiteralTable = game.stringLiteralTable ?? game.literalTable ?? game.string_literals ?? {};
+  let stringLiteralTableVersion = game.stringLiteralTableVersion ?? 1;
+  let stringLiteralTable = game.stringLiteralTable ?? game.literalTable ?? game.string_literals ?? {};
   const replaySource = (() => {
     if (!globalThis.location || typeof URLSearchParams !== "function") return null;
     return new URLSearchParams(globalThis.location.search).get("stasis-replay");
@@ -417,9 +479,25 @@
     }
     return 0;
   };
-  networkLoadCheckpoint();
+  if (!playgroundEnabled) networkLoadCheckpoint();
   // @stasis-feature network end
   // @stasis-feature audio begin
+  for (const name of [
+    "web_play_tone",
+    "stasis_jit_asset_request_audio",
+    "audio_init", "audio_shutdown", "audio_is_available", "audio_get_sample_rate",
+    "audio_get_channels", "audio_get_queued_frames", "audio_get_underruns", "audio_push_f32_interleaved",
+    "stasis_jit_audio_init", "stasis_jit_audio_shutdown", "stasis_jit_audio_is_available",
+    "stasis_jit_audio_get_sample_rate", "stasis_jit_audio_get_channels",
+    "stasis_jit_audio_get_queued_frames", "stasis_jit_audio_get_underruns",
+    "stasis_jit_audio_push_f32_interleaved", "audio_load_wav", "audio_release", "audio_play",
+    "audio_stop", "audio_voice_is_playing", "audio_voice_set_paused", "audio_voice_set_volume_pan",
+    "stasis_jit_audio_play", "stasis_jit_audio_stop", "stasis_jit_audio_voice_is_playing",
+    "stasis_jit_audio_voice_set_paused", "stasis_jit_audio_voice_set_volume_pan",
+    "stasis_jit_audio_load_music", "stasis_jit_audio_load_effect", "stasis_jit_audio_play_music",
+    "stasis_jit_audio_play_effect", "stasis_jit_audio_stop_music", "stasis_jit_audio_pause_music",
+    "stasis_jit_audio_set_music_volume",
+  ]) PLAYGROUND_ALLOWED_IMPORTS.add(name);
   let audioContext;
   let audioEnablePromise;
   let audioEvents = 0;
@@ -652,7 +730,8 @@
     const overrides = game.assets || {};
     if (Object.prototype.hasOwnProperty.call(overrides, key)) return overrides[key];
     const urls = game.asset_urls || {};
-    return Object.prototype.hasOwnProperty.call(urls, key) ? urls[key] : key;
+    if (Object.prototype.hasOwnProperty.call(urls, key)) return urls[key];
+    return playgroundEnabled ? "data:," : key;
   };
   const assetMetadata = id => {
     const key = assetKey(stringValue(id));
@@ -1018,24 +1097,23 @@
         && Number.isSafeInteger(layout.offset))
       .map(layout => [layout.offset | 0, layout])
   );
-  const u8MemoryLayouts = new Map(
-    Object.entries(game.memory || {})
-      .filter(([, layout]) => (layout?.byte_backed === true || layout?.type_id === 5)
-        && Number.isSafeInteger(layout.hash))
-      .map(([path, layout]) => [layout.hash | 0, { ...layout, path }])
-  );
-  const u8MemoryLayoutsByOffset = new Map(
-    Object.entries(game.memory || {})
-      .filter(([, layout]) => (layout?.byte_backed === true || layout?.type_id === 5)
-        && Number.isSafeInteger(layout.offset))
-      .map(([path, layout]) => [layout.offset | 0, { ...layout, path }])
-  );
-  const u8MemoryLayoutsByHandle = new Map(
-    Object.entries(game.memory || {})
-      .filter(([, layout]) => (layout?.byte_backed === true || layout?.type_id === 5)
-        && Number.isSafeInteger(layout.handle) && layout.handle !== 0)
-      .map(([path, layout]) => [layout.handle | 0, { ...layout, path }])
-  );
+  const u8MemoryLayouts = new Map();
+  const u8MemoryLayoutsByOffset = new Map();
+  const u8MemoryLayoutsByHandle = new Map();
+  const rebuildU8MemoryLayouts = () => {
+    u8MemoryLayouts.clear();
+    u8MemoryLayoutsByOffset.clear();
+    u8MemoryLayoutsByHandle.clear();
+    for (const [path, layout] of Object.entries(game.memory || {})) {
+      if (layout?.byte_backed !== true && layout?.type_id !== 5) continue;
+      if (Number.isSafeInteger(layout.hash)) u8MemoryLayouts.set(layout.hash | 0, { ...layout, path });
+      if (Number.isSafeInteger(layout.offset)) u8MemoryLayoutsByOffset.set(layout.offset | 0, { ...layout, path });
+      if (Number.isSafeInteger(layout.handle) && layout.handle !== 0) {
+        u8MemoryLayoutsByHandle.set(layout.handle | 0, { ...layout, path });
+      }
+    }
+  };
+  rebuildU8MemoryLayouts();
   const legacyMemoryLayout = (byHash, byOffset, reference) =>
     byHash.get(reference | 0) || byOffset.get(reference | 0);
   const hasU8MemoryReference = reference => collectionViewAbiVersion === COLLECTION_VIEW_ABI_VERSION
@@ -1085,10 +1163,13 @@
       writeU8(destination, dstIndex + offset, values[offset]);
     }
   };
-  const typedMemoryLayouts = new Map([
-    [1, { byHandle: memoryLayoutsByHandle(1), byHash: memoryLayoutsByHash(1), byOffset: memoryLayoutsByOffset(1), width: 4 }],
-    [2, { byHandle: memoryLayoutsByHandle(2), byHash: memoryLayoutsByHash(2), byOffset: memoryLayoutsByOffset(2), width: 4 }],
-  ]);
+  const typedMemoryLayouts = new Map();
+  const rebuildTypedMemoryLayouts = () => {
+    typedMemoryLayouts.clear();
+    typedMemoryLayouts.set(1, { byHandle: memoryLayoutsByHandle(1), byHash: memoryLayoutsByHash(1), byOffset: memoryLayoutsByOffset(1), width: 4 });
+    typedMemoryLayouts.set(2, { byHandle: memoryLayoutsByHandle(2), byHash: memoryLayoutsByHash(2), byOffset: memoryLayoutsByOffset(2), width: 4 });
+  };
+  rebuildTypedMemoryLayouts();
   const resolveTypedMemory = (reference, typeId) => {
     const metadata = typedMemoryLayouts.get(typeId);
     const layout = collectionViewAbiVersion === COLLECTION_VIEW_ABI_VERSION
@@ -2656,13 +2737,28 @@
   const imports = { env: {
     sin_fast: value => Math.sin(value),
     cos_fast: value => Math.cos(value),
+    stasis_jit_sin_fast: value => Math.sin(value),
+    stasis_jit_cos_fast: value => Math.cos(value),
     print_i32: value => console.log(value),
     print_int: value => console.log(value),
     print_char: value => console.log(String.fromCodePoint(value)),
     print_string: value => console.log(stringValue(value)),
+    stasis_jit_print_i32: value => console.log(value),
+    stasis_jit_print_string: value => console.log(stringValue(value)),
     sys_memcpy_u8: sysMemcpyU8,
     sys_memcpy_i32: sysMemcpyI32,
     sys_memcpy_f32: sysMemcpyF32,
+    sys_memmove_u8: sysMemcpyU8,
+    sys_memmove_i32: sysMemcpyI32,
+    sys_memmove_f32: sysMemcpyF32,
+    stasis_jit_sys_memcpy_u8: sysMemcpyU8,
+    stasis_jit_sys_memcpy_i32: sysMemcpyI32,
+    stasis_jit_sys_memcpy_f32: sysMemcpyF32,
+    stasis_jit_sys_memmove_u8: sysMemcpyU8,
+    stasis_jit_sys_memmove_i32: sysMemcpyI32,
+    stasis_jit_sys_memmove_f32: sysMemcpyF32,
+    reject_code_swap: () => { throw new Error("candidate rejected code swap"); },
+    stasis_jit_reject_code_swap: () => { throw new Error("candidate rejected code swap"); },
     stasis_jit_ad_request: kind => callAdNumber("request", 0, kind | 0),
     stasis_jit_ad_poll: handle => callAdNumber("poll", AD_STATE_FAILED, handle | 0),
     stasis_jit_ad_gameplay_blocked: () => callAdNumber("gameplayBlocked", 0) ? 1 : 0,
@@ -2886,6 +2982,395 @@
     stasis_jit_audio_set_music_volume: (handle, volume) => setAudioAssetVolume(handle, volume),
     // @stasis-feature audio end
   }};
+
+  let activePlaygroundGate = null;
+  let activeHostFunctions = new Map();
+  let playgroundStepWaiters = [];
+  const stablePlaygroundJson = value => {
+    if (Array.isArray(value)) return `[${value.map(stablePlaygroundJson).join(",")}]`;
+    if (value && typeof value === "object") {
+      return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stablePlaygroundJson(value[key])}`).join(",")}}`;
+    }
+    return JSON.stringify(value);
+  };
+  const withoutPlaygroundAssets = config => {
+    const { assets: _assets, asset_urls: _assetUrls, asset_metadata: _assetMetadata,
+      assetMetadata: _camelAssetMetadata, ...rest } = config || {};
+    return rest;
+  };
+  function validatePlaygroundConfig(config) {
+    if (!config || typeof config !== "object" || Array.isArray(config)) {
+      throw new Error("playground package config must be an object");
+    }
+    const provider = config.portal?.provider;
+    if (provider && provider !== "none") throw new Error("playground packages cannot configure portal effects");
+    for (const field of ["assets", "asset_urls"]) {
+      const values = config[field];
+      if (values === undefined) continue;
+      if (!values || typeof values !== "object" || Array.isArray(values)) {
+        throw new Error(`playground ${field} must be an object of local asset URLs`);
+      }
+      for (const [path, url] of Object.entries(values)) {
+        if (!path || typeof url !== "string" || !/^(?:blob:|data:)/i.test(url)) {
+          throw new Error(`playground asset '${path}' must use a local blob: or data: URL`);
+        }
+      }
+    }
+    return config;
+  }
+  function validatePlaygroundMetadata(metadata, config, expectedDigest, requireSnapshot) {
+    if (!metadata || typeof metadata !== "object" || metadata.schemaVersion !== 1) {
+      throw new Error("unsupported playground compiler metadata");
+    }
+    if (typeof metadata.layoutDigest !== "string" || !/^[0-9a-f]{64}$/.test(metadata.layoutDigest)
+        || metadata.layoutDigest !== expectedDigest) {
+      throw new Error("playground state layout digest mismatch");
+    }
+    if (!Array.isArray(metadata.imports)
+        || metadata.imports.some(value => typeof value !== "string")
+        || new Set(metadata.imports).size !== metadata.imports.length
+        || metadata.imports.some((value, index) => index > 0 && metadata.imports[index - 1] > value)) {
+      throw new Error("playground compiler import metadata must be a sorted unique list");
+    }
+    const entries = metadata.entrypoints;
+    const checkEntry = (name, returnType, optional = false) => {
+      const entry = entries?.[name];
+      if (optional && (entry === null || entry === undefined)) return false;
+      if (!entry || !Array.isArray(entry.parameters) || entry.parameters.length !== 0
+          || entry.returnType !== returnType) {
+        throw new Error(`playground ${name} metadata must be ${name}(): ${returnType}`);
+      }
+      return true;
+    };
+    checkEntry("main", "i32");
+    checkEntry("tick", "i32");
+    checkEntry("render", "i32");
+    const hookPresent = checkEntry("on_code_swap", "void", true);
+    if (metadata.hookPresent !== hookPresent) throw new Error("playground on_code_swap metadata disagrees");
+    if (config.collectionViewAbiVersion !== COLLECTION_VIEW_ABI_VERSION) {
+      throw new Error(`playground collection view ABI must be ${COLLECTION_VIEW_ABI_VERSION}`);
+    }
+    if (metadata.snapshotSupported !== true && requireSnapshot) {
+      throw new Error("hot swap requires canonical user-state snapshots");
+    }
+    const descriptor = metadata.replayCompatibility?.state_snapshot;
+    if (metadata.snapshotSupported === true) {
+      if (!descriptor || descriptor.support !== "canonical_bytes"
+          || descriptor.size_operation !== "stasis_replay_state_snapshot_size"
+          || descriptor.write_operation !== "stasis_replay_state_snapshot_write"
+          || descriptor.restore_operation !== "stasis_replay_state_snapshot_restore"
+          || !Number.isSafeInteger(descriptor.required_bytes) || descriptor.required_bytes < 0
+          || descriptor.required_bytes > 64 * 1024 * 1024) {
+        throw new Error("playground canonical state snapshot descriptor is invalid");
+      }
+    }
+    return { hookPresent, descriptor };
+  }
+  const playgroundRendererContract = config => stablePlaygroundJson({
+    collectionViewAbiVersion: config.collectionViewAbiVersion ?? 1,
+    renderContractVersion: config.renderContractVersion ?? GFX_CMD_LEGACY_VERSION,
+    renderConstructionLifecycleVersion: config.renderConstructionLifecycleVersion ?? 0,
+    spriteAtlasPageSize: config.spriteAtlasPageSize ?? 2048,
+    atlasBudgetBytes: config.atlasBudgetBytes ?? null,
+  });
+  function inspectPlaygroundModule(module, metadata) {
+    const moduleImports = WebAssembly.Module.imports(module);
+    // WasmProcess metadata is a set of imported symbols; a module may contain
+    // multiple import entries for one symbol (for example, stdlib plus a user
+    // declaration), so compare the same normalized set representation here.
+    const actualImports = Array.from(new Set(moduleImports.map(entry => entry.name))).sort();
+    if (stablePlaygroundJson(actualImports) !== stablePlaygroundJson(metadata.imports)) {
+      throw new Error("playground Wasm imports do not match compiler metadata");
+    }
+    for (const entry of moduleImports) {
+      if (entry.module !== "env" || entry.kind !== "function") {
+        throw new Error(`playground Wasm import '${entry.module}.${entry.name}' is unsupported`);
+      }
+      if (!PLAYGROUND_ALLOWED_IMPORTS.has(entry.name)) {
+        throw new Error(`playground Wasm import '${entry.name}' is not available in the browser sandbox`);
+      }
+      if (typeof imports.env[entry.name] !== "function") {
+        throw new Error(`playground Wasm import '${entry.name}' has no local host implementation`);
+      }
+    }
+    const moduleExports = new Map(WebAssembly.Module.exports(module).map(entry => [entry.name, entry.kind]));
+    for (const name of ["main", "tick", "render"]) {
+      if (moduleExports.get(name) !== "function") throw new Error(`playground Wasm is missing ${name}()`);
+    }
+    if (metadata.hookPresent && moduleExports.get("on_code_swap") !== "function") {
+      throw new Error("playground Wasm is missing its declared on_code_swap() hook");
+    }
+    if (!metadata.hookPresent && moduleExports.has("on_code_swap")) {
+      throw new Error("playground Wasm exports an undeclared on_code_swap() hook");
+    }
+    if (metadata.snapshotSupported) {
+      for (const name of [
+        "stasis_replay_state_snapshot_size",
+        "stasis_replay_state_snapshot_write",
+        "stasis_replay_state_snapshot_restore",
+      ]) {
+        if (moduleExports.get(name) !== "function") throw new Error(`playground Wasm is missing ${name}`);
+      }
+    }
+    return moduleImports;
+  }
+  function playgroundImportsFor(moduleImports, gate) {
+    const env = {};
+    for (const entry of moduleImports) {
+      const name = entry.name;
+      const hostFunction = imports.env[name];
+      env[name] = (...args) => {
+        if (gate.mode === "active") return hostFunction(...args);
+        if (gate.mode === "hook" && PLAYGROUND_REJECT_IMPORTS.has(name)) {
+          throw new Error("candidate rejected code swap");
+        }
+        if (PLAYGROUND_PURE_IMPORTS.has(name)) return hostFunction(...args);
+        throw new Error(`playground import '${name}' is blocked during ${gate.mode}`);
+      };
+    }
+    return { env };
+  }
+  function validatePlaygroundInstance(candidate, metadata, descriptor, requireSnapshot) {
+    const exports = candidate?.exports;
+    if (!exports || !(exports.memory instanceof WebAssembly.Memory)) {
+      throw new Error("playground Wasm must export linear memory");
+    }
+    for (const name of ["main", "tick", "render"]) {
+      if (typeof exports[name] !== "function" || exports[name].length !== 0) {
+        throw new Error(`playground Wasm ${name} export has an invalid signature`);
+      }
+    }
+    if (metadata.hookPresent
+        && (typeof exports.on_code_swap !== "function" || exports.on_code_swap.length !== 0)) {
+      throw new Error("playground Wasm on_code_swap export has an invalid signature");
+    }
+    const collectionAbi = exports.__stasis_collection_view_abi_version;
+    if (!(collectionAbi instanceof WebAssembly.Global)
+        || Number(collectionAbi.value) !== COLLECTION_VIEW_ABI_VERSION) {
+      throw new Error("playground Wasm collection view ABI does not match the runtime");
+    }
+    if (requireSnapshot) {
+      for (const name of [
+        "stasis_replay_state_snapshot_size",
+        "stasis_replay_state_snapshot_write",
+        "stasis_replay_state_snapshot_restore",
+      ]) {
+        if (typeof exports[name] !== "function") throw new Error(`playground Wasm is missing ${name}`);
+      }
+      const required = exports.stasis_replay_state_snapshot_size();
+      if (!Number.isSafeInteger(required) || required !== descriptor.required_bytes) {
+        throw new Error("playground Wasm snapshot size disagrees with its state descriptor");
+      }
+    }
+  }
+  function buildHostFunctionMap(config, exports) {
+    const declared = config.host_exports ?? { abi_version: 1, functions: [] };
+    if (declared.abi_version !== 1 || !Array.isArray(declared.functions)) {
+      throw new Error("unsupported host export ABI version");
+    }
+    const result = new Map();
+    for (const record of declared.functions) {
+      const signature = record.signature;
+      if (!signature || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(signature.name)
+          || record.symbol !== `stasis_host_v1_${signature.name}`
+          || result.has(signature.name) || typeof exports[record.symbol] !== "function"
+          || !Array.isArray(signature.parameters) || signature.parameters.length > 3
+          || signature.parameters.some(type => type !== "i32" && type !== "bool")
+          || (signature.return_type !== "void" && signature.return_type !== "i32")) {
+        throw new Error("invalid declared host export");
+      }
+      result.set(signature.name, record);
+    }
+    return result;
+  }
+  function applyPlaygroundConfig(config, metadata) {
+    game = config;
+    playgroundMetadata = metadata;
+    stringLiteralTableVersion = game.stringLiteralTableVersion ?? 1;
+    stringLiteralTable = game.stringLiteralTable ?? game.literalTable ?? game.string_literals ?? {};
+    rebuildU8MemoryLayouts();
+    rebuildTypedMemoryLayouts();
+  }
+  function playgroundSnapshotBytes(candidate, metadata) {
+    if (!metadata?.snapshotSupported) throw new Error("canonical state snapshots are unavailable for this project");
+    const descriptor = metadata.replayCompatibility?.state_snapshot;
+    validatePlaygroundMetadata(metadata, metadata.config, metadata.layoutDigest, true);
+    validatePlaygroundInstance(candidate, metadata, descriptor, true);
+    const memory = candidate.exports.memory;
+    const required = descriptor.required_bytes;
+    let scratch = playgroundSnapshotScratch.get(memory);
+    if (!scratch || scratch.capacity < required || scratch.pointer + required > memory.buffer.byteLength) {
+      const pointer = memory.buffer.byteLength;
+      if (pointer + required > 0x7fff_ffff) throw new Error("playground state snapshot exceeds Wasm32 memory bounds");
+      const pages = Math.ceil(required / 65_536);
+      if (pages > 0) {
+        try { memory.grow(pages); } catch { throw new Error("unable to allocate playground state snapshot memory"); }
+      }
+      scratch = { pointer, capacity: pages * 65_536 };
+      playgroundSnapshotScratch.set(memory, scratch);
+    }
+    const written = candidate.exports.stasis_replay_state_snapshot_write(scratch.pointer, required);
+    if (written !== required) throw new Error(`playground snapshot write returned ${String(written)}; expected ${required}`);
+    return new Uint8Array(memory.buffer, scratch.pointer, required).slice();
+  }
+  function restorePlaygroundSnapshot(candidate, metadata, bytes) {
+    const descriptor = metadata.replayCompatibility.state_snapshot;
+    const memory = candidate.exports.memory;
+    let scratch = playgroundSnapshotScratch.get(memory);
+    const required = descriptor.required_bytes;
+    if (!scratch || scratch.capacity < required || scratch.pointer + required > memory.buffer.byteLength) {
+      const pointer = memory.buffer.byteLength;
+      if (pointer + required > 0x7fff_ffff) throw new Error("playground state snapshot exceeds Wasm32 memory bounds");
+      const pages = Math.ceil(required / 65_536);
+      if (pages > 0) {
+        try { memory.grow(pages); } catch { throw new Error("unable to allocate candidate state snapshot memory"); }
+      }
+      scratch = { pointer, capacity: pages * 65_536 };
+      playgroundSnapshotScratch.set(memory, scratch);
+    }
+    new Uint8Array(memory.buffer, scratch.pointer, required).set(bytes);
+    const restored = candidate.exports.stasis_replay_state_snapshot_restore(scratch.pointer, required);
+    if (restored !== required) throw new Error(`candidate state restore returned ${String(restored)}; expected ${required}`);
+  }
+  async function preparePlaygroundCandidate(request, requestId) {
+    const metadata = request?.metadata;
+    const expectedDigest = playgroundMetadata?.layoutDigest;
+    if (!expectedDigest || request?.layoutDigest !== expectedDigest) {
+      throw new Error("hot swap requires the active state's exact layout digest");
+    }
+    if (!request.config || stablePlaygroundJson(withoutPlaygroundAssets(request.config))
+        !== stablePlaygroundJson(withoutPlaygroundAssets(metadata?.config))) {
+      throw new Error("playground package config disagrees with compiler metadata");
+    }
+    const config = validatePlaygroundConfig(request.config);
+    const { descriptor } = validatePlaygroundMetadata(metadata, config, expectedDigest, true);
+    if (playgroundRendererContract(config) !== playgroundRendererContract(game)) {
+      throw new Error("hot swap changes a renderer ABI or allocation setting");
+    }
+    const byteSource = request.wasmBytes;
+    const bytes = byteSource instanceof ArrayBuffer
+      ? byteSource
+      : ArrayBuffer.isView(byteSource)
+        ? byteSource.buffer.slice(byteSource.byteOffset, byteSource.byteOffset + byteSource.byteLength)
+        : null;
+    if (!bytes || bytes.byteLength === 0 || bytes.byteLength > 32 * 1024 * 1024) {
+      throw new Error("playground Wasm bytes are missing or exceed the 32 MiB limit");
+    }
+    const module = await WebAssembly.compile(bytes);
+    const moduleImports = inspectPlaygroundModule(module, metadata);
+    const gate = { mode: "instantiate", requestId };
+    const result = await WebAssembly.instantiate(module, playgroundImportsFor(moduleImports, gate));
+    const candidate = result.instance || result;
+    validatePlaygroundInstance(candidate, metadata, descriptor, true);
+    const hostFunctions = buildHostFunctionMap(config, candidate.exports);
+    return { candidate, metadata, config, gate, hostFunctions, requestId };
+  }
+  function queuePlaygroundSwap(request) {
+    if (!playgroundEnabled) return Promise.reject(new Error("playground hot swap is unavailable"));
+    if (!instance || !playgroundMetadata) return Promise.reject(new Error("playground runtime is not ready"));
+    const requestId = ++playgroundRequestId;
+    return preparePlaygroundCandidate(request, requestId).then(candidate => new Promise((resolve, reject) => {
+      if (requestId !== playgroundRequestId) {
+        candidate.gate.mode = "revoked";
+        reject(new Error("playground swap was superseded"));
+        return;
+      }
+      if (pendingPlaygroundSwap) {
+        pendingPlaygroundSwap.gate.mode = "revoked";
+        pendingPlaygroundSwap.reject(new Error("playground swap was superseded"));
+      }
+      pendingPlaygroundSwap = { ...candidate, resolve, reject };
+    }));
+  }
+  function commitPendingPlaygroundSwap() {
+    const pending = pendingPlaygroundSwap;
+    if (!pending) return;
+    pendingPlaygroundSwap = null;
+    try {
+      if (pending.requestId !== playgroundRequestId) throw new Error("playground swap was superseded");
+      if (pending.metadata.layoutDigest !== playgroundMetadata.layoutDigest) {
+        throw new Error("active state layout changed while the candidate was compiling");
+      }
+      const bytes = playgroundSnapshotBytes(instance, playgroundMetadata);
+      restorePlaygroundSnapshot(pending.candidate, pending.metadata, bytes);
+      pending.gate.mode = "hook";
+      if (pending.metadata.hookPresent) pending.candidate.exports.on_code_swap();
+      const previousGate = activePlaygroundGate;
+      instance = pending.candidate;
+      applyPlaygroundConfig(pending.config, pending.metadata);
+      activeHostFunctions = pending.hostFunctions;
+      wasmModuleGeneration += 1;
+      clearLiteralTextCache();
+      playgroundGeneration += 1;
+      pending.gate.mode = "active";
+      activePlaygroundGate = pending.gate;
+      if (previousGate) previousGate.mode = "revoked";
+      if (document.body?.dataset) document.body.dataset.playgroundGeneration = String(playgroundGeneration);
+      pending.resolve({ generation: playgroundGeneration, layoutDigest: playgroundMetadata.layoutDigest });
+    } catch (error) {
+      pending.gate.mode = "revoked";
+      pending.reject(error);
+    }
+  }
+  function pausePlayground(value) {
+    playgroundPaused = Boolean(value);
+    if (!playgroundPaused) {
+      playgroundSteps = 0;
+      for (const resolve of playgroundStepWaiters.splice(0)) resolve({ stepped: false, generation: playgroundGeneration });
+    }
+    return playgroundPaused;
+  }
+  function stepPlayground() {
+    if (!playgroundEnabled) return Promise.reject(new Error("playground stepping is unavailable"));
+    if (!playgroundPaused) return Promise.reject(new Error("pause the playground before stepping"));
+    playgroundSteps += 1;
+    return new Promise(resolve => playgroundStepWaiters.push(resolve));
+  }
+  function completePlaygroundStep() {
+    if (!playgroundPaused || playgroundSteps === 0) return;
+    playgroundSteps -= 1;
+    const resolve = playgroundStepWaiters.shift();
+    resolve?.({ stepped: true, generation: playgroundGeneration });
+  }
+  function snapshotPlaygroundState() {
+    if (!playgroundEnabled || !instance || !playgroundMetadata) {
+      throw new Error("playground runtime is not ready");
+    }
+    return Object.freeze({
+      generation: playgroundGeneration,
+      layoutDigest: playgroundMetadata.layoutDigest,
+      bytes: playgroundSnapshotBytes(instance, playgroundMetadata),
+    });
+  }
+  async function initializePlayground(boot) {
+    const metadata = boot?.metadata;
+    const config = validatePlaygroundConfig(metadata?.config);
+    const digest = metadata?.layoutDigest;
+    if (boot?.layoutDigest !== digest) throw new Error("playground boot layout digest disagrees with metadata");
+    const { descriptor } = validatePlaygroundMetadata(metadata, config, digest, false);
+    const contract = playgroundRendererContract(config);
+    const byteSource = boot.wasmBytes;
+    const bytes = byteSource instanceof ArrayBuffer
+      ? byteSource
+      : ArrayBuffer.isView(byteSource)
+        ? byteSource.buffer.slice(byteSource.byteOffset, byteSource.byteOffset + byteSource.byteLength)
+        : null;
+    if (!bytes || bytes.byteLength === 0 || bytes.byteLength > 32 * 1024 * 1024) {
+      throw new Error("playground boot Wasm bytes are missing or exceed the 32 MiB limit");
+    }
+    const module = await WebAssembly.compile(bytes);
+    const moduleImports = inspectPlaygroundModule(module, metadata);
+    const gate = { mode: "instantiate", requestId: 0 };
+    const result = await WebAssembly.instantiate(module, playgroundImportsFor(moduleImports, gate));
+    const candidate = result.instance || result;
+    validatePlaygroundInstance(candidate, metadata, descriptor, metadata.snapshotSupported === true);
+    const hostFunctions = buildHostFunctionMap(config, candidate.exports);
+    if (playgroundRendererContract(config) !== contract) throw new Error("invalid playground renderer config");
+    activePlaygroundGate = gate;
+    activeHostFunctions = hostFunctions;
+    gate.mode = "active";
+    return candidate;
+  }
 
   document.addEventListener("paste", event => {
     clipboardText = event.clipboardData?.getData("text/plain") || clipboardText;
@@ -4379,6 +4864,13 @@
   }
 
   function frame(timestamp) {
+    if (playgroundEnabled) {
+      commitPendingPlaygroundSwap();
+      if (playgroundPaused && playgroundSteps === 0) {
+        requestAnimationFrame(frame);
+        return;
+      }
+    }
     if (!getGpuBatcher()) {
       // Context loss suspends publication. The restore event makes the same
       // visible WebGL2 renderer recreatable; there is no alternate backend.
@@ -4407,6 +4899,12 @@
         publishReplayFailure(error);
         return;
       }
+      if (playgroundEnabled) {
+        document.body.dataset.playgroundFrameError = String(error?.message || error).slice(0, 512);
+        completePlaygroundStep();
+        requestAnimationFrame(frame);
+        return;
+      }
       throw error;
     }
     const tickMs = performance.now() - tickStart;
@@ -4433,6 +4931,11 @@
     if (constructionResult !== 0) {
       commands.length = 0;
       document.body.dataset.guestStopped = String(constructionResult);
+      if (playgroundEnabled) {
+        finishHostFrame();
+        completePlaygroundStep();
+        requestAnimationFrame(frame);
+      }
       return;
     }
     const wasmRenderMs = performance.now() - wasmRenderStart;
@@ -4458,6 +4961,7 @@
     } catch (error) {
       publishGpuError(error, "frame");
       document.body.dataset.backend = performanceBackend;
+      completePlaygroundStep();
       requestAnimationFrame(frame);
       return;
     }
@@ -4532,6 +5036,7 @@
     document.body.dataset.underBudget = String(underBudget);
     if (instance.exports.player_x) document.body.dataset.playerX = String(instance.exports.player_x.value);
     finishHostFrame();
+    completePlaygroundStep();
     if (replayController) {
       if (replayController.completed) {
         document.body.dataset.replayState = "complete";
@@ -4647,8 +5152,12 @@
       }
       await initializeAdLifecycle();
       callAdVoid("resetGuest");
-      const result = await WebAssembly.instantiate(await wasmBytes(), imports);
-      instance = result.instance;
+      if (playgroundEnabled) {
+        instance = await initializePlayground(playgroundBoot);
+      } else {
+        const result = await WebAssembly.instantiate(await wasmBytes(), imports);
+        instance = result.instance;
+      }
       wasmModuleGeneration += 1;
       clearLiteralTextCache();
       if (stringLiteralTableVersion !== STRING_LITERAL_TABLE_VERSION) {
@@ -4683,28 +5192,12 @@
       } else {
         writeHostFrame(performance.now());
       }
-      const declaredHostExports = game.host_exports ?? { abi_version: 1, functions: [] };
-      if (declaredHostExports.abi_version !== 1 || !Array.isArray(declaredHostExports.functions)) {
-        throw new Error("unsupported host export ABI version");
-      }
-      const hostFunctions = new Map();
-      for (const record of declaredHostExports.functions) {
-        const signature = record.signature;
-        if (!signature || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(signature.name)
-          || record.symbol !== `stasis_host_v1_${signature.name}`
-          || hostFunctions.has(signature.name) || typeof instance.exports[record.symbol] !== "function"
-          || !Array.isArray(signature.parameters) || signature.parameters.length > 3
-          || signature.parameters.some(type => type !== "i32" && type !== "bool")
-          || (signature.return_type !== "void" && signature.return_type !== "i32")) {
-          throw new Error("invalid declared host export");
-        }
-        hostFunctions.set(signature.name, record);
-      }
+      activeHostFunctions = buildHostFunctionMap(game, instance.exports);
       const mainResult = instance.exports.main();
       finishHostFrame();
       window.STASIS_HOST = Object.freeze({
         invoke(name, ...args) {
-          const record = hostFunctions.get(name);
+          const record = activeHostFunctions.get(name);
           if (!record) throw new Error(`host export '${name}' is not declared`);
           if (args.length !== record.signature.parameters.length) throw new Error("host export argument count mismatch");
           const values = args.map((value, index) => {
@@ -4744,6 +5237,10 @@
       document.body.dataset.ready = "true";
       document.body.dataset.runtime = "wasm";
       document.body.dataset.mainResult = String(mainResult);
+      if (playgroundEnabled) {
+        document.body.dataset.playgroundGeneration = String(playgroundGeneration);
+        resolvePlaygroundReady({ generation: playgroundGeneration, layoutDigest: playgroundMetadata.layoutDigest });
+      }
       requestAnimationFrame(frame);
     } catch (error) {
       document.body.dataset.ready = "false";
@@ -4761,6 +5258,7 @@
         }
       }
       errorBox.textContent = String(error && error.stack || error);
+      if (playgroundEnabled) rejectPlaygroundReady(error);
       throw error;
     }
   })();

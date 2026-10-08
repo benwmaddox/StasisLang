@@ -2398,6 +2398,8 @@ dependencies = [
 name = "stasis_browser_compiler"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "stasis_compiler",
 ]
 

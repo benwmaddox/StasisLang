@@ -1041,3 +1041,58 @@ contents; the first path attempt also rejected valid POSIX backslash metadata.
 Adjustment: validate the new root field and metadata contract explicitly,
 require a validated target for configured adapters, and keep source digests
 syntax-only when the packaged source is unavailable.
+
+## 2026-10-08 - MaddoxTasks #268 browser playground
+
+Implemented bounded virtual-project compilation in the browser compiler, an editor
+with shared-lexer highlighting and compiler-backed completion, production Web-host
+preview, transactional same-layout state-preserving swaps, safe PNG/SVG import, and
+static ZIP export. Compiler analysis has isolated buffers, UTF-16 ranges, qualified
+type identity, incomplete-draft recovery, and no retained symbols from deleted files.
+The original ABI v1 fixed-sample request remains compatible. StaticWasm owns the
+StasisLang.com route and its existing Cloudflare Git deployment integration.
+
+Validation: compiler library 19/19; focused editor/runtime Node 12/12; existing Web
+runtime 283/283; fresh wasm32 release core; fixed-sample Chrome smoke; standalone
+Chrome acceptance (109 frames); site-wrapper acceptance (111 frames). Browser
+acceptance covers completion keyboard insertion, canonical state/hook execution,
+all rollback cases, overlapping sessions, PNG/SVG rendering, independent exported
+WebGL2 execution, and zero application-server requests after readiness. Formatting,
+syntax, action-version policy, and diff checks pass. Independent review findings
+for session publication, qualified types, enum variants, and keywords were fixed.
+
+The local full validation gate exposed an installer staging omission (fixed by
+PR #922), an audio-stripping regression (fixed and exact owning test passes), and
+stale native test artifacts. Fresh private native artifacts passed the display
+seam; the hot-swap seam requires a matched CLI/runtime fingerprint. The final
+matched native gate remains a separate pre-push check, not a claimed pass here.
+
+Visual evidence: inspected `D:/code/.automation-evidence/task268/site-reviewed-editor/`
+`syntax-highlighting-autocomplete.png`, `uploaded-asset-game.png`, and
+`exported-asset-game.png`; decoded and inspected a frame from
+`playground-acceptance.mp4`. They show the embedded editor, signature suggestions,
+the running production renderer, and both imported images in the exported game.
+
+Theory gained: canonical state migration and host resource lifetime are separate;
+same-layout swaps preserve user bytes but must not rerun resource initialization.
+Good: candidates publish only after restore and an effect-free hook succeed.
+Bad: replacing a mounted iframe resets its browsing context, and matching bare
+type names loses imported-module identity.
+Adjustment: retain the winning mounted frame, use request tokens for publication,
+and resolve completion types by their defining file as well as their name.
+
+The full workspace gate exposed two Web packaging regressions in the playground
+host: its import allowlist retained stripped input names, and its collection-view
+ABI variable no longer matched the immutable boot contract. Input names now carry
+the existing import-stripping markers, and compatible swaps retain the boot-time
+collection ABI. The owning Web package tests remain the acceptance oracle; they
+are rerun before push rather than weakening their expectations.
+
+Theory gained: optional host imports must share the packager's feature boundaries,
+while a compatible state swap cannot change the collection ABI. Good: packaging
+tests caught both regressions. Bad: browser-only validation missed stripped
+production packages. Adjustment: include the owning package suite in this slice.
+Visual evidence: the final staged-site editor and image captures under
+`D:/code/.automation-evidence/task268/site-final-git-build-passed/` were inspected;
+the browser receipt records successful completion, swaps, assets, export, and zero
+HTTP application requests after readiness.

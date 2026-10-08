@@ -191,6 +191,29 @@ jobs:
       - name: Prove offline Worker compilation in Chromium
         run: node tools/run_browser_compiler_smoke.mjs target/browser-compiler-bundle
 
+      - name: Test browser playground asset and publication contracts
+        run: node --test crates/stasis_browser_compiler/web/playground.test.mjs runtime/web/tests/playground_swap.test.mjs
+
+      - name: Prove offline editor swaps and exported games in Chromium
+        run: node tools/run_browser_playground_acceptance.mjs target/browser-compiler-bundle
+
+      - name: Preserve browser playground acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: browser-playground-acceptance
+          archive: true
+          path: target/browser-playground-acceptance
+          if-no-files-found: warn
+
+      - name: Publish static browser playground bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: browser-playground-bundle
+          archive: true
+          path: target/browser-compiler-bundle
+          if-no-files-found: error
+
   pr-ci-cargo-workspace:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     name: Nightly validation workspace Cargo
