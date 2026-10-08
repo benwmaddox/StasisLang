@@ -1,0 +1,69 @@
+struct AdapterMailbox {
+    serial: i32;
+    failures: i32;
+    initialize_count: i32;
+    pump_count: i32;
+    tick_count: i32;
+    async_result_count: i32;
+    foreground_count: i32;
+    foreground_pending_pump: i32;
+    shutdown_count: i32;
+}
+
+global adapter_mailbox: AdapterMailbox;
+
+function main(): i32 {
+    adapter_mailbox.serial = 0;
+    adapter_mailbox.failures = 0;
+    return 0;
+}
+
+function tick(): i32 {
+    adapter_mailbox.tick_count += 1;
+    if (adapter_mailbox.initialize_count != 1) {
+        adapter_mailbox.failures += 1;
+    }
+    if (adapter_mailbox.pump_count != adapter_mailbox.tick_count) {
+        adapter_mailbox.failures += 1;
+    }
+    if (adapter_mailbox.foreground_pending_pump != 0) {
+        adapter_mailbox.failures += 1;
+    }
+    return adapter_mailbox.failures;
+}
+
+function render(): i32 {
+    return 0;
+}
+
+function @host_export(adapter_mailbox) adapter_mailbox_event(kind: i32, serial: i32, value: i32): i32 {
+    if (serial != adapter_mailbox.serial + 1) {
+        adapter_mailbox.failures += 1;
+        return -100;
+    }
+    if (adapter_mailbox.failures != 0) {
+        return -103;
+    }
+    adapter_mailbox.serial = serial;
+    if (kind == 1) {
+        adapter_mailbox.initialize_count += 1;
+    } else if (kind == 2) {
+        adapter_mailbox.pump_count += 1;
+        adapter_mailbox.foreground_pending_pump = 0;
+    } else if (kind == 3) {
+        if (value != 665) {
+            adapter_mailbox.failures += 1;
+            return -101;
+        }
+        adapter_mailbox.async_result_count += 1;
+    } else if (kind == 4) {
+        adapter_mailbox.foreground_count += 1;
+        adapter_mailbox.foreground_pending_pump = 1;
+    } else if (kind == 5) {
+        adapter_mailbox.shutdown_count += 1;
+    } else {
+        adapter_mailbox.failures += 1;
+        return -102;
+    }
+    return adapter_mailbox.serial;
+}

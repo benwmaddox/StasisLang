@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include "stasis_asset_path.h"
+#include "stasis_desktop_adapter.h"
 #include "stasis_audio_assets.h"
 #include "stasis_recording_audio.h"
 #include <stdio.h>
@@ -181,6 +182,7 @@ STASIS_EXPORT const char* stasis_graphics_build_fingerprint(void) {
 static SDL_SpinLock g_runtime_error_lock;
 static char g_runtime_error[512];
 static SDL_Window* g_window = NULL;
+static int g_adapter_window_was_unavailable = 0;
 static SDL_Renderer* g_renderer = NULL;
 #if defined(__ANDROID__) || defined(STASIS_PLATFORM_IOS)
 #define STASIS_MOBILE_SAFE_TARGET_MAX_BYTES (64u * 1024u * 1024u)
@@ -4099,6 +4101,61 @@ STASIS_EXPORT void stasis_get_desktop_size(int* width, int* height) {
     }
     stasis_query_available_presentation(
         g_native_window_width, g_native_window_height, width, height);
+}
+
+/* Borrowed platform owner handle for the project desktop-adapter ABI. */
+STASIS_EXPORT uintptr_t stasis_get_native_window_handle(uint32_t *kind) {
+    if (kind) *kind = 0;
+    g_adapter_window_was_unavailable = 0;
+    if (!g_window) return (uintptr_t)0;
+    SDL_PropertiesID properties = SDL_GetWindowProperties(g_window);
+    if (properties == 0) return (uintptr_t)0;
+#if defined(_WIN32)
+    void *handle = SDL_GetPointerProperty(
+        properties, SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+    if (handle && kind) *kind = STASIS_DESKTOP_ADAPTER_WINDOW_WIN32_HWND;
+    return (uintptr_t)handle;
+#elif defined(__APPLE__) && !defined(__ANDROID__)
+    void *handle = SDL_GetPointerProperty(
+        properties, SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
+    if (handle && kind) *kind = STASIS_DESKTOP_ADAPTER_WINDOW_COCOA;
+    return (uintptr_t)handle;
+#elif defined(__linux__)
+    void *wayland = SDL_GetPointerProperty(
+        properties, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, NULL);
+    if (wayland) {
+        if (kind) *kind = STASIS_DESKTOP_ADAPTER_WINDOW_WAYLAND;
+        return (uintptr_t)wayland;
+    }
+    Sint64 x11 = SDL_GetNumberProperty(
+        properties, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+    if (x11 != 0 && kind) *kind = STASIS_DESKTOP_ADAPTER_WINDOW_X11;
+    return (uintptr_t)x11;
+#else
+    return (uintptr_t)0;
+#endif
+}
+
+STASIS_EXPORT int32_t stasis_window_is_foreground(void) {
+    if (!g_window) {
+        g_adapter_window_was_unavailable = 0;
+        return 0;
+    }
+    SDL_WindowFlags flags = SDL_GetWindowFlags(g_window);
+    int unavailable = (flags & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED)) != 0;
+    int input_focus = (flags & SDL_WINDOW_INPUT_FOCUS) != 0;
+#if defined(_WIN32)
+    SDL_PropertiesID properties = SDL_GetWindowProperties(g_window);
+    HWND window = properties == 0 ? NULL : (HWND)SDL_GetPointerProperty(
+        properties, SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL);
+    if (window) {
+        unavailable = !IsWindowVisible(window) || IsIconic(window);
+        input_focus = GetForegroundWindow() == window || GetActiveWindow() == window;
+    }
+#endif
+    int restored = g_adapter_window_was_unavailable && !unavailable;
+    g_adapter_window_was_unavailable = unavailable;
+    return !unavailable && (input_focus || restored);
 }
 
 /*

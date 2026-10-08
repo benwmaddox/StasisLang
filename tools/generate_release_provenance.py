@@ -29,6 +29,8 @@ RUNTIME_FILES = (
     "stasis_svg.cpp",
     "stasis_svg.h",
     "stasis_display_scale.h",
+    "stasis_desktop_adapter.h",
+    "stasis_desktop_adapter_links.cmake",
     "stasis_asset_path.h",
     "stasis_render_contract.h",
     "stasis_renderer_lifecycle.h",

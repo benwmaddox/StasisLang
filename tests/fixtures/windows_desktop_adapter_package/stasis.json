@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "desktop_adapter_acceptance",
+  "entry": "src/main.stasis",
+  "stdlib": "toolchain",
+  "tests": "tests",
+  "output": "build",
+  "desktop": {
+    "native_adapter": {
+      "abi_version": 1,
+      "source": "native/desktop_adapter.c",
+      "system_links": {
+        "windows": ["user32"]
+      }
+    }
+  }
+}

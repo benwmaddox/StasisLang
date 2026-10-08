@@ -16,9 +16,10 @@ use stasis::{
     run_play_in_process_with_window_title_and_project_configuration,
     run_self_host_aot_cli_with_project_configuration,
     run_self_host_aot_cli_with_project_configuration_and_release_asset_transforms, sign_artifacts,
-    sign_output_artifact_if_configured, signing_status, verify_artifacts, DesktopNetworkMode,
-    LiveRunConfig, PlayReplayConfig, ProjectCompilationConfiguration,
-    RecordingAudioDeviceSimulation, SigningOptions, StasisTestRunSession,
+    sign_output_artifact_if_configured, signing_status, verify_artifacts,
+    DesktopNativeAdapterConfig, DesktopNetworkMode, LiveRunConfig, PlayReplayConfig,
+    ProjectCompilationConfiguration, RecordingAudioDeviceSimulation, SigningOptions,
+    StasisTestRunSession,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, resolve_project_asset_paths,
@@ -83,6 +84,7 @@ const GFX_CMD_NAME: &str = "gfx_cmd";
 const GFX_CMD_VERSION: i64 = 8;
 const GFX_CMD_LEGACY_VERSION: i64 = 7;
 const WINDOWS_DESKTOP_PAYLOAD_DIR: &str = "app";
+const MAX_DESKTOP_NATIVE_ADAPTER_SOURCE_BYTES: u64 = 1024 * 1024;
 const DESKTOP_NETWORK_ARTIFACTS: &[&str] = &[
     if cfg!(windows) {
         "desktop/network/windows-x86_64/stasis_network.dll.lib"
@@ -127,6 +129,8 @@ const MOBILE_RUNTIME_FILES: &[&str] = &[
     "stasis_svg.cpp",
     "stasis_svg.h",
     "stasis_display_scale.h",
+    "stasis_desktop_adapter.h",
+    "stasis_desktop_adapter_links.cmake",
     "stasis_asset_path.h",
     "stasis_render_contract.h",
     "stasis_renderer_lifecycle.h",
@@ -1055,6 +1059,8 @@ struct ProjectManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     android: Option<AndroidProjectManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    desktop: Option<DesktopProjectManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     capabilities: Option<ProjectCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     web: Option<WebProjectManifest>,
@@ -1073,6 +1079,12 @@ struct ProjectManifest {
 struct ReleaseProjectManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     font_subsetting: Option<crate::release_assets::ReleaseFontSubsettingManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct DesktopProjectManifest {
+    native_adapter: DesktopNativeAdapterConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1174,6 +1186,7 @@ impl From<LegacyProjectManifest> for ProjectManifest {
                 version_name: android.version_name,
                 launcher_resources: android.launcher_resources,
             }),
+            desktop: None,
             capabilities: value.capabilities.map(|capabilities| ProjectCapabilities {
                 network: capabilities.network,
                 network_client: capabilities.network_client,
@@ -1286,6 +1299,38 @@ struct AndroidProjectManifest {
     launcher_resources: Option<String>,
 }
 
+fn validate_desktop_native_adapter(adapter: &DesktopNativeAdapterConfig) -> Result<(), String> {
+    if adapter.abi_version != 1 {
+        return Err(format!(
+            "desktop.native_adapter.abi_version must be 1 (found {})",
+            adapter.abi_version
+        ));
+    }
+    validate_relative_path("desktop.native_adapter.source", &adapter.source)?;
+    if adapter.source.extension().and_then(|value| value.to_str()) != Some("c") {
+        return Err("desktop.native_adapter.source must name one .c source file".to_string());
+    }
+    let link_count = adapter.system_links.windows.len()
+        + adapter.system_links.linux.len()
+        + adapter.system_links.macos.len();
+    if link_count > 8 {
+        return Err("desktop.native_adapter.system_links permits at most 8 entries".to_string());
+    }
+    fn reject_duplicates<T: Copy + Ord>(values: &[T], field: &str) -> Result<(), String> {
+        let unique = values.iter().copied().collect::<BTreeSet<_>>();
+        if unique.len() != values.len() {
+            return Err(format!(
+                "desktop.native_adapter.system_links.{field} must not contain duplicates"
+            ));
+        }
+        Ok(())
+    }
+    reject_duplicates(&adapter.system_links.windows, "windows")?;
+    reject_duplicates(&adapter.system_links.linux, "linux")?;
+    reject_duplicates(&adapter.system_links.macos, "macos")?;
+    Ok(())
+}
+
 impl ProjectManifest {
     fn uses_included_libraries(&self) -> bool {
         self.manifest_version >= 3 && self.libraries.is_some()
@@ -1301,6 +1346,7 @@ impl ProjectManifest {
             stdlib: None,
             vendor: None,
             android: None,
+            desktop: None,
             capabilities: None,
             web: None,
             graphics: None,
@@ -1323,6 +1369,9 @@ impl ProjectManifest {
         if self.manifest_version < 3 && self.libraries.is_some() {
             return Err("included libraries require manifest_version 3".to_string());
         }
+        if self.manifest_version < 3 && self.desktop.is_some() {
+            return Err("desktop native adapters require manifest_version 3".to_string());
+        }
         if self.manifest_version == 3
             && self.libraries.is_none()
             && self
@@ -1343,6 +1392,9 @@ impl ProjectManifest {
         }
         if let Some(settings) = self.settings.as_ref() {
             project_settings::validate_manifest(settings)?;
+        }
+        if let Some(desktop) = self.desktop.as_ref() {
+            validate_desktop_native_adapter(&desktop.native_adapter)?;
         }
         if let Some(libraries) = self.libraries.as_ref() {
             included_libraries::validate_manifest(libraries)?;
@@ -2888,6 +2940,7 @@ pub(super) fn load_project_compilation_configuration(
         generated_path: project_settings::GENERATED_SETTINGS_FILE.to_string(),
         generated_source: resolved.generated_source,
         sprite_atlas_page_size: configured_sprite_atlas_page_size(manifest.graphics.as_ref())?,
+        desktop_native_adapter: manifest.desktop.map(|desktop| desktop.native_adapter),
     })
 }
 
@@ -3794,6 +3847,7 @@ fn format_files(
 }
 
 fn check_workspace(workspace: &Workspace) -> Result<CommandResult, String> {
+    desktop_native_adapter_provenance(workspace)?;
     if let Some(resources) = workspace
         .manifest
         .android
@@ -3865,6 +3919,7 @@ fn generated_settings_path(workspace: &Workspace) -> String {
 fn project_compilation_configuration(
     workspace: &Workspace,
 ) -> Result<ProjectCompilationConfiguration, String> {
+    desktop_native_adapter_provenance(workspace)?;
     Ok(ProjectCompilationConfiguration {
         configuration: workspace.project_configuration()?.clone(),
         generated_path: generated_settings_path(workspace),
@@ -3872,6 +3927,11 @@ fn project_compilation_configuration(
         sprite_atlas_page_size: configured_sprite_atlas_page_size(
             workspace.manifest.graphics.as_ref(),
         )?,
+        desktop_native_adapter: workspace
+            .manifest
+            .desktop
+            .as_ref()
+            .map(|desktop| desktop.native_adapter.clone()),
     })
 }
 
@@ -6623,6 +6683,67 @@ fn package_project_provenance(
     }))
 }
 
+fn desktop_native_adapter_provenance(workspace: &Workspace) -> Result<Option<Value>, String> {
+    let Some(adapter) = workspace
+        .manifest
+        .desktop
+        .as_ref()
+        .map(|desktop| &desktop.native_adapter)
+    else {
+        return Ok(None);
+    };
+    let source = workspace.root.join(&adapter.source);
+    let resolved = source.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve desktop native adapter source {}: {error}",
+            source.display()
+        )
+    })?;
+    let workspace_root = workspace.root.canonicalize().map_err(|error| {
+        format!(
+            "failed to resolve desktop native adapter workspace {}: {error}",
+            workspace.root.display()
+        )
+    })?;
+    if !destination_starts_with(&resolved, &workspace_root) {
+        return Err(format!(
+            "desktop native adapter source resolves outside the workspace: {}",
+            source.display()
+        ));
+    }
+    let metadata = fs::metadata(&resolved).map_err(|error| {
+        format!(
+            "failed to inspect desktop native adapter source {}: {error}",
+            source.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "desktop native adapter source is not a file: {}",
+            source.display()
+        ));
+    }
+    if metadata.len() > MAX_DESKTOP_NATIVE_ADAPTER_SOURCE_BYTES {
+        return Err(format!(
+            "desktop native adapter source exceeds {} bytes: {}",
+            MAX_DESKTOP_NATIVE_ADAPTER_SOURCE_BYTES,
+            source.display()
+        ));
+    }
+    let bytes = fs::read(&resolved).map_err(|error| {
+        format!(
+            "failed to read desktop native adapter source {}: {error}",
+            source.display()
+        )
+    })?;
+    Ok(Some(json!({
+        "abi_version": adapter.abi_version,
+        "source": normalize_web_package_source_path(&adapter.source.to_string_lossy()),
+        "sha256": format!("{:x}", Sha256::digest(&bytes)),
+        "system_links": adapter.system_links,
+    })))
+}
+
 fn capture_desktop_package_workspace(
     workspace: &Workspace,
     manifest_bytes: &[u8],
@@ -6634,6 +6755,7 @@ fn capture_desktop_package_workspace(
             snapshot_root.display()
         ));
     }
+    desktop_native_adapter_provenance(workspace)?;
 
     let mut entries = vec![workspace.manifest.entry.as_str()];
     if workspace.network_roles()?.0 {
@@ -6741,6 +6863,35 @@ fn capture_desktop_package_workspace(
             )
         })?;
     }
+    if let Some(adapter) = workspace
+        .manifest
+        .desktop
+        .as_ref()
+        .map(|desktop| &desktop.native_adapter)
+    {
+        let source = workspace.root.join(&adapter.source);
+        let destination = snapshot_root.join(&adapter.source);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create captured adapter directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        let bytes = fs::read(&source).map_err(|error| {
+            format!(
+                "failed to capture desktop native adapter source {}: {error}",
+                source.display()
+            )
+        })?;
+        fs::write(&destination, bytes).map_err(|error| {
+            format!(
+                "failed to write captured desktop native adapter source {}: {error}",
+                destination.display()
+            )
+        })?;
+    }
 
     Ok(Workspace {
         root: canonical_workspace_root(snapshot_root)?,
@@ -6778,6 +6929,7 @@ fn desktop_package_project_provenance(
     Ok(json!({
         "project": project,
         "network_guest": network_guest,
+        "native_adapter": desktop_native_adapter_provenance(workspace)?,
     }))
 }
 
@@ -12175,6 +12327,7 @@ mod tests {
     }
 
     use super::*;
+    use stasis::DesktopSystemLinks;
 
     fn mobile_network_artifact_fixture() -> NativeNetworkArtifacts {
         NativeNetworkArtifacts {
@@ -12231,6 +12384,113 @@ mod tests {
             parse_project_manifest(with_release).unwrap_err(),
             "release configuration requires manifest_version 2"
         );
+    }
+
+    #[test]
+    fn manifest_v3_validates_bounded_desktop_native_adapter_declarations() {
+        let valid = json!({
+            "manifest_version": 3,
+            "name": "adapter_fixture",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build",
+            "desktop": {"native_adapter": {
+                "abi_version": 1,
+                "source": "native/store_adapter.c",
+                "system_links": {
+                    "windows": ["windows_app", "runtime_object"],
+                    "linux": ["pthread"],
+                    "macos": ["store_kit"]
+                }
+            }}
+        });
+        let parsed = parse_project_manifest(&serde_json::to_vec(&valid).unwrap())
+            .expect("valid adapter declaration");
+        assert_eq!(
+            parsed.desktop.unwrap().native_adapter.source,
+            PathBuf::from("native/store_adapter.c")
+        );
+
+        for (label, value, expected) in [
+            (
+                "old manifest",
+                {
+                    let mut value = valid.clone();
+                    value["manifest_version"] = json!(2);
+                    value
+                },
+                "desktop native adapters require manifest_version 3",
+            ),
+            (
+                "wrong ABI",
+                {
+                    let mut value = valid.clone();
+                    value["desktop"]["native_adapter"]["abi_version"] = json!(2);
+                    value
+                },
+                "abi_version must be 1",
+            ),
+            (
+                "traversal",
+                {
+                    let mut value = valid.clone();
+                    value["desktop"]["native_adapter"]["source"] = json!("../adapter.c");
+                    value
+                },
+                "must be a non-empty project-relative path",
+            ),
+            (
+                "wrong extension",
+                {
+                    let mut value = valid.clone();
+                    value["desktop"]["native_adapter"]["source"] = json!("native/adapter.cpp");
+                    value
+                },
+                "must name one .c source file",
+            ),
+            (
+                "duplicate link",
+                {
+                    let mut value = valid.clone();
+                    value["desktop"]["native_adapter"]["system_links"]["windows"] =
+                        json!(["windows_app", "windows_app"]);
+                    value
+                },
+                "must not contain duplicates",
+            ),
+            (
+                "unknown link",
+                {
+                    let mut value = valid.clone();
+                    value["desktop"]["native_adapter"]["system_links"]["windows"] =
+                        json!(["arbitrary_library"]);
+                    value
+                },
+                "unknown variant",
+            ),
+            (
+                "too many links",
+                {
+                    let mut value = valid.clone();
+                    value["desktop"]["native_adapter"]["system_links"]["windows"] = json!([
+                        "advapi32",
+                        "ole32",
+                        "runtime_object",
+                        "shell32",
+                        "user32",
+                        "windows_app"
+                    ]);
+                    value["desktop"]["native_adapter"]["system_links"]["linux"] =
+                        json!(["dl", "m", "pthread"]);
+                    value
+                },
+                "permits at most 8 entries",
+            ),
+        ] {
+            let error =
+                parse_project_manifest(&serde_json::to_vec(&value).unwrap()).expect_err(label);
+            assert!(error.contains(expected), "{label}: {error}");
+        }
     }
 
     #[test]
@@ -12686,6 +12946,96 @@ mod tests {
             before, after,
             "source mutation must change package provenance"
         );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn desktop_package_captures_and_hashes_native_adapter_source() {
+        let root = temp_dir("desktop_native_adapter_provenance");
+        create_project(
+            root.clone(),
+            "desktop_native_adapter_provenance".to_string(),
+        )
+        .expect("create project");
+        fs::create_dir_all(root.join("native")).expect("create native source directory");
+        fs::write(
+            root.join("native/adapter.c"),
+            b"int adapter_revision(void) { return 1; }\n",
+        )
+        .expect("write adapter source");
+        let mut manifest: ProjectManifest =
+            serde_json::from_slice(&fs::read(root.join(MANIFEST_NAME)).expect("read manifest"))
+                .expect("parse manifest");
+        manifest.desktop = Some(DesktopProjectManifest {
+            native_adapter: DesktopNativeAdapterConfig {
+                abi_version: 1,
+                source: PathBuf::from("native/adapter.c"),
+                system_links: DesktopSystemLinks::default(),
+            },
+        });
+        write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write adapter manifest");
+        let workspace = load_workspace(Some(&root))
+            .expect("load adapter workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve adapter workspace");
+        let manifest_bytes = fs::read(root.join(MANIFEST_NAME)).expect("manifest bytes");
+        let before = desktop_package_project_provenance(&workspace, &manifest_bytes)
+            .expect("adapter provenance");
+        assert_eq!(before["native_adapter"]["abi_version"], 1);
+        assert_eq!(before["native_adapter"]["source"], "native/adapter.c");
+
+        fs::write(
+            root.join("native/adapter.c"),
+            b"int adapter_revision(void) { return 2; }\n",
+        )
+        .expect("mutate adapter source");
+        let after = desktop_package_project_provenance(&workspace, &manifest_bytes)
+            .expect("mutated adapter provenance");
+        assert_eq!(before["project"], after["project"]);
+        assert_ne!(
+            before["native_adapter"]["sha256"],
+            after["native_adapter"]["sha256"]
+        );
+
+        let snapshot_root = root.join("captured");
+        let snapshot =
+            capture_desktop_package_workspace(&workspace, &manifest_bytes, &snapshot_root)
+                .expect("capture adapter workspace");
+        assert_eq!(
+            fs::read(snapshot.root.join("native/adapter.c")).expect("captured adapter"),
+            b"int adapter_revision(void) { return 2; }\n"
+        );
+        remove_temp(&root);
+    }
+
+    #[test]
+    fn jit_check_validates_but_does_not_compile_desktop_adapter_source() {
+        let root = temp_dir("desktop_native_adapter_jit_scope");
+        create_project(root.clone(), "desktop_native_adapter_jit_scope".to_string())
+            .expect("create project");
+        fs::create_dir_all(root.join("native")).expect("create native source directory");
+        fs::write(
+            root.join("native/adapter.c"),
+            b"this is deliberately not valid C; JIT must ignore it\n",
+        )
+        .expect("write adapter source");
+        let mut manifest: ProjectManifest =
+            serde_json::from_slice(&fs::read(root.join(MANIFEST_NAME)).expect("read manifest"))
+                .expect("parse manifest");
+        manifest.manifest_version = 3;
+        manifest.desktop = Some(DesktopProjectManifest {
+            native_adapter: DesktopNativeAdapterConfig {
+                abi_version: 1,
+                source: PathBuf::from("native/adapter.c"),
+                system_links: DesktopSystemLinks::default(),
+            },
+        });
+        write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write adapter manifest");
+        let workspace = load_workspace(Some(&root))
+            .expect("load adapter workspace")
+            .resolve_for(CanonicalTarget::host())
+            .expect("resolve adapter workspace");
+        check_workspace(&workspace).expect("JIT check ignores desktop-only C compilation");
         remove_temp(&root);
     }
 

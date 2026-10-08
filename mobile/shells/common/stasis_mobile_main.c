@@ -38,6 +38,9 @@ int stasis_audio_voice_is_playing(int voice_handle);
 #endif
 #include "stasis_mobile_runtime.h"
 #include "stasis_network_join_card.h"
+#if defined(STASIS_DESKTOP_NATIVE_ADAPTER)
+#include "stasis_desktop_adapter.h"
+#endif
 
 #define STASIS_SPRITE_ATLAS_PAGE_SIZE @STASIS_SPRITE_ATLAS_PAGE_SIZE@
 int stasis_gfx_set_sprite_atlas_page_size(int page_size);
@@ -790,6 +793,32 @@ static int load_replay_argument(
     return 1;
 }
 
+#if defined(STASIS_DESKTOP_NATIVE_ADAPTER)
+static uint32_t stasis_desktop_adapter_platform(void) {
+#if defined(_WIN32)
+    return STASIS_DESKTOP_ADAPTER_PLATFORM_WINDOWS;
+#elif defined(__APPLE__) && !defined(__ANDROID__)
+    return STASIS_DESKTOP_ADAPTER_PLATFORM_MACOS;
+#else
+    return STASIS_DESKTOP_ADAPTER_PLATFORM_LINUX;
+#endif
+}
+
+static int stasis_desktop_adapter_failed(const char *hook, int32_t result) {
+    char message[192];
+    snprintf(
+        message,
+        sizeof(message),
+        "Stasis desktop native adapter %s failed with code %d",
+        hook,
+        result
+    );
+    stasis_host_report_runtime_error(message);
+    SDL_Log("%s", message);
+    return STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+}
+#endif
+
 int SDL_main(int argc, char **argv) {
     stasis_mobile_set_external_url_opener(stasis_open_external_url);
     uint8_t *replay_bytes = NULL;
@@ -879,27 +908,65 @@ int SDL_main(int argc, char **argv) {
     }
 #endif
     int status = stasis_mobile_runtime_initialize(&config, &game);
+#if defined(STASIS_DESKTOP_NATIVE_ADAPTER)
+    StasisDesktopAdapterContext desktop_adapter_context = {0};
+    int desktop_adapter_initialized = 0;
+    int desktop_adapter_was_foreground = 0;
+#endif
     if (status != STASIS_MOBILE_RUNTIME_OK) {
         if (stasis_mobile_runtime_last_entry_result() == 0) {
             report_runtime_status("Stasis mobile initialization", status);
             SDL_Log("Stasis mobile initialization stopped with status %d", status);
         }
     } else {
+#if defined(STASIS_DESKTOP_NATIVE_ADAPTER)
+        uint32_t native_window_kind = STASIS_DESKTOP_ADAPTER_WINDOW_NONE;
+        uintptr_t native_window =
+            stasis_mobile_runtime_native_window(&native_window_kind);
+        if (native_window == (uintptr_t)0 ||
+                native_window_kind == STASIS_DESKTOP_ADAPTER_WINDOW_NONE) {
+            status = stasis_desktop_adapter_failed("native window", -1);
+        } else {
+            desktop_adapter_context = (StasisDesktopAdapterContext){
+                sizeof(StasisDesktopAdapterContext),
+                STASIS_DESKTOP_ADAPTER_ABI_VERSION,
+                stasis_desktop_adapter_platform(),
+                native_window_kind,
+                STASIS_DESKTOP_ADAPTER_WINDOW_BORROWED_RUNTIME,
+                0,
+                native_window,
+            };
+            int32_t adapter_result =
+                stasis_desktop_adapter_initialize(&desktop_adapter_context);
+            if (adapter_result != 0) {
+                status = stasis_desktop_adapter_failed(
+                    "initialize", adapter_result);
+            } else {
+                desktop_adapter_initialized = 1;
+                desktop_adapter_was_foreground =
+                    stasis_mobile_runtime_window_is_foreground();
+            }
+        }
+#endif
 #if defined(STASIS_NETWORK_CLIENT_ENABLED)
-        if (stasis_web_network_supported()) {
+        if (status == STASIS_MOBILE_RUNTIME_OK && stasis_web_network_supported()) {
             (void)stasis_mobile_network_client_connect();
         }
 #endif
 #if defined(STASIS_DESKTOP_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
-        int32_t supervision = stasis_mobile_network_publish_supervision_join_url();
-        if (supervision < 0) {
-            SDL_Log("Stasis network supervision readiness failed");
-            status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
-        } else if (supervision == 0) {
-            stasis_desktop_network_present_join_card();
+        if (status == STASIS_MOBILE_RUNTIME_OK) {
+            int32_t supervision = stasis_mobile_network_publish_supervision_join_url();
+            if (supervision < 0) {
+                SDL_Log("Stasis network supervision readiness failed");
+                status = STASIS_MOBILE_RUNTIME_INVALID_ARGUMENT;
+            } else if (supervision == 0) {
+                stasis_desktop_network_present_join_card();
+            }
         }
 #elif defined(__APPLE__) && !defined(__ANDROID__) && defined(STASIS_NETWORK_ENABLED)
-        stasis_mobile_network_present_join_url();
+        if (status == STASIS_MOBILE_RUNTIME_OK) {
+            stasis_mobile_network_present_join_url();
+        }
 #endif
 #if defined(STASIS_ENABLE_SEAM_TESTS)
         if (seam_test_id != NULL && seam_test_id[0] != '\0') {
@@ -976,8 +1043,33 @@ int SDL_main(int argc, char **argv) {
 #endif
     stasis_mobile_frame_pacer_reset(&frame_pacer, SDL_GetTicksNS());
     while (status == STASIS_MOBILE_RUNTIME_OK) {
+#if defined(STASIS_DESKTOP_NATIVE_ADAPTER)
+        int32_t adapter_result =
+            stasis_desktop_adapter_pump(&desktop_adapter_context);
+        if (adapter_result == STASIS_DESKTOP_ADAPTER_PUMP_REQUEST_EXIT) {
+            break;
+        }
+        if (adapter_result != STASIS_DESKTOP_ADAPTER_PUMP_CONTINUE) {
+            status = stasis_desktop_adapter_failed("pump", adapter_result);
+            break;
+        }
+#endif
         status = stasis_mobile_runtime_step();
         if (status == STASIS_MOBILE_RUNTIME_OK) {
+#if defined(STASIS_DESKTOP_NATIVE_ADAPTER)
+            int desktop_adapter_is_foreground =
+                stasis_mobile_runtime_window_is_foreground();
+            if (desktop_adapter_is_foreground && !desktop_adapter_was_foreground) {
+                adapter_result = stasis_desktop_adapter_on_foreground(
+                    &desktop_adapter_context);
+                if (adapter_result != 0) {
+                    status = stasis_desktop_adapter_failed(
+                        "on_foreground", adapter_result);
+                }
+            }
+            desktop_adapter_was_foreground = desktop_adapter_is_foreground;
+            if (status != STASIS_MOBILE_RUNTIME_OK) break;
+#endif
 #if defined(STASIS_DESKTOP_MONOLITH) && defined(STASIS_NETWORK_ENABLED)
             const bool *keys = SDL_GetKeyboardState(NULL);
             int shortcut_down = keys != NULL && keys[SDL_SCANCODE_F1];
@@ -1114,6 +1206,12 @@ int SDL_main(int argc, char **argv) {
             }
         }
     }
+#if defined(STASIS_DESKTOP_NATIVE_ADAPTER)
+    if (desktop_adapter_initialized) {
+        stasis_desktop_adapter_shutdown(&desktop_adapter_context);
+        desktop_adapter_initialized = 0;
+    }
+#endif
     stasis_mobile_network_client_shutdown();
     stasis_mobile_runtime_shutdown();
     free(replay_bytes);
