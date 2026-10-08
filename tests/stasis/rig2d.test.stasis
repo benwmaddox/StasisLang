@@ -1,11 +1,29 @@
 import "../../src/stdlib/rig2d.stasis";
+import "../../src/stdlib/math.stasis";
 
 global rig_test_a: Rig2D<24>;
 global rig_test_b: Rig2D<64>;
+global rig_test_ik: Rig2D<24>;
 
 function rig2d_test_near(a: f32, b: f32): bool {
     let difference: f32 = a - b;
     return difference > -0.0001 && difference < 0.0001;
+}
+
+function rig2d_test_setup_ik(offset_x: f32, offset_y: f32, lower_length: f32): bool {
+    rig_test_ik.clear();
+    return rig_test_ik.add_bone(-1, 2.0, -1.0, 0.0) == 0 && rig_test_ik.add_bone(0, offset_x, offset_y, 0.0) == 1 && rig_test_ik.add_bone(
+        1,
+        lower_length,
+        0.0,
+        0.0
+    ) == 2;
+}
+
+function rig2d_test_distance(x1: f32, y1: f32, x2: f32, y2: f32): f32 {
+    let dx: f32 = x2 - x1;
+    let dy: f32 = y2 - y1;
+    return math_sqrt(dx * dx + dy * dy);
 }
 
 test `rig generic capacities are independent and receiver-owned`(): bool {
@@ -205,4 +223,482 @@ test `rig angle normalization and blend clamp retain adjacent interior values`()
     rig_test_a.reset_pose();
     rig_test_a.blend_local(0, 100.0, 0.0, 100.0, 0.99);
     return rig2d_test_near(rig_test_a.bones[0].local_x, 99.0) && rig2d_test_near(rig_test_a.bones[0].local_angle, 99.0);
+}
+
+test `two bone IK sweeps target directions reach radii and both bends`(): bool {
+    let direction: f32 = -180.0;
+    let radius_case: i32 = 0;
+    let side: i32 = -1;
+    let radius: f32 = 0.0;
+    let projected_radius: f32 = 0.0;
+    let root_x: f32 = 0.0;
+    let root_y: f32 = 0.0;
+    let target_x: f32 = 0.0;
+    let target_y: f32 = 0.0;
+    let expected_x: f32 = 0.0;
+    let expected_y: f32 = 0.0;
+    let cached_lower_x: f32 = 0.0;
+    let cached_lower_y: f32 = 0.0;
+    let negative_elbow_x: f32 = 0.0;
+    let negative_elbow_y: f32 = 0.0;
+    for (direction = -180.0; direction < 180.0; direction = direction + 15.0) {
+        for (radius_case = 0; radius_case < 7; radius_case = radius_case + 1) {
+            radius = 0.0;
+            if (radius_case == 0) {
+                radius = 0.5;
+            }
+            if (radius_case == 1) {
+                radius = 1.0;
+            }
+            if (radius_case == 2) {
+                radius = 1.25;
+            }
+            if (radius_case == 3) {
+                radius = 4.0;
+            }
+            if (radius_case == 4) {
+                radius = 8.75;
+            }
+            if (radius_case == 5) {
+                radius = 9.0;
+            }
+            if (radius_case == 6) {
+                radius = 10.0;
+            }
+            for (side = -1; side <= 1; side = side + 2) {
+                if (!rig2d_test_setup_ik(3.0, 4.0, 4.0) || !rig_test_ik.solve(100.0, -50.0, 37.0)) {
+                    return false;
+                }
+                root_x = rig_test_ik.world_x(0);
+                root_y = rig_test_ik.world_y(0);
+                target_x = root_x + radius * rig2d_cos(direction);
+                target_y = root_y + radius * rig2d_sin(direction);
+                projected_radius = radius;
+                if (projected_radius < 1.0) {
+                    projected_radius = 1.0;
+                }
+                if (projected_radius > 9.0) {
+                    projected_radius = 9.0;
+                }
+                expected_x = root_x + projected_radius * rig2d_cos(direction);
+                expected_y = root_y + projected_radius * rig2d_sin(direction);
+                cached_lower_x = rig_test_ik.world_x(1);
+                cached_lower_y = rig_test_ik.world_y(1);
+                if (!rig_test_ik.solve_two_bone(0, 1, target_x, target_y, 5.0, 4.0, side, -180.0, 180.0, -180.0, 180.0)) {
+                    return false;
+                }
+                if (
+                    !rig2d_test_near(rig_test_ik.world_x(1), cached_lower_x)
+                    || !rig2d_test_near(rig_test_ik.world_y(1), cached_lower_y)
+                    || !rig2d_test_near(rig_test_ik.bones[0].local_x, 2.0)
+                    || !rig2d_test_near(rig_test_ik.bones[0].local_y, -1.0)
+                    || !rig2d_test_near(rig_test_ik.bones[1].local_x, 3.0)
+                    || !rig2d_test_near(rig_test_ik.bones[1].local_y, 4.0)
+                    || !rig2d_test_near(rig_test_ik.bones[2].local_x, 4.0)
+                ) {
+                    return false;
+                }
+                if (!rig_test_ik.solve(100.0, -50.0, 37.0)) {
+                    return false;
+                }
+                if (!rig2d_test_near(rig_test_ik.world_x(2), expected_x) || !rig2d_test_near(rig_test_ik.world_y(2), expected_y)) {
+                    return false;
+                }
+                if (side < 0) {
+                    negative_elbow_x = rig_test_ik.world_x(1);
+                    negative_elbow_y = rig_test_ik.world_y(1);
+                }
+                if (direction == 0.0 && radius == 4.0) {
+                    if (side < 0 && rig_test_ik.world_y(1) >= root_y) {
+                        return false;
+                    }
+                    if (side > 0 && rig_test_ik.world_y(1) <= root_y) {
+                        return false;
+                    }
+                }
+                if (side > 0 && radius > 1.25 && radius < 8.75) {
+                    if (rig2d_test_distance(rig_test_ik.world_x(1), rig_test_ik.world_y(1), negative_elbow_x, negative_elbow_y) < 0.1) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+test `two bone IK uses cached parent transforms and keeps the child offset basis`(): bool {
+    rig_test_ik.clear();
+    if (
+        rig_test_ik.add_bone(-1, 5.0, 7.0, 30.0) != 0
+        || rig_test_ik.add_bone(0, 2.0, -1.0, 0.0) != 1
+        || rig_test_ik.add_bone(1, 3.0, 4.0, 0.0) != 2
+        || rig_test_ik.add_bone(2, 4.0, 0.0, 0.0) != 3
+    ) {
+        return false;
+    }
+    rig_test_ik.set_local(1, 2.0, -1.0, 15.0);
+    rig_test_ik.set_local(2, 3.0, 4.0, -20.0);
+    if (!rig_test_ik.solve(80.0, -40.0, -25.0)) {
+        return false;
+    }
+    let target_x: f32 = rig_test_ik.world_x(3);
+    let target_y: f32 = rig_test_ik.world_y(3);
+    let upper_x: f32 = rig_test_ik.bones[1].local_x;
+    let upper_y: f32 = rig_test_ik.bones[1].local_y;
+    let lower_x: f32 = rig_test_ik.bones[2].local_x;
+    let lower_y: f32 = rig_test_ik.bones[2].local_y;
+    if (!rig_test_ik.solve_two_bone(1, 2, target_x, target_y, 5.0, 4.0, -1, -180.0, 180.0, -180.0, 180.0)) {
+        return false;
+    }
+    if (
+        !rig2d_test_near(rig_test_ik.bones[1].local_x, upper_x)
+        || !rig2d_test_near(rig_test_ik.bones[1].local_y, upper_y)
+        || !rig2d_test_near(rig_test_ik.bones[2].local_x, lower_x)
+        || !rig2d_test_near(rig_test_ik.bones[2].local_y, lower_y)
+    ) {
+        return false;
+    }
+    if (!rig_test_ik.solve(80.0, -40.0, -25.0)) {
+        return false;
+    }
+    return rig2d_test_near(rig_test_ik.world_x(3), target_x) && rig2d_test_near(rig_test_ik.world_y(3), target_y);
+}
+
+test `two bone IK unwraps local limits across the seam and wide intervals`(): bool {
+    if (!rig2d_test_setup_ik(3.0, 4.0, 4.0)) {
+        return false;
+    }
+    rig_test_ik.set_local(0, 2.0, -1.0, -175.0);
+    rig_test_ik.set_local(1, 3.0, 4.0, 0.0);
+    if (!rig_test_ik.solve(0.0, 0.0, 0.0)) {
+        return false;
+    }
+    let seam_target_x: f32 = rig_test_ik.world_x(2);
+    let seam_target_y: f32 = rig_test_ik.world_y(2);
+    rig_test_ik.set_local(0, 2.0, -1.0, 0.0);
+    if (!rig_test_ik.solve(0.0, 0.0, 0.0)) {
+        return false;
+    }
+    if (!rig_test_ik.solve_two_bone(0, 1, seam_target_x, seam_target_y, 5.0, 4.0, 1, 170.0, 210.0, -180.0, 180.0)) {
+        return false;
+    }
+    if (!rig2d_test_near(rig_test_ik.bones[0].local_angle, -175.0)) {
+        return false;
+    }
+
+    rig_test_ik.set_local(0, 2.0, -1.0, 179.0);
+    rig_test_ik.set_local(1, 3.0, 4.0, 0.0);
+    if (!rig_test_ik.solve(0.0, 0.0, 0.0)) {
+        return false;
+    }
+    let wide_target_x: f32 = rig_test_ik.world_x(2);
+    let wide_target_y: f32 = rig_test_ik.world_y(2);
+    rig_test_ik.set_local(0, 2.0, -1.0, 0.0);
+    if (!rig_test_ik.solve(0.0, 0.0, 0.0)) {
+        return false;
+    }
+    if (!rig_test_ik.solve_two_bone(0, 1, wide_target_x, wide_target_y, 5.0, 4.0, 1, -170.0, 170.0, -180.0, 180.0)) {
+        return false;
+    }
+    if (!rig2d_test_near(rig_test_ik.bones[0].local_angle, 170.0)) {
+        return false;
+    }
+
+    rig_test_ik.set_local(0, 2.0, -1.0, -179.0);
+    rig_test_ik.set_local(1, 3.0, 4.0, 0.0);
+    if (!rig_test_ik.solve(0.0, 0.0, 0.0)) {
+        return false;
+    }
+    let lower_wide_target_x: f32 = rig_test_ik.world_x(2);
+    let lower_wide_target_y: f32 = rig_test_ik.world_y(2);
+    rig_test_ik.set_local(0, 2.0, -1.0, 0.0);
+    if (!rig_test_ik.solve(0.0, 0.0, 0.0)) {
+        return false;
+    }
+    if (!rig_test_ik.solve_two_bone(0, 1, lower_wide_target_x, lower_wide_target_y, 5.0, 4.0, 1, -170.0, 170.0, -180.0, 180.0)) {
+        return false;
+    }
+    return rig2d_test_near(rig_test_ik.bones[0].local_angle, -170.0);
+}
+
+test `two bone IK uses screen clockwise bend and aims lower from clamped elbow`(): bool {
+    let side: i32 = -1;
+    let negative_elbow_y: f32 = 0.0;
+    let pivot_x: f32 = 0.0;
+    let pivot_y: f32 = 0.0;
+    let target_x: f32 = 0.0;
+    let target_y: f32 = 0.0;
+    for (side = -1; side <= 1; side = side + 2) {
+        if (!rig2d_test_setup_ik(3.0, 4.0, 4.0) || !rig_test_ik.solve(10.0, 20.0, 0.0)) {
+            return false;
+        }
+        pivot_x = rig_test_ik.world_x(0);
+        pivot_y = rig_test_ik.world_y(0);
+        target_x = pivot_x + 5.0;
+        target_y = pivot_y;
+        if (!rig_test_ik.solve_two_bone(0, 1, target_x, target_y, 5.0, 4.0, side, -180.0, 180.0, -180.0, 180.0)) {
+            return false;
+        }
+        if (!rig_test_ik.solve(10.0, 20.0, 0.0)) {
+            return false;
+        }
+        if (side < 0) {
+            negative_elbow_y = rig_test_ik.world_y(1);
+            if (negative_elbow_y >= pivot_y) {
+                return false;
+            }
+        } else if (rig_test_ik.world_y(1) <= pivot_y || rig_test_ik.world_y(1) <= negative_elbow_y) {
+            return false;
+        }
+        if (!rig2d_test_near(rig_test_ik.world_x(2), target_x) || !rig2d_test_near(rig_test_ik.world_y(2), target_y)) {
+            return false;
+        }
+    }
+
+    if (!rig2d_test_setup_ik(3.0, 4.0, 4.0)) {
+        return false;
+    }
+    rig_test_ik.set_local(0, 2.0, -1.0, 40.0);
+    rig_test_ik.set_local(1, 3.0, 4.0, -75.0);
+    if (!rig_test_ik.solve(10.0, 20.0, 0.0)) {
+        return false;
+    }
+    target_x = rig_test_ik.world_x(2);
+    target_y = rig_test_ik.world_y(2);
+    pivot_x = rig_test_ik.world_x(0);
+    pivot_y = rig_test_ik.world_y(0);
+    rig_test_ik.set_local(0, 2.0, -1.0, 0.0);
+    rig_test_ik.set_local(1, 3.0, 4.0, 0.0);
+    if (!rig_test_ik.solve(10.0, 20.0, 0.0)) {
+        return false;
+    }
+    if (!rig_test_ik.solve_two_bone(0, 1, target_x, target_y, 5.0, 4.0, 1, 0.0, 0.0, -180.0, 180.0)) {
+        return false;
+    }
+    let clamped_elbow_x: f32 = pivot_x + 3.0;
+    let clamped_elbow_y: f32 = pivot_y + 4.0;
+    let expected_lower_angle: f32 = math_atan2_degrees(target_y - clamped_elbow_y, target_x - clamped_elbow_x);
+    if (
+        !rig2d_test_near(rig_test_ik.bones[0].local_angle, 0.0)
+        || !rig2d_test_near(rig_test_ik.bones[1].local_angle, rig2d_wrap(expected_lower_angle))
+        || !rig_test_ik.solve(10.0, 20.0, 0.0)
+    ) {
+        return false;
+    }
+    let expected_x: f32 = clamped_elbow_x + 4.0 * rig2d_cos(expected_lower_angle);
+    let expected_y: f32 = clamped_elbow_y + 4.0 * rig2d_sin(expected_lower_angle);
+    return rig2d_test_near(rig_test_ik.world_x(2), expected_x) && rig2d_test_near(rig_test_ik.world_y(2), expected_y);
+}
+
+test `two bone IK constrains lower seam and both nearest arc edges`(): bool {
+    if (!rig2d_test_setup_ik(3.0, 4.0, 4.0)) {
+        return false;
+    }
+    rig_test_ik.set_local(0, 2.0, -1.0, 0.0);
+    rig_test_ik.set_local(1, 3.0, 4.0, -175.0);
+    if (!rig_test_ik.solve(0.0, 0.0, 0.0)) {
+        return false;
+    }
+    let seam_target_x: f32 = rig_test_ik.world_x(2);
+    let seam_target_y: f32 = rig_test_ik.world_y(2);
+    rig_test_ik.set_local(1, 3.0, 4.0, 0.0);
+    if (!rig_test_ik.solve(0.0, 0.0, 0.0)) {
+        return false;
+    }
+    if (!rig_test_ik.solve_two_bone(0, 1, seam_target_x, seam_target_y, 5.0, 4.0, 1, 0.0, 0.0, 170.0, 210.0)) {
+        return false;
+    }
+    if (!rig2d_test_near(rig_test_ik.bones[1].local_angle, -175.0)) {
+        return false;
+    }
+
+    rig_test_ik.set_local(1, 3.0, 4.0, 179.0);
+    if (!rig_test_ik.solve(0.0, 0.0, 0.0)) {
+        return false;
+    }
+    let upper_edge_target_x: f32 = rig_test_ik.world_x(2);
+    let upper_edge_target_y: f32 = rig_test_ik.world_y(2);
+    rig_test_ik.set_local(1, 3.0, 4.0, 0.0);
+    if (!rig_test_ik.solve(0.0, 0.0, 0.0)) {
+        return false;
+    }
+    if (!rig_test_ik.solve_two_bone(0, 1, upper_edge_target_x, upper_edge_target_y, 5.0, 4.0, 1, 0.0, 0.0, -170.0, 170.0)) {
+        return false;
+    }
+    if (!rig2d_test_near(rig_test_ik.bones[1].local_angle, 170.0)) {
+        return false;
+    }
+
+    rig_test_ik.set_local(1, 3.0, 4.0, -179.0);
+    if (!rig_test_ik.solve(0.0, 0.0, 0.0)) {
+        return false;
+    }
+    let lower_edge_target_x: f32 = rig_test_ik.world_x(2);
+    let lower_edge_target_y: f32 = rig_test_ik.world_y(2);
+    rig_test_ik.set_local(1, 3.0, 4.0, 0.0);
+    if (!rig_test_ik.solve(0.0, 0.0, 0.0)) {
+        return false;
+    }
+    if (!rig_test_ik.solve_two_bone(0, 1, lower_edge_target_x, lower_edge_target_y, 5.0, 4.0, 1, 0.0, 0.0, -170.0, 170.0)) {
+        return false;
+    }
+    return rig2d_test_near(rig_test_ik.bones[1].local_angle, -170.0);
+}
+
+test `two bone IK supports small positive links and rejects zero offset`(): bool {
+    rig_test_ik.clear();
+    if (
+        rig_test_ik.add_bone(-1, 0.0, 0.0, 0.0) != 0
+        || rig_test_ik.add_bone(0, 0.0003, 0.0004, 0.0) != 1
+        || rig_test_ik.add_bone(1, 0.0005, 0.0, 0.0) != 2
+        || !rig_test_ik.solve(0.0, 0.0, 0.0)
+        || !rig_test_ik.solve_two_bone(0, 1, 0.0005, 0.0, 0.0005, 0.0005, 1, -180.0, 180.0, -180.0, 180.0)
+        || !rig_test_ik.solve(0.0, 0.0, 0.0)
+    ) {
+        return false;
+    }
+    let difference_x: f32 = rig_test_ik.world_x(2) - 0.0005;
+    let difference_y: f32 = rig_test_ik.world_y(2);
+    if (difference_x <= -0.0000001 || difference_x >= 0.0000001 || difference_y <= -0.0000001 || difference_y >= 0.0000001) {
+        return false;
+    }
+
+    rig_test_ik.clear();
+    if (
+        rig_test_ik.add_bone(-1, 0.0, 0.0, 0.0) != 0
+        || rig_test_ik.add_bone(0, 0.0, 0.0, 0.0) != 1
+        || rig_test_ik.add_bone(1, 0.0005, 0.0, 0.0) != 2
+        || !rig_test_ik.solve(0.0, 0.0, 0.0)
+    ) {
+        return false;
+    }
+    let upper_angle: f32 = rig_test_ik.bones[0].local_angle;
+    let lower_angle: f32 = rig_test_ik.bones[1].local_angle;
+    let cached_elbow_x: f32 = rig_test_ik.world_x(1);
+    let cached_elbow_y: f32 = rig_test_ik.world_y(1);
+    if (rig_test_ik.solve_two_bone(0, 1, 0.0, 0.0, 0.0005, 0.0005, 1, -180.0, 180.0, -180.0, 180.0)) {
+        return false;
+    }
+    if (
+        !rig2d_test_near(rig_test_ik.bones[0].local_angle, upper_angle)
+        || !rig2d_test_near(rig_test_ik.bones[1].local_angle, lower_angle)
+        || !rig2d_test_near(rig_test_ik.world_x(1), cached_elbow_x)
+        || !rig2d_test_near(rig_test_ik.world_y(1), cached_elbow_y)
+    ) {
+        return false;
+    }
+
+    rig_test_ik.clear();
+    if (
+        rig_test_ik.add_bone(-1, 0.0, 0.0, 0.0) != 0
+        || rig_test_ik.add_bone(0, 0.00000000006, 0.00000000008, 0.0) != 1
+        || rig_test_ik.add_bone(1, 0.0000000001, 0.0, 0.0) != 2
+        || !rig_test_ik.solve(0.0, 0.0, 0.0)
+        || !rig_test_ik.solve_two_bone(0, 1, 0.0000000001, 0.0, 0.0000000001, 0.0000000001, 1, -180.0, 180.0, -180.0, 180.0)
+        || !rig_test_ik.solve(0.0, 0.0, 0.0)
+    ) {
+        return false;
+    }
+    let tiny_difference_x: f32 = rig_test_ik.world_x(2) - 0.0000000001;
+    let tiny_difference_y: f32 = rig_test_ik.world_y(2);
+    return tiny_difference_x > -0.000000000001 && tiny_difference_x < 0.000000000001 && tiny_difference_y > -0.000000000001 && tiny_difference_y < 0.000000000001;
+}
+
+test `two bone IK keeps both joint limits across a target sweep`(): bool {
+    let direction: f32 = -180.0;
+    let radius_case: i32 = 0;
+    let radius: f32 = 0.0;
+    let bend: i32 = -1;
+    let pivot_x: f32 = 0.0;
+    let pivot_y: f32 = 0.0;
+    for (direction = -180.0; direction < 180.0; direction = direction + 30.0) {
+        for (radius_case = 0; radius_case < 3; radius_case = radius_case + 1) {
+            radius = 1.0;
+            if (radius_case == 1) {
+                radius = 4.0;
+            }
+            if (radius_case == 2) {
+                radius = 10.0;
+            }
+            for (bend = -1; bend <= 1; bend = bend + 2) {
+                if (!rig2d_test_setup_ik(3.0, 4.0, 4.0) || !rig_test_ik.solve(60.0, -35.0, 37.0)) {
+                    return false;
+                }
+                pivot_x = rig_test_ik.world_x(0);
+                pivot_y = rig_test_ik.world_y(0);
+                let target_x: f32 = pivot_x + radius * rig2d_cos(direction);
+                let target_y: f32 = pivot_y + radius * rig2d_sin(direction);
+                if (!rig_test_ik.solve_two_bone(0, 1, target_x, target_y, 5.0, 4.0, bend, -70.0, 40.0, -100.0, 55.0)) {
+                    return false;
+                }
+                if (
+                    rig_test_ik.bones[0].local_angle < -70.0
+                    || rig_test_ik.bones[0].local_angle > 40.0
+                    || rig_test_ik.bones[1].local_angle < -100.0
+                    || rig_test_ik.bones[1].local_angle > 55.0
+                ) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+test `two bone IK rejects bad lengths inputs topology and arcs atomically`(): bool {
+    if (!rig2d_test_setup_ik(3.0, 4.0, 4.0) || !rig_test_ik.solve(10.0, 20.0, 30.0)) {
+        return false;
+    }
+    rig_test_ik.set_local(0, 2.0, -1.0, 25.0);
+    rig_test_ik.set_local(1, 3.0, 4.0, -15.0);
+    if (!rig_test_ik.solve(10.0, 20.0, 30.0)) {
+        return false;
+    }
+    let upper_angle: f32 = rig_test_ik.bones[0].local_angle;
+    let lower_angle: f32 = rig_test_ik.bones[1].local_angle;
+    let upper_world_x: f32 = rig_test_ik.world_x(0);
+    let upper_world_y: f32 = rig_test_ik.world_y(0);
+    let lower_world_x: f32 = rig_test_ik.world_x(1);
+    let lower_world_y: f32 = rig_test_ik.world_y(1);
+    let bad_nan: f32 = 0.0 / 0.0;
+    if (
+        rig_test_ik.solve_two_bone(0, 1, bad_nan, 22.0, 5.0, 4.0, 1, -180.0, 180.0, -180.0, 180.0)
+        || rig_test_ik.solve_two_bone(0, 1, 15.0, 24.0, 5.1, 4.0, 1, -180.0, 180.0, -180.0, 180.0)
+        || rig_test_ik.solve_two_bone(0, 1, 15.0, 24.0, 5.0, 0.0, 1, -180.0, 180.0, -180.0, 180.0)
+        || rig_test_ik.solve_two_bone(0, 1, 15.0, 24.0, 5.0, 4.0, 0, -180.0, 180.0, -180.0, 180.0)
+        || rig_test_ik.solve_two_bone(0, 1, 15.0, 24.0, 5.0, 4.0, 1, 181.0, 170.0, -180.0, 180.0)
+        || rig_test_ik.solve_two_bone(0, 1, 15.0, 24.0, 5.0, 4.0, 1, -180.0, 181.0, -180.0, 180.0)
+        || rig_test_ik.solve_two_bone(-1, 1, 15.0, 24.0, 5.0, 4.0, 1, -180.0, 180.0, -180.0, 180.0)
+    ) {
+        return false;
+    }
+    if (
+        !rig2d_test_near(rig_test_ik.bones[0].local_angle, upper_angle)
+        || !rig2d_test_near(rig_test_ik.bones[1].local_angle, lower_angle)
+        || !rig2d_test_near(rig_test_ik.world_x(0), upper_world_x)
+        || !rig2d_test_near(rig_test_ik.world_y(0), upper_world_y)
+        || !rig2d_test_near(rig_test_ik.world_x(1), lower_world_x)
+        || !rig2d_test_near(rig_test_ik.world_y(1), lower_world_y)
+        || !rig2d_test_near(rig_test_ik.bones[0].rest_angle, 0.0)
+        || !rig2d_test_near(rig_test_ik.bones[1].rest_angle, 0.0)
+        || !rig2d_test_near(rig_test_ik.bones[2].local_angle, 0.0)
+    ) {
+        return false;
+    }
+    rig_test_ik.bones[1].parent = 1;
+    return !rig_test_ik.solve_two_bone(0, 1, 15.0, 24.0, 5.0, 4.0, 1, -180.0, 180.0, -180.0, 180.0) && rig2d_test_near(
+        rig_test_ik.bones[0].local_angle,
+        upper_angle
+    ) && rig2d_test_near(rig_test_ik.bones[1].local_angle, lower_angle);
+}
+
+test `rig local arc clamp leaves invalid direct inputs unchanged`(): bool {
+    let bad_nan: f32 = 0.0 / 0.0;
+    let infinity: f32 = 1.0 / 0.0;
+    return rig2d_clamp_local_angle(12.0, 180.0, 170.0) == 12.0 && rig2d_clamp_local_angle(12.0, -180.0, 181.0) == 12.0 && rig2d_clamp_local_angle(
+        bad_nan,
+        -180.0,
+        180.0
+    ) != rig2d_clamp_local_angle(bad_nan, -180.0, 180.0) && rig2d_clamp_local_angle(infinity, -180.0, 180.0) == infinity;
 }

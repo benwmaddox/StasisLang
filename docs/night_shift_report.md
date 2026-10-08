@@ -952,3 +952,49 @@ copied the stamped CLI without its required sibling graphics runtime, before
 the first package could be generated.
 Adjustment: stage the freshly built matching runtime beside the isolated CLI;
 the two-generation lifecycle acceptance is pending on the frozen source.
+
+## 2026-10-08 - Maddox #784 bounded two-bone IK
+
+Added `Rig2D.solve_two_bone()` for a direct upper/lower chain. The lower bone's
+local translation supplies the upper-link vector; its local X axis supplies the
+virtual lower link. The solver validates the cached chain and inputs, projects
+targets to the reachable annulus, applies the upper local-angle limit, recomputes
+the elbow from its preserved offset, then aims and constrains the lower angle.
+Invalid input leaves the rig unchanged. The Stasis behavior suite now covers
+direction/radius/bend sweeps, nested and rotated parents, non-axis offsets,
+reach boundaries, equal-link root targets, seam/wide arcs, post-clamp aiming,
+and atomic rejection. The same deterministic sweep runs as a JIT, linked-AOT,
+and Node-Wasm oracle.
+
+The RED seam first failed because the public method did not exist. The solver
+snapshots only the scalar FK and local fields it needs, then defers its two
+local-angle writes until validation and calculations pass.
+
+Validation: signed-required `python tools/cargo_cache.py run -- cargo test
+--package stasis_compiler --test rig2d_jit_aot_seam -- --test-threads=1`; 3/3
+Rust tests passed, including all 21 Stasis behavior cases and JIT/linked-AOT/
+Node-Wasm oracle parity. The existing MSVC 14.44 linker and Rust sysroot
+`gcc-ld` were added to PATH only for the test process. Documentation and
+formatting checks remain part of final review.
+
+Visual evidence: not applicable; this is renderer-independent pose math with no
+user-visible graphics change.
+
+Theory gained: a child's parent-relative offset is the geometric upper link,
+while its frame angle controls a virtual distal X axis. The `(3, 4)` offset sweep
+confirmed that compensating for the offset bearing preserves endpoint reach
+under rotated roots and nested parents. This predicts that any translated or
+rotated parent hierarchy should behave identically when the caller runs FK
+before and after the helper.
+
+Good: analytic reach, bend, and limit behavior now stays inside the existing
+stdlib FK representation, and one oracle executes in all three backends. Tiny
+positive links remain supported while a zero upper-link offset is rejected
+atomically; both joints are checked across the limit sweep.
+Bad: one limit-sweep call failed frontend resolution when target arithmetic and
+trig calls were passed inline, although the same call resolves with equivalent
+local arguments. The first AOT attempt also lacked an inherited linker PATH.
+Adjustment: snapshot only the needed scalar fields and defer writes; assign
+target coordinates to local `f32` values before that call without changing
+compiler resolution behavior; and add the installed MSVC and Rust LLD
+directories only to the bounded test process.

@@ -223,12 +223,59 @@ code should treat it as module-owned storage. Direct parent mutation can violate
 the parent-first invariant; direct local mutation bypasses index validation and
 angle normalization.
 
+## Two-bone inverse kinematics
+
+`solve_two_bone()` handles one parent-first chain: `lower` must be a direct child
+of `upper`. The lower bone's local translation is the upper-link vector, so its
+nonzero length must match `upper_length` within a relative `1e-5` f32 tolerance.
+No minimum link size is imposed. Its local X axis defines the virtual lower
+link with the supplied `lower_length`; a child marker at `(lower_length, 0)` can
+be used to visualize that endpoint. The helper compensates for a non-axis
+upper-link offset.
+
+Call the helper after a successful `solve()` so it can read the cached world
+pivot and parent orientation. It validates topology, finite inputs, positive
+lengths, offset length, bend sign, and both angle intervals before changing
+anything. It writes only the two local angles and leaves local translations,
+rest transforms, and cached world transforms untouched. Call `solve()` again
+before reading the updated world pose.
+
+```stasis
+if (!courier_rig.solve(220.0, 640.0, bank)) {
+    return false;
+}
+if (!courier_rig.solve_two_bone(arm, forearm, target_x, target_y, 24.0, 18.0, 1, -80.0, 50.0, -110.0, 5.0)) {
+    return false;
+}
+return courier_rig.solve(220.0, 640.0, bank);
+```
+
+`bend_sign` is `-1` or `+1`; for a target on the positive X axis, `+1` places
+the elbow on the clockwise, positive-Y side of the screen and `-1` places it
+on the counter-clockwise side. The helper projects targets outside the chain's
+reach to the nearest radius in `[abs(upper_length - lower_length),
+upper_length + lower_length]`. If both lengths match and the target is the
+upper pivot, it keeps the current first-link direction and folds the virtual
+lower link back toward that pivot.
+
+The upper and lower local angle limits are ordered, unwrapped `[lo, hi]`
+intervals with widths from zero through 360 degrees. This allows a seam-crossing
+interval such as `170.0..210.0` and a wide interval such as `-170.0..170.0`.
+The candidate angle is unwrapped around the interval midpoint before clamping,
+then stored in the usual `[-180, 180)` local range. Small overshoots clamp to
+the nearby interval edge. `rig2d_clamp_local_angle()` returns its input
+unchanged for a non-finite/out-of-range angle or invalid interval.
+
+`true` means valid inputs produced and committed a constrained pose. It does
+not promise to reach the requested point when reach projection or angle limits
+prevent an exact solution.
+
 ## Deliberate version 1 limits
 
 - A caller-selected non-negative compile-time capacity per `Rig2D<N>`, with
   bounded `O(count)` solve work.
 - Translation and rotation only; no scale, shear, weighted mesh, or skinning.
-- No inverse kinematics, constraints, animation clips, queues, or layers.
+- No general constraint solver, animation clips, queues, or layers.
 - No JSON/atlas importer, editor format, attachment type, or draw-order model.
 - Polynomial sine/cosine helpers keep the module host-independent. The module
   is intended for visual transforms, not authoritative cross-architecture
@@ -236,9 +283,9 @@ angle normalization.
 
 These limits preserve the boundary proven by Afterlight: the generic hierarchy
 did not change when that game extended its consumer from a simpler courier to a
-14-bone head, scarf, arm, and two-link leg rig. Future clip playback, IK, or
-attachment helpers can build on the solved-transform API without coupling the
-core to a renderer or asset format.
+14-bone head, scarf, arm, and two-link leg rig. Future clip playback, general
+constraints, or attachment helpers can build on the solved-transform API
+without coupling the core to a renderer or asset format.
 
 ## Migrating the Afterlight proof
 
@@ -303,6 +350,6 @@ from `Rig2D` or a completed validation of Afterlight's shipping rig.
 `tests/stasis/rig2d.test.stasis` covers capacity and parent validation, rotated
 chains, independently owned rigs, shortest-arc blending, endpoint clamping,
 rest-pose reset, repeated solve stability, atomic failure, trigonometric wrapping,
-empty and multiple-root rigs, sentinels, and exact angle boundaries. The backend
-seam executes a representative owned-array hierarchy through JIT and linked AOT
-paths.
+empty and multiple-root rigs, sentinels, exact angle boundaries, and two-bone IK
+reach, bend, offset, limit, and invalid-input cases. The backend seam executes
+the same IK sweep oracle through JIT, linked AOT, and Node WebAssembly.
