@@ -5032,3 +5032,120 @@ fn walk_files_without_git(root: &Path) -> Vec<PathBuf> {
     }
     files
 }
+
+#[test]
+fn desktop_package_rejects_adapter_for_standalone_guest_and_keeps_plain_standalone() {
+    let adapter_project = temp_dir("desktop_adapter_standalone_package");
+    let baseline_project = temp_dir("plain_standalone_package_baseline");
+
+    let prepare_project = |project: &Path, name: &str, with_adapter: bool| {
+        fs::create_dir_all(project.join("src")).expect("create source directory");
+        fs::create_dir_all(project.join("tests")).expect("create tests directory");
+        let mut manifest = json!({
+            "manifest_version": 3,
+            "name": name,
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build"
+        });
+        if with_adapter {
+            fs::create_dir_all(project.join("native")).expect("create adapter directory");
+            manifest["desktop"] = json!({
+                "native_adapter": {
+                    "abi_version": 1,
+                    "source": "native/adapter.c"
+                }
+            });
+            fs::write(
+                project.join("native/adapter.c"),
+                concat!(
+                    "#include \"stasis_desktop_adapter.h\"\n",
+                    "int32_t stasis_desktop_adapter_initialize(const StasisDesktopAdapterContext *context) { return context ? 0 : 1; }\n",
+                    "int32_t stasis_desktop_adapter_pump(const StasisDesktopAdapterContext *context) { (void)context; return STASIS_DESKTOP_ADAPTER_PUMP_CONTINUE; }\n",
+                    "int32_t stasis_desktop_adapter_on_foreground(const StasisDesktopAdapterContext *context) { (void)context; return 0; }\n",
+                    "void stasis_desktop_adapter_shutdown(const StasisDesktopAdapterContext *context) { (void)context; }\n"
+                ),
+            )
+            .expect("write valid adapter source");
+        }
+        fs::write(
+            project.join("stasis.json"),
+            serde_json::to_vec_pretty(&manifest).expect("serialize manifest"),
+        )
+        .expect("write project manifest");
+        fs::write(
+            project.join("src/main.stasis"),
+            "function main(): i32 { return 0; }\n",
+        )
+        .expect("write standalone guest");
+    };
+
+    prepare_project(&adapter_project, "standalone_adapter_probe", true);
+    prepare_project(&baseline_project, "standalone_plain_baseline", false);
+
+    let adapter_package = stasis(
+        &[
+            "--json",
+            "package",
+            "--target",
+            "desktop",
+            "--development-build",
+        ],
+        &adapter_project,
+    );
+    let adapter_diagnostic = serde_json::from_slice::<Value>(&adapter_package.stderr)
+        .ok()
+        .and_then(|value| value["message"].as_str().map(str::to_owned));
+    let adapter_output_exists = adapter_project
+        .join("dist/standalone_adapter_probe-desktop")
+        .exists();
+
+    let baseline_package = stasis(
+        &[
+            "--json",
+            "package",
+            "--target",
+            "desktop",
+            "--development-build",
+        ],
+        &baseline_project,
+    );
+    let baseline_output_exists = baseline_project
+        .join("dist/standalone_plain_baseline-desktop")
+        .exists();
+
+    fs::remove_dir_all(&adapter_project).ok();
+    fs::remove_dir_all(&baseline_project).ok();
+
+    assert_eq!(
+        adapter_package.status.code(),
+        Some(1),
+        "adapter-enabled standalone package should be rejected; stdout={} stderr={}",
+        String::from_utf8_lossy(&adapter_package.stdout),
+        String::from_utf8_lossy(&adapter_package.stderr)
+    );
+    assert!(
+        adapter_package.stdout.is_empty(),
+        "rejected adapter package should not report success"
+    );
+    assert_eq!(
+        adapter_diagnostic.as_deref(),
+        Some("desktop native adapter requires engine-mode guest entrypoints: zero-argument tick() and render"),
+        "adapter rejection must identify the missing engine contract"
+    );
+    assert!(
+        !adapter_output_exists,
+        "rejected adapter package must not publish a standalone package"
+    );
+    assert_eq!(
+        baseline_package.status.code(),
+        Some(0),
+        "plain standalone desktop package regressed; stdout={} stderr={}",
+        String::from_utf8_lossy(&baseline_package.stdout),
+        String::from_utf8_lossy(&baseline_package.stderr)
+    );
+    assert!(
+        baseline_output_exists,
+        "plain standalone desktop package was not published"
+    );
+}
