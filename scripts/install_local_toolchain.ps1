@@ -28,6 +28,8 @@ $runtimeSourceFiles = @(
   "stasis_svg.h",
   "stasis_asset_path.h",
   "stasis_display_scale.h",
+  "stasis_desktop_adapter.h",
+  "stasis_desktop_adapter_links.cmake",
   "stasis_render_contract.h",
   "stasis_renderer_lifecycle.h",
   "stasis_performance_metrics.h",
