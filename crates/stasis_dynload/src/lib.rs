@@ -5905,6 +5905,32 @@ pub extern "C" fn stasis_jit_open_external_url(value_id: i32) -> i32 {
     callback(value.as_ptr().cast(), value.len() as i32)
 }
 
+#[no_mangle]
+pub extern "C" fn stasis_jit_ad_request(_kind: i32) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_ad_poll(_handle: i32) -> i32 {
+    4
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_ad_gameplay_blocked() -> i32 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_ad_take_reward(_handle: i32) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_ad_release(_handle: i32) {}
+
+#[no_mangle]
+pub extern "C" fn stasis_jit_portal_lifecycle(_event: i32) {}
+
 fn validated_jit_text_arg_bytes(value_id: i32) -> Option<Vec<u8>> {
     let bytes = jit_text_arg_bytes(value_id)?;
     std::str::from_utf8(&bytes).ok()?;
@@ -8488,6 +8514,20 @@ fn jit_string_literal_table() -> &'static Mutex<JitStringLiteralMap> {
 mod tests {
     use super::*;
     use std::sync::MutexGuard;
+
+    #[test]
+    fn native_ad_bridges_report_unavailable() {
+        assert_eq!(stasis_jit_ad_request(0), 0);
+        assert_eq!(stasis_jit_ad_poll(0), 4);
+        assert_eq!(stasis_jit_ad_poll(-1), 4);
+        assert_eq!(stasis_jit_ad_gameplay_blocked(), 0);
+        assert_eq!(stasis_jit_ad_take_reward(1), 0);
+        stasis_jit_ad_release(1);
+        stasis_jit_ad_release(-1);
+        stasis_jit_portal_lifecycle(0);
+        stasis_jit_portal_lifecycle(1);
+        stasis_jit_portal_lifecycle(i32::MAX);
+    }
 
     #[test]
     fn window_placement_decodes_signed_desktop_coordinates_and_scales() {

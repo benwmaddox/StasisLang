@@ -1,4 +1,6 @@
 import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
+import "/.stasis_cache/toolchain/src/stdlib/ad_tasks.stasis";
+import "/.stasis_cache/toolchain/src/stdlib/portal_lifecycle.stasis";
 
 struct WallRun { x: i32; length: i32; }
 struct WallCache<N: i32> { runs: WallRun[N]; }
@@ -13,6 +15,41 @@ global forwarded_char_length: i32;
 global fixed_walls: WallRun[2];
 global generic_walls: WallCache<2>;
 global lifecycle_writer: SpriteRunWriter;
+global mobile_ad_task: AdTask;
+
+function probe_mobile_ad_shims(): i32 {
+    if (mobile_ad_task.begin(AdKind.Midgame) != AdBeginResult.Unavailable) {
+        return 1;
+    }
+    if (ad_tasks.status(mobile_ad_task) != AdState.Unavailable) {
+        return 2;
+    }
+    if (mobile_ad_task.should_block_gameplay()) {
+        return 3;
+    }
+    mobile_ad_task.handle = 1;
+    mobile_ad_task.state = AdState.Playing;
+    if (mobile_ad_task.take_reward()) {
+        return 4;
+    }
+    if (ad_tasks.status(mobile_ad_task) != AdState.Failed) {
+        return 5;
+    }
+    ad_tasks.release(mobile_ad_task);
+    if (mobile_ad_task.handle != 0 || mobile_ad_task.state != AdState.Idle) {
+        return 6;
+    }
+    mobile_ad_task.state = AdState.Finished;
+    ad_tasks.reset(mobile_ad_task);
+    if (mobile_ad_task.handle != 0 || mobile_ad_task.state != AdState.Idle) {
+        return 7;
+    }
+    notify_portal_lifecycle(PortalLifecycleEvent.LoadingStarted);
+    notify_portal_lifecycle(PortalLifecycleEvent.LoadingFinished);
+    notify_portal_lifecycle(PortalLifecycleEvent.GameplayStarted);
+    notify_portal_lifecycle(PortalLifecycleEvent.GameplayStopped);
+    return 0;
+}
 
 function emit_text_leaf(text: utf8[]): void {
     forwarded_byte_length = length_bytes(text);
@@ -44,6 +81,10 @@ function main(): i32 {
         return 43;
     }
     score = 10;
+    let mobile_ad_result: i32 = probe_mobile_ad_shims();
+    if (mobile_ad_result != 0) {
+        return 60 + mobile_ad_result;
+    }
     fixed_walls[0].length = 3;
     generic_walls.runs[0].length = 4;
     if (lifecycle_mode == 1) {

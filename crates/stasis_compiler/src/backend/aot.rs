@@ -1911,6 +1911,7 @@ fn build_engine_bundle_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frontend::types::TYPE_ID_VOID;
 
     fn manifest_for_lifecycle_rows(
         rows: &[(FunctionId, String, String, String, String, u16, usize)],
@@ -5568,6 +5569,90 @@ function zero_capacity(): i32 {
         .into_iter()
         .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn ad_extern_and_aot_export_contract() {
+        let expected = [
+            "stasis_jit_ad_request",
+            "stasis_jit_ad_poll",
+            "stasis_jit_ad_gameplay_blocked",
+            "stasis_jit_ad_take_reward",
+            "stasis_jit_ad_release",
+            "stasis_jit_portal_lifecycle",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        for symbol in &expected {
+            assert!(
+                super::super::runtime_exports::is_aot_runtime_export_symbol(symbol),
+                "missing AOT runtime export {symbol}"
+            );
+        }
+
+        let mut process = AotProcess::new();
+        let source = format!(
+            "import \"stdlib/ad_tasks.stasis\";\nimport \"stdlib/portal_lifecycle.stasis\";\n{}",
+            include_str!("../../../../tests/stasis/seams/native_ad_unavailable.stasis.fixture")
+        );
+        process.upsert_file(
+            "stdlib/ad_tasks.stasis",
+            include_str!("../../../../src/stdlib/ad_tasks.stasis"),
+        );
+        process.upsert_file(
+            "stdlib/portal_lifecycle.stasis",
+            include_str!("../../../../src/stdlib/portal_lifecycle.stasis"),
+        );
+        process.upsert_file("native_ad_unavailable.stasis", source);
+        process
+            .compile()
+            .expect("compile native stdlib unavailable ad fixture");
+        let signatures = &process
+            .program_snapshot
+            .as_ref()
+            .expect("AOT program snapshot")
+            .analysis
+            .resolved_extern_signatures;
+        let actual = signatures
+            .iter()
+            .map(|signature| (signature.symbol.as_str(), signature))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(actual.len(), expected.len());
+        for (symbol, parameters, return_type) in [
+            ("stasis_jit_ad_request", vec![TYPE_ID_I32], TYPE_ID_I32),
+            ("stasis_jit_ad_poll", vec![TYPE_ID_I32], TYPE_ID_I32),
+            ("stasis_jit_ad_gameplay_blocked", Vec::new(), TYPE_ID_I32),
+            ("stasis_jit_ad_take_reward", vec![TYPE_ID_I32], TYPE_ID_I32),
+            ("stasis_jit_ad_release", vec![TYPE_ID_I32], TYPE_ID_VOID),
+            (
+                "stasis_jit_portal_lifecycle",
+                vec![TYPE_ID_I32],
+                TYPE_ID_VOID,
+            ),
+        ] {
+            let signature = actual
+                .get(symbol)
+                .unwrap_or_else(|| panic!("missing {symbol}"));
+            assert_eq!(signature.params, parameters, "parameter ABI for {symbol}");
+            assert_eq!(
+                signature.return_type, return_type,
+                "return ABI for {symbol}"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            let link_config =
+                resolve_link_config_for_smoke().expect("configured Windows AOT linker");
+            let result = run_linked_i32_noarg_fixture(
+                &process,
+                "main",
+                "native_ad_unavailable",
+                &link_config,
+            )
+            .expect("link and execute native ad ABI AOT fixture");
+            assert_eq!(result, 0);
+        }
     }
 
     #[test]

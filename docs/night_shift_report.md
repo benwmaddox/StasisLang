@@ -814,6 +814,101 @@ literal lookup omission. Adjustment: retain a generated executable regression
 for indexed literal arguments and require packaged mobile acceptance before
 merging this slice.
 
+## 2026-10-07 - Maddox #833 browser ad lifecycle and portal profiles
+
+Added typed ad-task and portal-lifecycle modules, native/JIT/AOT/mobile unavailable
+stubs, Web request/poll/release handling, four portal profiles, deterministic
+upload ZIPs, and a no-SDK default. Browser requests remain asynchronous: the
+frame pump and guest polling continue while the guest blocks simulation. Rewards
+require provider-specific proof and are consumed once. The direct Web package
+selects one portal SDK; native desktop/mobile LAN guest bundles remain plain Web.
+
+Validation before the final user-facing message tweak: the full Web Node suite
+passed 279/279 and the focused ad lifecycle suite passed 34/34. After the tweak,
+the focused audio/runtime suite passed 20/20. Native unavailable
+coverage passed 1/1 each for the dynload shim, JIT execution, linked Windows AOT
+executable, and generated mobile AOT runtime seam. The fresh Windows CLI build
+was `082f3ff3a66daa5062253ad6cd56f276eb2f0187e631d07d583802e2ab320b63`;
+fresh `none` and all four portal development packages completed with exit 0 and
+left the installed CLI unchanged. The packaged Wasm hash was
+`dd5e37a5ef52e5bef119323d131cec89e0a3e0f421dc2bd171bfa4ed620982fa`.
+The friendly adapter-import failure message was then checked with a new CLI
+build (`fc1903518e03d51d2367ba1d2692d9d8441bf9f4a5964b5f1decd65dbcf1eb0a`), a
+fresh GameMonetize package, and a new Chrome 404 run.
+
+Real Chrome 155 CDP acceptance used deterministic SDK fakes intercepted at the
+selected provider's actual script request; no SDK globals were preloaded. The
+`none` build requested no SDK and returned `Unavailable` with no handle. All
+four selected profiles made exactly one selected SDK request. CrazyGames and
+Poki reported start/terminal callbacks and lifecycle boundaries; GameMonetize
+reward requests were explicitly unavailable; GameDistribution's mouse and
+390x844 Chrome touch-emulation paths both issued `showAd` inside a trusted
+pointer-up while user activation was active. The GD browser run proved that a
+promise without `SDK_REWARDED_WATCH_COMPLETE` grants zero, while proof followed
+by a rejected promise remains consumable exactly once. Audio acceptance used a
+real `AudioContext`: it resumed from the trusted gesture, suspended on actual
+ad start, resumed on completion, and preserved an independently suspended
+context. Requesting/playing frames held the simulation counter steady while
+poll/render counters advanced; completion and no-fill resumed without catch-up
+or replaying a held key. The optional CDP hidden/visible transition was skipped;
+visibility lifecycle behavior has Node coverage, but this run makes no claim of
+real-browser visibility-transition acceptance.
+
+Separate real-browser failure runs returned to a playable state with
+`mainResult=0`, guest `Unavailable`, no open handle, no gameplay block, and
+continuing simulation/rendering when (a) the selected GameMonetize SDK script
+failed to load and (b) the actual dynamic `ad_lifecycle.js` request returned
+HTTP 404. Both paths executed no SDK break. The primary-source notes and product
+docs state the user-selected GD policy: the global reward event belongs to the
+latest issued rewarded call until its owner is released/reset/disposed/timed
+out or a newer rewarded call is issued. The event has no documented ID, order,
+or delay bound, so a late completion from an older call can be attributed to a
+newer one; no vendor correlation guarantee is claimed. GameMonetize rewarded
+remains unsupported.
+
+The complete `tools/validate_repo.sh` attempt at the recorded baseline reached
+its 900-second process-tree limit and is incomplete, not a pass. Bounded
+remaining coverage shards passed, but exact-final-source validation still must
+run after the focused commit. Actions was confirmed disabled, so no hosted
+workflow was started. No live portal account, ad fill, submission approval,
+publication, or supported release was tested; the nightly dependency is still
+blocked by #832. The unreleased branch therefore does not establish downstream
+#834 readiness.
+
+Visual evidence: PNGs and actual timestamped Chrome screencast MP4s were captured
+for the full matrix under
+`D:\code\.automation-evidence\nightly-20261007\task833\browser-acceptance`.
+Captured stage frames include `none-noaudio-mouse-JX1dhZ/frame-02.png`,
+`crazygames-audio-mouse-K1aRpa/frame-02.png`, `frame-03.png`, and `frame-06.png`,
+`gamemonetize-noaudio-mouse-ckoMeE/frame-02.png`, `frame-03.png`, and
+`frame-06.png`, `gamedistribution-noaudio-mouse-cgtifK/frame-02.png`,
+`frame-04.png`, and `frame-08.png`, the corresponding touch stages in
+`gamedistribution-noaudio-touch-UhtQdP`, `poki-noaudio-mouse-84bLaz/frame-02.png`,
+`frame-03.png`, and `frame-06.png`, SDK-failure `frame-02.png` in
+`gamemonetize-noaudio-mouse-m5pfwB`, and module-failure `frame-02.png` in both
+`gamemonetize-noaudio-mouse-7P1xsY` and the friendly-message recheck
+`gamemonetize-noaudio-mouse-oJlSxV`. Each run directory contains `browser.mp4`,
+encoded from real screencast timestamps; durations range from 0.65 to 17.31
+seconds. Root directly inspected representative none, CrazyGames, GameDistribution
+desktop/touch, SDK-failure, and pre-fix module-failure frames/MP4 samples; the
+browser owner inspected the refreshed friendly-message frame. The remaining
+captured media is available but is not claimed as individually reviewed. SDK
+fakes prove local host behavior only, not live vendor ad delivery.
+
+Theory gained: request acceptance, physical ad start, provider resume, and reward
+proof are independent observations. A host can keep the browser frame pump
+running while Stasis blocks only simulation, and a reward token should be
+consumed only after explicit provider evidence. Untagged global callbacks with
+no correlation contract set a real cross-request attribution limit that local
+generation counters cannot remove.
+
+Good: focused cross-backend contracts, four fresh packages, real browser
+pointer/touch/audio paths, failure recovery, and visible motion evidence are
+recorded. Bad: the full repository validator, hosted checks, portal approval,
+and a published release are still outstanding. Adjustment: refresh artifact
+identity from the focused commit, run final bounded validation, and keep #834
+blocked until the supported release and payload verification exist.
+
 ## 2026-10-08 - Workshop render budgets (#836)
 
 Set the configured Android Workshop render ceilings to P50 4.0 ms and P95

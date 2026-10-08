@@ -3520,6 +3520,22 @@ fn builtin_host_symbol_address(symbol: &str) -> Option<usize> {
         "open_external_url" | "stasis_open_external_url" | "stasis_jit_open_external_url" => {
             function_address(stasis_dynload::stasis_jit_open_external_url as *const ())
         }
+        "stasis_jit_ad_request" => {
+            function_address(stasis_dynload::stasis_jit_ad_request as *const ())
+        }
+        "stasis_jit_ad_poll" => function_address(stasis_dynload::stasis_jit_ad_poll as *const ()),
+        "stasis_jit_ad_gameplay_blocked" => {
+            function_address(stasis_dynload::stasis_jit_ad_gameplay_blocked as *const ())
+        }
+        "stasis_jit_ad_take_reward" => {
+            function_address(stasis_dynload::stasis_jit_ad_take_reward as *const ())
+        }
+        "stasis_jit_ad_release" => {
+            function_address(stasis_dynload::stasis_jit_ad_release as *const ())
+        }
+        "stasis_jit_portal_lifecycle" => {
+            function_address(stasis_dynload::stasis_jit_portal_lifecycle as *const ())
+        }
         "storage_load_ascii" | "stasis_storage_load_ascii" | "stasis_jit_storage_load_ascii" => {
             function_address(stasis_dynload::stasis_jit_storage_load_ascii as *const ())
         }
@@ -4190,6 +4206,33 @@ function main(): i32 {
         assert!(
             format!("{error:?}").contains("stasis_web_network_supported"),
             "unexpected unresolved extern diagnostic: {error:?}"
+        );
+    }
+
+    #[test]
+    fn native_ad_abi_executes_unavailable_contract() {
+        let mut process = JitProcess::new();
+        let source = format!(
+            "import \"stdlib/ad_tasks.stasis\";\nimport \"stdlib/portal_lifecycle.stasis\";\n{}",
+            include_str!("../../../../tests/stasis/seams/native_ad_unavailable.stasis.fixture")
+        );
+        process.upsert_file(
+            "stdlib/ad_tasks.stasis",
+            include_str!("../../../../src/stdlib/ad_tasks.stasis"),
+        );
+        process.upsert_file(
+            "stdlib/portal_lifecycle.stasis",
+            include_str!("../../../../src/stdlib/portal_lifecycle.stasis"),
+        );
+        process.upsert_file("native_ad_unavailable.stasis", source);
+        process
+            .compile()
+            .expect("native JIT compiles the stdlib unavailable ad fixture");
+        assert_eq!(
+            process
+                .execute_i32_noarg_by_name("main")
+                .expect("execute native stdlib ad fixture"),
+            0
         );
     }
 
