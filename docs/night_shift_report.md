@@ -1080,3 +1080,19 @@ Bad: replacing a mounted iframe resets its browsing context, and matching bare
 type names loses imported-module identity.
 Adjustment: retain the winning mounted frame, use request tokens for publication,
 and resolve completion types by their defining file as well as their name.
+
+The full workspace gate exposed two Web packaging regressions in the playground
+host: its import allowlist retained stripped input names, and its collection-view
+ABI variable no longer matched the immutable boot contract. Input names now carry
+the existing import-stripping markers, and compatible swaps retain the boot-time
+collection ABI. The owning Web package tests remain the acceptance oracle; they
+are rerun before push rather than weakening their expectations.
+
+Theory gained: optional host imports must share the packager's feature boundaries,
+while a compatible state swap cannot change the collection ABI. Good: packaging
+tests caught both regressions. Bad: browser-only validation missed stripped
+production packages. Adjustment: include the owning package suite in this slice.
+Visual evidence: the final staged-site editor and image captures under
+`D:/code/.automation-evidence/task268/site-final-git-build-passed/` were inspected;
+the browser receipt records successful completion, swaps, assets, export, and zero
+HTTP application requests after readiness.

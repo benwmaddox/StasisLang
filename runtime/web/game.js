@@ -52,7 +52,18 @@
     "sys_memmove_u8", "sys_memmove_i32", "sys_memmove_f32",
     "stasis_jit_sys_memcpy_u8", "stasis_jit_sys_memcpy_i32", "stasis_jit_sys_memcpy_f32",
     "stasis_jit_sys_memmove_u8", "stasis_jit_sys_memmove_i32", "stasis_jit_sys_memmove_f32",
-    "web_input_axis", "web_input_fire", "web_pointer_x", "web_pointer_down",
+    // @stasis-import web_input_axis begin
+    "web_input_axis",
+    // @stasis-import web_input_axis end
+    // @stasis-import web_input_fire begin
+    "web_input_fire",
+    // @stasis-import web_input_fire end
+    // @stasis-import web_pointer_x begin
+    "web_pointer_x",
+    // @stasis-import web_pointer_x end
+    // @stasis-import web_pointer_down begin
+    "web_pointer_down",
+    // @stasis-import web_pointer_down end
     "web_begin_frame", "web_draw_rect", "web_draw_text",
     "gfx_load_sprite", "stasis_gfx_load_sprite", "gfx_release_sprite",
     "stasis_gfx_release_sprite", "stasis_jit_gfx_release_sprite",
@@ -229,7 +240,7 @@
     || (spriteAtlasPageSize & (spriteAtlasPageSize - 1)) !== 0
     ? new StasisConfigError("graphics.sprite_atlas_page_size must be a power of two between 256 and 4096") : null;
   const COLLECTION_VIEW_ABI_VERSION = 2;
-  let collectionViewAbiVersion = game.collectionViewAbiVersion ?? 1;
+  const collectionViewAbiVersion = game.collectionViewAbiVersion ?? 1;
   const sprites = new Map();
   const fonts = new Map();
   const fontLoads = new Map();
@@ -3177,7 +3188,6 @@
     playgroundMetadata = metadata;
     stringLiteralTableVersion = game.stringLiteralTableVersion ?? 1;
     stringLiteralTable = game.stringLiteralTable ?? game.literalTable ?? game.string_literals ?? {};
-    collectionViewAbiVersion = game.collectionViewAbiVersion ?? 1;
     rebuildU8MemoryLayouts();
     rebuildTypedMemoryLayouts();
   }
