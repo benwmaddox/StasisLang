@@ -143,11 +143,11 @@ After three stable pixel captures, the render-acceptance driver explicitly
 starts one bounded performance sample with 60 warm-up and 180 measured frames.
 It permits one fresh retry after a timeout, malformed report, or threshold
 failure; the second failure fails the gate. Enforce the API 35 emulator
-thresholds with `-MaxRenderP50Millis 1.05 -MaxRenderP95Millis 8.94`; the output
+thresholds with `-MaxRenderP50Millis 4.0 -MaxRenderP95Millis 14.0`; the output
 directory then contains device/build identity, attempt-specific stage
 percentiles, the complete Workshop logcat, and pixel captures.
-See `docs/android_preview_render_performance.md` for the baseline and ownership
-of the hardware-normalized limits.
+See `docs/android_preview_render_performance.md` for the baseline and configured
+scheduling limits.
 
 The Workshop render-acceptance build runs IT-031 immediately after IT-028. It
 mutates the real packaged source through five ordered cases (parse,

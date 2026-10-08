@@ -908,3 +908,15 @@ recorded. Bad: the full repository validator, hosted checks, portal approval,
 and a published release are still outstanding. Adjustment: refresh artifact
 identity from the focused commit, run final bounded validation, and keep #834
 blocked until the supported release and payload verification exist.
+
+## 2026-10-08 - Workshop render budgets (#836)
+
+Set the configured Android Workshop render ceilings to P50 4.0 ms and P95
+14.0 ms in the reusable device seam workflow and its contract assertions.
+Nightly acceptance reuses that workflow. The measured baseline remains
+historical evidence; sampling, retries, comparison and other budgets stay intact.
+Validation: the task-specified Android emulator, PR seam placement and Android
+release-shell Python contract suites; git diff --check.
+Visual evidence: not applicable (configuration only).
+Theory gained: the reusable device workflow owns the CI budget; documented
+baseline measurements do not define the user-selected acceptance limits.
