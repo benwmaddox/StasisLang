@@ -43,11 +43,24 @@ isolated bounds-trap children. It then packages and launches this canonical
 sample through the production desktop runtime. The authored frame is teal only
 when the captured sample digest is exactly `507`, giving the package launch an
 independent visible digest oracle; a mismatch renders red. The shared entry
-also runs the scalar math oracle and hashes 13 raw f32 bit patterns, including
-negative-zero input and canonicalized outputs, into
+calls `math_oracle_extended_f32()`, `math_oracle_extended_f64()`, and
+`math_oracle_extended_text()` before computing its retained raw-bit digest.
+The math assertions cover f32 and explicitly typed f64 calls for roots,
+powers, exponentials, logarithms, rounding, min/max, and clamp, including
+exceptional classifications and the documented accuracy tolerances. Explicit
+f64 locals keep the wider overload selected when decimal literals otherwise
+default to f32. The text assertions cover short f64 formatting, notation and
+rounding carries, special values, signed zero, append, and capacity rejection.
+These assertions run from the same entry on each target, so they exercise the
+shared Stasis implementations rather than target-specific wrappers.
+
+After those assertions, the entry still hashes the same 13 raw f32 bit
+patterns, including negative-zero input and canonicalized outputs, into
 `math_oracle_raw_digest_value`. Every target compares that value with the
-independent expected digest `-1430176193`; packaged Web and mobile receipts
-record the observed value, and the desktop teal frame is gated on both digests.
+independent expected digest `-1430176193`; the new assertions do not change the
+legacy digest inputs. Packaged Web and mobile receipts record the observed
+value, and the desktop teal frame is gated on both the collection and math
+digests.
 `vendor/stasis` is the recorded, hash-checked graphics/runtime snapshot used
 by every packaged target.
 

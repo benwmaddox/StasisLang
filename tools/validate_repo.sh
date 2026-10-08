@@ -70,6 +70,7 @@ node --test runtime/web/tests/sys_memcpy_u8.test.mjs
 node --test runtime/web/tests/sys_memcpy_typed.test.mjs
 node --test runtime/web/tests/asset_paths.test.mjs
 node --test runtime/web/tests/audio_suspended_queue.test.mjs
+node --test runtime/web/tests/ad_lifecycle_contract.test.mjs
 node --test runtime/web/tests/network_mailbox_contract.test.mjs
 
 set +e

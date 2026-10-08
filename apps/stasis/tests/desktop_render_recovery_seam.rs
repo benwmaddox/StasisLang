@@ -11,6 +11,7 @@ use stasis_dynload::{
 use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const FLAGS_CLEAR_PRESENT: i32 = 3;
 const FLAGS_PRESENT: i32 = 2;
@@ -265,6 +266,82 @@ fn valid_frame() -> (Vec<i32>, Vec<f32>, Vec<u8>) {
     (i32s, f32s, u8s)
 }
 
+fn wait_for_stable_physical_target(
+    gfx: &StasisGraphicsApi,
+    native: &NativeRecoveryHarness,
+) -> [u32; 2] {
+    const REQUIRED_STABLE_CAPTURES: usize = 3;
+    const REQUIRED_STABLE_TIME: Duration = Duration::from_millis(500);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let probe = evidence_root().join("presentation-geometry-stabilization.png");
+    fs::create_dir_all(probe.parent().expect("geometry probe parent"))
+        .expect("create geometry probe directory");
+    let mut host_i32 = vec![0; 768];
+    let mut host_f32 = vec![0.0; 64];
+    let mut previous = None;
+    let mut stable_captures = 0;
+    let mut stable_since = None;
+    let mut observations = Vec::new();
+
+    loop {
+        gfx.host_get_frame(&mut host_i32, &mut host_f32)
+            .expect("pump native window events before presentation poison");
+        let reported_native = [host_i32[22], host_i32[23]];
+        let reported_drawable = [host_i32[24], host_i32[25]];
+        let poison_state = native.poison_physical_target();
+        let poisoned = [poison_state[0] as u32, poison_state[1] as u32];
+        match fs::remove_file(&probe) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove stale physical-target geometry probe: {error}"),
+        }
+        native.screenshot(&probe);
+        let (mut frame_i32, frame_f32, frame_u8) = valid_frame();
+        gfx.gfx_submit_u8(&mut frame_i32, &frame_f32, &frame_u8)
+            .expect("submit geometry stabilization frame");
+        let image = image::open(&probe)
+            .expect("open physical-target geometry probe")
+            .to_rgba8();
+        let captured = [image.width(), image.height()];
+        if observations.len() == 8 {
+            observations.remove(0);
+        }
+        observations.push((reported_native, reported_drawable, poisoned, captured));
+
+        let reported_matches = reported_native[0] > 0
+            && reported_native[1] > 0
+            && reported_drawable[0] > 0
+            && reported_drawable[1] > 0
+            && reported_native == reported_drawable
+            && poisoned == captured
+            && u32::try_from(reported_drawable[0]) == Ok(captured[0])
+            && u32::try_from(reported_drawable[1]) == Ok(captured[1]);
+        let changed = previous.is_some_and(|previous| previous != captured);
+        if !reported_matches || changed {
+            stable_captures = 0;
+            stable_since = None;
+        }
+        let observed_at = Instant::now();
+        if reported_matches {
+            stable_captures += 1;
+            stable_since.get_or_insert(observed_at);
+        }
+        previous = Some(captured);
+        assert!(
+            observed_at < deadline,
+            "native presentation geometry did not stabilize before poison: {observations:?}"
+        );
+        if stable_captures >= REQUIRED_STABLE_CAPTURES
+            && stable_since
+                .is_some_and(|since| observed_at.duration_since(since) >= REQUIRED_STABLE_TIME)
+        {
+            return captured;
+        }
+        gfx.sleep_ms(25)
+            .expect("wait for native window geometry to settle");
+    }
+}
+
 fn red_pixels(image: &RgbaImage) -> usize {
     image
         .pixels()
@@ -430,8 +507,14 @@ fn present_only_frame_initializes_a_poisoned_physical_target() {
         .init_window(320, 180, "Stasis poisoned presentation target")
         .expect("initialize native window"));
     let native = NativeRecoveryHarness::load(&runtime_path);
+    let stable_physical_target = wait_for_stable_physical_target(&gfx, &native);
     let initial_state = native.state();
     let poison_state = native.poison_physical_target();
+    assert_eq!(
+        [poison_state[0] as u32, poison_state[1] as u32],
+        stable_physical_target,
+        "poison must target the renderer extent proven stable by real readback"
+    );
     assert_eq!(
         &poison_state[..20],
         &poison_state[20..],
@@ -486,6 +569,7 @@ fn present_only_frame_initializes_a_poisoned_physical_target() {
         "schema": "stasis.presentation_physical_poison.v1",
         "runtime_path": runtime_path,
         "physical_target_poison": "opaque magenta SDL_RenderClear with logical presentation disabled",
+        "stabilized_physical_target": stable_physical_target,
         "poison_state_before_and_after": poison_state.to_vec(),
         "background_state_before_and_after": baseline_state.to_vec(),
         "logical_size": [320, 180],

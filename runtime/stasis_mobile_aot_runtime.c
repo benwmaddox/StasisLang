@@ -851,6 +851,21 @@ int stasis_jit_asset_task_take_handle(int32_t task) {
     return stasis_asset_task_take_handle(task);
 }
 void stasis_jit_asset_task_cancel(int32_t task) { stasis_asset_task_cancel(task); }
+int32_t stasis_jit_ad_request(int32_t kind) {
+    (void)kind;
+    return 0;
+}
+int32_t stasis_jit_ad_poll(int32_t handle) {
+    (void)handle;
+    return 4;
+}
+int32_t stasis_jit_ad_gameplay_blocked(void) { return 0; }
+int32_t stasis_jit_ad_take_reward(int32_t handle) {
+    (void)handle;
+    return 0;
+}
+void stasis_jit_ad_release(int32_t handle) { (void)handle; }
+void stasis_jit_portal_lifecycle(int32_t event) { (void)event; }
 void stasis_jit_gfx_release_sprite(int32_t handle) { stasis_gfx_release_sprite(handle); }
 void stasis_jit_gfx_release_font(int32_t handle) { stasis_gfx_release_font(handle); }
 int stasis_jit_gfx_dump_bmp(int32_t path) {
@@ -1585,13 +1600,28 @@ DEFINE_ARRAY_ACCESSORS(f64, double, STASIS_VALUE_F64)
 
 int32_t stasis_jit_global_i32_array_load(int32_t c, int32_t f, int32_t i) {
     StasisArray *entry;
+    const char *literal;
     if (i < 0) return 0;
     entry = find_array(c, f, STASIS_VALUE_I32, 0);
-    if (entry != NULL && (size_t)i < entry->length) return ((int32_t *)entry->data)[i];
+    if (entry != NULL) {
+        if ((size_t)i < entry->length) return ((int32_t *)entry->data)[i];
+        return 0;
+    }
     entry = find_array(c, f, STASIS_VALUE_U8, 0);
-    if (entry != NULL && (size_t)i < entry->length) return ((uint8_t *)entry->data)[i];
+    if (entry != NULL) {
+        if ((size_t)i < entry->length) return ((uint8_t *)entry->data)[i];
+        return 0;
+    }
     entry = find_array(c, f, STASIS_VALUE_U16, 0);
-    if (entry != NULL && (size_t)i < entry->length) return ((uint16_t *)entry->data)[i];
+    if (entry != NULL) {
+        if ((size_t)i < entry->length) return ((uint16_t *)entry->data)[i];
+        return 0;
+    }
+    if (f != 0) return 0;
+    literal = find_string(c);
+    if (literal != NULL && (size_t)i < strlen(literal)) {
+        return (unsigned char)literal[i];
+    }
     return 0;
 }
 

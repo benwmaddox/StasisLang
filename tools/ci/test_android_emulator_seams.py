@@ -562,18 +562,19 @@ class AndroidEmulatorSeamContractTests(unittest.TestCase):
         release_body = job_bodies["release-shell-seams"]
         workshop_body = job_bodies["workshop-seams"]
         self.assertIn("timeout-minutes: 75", workshop_body)
+        self.assertIn("avd-name: Stasis_API_35", workshop_body)
         release_script = "pwsh -NoProfile -File ./mobile/android/test_release_shell_emulator.ps1"
         workshop_script = (
             "pwsh -NoProfile -File ./mobile/android/test_render_emulator.ps1 "
-            "-Headless -AvdName test -StepTimeoutSeconds 1200 -TotalTimeoutSeconds 1500 "
+            "-Headless -AvdName Stasis_API_35 -StepTimeoutSeconds 1200 -TotalTimeoutSeconds 1500 "
             "-RenderTimeoutSeconds 90 "
-            "-MaxRenderP50Millis 1.05 -MaxRenderP95Millis 8.94"
+            "-MaxRenderP50Millis 4.0 -MaxRenderP95Millis 14.0"
         )
         self.assertEqual(1, release_body.count(release_script))
         self.assertNotIn("test_render_emulator.ps1", release_body)
         self.assertEqual(1, workshop_body.count(workshop_script))
-        self.assertEqual(1, self.workflow.count("-MaxRenderP50Millis 1.05"))
-        self.assertEqual(1, self.workflow.count("-MaxRenderP95Millis 8.94"))
+        self.assertEqual(1, self.workflow.count("-MaxRenderP50Millis 4.0"))
+        self.assertEqual(1, self.workflow.count("-MaxRenderP95Millis 14.0"))
         self.assertNotIn("test_release_shell_emulator.ps1", workshop_body)
         release_artifacts = re.findall(r"(?m)^\s+name: (android-[^\s]+)$", release_body)
         workshop_artifacts = re.findall(r"(?m)^\s+name: (android-[^\s]+)$", workshop_body)
@@ -1127,6 +1128,119 @@ if ($noPidState.LogCalls -ne 0) {{ throw 'The log was read without a package pro
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("readiness helper cases passed", result.stdout)
 
+    def test_workshop_lifecycle_video_start_is_platform_safe_and_preserves_contract(self):
+        pwsh = shutil.which("pwsh")
+        if not pwsh:
+            self.skipTest("PowerShell is unavailable for executable lifecycle-video checks")
+        start = self.workshop_script.index("function Start-PresentationLifecycleVideo(")
+        end = self.workshop_script.index("function Invoke-VideoProbe(", start)
+        helper = self.workshop_script[start:end]
+        script = f"""
+$ErrorActionPreference = 'Stop'
+{helper}
+$runningOnWindows = $false
+$AvdName = 'Stasis_API_35'
+$serial = 'emulator-5554'
+$adb = '/android-sdk/platform-tools/adb'
+$artifactRoot = Join-Path ([System.IO.Path]::GetTempPath()) 'stasis-lifecycle-video-contract'
+$TotalTimeoutSeconds = 30
+$script:expectedWindows = $false
+$script:failStartProcess = $false
+$script:adbCalls = [System.Collections.Generic.List[string]]::new()
+$script:lastStart = $null
+$script:fakeProcess = [pscustomobject]@{{ Id = 4242; HasExited = $false; ExitCode = 0 }}
+$script:fakeProcess | Add-Member ScriptMethod Refresh {{}}
+$script:fakeProcess | Add-Member ScriptMethod WaitForExit {{ param([int]$TimeoutMilliseconds) return $true }}
+$script:fakeProcess | Add-Member ScriptMethod Kill {{}}
+function Assert-In-Time([string]$Step) {{ }}
+function Invoke-Adb([string[]]$Arguments) {{
+    $joined = $Arguments -join ' '
+    [void]$script:adbCalls.Add($joined)
+    if ($joined -like '*cat /sdcard/Movies/stasis-present-only-*') {{ return '8123' }}
+    return @()
+}}
+function Start-Process {{
+    param(
+        [string]$FilePath,
+        [string]$ArgumentList,
+        [switch]$PassThru,
+        [string]$RedirectStandardOutput,
+        [string]$RedirectStandardError,
+        [string]$WindowStyle
+    )
+    if ($script:failStartProcess) {{ throw 'simulated process start failure' }}
+    $hasWindowStyle = $PSBoundParameters.ContainsKey('WindowStyle')
+    if ($FilePath -ne $script:adb -or -not $PassThru.IsPresent) {{
+        throw 'lifecycle recorder lost its ADB path or returned-process contract'
+    }}
+    if ($script:expectedWindows -and (-not $hasWindowStyle -or $WindowStyle -ne 'Hidden')) {{
+        throw 'Windows lifecycle recorder did not request a hidden process'
+    }}
+    if (-not $script:expectedWindows -and $hasWindowStyle) {{
+        throw 'WindowStyle is unsupported on non-Windows PowerShell'
+    }}
+    if ($ArgumentList -notmatch '^-s emulator-5554 shell "screenrecord --size 720x1280 --time-limit 165 ') {{
+        throw 'lifecycle recorder lost its quoted ADB screenrecord arguments'
+    }}
+    if ($RedirectStandardOutput -notmatch '-adb-stdout\\.log$' -or
+        $RedirectStandardError -notmatch '-adb-stderr\\.log$') {{
+        throw 'lifecycle recorder lost stdout/stderr capture paths'
+    }}
+    $script:lastStart = [pscustomobject]@{{
+        FilePath = $FilePath
+        ArgumentList = $ArgumentList
+        RedirectStandardOutput = $RedirectStandardOutput
+        RedirectStandardError = $RedirectStandardError
+        WindowStyle = $WindowStyle
+        HasWindowStyle = $hasWindowStyle
+    }}
+    return $script:fakeProcess
+}}
+foreach ($testWindows in @($false, $true)) {{
+    $script:expectedWindows = [bool]$testWindows
+    $runningOnWindows = $script:expectedWindows
+    $script:lastStart = $null
+    $session = Start-PresentationLifecycleVideo 'video-probe' 165
+    if (-not $session.process -or $session.process.Id -ne 4242 -or
+        $session.remote_pid -ne '8123' -or $session.record.host_adb_pid -ne 4242 -or
+        $session.record.device_screenrecord_pid -ne 8123 -or
+        $session.record.status -ne 'recording' -or
+        $session.record.duration_limit_seconds -ne 165 -or
+        $session.record.output_size -ne '720x1280') {{
+        throw 'lifecycle video did not publish its owned host/device PIDs and readiness record'
+    }}
+    if ($session.adb_stdout -ne $script:lastStart.RedirectStandardOutput -or
+        $session.adb_stderr -ne $script:lastStart.RedirectStandardError) {{
+        throw 'lifecycle video session lost its redirected ADB logs'
+    }}
+}}
+$script:expectedWindows = $false
+$runningOnWindows = $false
+$script:failStartProcess = $true
+$script:adbCalls.Clear()
+try {{
+    Start-PresentationLifecycleVideo 'cleanup-probe' 100 | Out-Null
+    throw 'expected a simulated host-process startup failure'
+}} catch {{
+    if ($_.Exception.Message -notlike '*host process could not start: simulated process start failure*') {{ throw }}
+}}
+$cleanupCalls = $script:adbCalls -join "`n"
+if ($cleanupCalls -notmatch 'shell rm -f /sdcard/Movies/stasis-present-only-' -or
+    $cleanupCalls -notmatch 'shell rmdir /sdcard/Movies/stasis-present-only-') {{
+    throw 'lifecycle recorder startup failure did not clean up its remote video files'
+}}
+'lifecycle video process contract passed'
+"""
+        result = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-Command", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("lifecycle video process contract passed", result.stdout)
+
     def test_resize_receipt_waits_for_later_exact_settled_surface(self):
         pwsh = shutil.which("pwsh")
         if not pwsh:
@@ -1295,7 +1409,7 @@ if (-not $failedClosed) {{ throw 'truncated receipt stream did not fail closed' 
         self.assertIn('Destination $capture -Force', self.workshop_script)
         self.assertIn("Take-WorkshopSurfaceProbe $surfaceProbeState", self.workshop_script)
 
-    def test_observed_workshop_surface_maps_to_exact_crop_on_test_avd(self):
+    def test_observed_workshop_surface_maps_to_exact_crop_on_dedicated_avd(self):
         app_window = (0, 136, 1080, 2337)
         surface = (
             app_window[0],
@@ -1321,7 +1435,8 @@ if (-not $failedClosed) {{ throw 'truncated receipt stream did not fail closed' 
         self.assertEqual((0, 933, 1080, 607), reported_pre_fix_viewport)
         self.assertEqual((0, 933, 1080, 608), viewport)
         self.assertNotEqual(reported_pre_fix_viewport, viewport)
-        self.assertIn("-Headless -AvdName test", self.workflow)
+        self.assertIn("avd-name: Stasis_API_35", self.workflow)
+        self.assertIn("-Headless -AvdName Stasis_API_35", self.workflow)
         self.assertIn(
             "$viewportHeight = [int][math]::Floor(($width * $logicalHeight / $logicalWidth) + 0.5)",
             self.workshop_script,

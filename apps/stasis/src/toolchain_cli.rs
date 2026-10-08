@@ -64,6 +64,8 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use zip::System as ZipSystem;
+use zip::{write::SimpleFileOptions, CompressionMethod, DateTime as ZipDateTime, ZipWriter};
 
 mod dap;
 mod headless;
@@ -541,6 +543,12 @@ enum ToolchainCommand {
         target: PackageTarget,
         #[arg(long, value_name = "PATH")]
         out: Option<PathBuf>,
+        /// Select the Web portal adapter profile.
+        #[arg(long, value_enum)]
+        portal_profile: Option<WebPortalProvider>,
+        /// Set the public game ID for GameMonetize or GameDistribution.
+        #[arg(long, value_name = "ID")]
+        portal_game_id: Option<String>,
         /// Force a visibly labeled development package.
         #[arg(long)]
         development_build: bool,
@@ -848,6 +856,131 @@ enum PackageTarget {
     IosSimulatorArm64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+enum WebPortalProvider {
+    None,
+    Crazygames,
+    Gamemonetize,
+    Gamedistribution,
+    Poki,
+}
+
+impl WebPortalProvider {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Crazygames => "crazygames",
+            Self::Gamemonetize => "gamemonetize",
+            Self::Gamedistribution => "gamedistribution",
+            Self::Poki => "poki",
+        }
+    }
+
+    fn requires_game_id(self) -> bool {
+        matches!(self, Self::Gamemonetize | Self::Gamedistribution)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct WebPortalManifest {
+    provider: WebPortalProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    game_id: Option<String>,
+}
+
+impl WebPortalManifest {
+    fn none() -> Self {
+        Self {
+            provider: WebPortalProvider::None,
+            game_id: None,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        match (self.provider.requires_game_id(), self.game_id.as_deref()) {
+            (true, None) => Err(format!(
+                "web.portal.provider '{}' requires a public game_id",
+                self.provider.as_str()
+            )),
+            (true, Some(game_id)) => validate_web_portal_game_id(game_id),
+            (false, Some(_)) => Err(format!(
+                "web.portal.provider '{}' does not accept a game ID",
+                self.provider.as_str()
+            )),
+            (false, None) => Ok(()),
+        }
+    }
+}
+
+fn validate_web_portal_game_id(game_id: &str) -> Result<(), String> {
+    if game_id.is_empty()
+        || game_id.len() > 128
+        || !game_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(
+            "portal game ID must contain 1 to 128 ASCII letters, numbers, underscores, or hyphens"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn resolve_web_portal_profile(
+    target: PackageTarget,
+    manifest: Option<&WebPortalManifest>,
+    cli_provider: Option<WebPortalProvider>,
+    cli_game_id: Option<&str>,
+) -> Result<WebPortalManifest, String> {
+    let has_cli_options = cli_provider.is_some() || cli_game_id.is_some();
+    if !matches!(target, PackageTarget::Web) {
+        if has_cli_options {
+            return Err("portal options are only supported for --target web".to_string());
+        }
+        return Ok(WebPortalManifest::none());
+    }
+
+    if let Some(game_id) = cli_game_id {
+        validate_web_portal_game_id(game_id)?;
+        if cli_provider.is_none() && manifest.is_none() {
+            return Err("--portal-game-id requires a manifest profile".to_string());
+        }
+    }
+
+    let provider = cli_provider
+        .or_else(|| manifest.map(|profile| profile.provider))
+        .unwrap_or(WebPortalProvider::None);
+    let inherited_game_id = manifest
+        .filter(|profile| profile.provider == provider)
+        .and_then(|profile| profile.game_id.clone());
+    let game_id = if provider.requires_game_id() {
+        if let Some(game_id) = cli_game_id {
+            Some(game_id.to_string())
+        } else if let Some(game_id) = inherited_game_id {
+            Some(game_id)
+        } else {
+            return Err(format!(
+                "portal profile '{}' requires --portal-game-id unless the same provider has a manifest game_id",
+                provider.as_str()
+            ));
+        }
+    } else {
+        if cli_game_id.is_some() {
+            return Err(format!(
+                "portal profile '{}' does not accept a game ID",
+                provider.as_str()
+            ));
+        }
+        None
+    };
+    let profile = WebPortalManifest { provider, game_id };
+    profile.validate()?;
+    Ok(profile)
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum MobilePackageTarget {
     AndroidArm64,
@@ -995,6 +1128,8 @@ struct LegacyWebProjectManifest {
     viewport: Option<LegacyWebViewportManifest>,
     #[serde(default, deserialize_with = "deserialize_optional_json_value")]
     atlas_budget_bytes: Option<Value>,
+    #[serde(default)]
+    portal: Option<WebPortalManifest>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -1065,6 +1200,7 @@ impl From<LegacyProjectManifest> for ProjectManifest {
                     height: viewport.height,
                 }),
                 atlas_budget_bytes: web.atlas_budget_bytes,
+                portal: web.portal,
             }),
             graphics: value.graphics,
             settings: None,
@@ -1100,6 +1236,8 @@ struct WebProjectManifest {
         skip_serializing_if = "Option::is_none"
     )]
     atlas_budget_bytes: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    portal: Option<WebPortalManifest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1376,6 +1514,9 @@ impl ProjectManifest {
             }
         }
         if let Some(web) = &self.web {
+            if let Some(portal) = web.portal.as_ref() {
+                portal.validate()?;
+            }
             if let Some(path) = web.loading_font.as_deref() {
                 normalize_web_loading_font_path(path)?;
             }
@@ -2116,12 +2257,30 @@ fn execute(
                 ToolchainCommand::Package {
                     target,
                     out,
+                    portal_profile,
+                    portal_game_id,
                     development_build,
                     signing,
                 } => {
+                    let portal_profile = resolve_web_portal_profile(
+                        target,
+                        workspace
+                            .manifest
+                            .web
+                            .as_ref()
+                            .and_then(|web| web.portal.as_ref()),
+                        portal_profile,
+                        portal_game_id.as_deref(),
+                    )?;
                     validate_optional_workspace_path(&workspace, "package output", out.as_deref())?;
                     with_signing_selection(signing, || {
-                        package_workspace(&workspace, target, out.as_deref(), development_build)
+                        package_workspace_with_portal(
+                            &workspace,
+                            target,
+                            out.as_deref(),
+                            development_build,
+                            &portal_profile,
+                        )
                     })
                 }
                 ToolchainCommand::PackageMobile {
@@ -5839,21 +5998,55 @@ impl Drop for DesktopPackageAotArtifactRoot {
     }
 }
 
+#[cfg(test)]
 fn package_workspace(
     workspace: &Workspace,
     target: PackageTarget,
     output: Option<&Path>,
     development_build: bool,
 ) -> Result<CommandResult, String> {
+    let portal_profile = resolve_web_portal_profile(
+        target,
+        workspace
+            .manifest
+            .web
+            .as_ref()
+            .and_then(|web| web.portal.as_ref()),
+        None,
+        None,
+    )?;
+    package_workspace_with_portal(
+        workspace,
+        target,
+        output,
+        development_build,
+        &portal_profile,
+    )
+}
+
+fn package_workspace_with_portal(
+    workspace: &Workspace,
+    target: PackageTarget,
+    output: Option<&Path>,
+    development_build: bool,
+    portal_profile: &WebPortalManifest,
+) -> Result<CommandResult, String> {
     validate_network_client_target(&workspace.manifest, target)?;
     let package_root = output
         .map(|path| workspace.root.join(path))
         .unwrap_or_else(|| {
-            workspace.root.join("dist").join(format!(
-                "{}-{}",
-                workspace.manifest.name,
-                target.as_str()
-            ))
+            let directory = if matches!(target, PackageTarget::Web)
+                && portal_profile.provider != WebPortalProvider::None
+            {
+                format!(
+                    "{}-web-{}",
+                    workspace.manifest.name,
+                    portal_profile.provider.as_str()
+                )
+            } else {
+                format!("{}-{}", workspace.manifest.name, target.as_str())
+            };
+            workspace.root.join("dist").join(directory)
         });
     validate_workspace_destination(workspace, "package output", &package_root)?;
     if package_root.exists() && !matches!(target, PackageTarget::Web) {
@@ -5863,7 +6056,12 @@ fn package_workspace(
         ));
     }
     if matches!(target, PackageTarget::Web) {
-        return package_web_workspace(workspace, &package_root, development_build);
+        return package_web_workspace_with_portal(
+            workspace,
+            &package_root,
+            development_build,
+            portal_profile,
+        );
     }
     if !matches!(target, PackageTarget::Desktop) {
         return package_mobile_workspace(
@@ -6181,6 +6379,7 @@ fn macos_app_bundle_for_executable(linked_output: &Path) -> Result<PathBuf, Stri
 
 const WEB_INDEX_HTML: &str = include_str!("../../../runtime/web/index.html");
 const WEB_RUNTIME_JS: &str = include_str!("../../../runtime/web/game.js");
+const WEB_AD_LIFECYCLE_JS: &str = include_str!("../../../runtime/web/ad_lifecycle.js");
 const WEB_REPLAY_CONTROLLER_JS: &str = include_str!("../../../runtime/web/replay_controller.mjs");
 
 struct WebWasmArtifact {
@@ -6739,6 +6938,20 @@ fn package_web_workspace(
     package_root: &Path,
     development_build: bool,
 ) -> Result<CommandResult, String> {
+    package_web_workspace_with_portal(
+        workspace,
+        package_root,
+        development_build,
+        &WebPortalManifest::none(),
+    )
+}
+
+fn package_web_workspace_with_portal(
+    workspace: &Workspace,
+    package_root: &Path,
+    development_build: bool,
+    portal_profile: &WebPortalManifest,
+) -> Result<CommandResult, String> {
     let manifest_path = workspace.root.join(MANIFEST_NAME);
     let manifest_bytes = fs::read(&manifest_path).map_err(|error| {
         format!(
@@ -6914,6 +7127,18 @@ fn package_web_workspace(
             release_web_asset_metadata(&audit_asset_metadata)
         };
         let mut runtime_config = web_runtime_config(workspace, &process, development_build);
+        runtime_config["portal"] = json!(portal_profile);
+        if portal_profile.provider == WebPortalProvider::None {
+            runtime_config
+                .as_object_mut()
+                .expect("generated Web runtime config object")
+                .remove("adLifecycleUrl");
+        } else {
+            runtime_config["adLifecycleUrl"] = json!(web_content_hash_url(
+                "ad_lifecycle.js",
+                WEB_AD_LIFECYCLE_JS.as_bytes()
+            ));
+        }
         runtime_config["asset_urls"] = asset_urls.clone();
         runtime_config["asset_metadata"] = runtime_asset_metadata.clone();
         let asset_identity_path = staging_root.join(ASSET_PACKAGE_IDENTITY_PATH);
@@ -7021,6 +7246,13 @@ fn package_web_workspace(
             .map_err(|error| format!("failed to write {}: {error}", wasm_path.display()))?;
         fs::write(staging_root.join("game.js"), &runtime_bundle)
             .map_err(|error| format!("failed to write web runtime: {error}"))?;
+        if portal_profile.provider != WebPortalProvider::None {
+            fs::write(
+                staging_root.join("ad_lifecycle.js"),
+                WEB_AD_LIFECYCLE_JS.as_bytes(),
+            )
+            .map_err(|error| format!("failed to write Web ad lifecycle module: {error}"))?;
+        }
         if let Some(replay_controller_bytes) = replay_controller_bytes {
             fs::write(
                 staging_root.join("replay_controller.mjs"),
@@ -7068,6 +7300,13 @@ fn package_web_workspace(
                     bytes: wasm.bytes.clone(),
                 },
             ];
+            if portal_profile.provider != WebPortalProvider::None {
+                bundle_files.push(stasis_network::BundleFile {
+                    path: "ad_lifecycle.js".to_string(),
+                    mime: "text/javascript".to_string(),
+                    bytes: WEB_AD_LIFECYCLE_JS.as_bytes().to_vec(),
+                });
+            }
             if let Some(replay_controller_bytes) = replay_controller_bytes {
                 bundle_files.push(stasis_network::BundleFile {
                     path: "replay_controller.mjs".to_string(),
@@ -7109,6 +7348,9 @@ fn package_web_workspace(
         }
 
         write_json_file(&staging_root.join(PACKAGE_PROVENANCE_NAME), &provenance)?;
+        if portal_profile.provider != WebPortalProvider::None {
+            create_web_upload_zip(&staging_root, portal_profile.provider)?;
+        }
         Ok((
             wasm.optimized,
             wasm.input_bytes,
@@ -7172,6 +7414,7 @@ fn package_web_workspace(
                 .and_then(|web| (!web.entry.is_empty()).then_some(web.entry.as_str()))
                 .unwrap_or(workspace.manifest.entry.as_str()),
             "network_guest_bundle": network_library_host_enabled.then_some("network_guest.bundle"),
+            "portal_profile": portal_profile,
         }),
     ))
 }
@@ -7726,6 +7969,111 @@ fn retain_opted_in_web_loading_font(
 
 fn web_content_hash_url(path: &str, bytes: &[u8]) -> String {
     format!("{path}?hash={:x}", Sha256::digest(bytes))
+}
+
+fn create_web_upload_zip(package_root: &Path, provider: WebPortalProvider) -> Result<(), String> {
+    let archive_path = package_root.join(format!("{}-upload.zip", provider.as_str()));
+    let mut files = Vec::new();
+    collect_web_upload_files(package_root, package_root, &archive_path, &mut files)?;
+    files.sort_by(|left: &(String, PathBuf), right| left.0.cmp(&right.0));
+
+    let archive_file = fs::File::create(&archive_path).map_err(|error| {
+        format!(
+            "failed to create Web upload archive {}: {error}",
+            archive_path.display()
+        )
+    })?;
+    let mut archive = ZipWriter::new(archive_file);
+    let options = SimpleFileOptions::default()
+        .compression_method(CompressionMethod::Deflated)
+        .compression_level(Some(6))
+        .last_modified_time(ZipDateTime::DEFAULT)
+        .unix_permissions(0o644)
+        .large_file(false)
+        .system(ZipSystem::Dos);
+    for (name, path) in files {
+        archive
+            .start_file(&name, options)
+            .map_err(|error| format!("failed to add {name} to Web upload archive: {error}"))?;
+        let mut file = fs::File::open(&path).map_err(|error| {
+            format!("failed to open Web upload file {}: {error}", path.display())
+        })?;
+        io::copy(&mut file, &mut archive)
+            .map_err(|error| format!("failed to write {name} to Web upload archive: {error}"))?;
+    }
+    archive
+        .finish()
+        .map_err(|error| format!("failed to finish Web upload archive: {error}"))?;
+    Ok(())
+}
+
+fn collect_web_upload_files(
+    root: &Path,
+    directory: &Path,
+    archive_path: &Path,
+    files: &mut Vec<(String, PathBuf)>,
+) -> Result<(), String> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| {
+            format!(
+                "failed to read Web package {}: {error}",
+                directory.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("failed to enumerate Web package files: {error}"))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if path == archive_path {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(|error| {
+            format!(
+                "failed to inspect Web package file {}: {error}",
+                path.display()
+            )
+        })?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "symbolic link in Web package cannot be included in upload archive: {}",
+                path.display()
+            ));
+        }
+        if file_type.is_dir() {
+            collect_web_upload_files(root, &path, archive_path, files)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            return Err(format!(
+                "unsupported special file in Web package: {}",
+                path.display()
+            ));
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| format!("Web package file escaped its root: {}", path.display()))?;
+        if relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(format!(
+                "invalid Web upload archive path: {}",
+                relative.display()
+            ));
+        }
+        let name = relative
+            .to_str()
+            .ok_or_else(|| {
+                format!(
+                    "Web upload archive path is not Unicode: {}",
+                    relative.display()
+                )
+            })?
+            .replace('\\', "/");
+        files.push((name, path));
+    }
+    Ok(())
 }
 
 fn staged_web_asset_paths(
@@ -12762,6 +13110,7 @@ mod tests {
             loading_font: None,
             viewport: None,
             atlas_budget_bytes: None,
+            portal: None,
         });
         write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write network manifest");
         let workspace = load_workspace(Some(&root))
@@ -12903,6 +13252,7 @@ mod tests {
             loading_font: None,
             viewport: None,
             atlas_budget_bytes: None,
+            portal: None,
         });
         write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write network manifest");
         let workspace = load_workspace(Some(&root))
@@ -13091,6 +13441,7 @@ mod tests {
                 height: 900,
             }),
             atlas_budget_bytes: None,
+            portal: None,
         });
         write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write project manifest");
         let workspace = Workspace {
@@ -13141,6 +13492,7 @@ mod tests {
             loading_font: None,
             viewport: None,
             atlas_budget_bytes: None,
+            portal: None,
         });
         write_manifest(&root.join(MANIFEST_NAME), &manifest).expect("write project manifest");
         let workspace = Workspace {
@@ -13217,6 +13569,7 @@ mod tests {
             loading_font: Some("assets/fonts/ui.ttf".to_string()),
             viewport: None,
             atlas_budget_bytes: None,
+            portal: None,
         });
         manifest.release = Some(ReleaseProjectManifest {
             font_subsetting: Some(crate::release_assets::ReleaseFontSubsettingManifest {
@@ -13288,6 +13641,7 @@ mod tests {
             loading_font: Some("assets/fonts/ui.ttf".to_string()),
             viewport: None,
             atlas_budget_bytes: None,
+            portal: None,
         });
         manifest.release = Some(ReleaseProjectManifest {
             font_subsetting: Some(crate::release_assets::ReleaseFontSubsettingManifest {
@@ -16352,6 +16706,7 @@ mod tests {
             loading_font: None,
             viewport: None,
             atlas_budget_bytes: None,
+            portal: None,
         });
         let ios_network = root.join("ios-network-package");
         fs::create_dir_all(ios_network.join("ios/network/include"))
@@ -16937,6 +17292,7 @@ mod tests {
                 height: 900,
             }),
             atlas_budget_bytes: None,
+            portal: None,
         });
         assert!(manifest.validate().is_ok());
 
@@ -16959,6 +17315,197 @@ mod tests {
     }
 
     #[test]
+    fn web_portal_manifest_validates_profiles() {
+        let parse = |version: u32, portal: Option<Value>| {
+            let mut value = serde_json::json!({
+                "manifest_version": version,
+                "name": "portal_manifest_probe",
+                "entry": "src/main.stasis",
+                "tests": "tests",
+                "output": "build",
+                "web": {},
+            });
+            if let Some(portal) = portal {
+                value["web"]["portal"] = portal;
+            }
+            let bytes = serde_json::to_vec(&value).expect("serialize portal manifest fixture");
+            parse_project_manifest(&bytes)
+        };
+
+        let valid_profiles = [
+            (
+                serde_json::json!({ "provider": "none" }),
+                WebPortalProvider::None,
+                None,
+            ),
+            (
+                serde_json::json!({ "provider": "crazygames" }),
+                WebPortalProvider::Crazygames,
+                None,
+            ),
+            (
+                serde_json::json!({ "provider": "gamemonetize", "game_id": "gm-public-833" }),
+                WebPortalProvider::Gamemonetize,
+                Some("gm-public-833"),
+            ),
+            (
+                serde_json::json!({ "provider": "gamedistribution", "game_id": "gd-public-833" }),
+                WebPortalProvider::Gamedistribution,
+                Some("gd-public-833"),
+            ),
+            (
+                serde_json::json!({ "provider": "poki" }),
+                WebPortalProvider::Poki,
+                None,
+            ),
+        ];
+        for version in [1, 2, 3] {
+            for (portal, provider, game_id) in &valid_profiles {
+                let parsed = parse(version, Some(portal.clone())).unwrap_or_else(|error| {
+                    panic!("manifest v{version} rejected {portal}: {error}")
+                });
+                let profile = parsed
+                    .web
+                    .as_ref()
+                    .and_then(|web| web.portal.as_ref())
+                    .expect("parsed portal profile");
+                assert_eq!(profile.provider, *provider);
+                assert_eq!(profile.game_id.as_deref(), *game_id);
+            }
+        }
+
+        for version in [1, 2, 3] {
+            assert!(
+                parse(version, None).is_ok(),
+                "manifest v{version} without a portal"
+            );
+        }
+        let legacy_extension = serde_json::json!({
+            "manifest_version": 1,
+            "name": "portal_manifest_probe",
+            "entry": "src/main.stasis",
+            "tests": "tests",
+            "output": "build",
+            "legacy_extension": true,
+            "web": {},
+        });
+        assert!(parse_project_manifest(
+            &serde_json::to_vec(&legacy_extension).expect("serialize legacy extension")
+        )
+        .is_ok());
+
+        for portal in [
+            serde_json::json!({ "provider": "unknown" }),
+            serde_json::json!({ "provider": "gamemonetize" }),
+            serde_json::json!({ "provider": "gamedistribution", "game_id": "" }),
+            serde_json::json!({ "provider": "gamemonetize", "game_id": "bad/id" }),
+            serde_json::json!({ "provider": "crazygames", "game_id": "public-id" }),
+            serde_json::json!({ "provider": "none", "game_id": "public-id" }),
+            serde_json::json!({ "provider": "poki", "game_id": "public-id" }),
+            serde_json::json!({ "provider": "poki", "unexpected": true }),
+        ] {
+            for version in [1, 2, 3] {
+                assert!(
+                    parse(version, Some(portal.clone())).is_err(),
+                    "manifest v{version} accepted invalid portal {portal}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn web_portal_cli_overrides_are_provider_scoped() {
+        let manifest_profile = |json: &str| {
+            let parsed = parse_project_manifest(json.as_bytes()).expect("valid profile manifest");
+            parsed
+                .web
+                .and_then(|web| web.portal)
+                .expect("manifest portal profile")
+        };
+        let game_distribution = manifest_profile(
+            r#"{"manifest_version":1,"name":"portal_override_probe","entry":"src/main.stasis","tests":"tests","output":"build","web":{"portal":{"provider":"gamedistribution","game_id":"gd-original-833"}}}"#,
+        );
+        let game_monetize = manifest_profile(
+            r#"{"manifest_version":1,"name":"portal_override_probe","entry":"src/main.stasis","tests":"tests","output":"build","web":{"portal":{"provider":"gamemonetize","game_id":"gm-original-833"}}}"#,
+        );
+
+        let unchanged =
+            resolve_web_portal_profile(PackageTarget::Web, Some(&game_distribution), None, None)
+                .expect("use manifest profile");
+        assert_eq!(unchanged, game_distribution);
+        let matching_provider = resolve_web_portal_profile(
+            PackageTarget::Web,
+            Some(&game_distribution),
+            Some(WebPortalProvider::Gamedistribution),
+            None,
+        )
+        .expect("reuse matching provider ID");
+        assert_eq!(matching_provider, game_distribution);
+        let switched_provider = resolve_web_portal_profile(
+            PackageTarget::Web,
+            Some(&game_distribution),
+            Some(WebPortalProvider::Gamemonetize),
+            Some("gm-new-833"),
+        )
+        .expect("replace provider and supply its ID");
+        assert_eq!(switched_provider.provider, WebPortalProvider::Gamemonetize);
+        assert_eq!(switched_provider.game_id.as_deref(), Some("gm-new-833"));
+        let replaced_id = resolve_web_portal_profile(
+            PackageTarget::Web,
+            Some(&game_monetize),
+            None,
+            Some("gm-override-833"),
+        )
+        .expect("override matching provider ID");
+        assert_eq!(replaced_id.game_id.as_deref(), Some("gm-override-833"));
+        let explicitly_cleared = resolve_web_portal_profile(
+            PackageTarget::Web,
+            Some(&game_distribution),
+            Some(WebPortalProvider::None),
+            None,
+        )
+        .expect("clear manifest profile");
+        assert_eq!(explicitly_cleared.provider, WebPortalProvider::None);
+        assert_eq!(explicitly_cleared.game_id, None);
+
+        for target in [PackageTarget::Desktop, PackageTarget::AndroidArm64] {
+            let ignored_manifest_profile =
+                resolve_web_portal_profile(target, Some(&game_distribution), None, None)
+                    .expect("web-only manifest profile is ignored by non-Web targets");
+            assert_eq!(ignored_manifest_profile.provider, WebPortalProvider::None);
+        }
+
+        for (target, profile, game_id) in [
+            (
+                PackageTarget::Web,
+                Some(WebPortalProvider::Gamemonetize),
+                None,
+            ),
+            (PackageTarget::Web, None, Some("id-with-space 833")),
+            (
+                PackageTarget::Desktop,
+                Some(WebPortalProvider::Crazygames),
+                None,
+            ),
+            (
+                PackageTarget::AndroidArm64,
+                Some(WebPortalProvider::Poki),
+                None,
+            ),
+        ] {
+            assert!(
+                resolve_web_portal_profile(target, Some(&game_distribution), profile, game_id)
+                    .is_err(),
+                "invalid portal override unexpectedly succeeded"
+            );
+        }
+        assert!(
+            resolve_web_portal_profile(PackageTarget::Web, None, None, Some("gm-orphan-833"))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn manifest_validates_web_atlas_budget_as_a_javascript_safe_integer() {
         let mut manifest = ProjectManifest::new("atlas_budget".to_string());
         manifest.graphics = Some(GraphicsProjectManifest {
@@ -16970,6 +17517,7 @@ mod tests {
             loading_font: None,
             viewport: None,
             atlas_budget_bytes: Some(json!(4_194_304)),
+            portal: None,
         });
         assert!(manifest.validate().is_ok());
         manifest.web.as_mut().unwrap().atlas_budget_bytes = Some(json!(MAX_WEB_ATLAS_BUDGET_BYTES));
@@ -17025,6 +17573,7 @@ mod tests {
             loading_font: None,
             viewport: None,
             atlas_budget_bytes: Some(json!(16 * 1024 * 1024 - 1)),
+            portal: None,
         });
         assert!(manifest
             .validate()
@@ -17374,6 +17923,7 @@ mod tests {
             loading_font: None,
             viewport: None,
             atlas_budget_bytes: None,
+            portal: None,
         });
         assert!(manifest.validate().is_ok());
         assert!(validate_desktop_network_guest_contract(&manifest).is_ok());

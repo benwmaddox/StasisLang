@@ -14,6 +14,13 @@ assert SPEC and SPEC.loader
 AUDIT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(AUDIT)
 
+WEB_AD_ARCHIVE_REQUIRED_FILES = (
+    "docs/web_packaging.md",
+    "docs/web_ads.md",
+    "src/stdlib/ad_tasks.stasis",
+    "src/stdlib/portal_lifecycle.stasis",
+)
+
 
 class ReleaseBundleSizeTests(unittest.TestCase):
     def _fixture(self, root, platform="windows"):
@@ -68,6 +75,38 @@ class ReleaseBundleSizeTests(unittest.TestCase):
                     destination.write_bytes(path.read_bytes())
             with self.assertRaisesRegex(AUDIT.BundleAuditError, "files missing from archive"):
                 AUDIT.build_report(stripped_root, "linux", archive)
+
+    def test_web_ad_docs_and_stdlib_modules_are_required_in_release_bundles(self):
+        missing_by_platform = {
+            platform: sorted(
+                set(WEB_AD_ARCHIVE_REQUIRED_FILES) - set(AUDIT.required_files(platform))
+            )
+            for platform in ("windows", "linux", "macos")
+        }
+        self.assertEqual(
+            {"windows": [], "linux": [], "macos": []},
+            missing_by_platform,
+            "every release contract must require the web-ad docs and stdlib modules",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory) / "stasis-nightly-win-x64"
+            root.mkdir()
+            self._fixture(root)
+            for name in WEB_AD_ARCHIVE_REQUIRED_FILES:
+                with self.subTest(missing=name):
+                    archive = pathlib.Path(directory) / (
+                        f"bundle-without-{pathlib.Path(name).name}.zip"
+                    )
+                    with zipfile.ZipFile(
+                        archive, "w", compression=zipfile.ZIP_DEFLATED
+                    ) as output:
+                        for path in sorted(root.rglob("*")):
+                            if path.is_file() and path.relative_to(root).as_posix() != name:
+                                output.write(path, path.relative_to(root).as_posix())
+                    with self.assertRaises(AUDIT.BundleAuditError) as error:
+                        AUDIT.build_report(root, "windows", archive)
+                    self.assertIn(name, str(error.exception))
 
     def test_archive_rejects_bundled_host_compiler(self):
         with tempfile.TemporaryDirectory() as directory:

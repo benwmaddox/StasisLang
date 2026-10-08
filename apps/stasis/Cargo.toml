@@ -22,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 flate2 = "1.1"
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
 oxc_allocator = "=0.125.0"
 oxc_codegen = "=0.125.0"
 oxc_minifier = "=0.125.0"

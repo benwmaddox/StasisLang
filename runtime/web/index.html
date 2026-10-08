@@ -45,11 +45,30 @@
     #stasis-loading[data-failed="true"] #stasis-loading-status { color: #f1a09a; }
     #stasis-error { position: absolute; inset: 0; margin: 0; padding: 1rem; box-sizing: border-box; overflow: auto; color: #ff8f8f; white-space: pre-wrap; pointer-events: none; }
     #stasis-error:empty { display: none; }
+    #stasis-ad-controls { position: fixed; z-index: 20; inset: max(1rem, env(safe-area-inset-top, 0px)) max(1rem, env(safe-area-inset-right, 0px)) max(1rem, env(safe-area-inset-bottom, 0px)) max(1rem, env(safe-area-inset-left, 0px)); display: grid; place-items: center; pointer-events: none; }
+    #stasis-ad-controls[hidden] { display: none; }
+    .stasis-ad-card { width: min(100%, 30rem); box-sizing: border-box; display: grid; justify-items: center; gap: .8rem; padding: clamp(1.25rem, 5vw, 2rem); border: 1px solid #c7b47b99; border-radius: .65rem; background: #0b1d1af5; color: #f3eee1; text-align: center; box-shadow: 0 1rem 3rem #0009; pointer-events: auto; }
+    #stasis-ad-status { position: fixed; z-index: 21; right: max(1rem, env(safe-area-inset-right, 0px)); bottom: max(1rem, env(safe-area-inset-bottom, 0px)); left: max(1rem, env(safe-area-inset-left, 0px)); width: fit-content; max-width: min(36rem, calc(100% - 2rem)); margin-inline: auto; padding: .7rem 1rem; border: 1px solid #c7b47b99; border-radius: .35rem; background: #0b1d1af5; color: #c7cbbf; line-height: 1.4; text-align: center; box-shadow: 0 .5rem 1.5rem #0008; }
+    #stasis-ad-status[hidden] { display: none; }
+    .stasis-ad-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: .65rem; }
+    .stasis-ad-actions button { min-height: 2.75rem; padding: .55rem 1rem; border: 1px solid #c7b47b; border-radius: .35rem; background: #173c32; color: inherit; font: inherit; cursor: pointer; touch-action: manipulation; }
+    .stasis-ad-actions button:disabled { opacity: .6; cursor: not-allowed; }
+    .stasis-ad-actions button:focus-visible { outline: 3px solid #f3d77d; outline-offset: 3px; }
   </style>
 </head>
 <body>
   <main>
     <canvas id="stasis-canvas" width="640" height="360" data-logical-width="__STASIS_LOGICAL_WIDTH__" data-logical-height="__STASIS_LOGICAL_HEIGHT__" aria-label="__STASIS_GAME_TITLE__ game canvas" tabindex="0"></canvas>
+    <section id="stasis-ad-controls" hidden aria-labelledby="stasis-ad-title">
+      <div class="stasis-ad-card">
+        <h2 id="stasis-ad-title">Continue with an ad</h2>
+        <div class="stasis-ad-actions">
+          <button id="stasis-ad-watch" type="button">Watch ad</button>
+          <button id="stasis-ad-cancel" type="button">Cancel</button>
+        </div>
+      </div>
+    </section>
+    <div id="stasis-ad-status" role="status" aria-live="polite" hidden></div>
     <div id="stasis-loading" role="status" aria-live="polite">
       <div class="stasis-loading-card">
         <div class="stasis-loading-rule" aria-hidden="true"></div>

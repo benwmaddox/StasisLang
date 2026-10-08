@@ -755,3 +755,168 @@ Limits: the initial broad repository validator failed with a stale/mismatched ru
 Visual evidence: inspected D:/code/.automation-evidence/stash625-integration/windows/present-only-physical-poison.png (red logical canvas within fully initialized black physical margins) and it-009-recovered-valid-frame.png (valid scene recovered after malformed submissions). These stills do not establish motion or lifecycle timing.
 
 Theory gained: test instrumentation changes binary identity while preserving source compatibility identity. Distinct paths, compile flags, exports, and hashes distinguish variants; a matching release/fingerprint lets both exercise the same loader contract. A CLI-sibling runtime takes priority over an environment path, so fresh native validation must provision the matching sibling as well.
+
+## 2026-10-07 - Maddox #832 scalar math and short f64 text
+
+Added the shared f32/f64 scalar math API, with signed-zero, NaN, infinity,
+power-domain, and rounding behavior, plus its current tolerance bounds. Decimal
+float literals default to f32, so callers use explicitly typed f64 locals when
+they need wider overloads. Integer powers use a bounded 32-step repeated-square
+path; floating powers with negative bases require integral exponents. The
+sample's added f32/f64 math and short-text assertions run before the unchanged
+13-value f32 raw-bit digest `-1430176193`.
+
+Added `ascii_write_f64_short`, `ascii_from_f64_short`, and
+`ascii_append_f64_short`, including precision `0..6`, magnitude-based fixed or
+scientific notation, carry behavior, lowercase specials, unsigned signed-zero
+output, and full-capacity transactional rejection. It stages digits as local
+integers, then writes to the destination after capacity preflight, preserving
+the caller-owned buffer contract.
+
+Focused validation: `python tools/cargo_cache.py run -- cargo test -p stasis --test stasis_behavior_suite -- --test-threads=1 --nocapture` passed 22 math and 7 numeric-text assertions in 48.645 seconds. The recorded receipt is `D:\code\.automation-evidence\nightly-20261007\math832\focused-final\run-format-refactor\result.json`. The source snapshot reviewed here had `src/stdlib/math.stasis` SHA-256 `801FA3722E0E91815095795F60914393A45F06E9B132B7910CC71EC6887B0327` and `src/stdlib/stdlib.stasis` SHA-256 `09FCBBFD89EECA84BF50E9320DBE7276992E085C4CC947C05097BD91C8C203A8`.
+
+This is bounded focused evidence. No final exact-source JIT/native AOT/Wasm/Android/iOS parity matrix, complete repository validator, hosted gate, or nightly publication pass is claimed here. The separate numerical-review artifacts at `D:\code\.automation-evidence\nightly-20261007\math832\numerical-review\review_final.md` and `review_rounding.md` are review evidence, not backend executions. Final identity-bound backend, full-gate, and hosted receipts will be recorded with the reviewed PR and Maddox ledger when they are available.
+
+The desktop presentation prerequisite was also rechecked: its recovery seam waits for matching physical, drawable, native, and readback state across three continuous observations spanning 500 ms, with a five-second bound; existing pixel and counter assertions remain. The exact four-test target and five fresh whole-target processes passed. This prerequisite result does not establish math parity.
+
+Visual evidence: inspected `D:\code\.automation-evidence\nightly-20261007\math832\post-fix-five-full-recovery-fresh\run-5\artifacts\seam-tests\present-only-physical-poison.png`. It shows the red logical rectangle with black physical margins and no magenta contamination for the desktop presentation prerequisite; it is not a visual test of scalar math.
+
+Theory gained: the base argument selects the power result lane, while explicit local types make f64 intent visible before overload resolution. Relative error alone can misstate subnormal behavior, so the shared oracle pairs it with an absolute minimum-subnormal allowance and a separate zero/subnormal classification check.
+
+Good: one shared Stasis oracle covers both precision lanes and exact ASCII output before the retained digest, while focused evidence has a concrete bounded receipt. Bad: focused host evidence and numerical review do not yet prove the final artifact on every backend. Adjustment: finish the source/vendor freeze, then record exact-source backend receipts separately and keep the focused result clearly bounded.
+
+The packaged mobile check exposed a separate runtime parity gap in indexed text
+views. An unchanged Android sample returned 21; a temporary diagnostic narrowed
+the failure to comparison with the literal `1.00e-300`. The destination had
+length 9, a NUL terminator, and first byte 49, while the literal's first indexed
+byte read as zero. Desktop indexed loads already resolve unbound literal hashes;
+the mobile loader omitted that lookup. The repair gives registered integer,
+byte, and UTF-16 arrays priority, including out-of-range reads, and resolves
+literal bytes only for an unbound field-zero view. It adds no ABI export, layout,
+capacity, or format version.
+
+The regression first failed through both the native runtime contract and a
+generated Stasis executable linked to the real mobile runtime. The generated
+fixture checks valid ASCII and UTF-8 indices; native contract checks cover
+unsigned bytes, field selection, bounds, and registered-array collisions.
+Language-level bounds traps remain separate from the native accessor's zero
+result. Temporary diagnostic instrumentation is removed from the production
+sample. Final mobile, merge, and subsequent official-nightly receipts remain
+external acceptance gates recorded with PR #917 and the task ledger.
+
+Theory gained: a text-view argument carries a hash that can name either an
+array or a literal. Runtime array registration must win even when an index is
+outside that array; only an unbound view may resolve the literal table.
+
+Good: controlled original-versus-diagnostic Android runs localized the failure
+before changing math kernels. Bad: host parity checks did not expose the mobile
+literal lookup omission. Adjustment: retain a generated executable regression
+for indexed literal arguments and require packaged mobile acceptance before
+merging this slice.
+
+## 2026-10-07 - Maddox #833 browser ad lifecycle and portal profiles
+
+Added typed ad-task and portal-lifecycle modules, native/JIT/AOT/mobile unavailable
+stubs, Web request/poll/release handling, four portal profiles, deterministic
+upload ZIPs, and a no-SDK default. Browser requests remain asynchronous: the
+frame pump and guest polling continue while the guest blocks simulation. Rewards
+require provider-specific proof and are consumed once. The direct Web package
+selects one portal SDK; native desktop/mobile LAN guest bundles remain plain Web.
+
+Validation before the final user-facing message tweak: the full Web Node suite
+passed 279/279 and the focused ad lifecycle suite passed 34/34. After the tweak,
+the focused audio/runtime suite passed 20/20. Native unavailable
+coverage passed 1/1 each for the dynload shim, JIT execution, linked Windows AOT
+executable, and generated mobile AOT runtime seam. The fresh Windows CLI build
+was `082f3ff3a66daa5062253ad6cd56f276eb2f0187e631d07d583802e2ab320b63`;
+fresh `none` and all four portal development packages completed with exit 0 and
+left the installed CLI unchanged. The packaged Wasm hash was
+`dd5e37a5ef52e5bef119323d131cec89e0a3e0f421dc2bd171bfa4ed620982fa`.
+The friendly adapter-import failure message was then checked with a new CLI
+build (`fc1903518e03d51d2367ba1d2692d9d8441bf9f4a5964b5f1decd65dbcf1eb0a`), a
+fresh GameMonetize package, and a new Chrome 404 run.
+
+Real Chrome 155 CDP acceptance used deterministic SDK fakes intercepted at the
+selected provider's actual script request; no SDK globals were preloaded. The
+`none` build requested no SDK and returned `Unavailable` with no handle. All
+four selected profiles made exactly one selected SDK request. CrazyGames and
+Poki reported start/terminal callbacks and lifecycle boundaries; GameMonetize
+reward requests were explicitly unavailable; GameDistribution's mouse and
+390x844 Chrome touch-emulation paths both issued `showAd` inside a trusted
+pointer-up while user activation was active. The GD browser run proved that a
+promise without `SDK_REWARDED_WATCH_COMPLETE` grants zero, while proof followed
+by a rejected promise remains consumable exactly once. Audio acceptance used a
+real `AudioContext`: it resumed from the trusted gesture, suspended on actual
+ad start, resumed on completion, and preserved an independently suspended
+context. Requesting/playing frames held the simulation counter steady while
+poll/render counters advanced; completion and no-fill resumed without catch-up
+or replaying a held key. The optional CDP hidden/visible transition was skipped;
+visibility lifecycle behavior has Node coverage, but this run makes no claim of
+real-browser visibility-transition acceptance.
+
+Separate real-browser failure runs returned to a playable state with
+`mainResult=0`, guest `Unavailable`, no open handle, no gameplay block, and
+continuing simulation/rendering when (a) the selected GameMonetize SDK script
+failed to load and (b) the actual dynamic `ad_lifecycle.js` request returned
+HTTP 404. Both paths executed no SDK break. The primary-source notes and product
+docs state the user-selected GD policy: the global reward event belongs to the
+latest issued rewarded call until its owner is released/reset/disposed/timed
+out or a newer rewarded call is issued. The event has no documented ID, order,
+or delay bound, so a late completion from an older call can be attributed to a
+newer one; no vendor correlation guarantee is claimed. GameMonetize rewarded
+remains unsupported.
+
+The complete `tools/validate_repo.sh` attempt at the recorded baseline reached
+its 900-second process-tree limit and is incomplete, not a pass. Bounded
+remaining coverage shards passed, but exact-final-source validation still must
+run after the focused commit. Actions was confirmed disabled, so no hosted
+workflow was started. No live portal account, ad fill, submission approval,
+publication, or supported release was tested; the nightly dependency is still
+blocked by #832. The unreleased branch therefore does not establish downstream
+#834 readiness.
+
+Visual evidence: PNGs and actual timestamped Chrome screencast MP4s were captured
+for the full matrix under
+`D:\code\.automation-evidence\nightly-20261007\task833\browser-acceptance`.
+Captured stage frames include `none-noaudio-mouse-JX1dhZ/frame-02.png`,
+`crazygames-audio-mouse-K1aRpa/frame-02.png`, `frame-03.png`, and `frame-06.png`,
+`gamemonetize-noaudio-mouse-ckoMeE/frame-02.png`, `frame-03.png`, and
+`frame-06.png`, `gamedistribution-noaudio-mouse-cgtifK/frame-02.png`,
+`frame-04.png`, and `frame-08.png`, the corresponding touch stages in
+`gamedistribution-noaudio-touch-UhtQdP`, `poki-noaudio-mouse-84bLaz/frame-02.png`,
+`frame-03.png`, and `frame-06.png`, SDK-failure `frame-02.png` in
+`gamemonetize-noaudio-mouse-m5pfwB`, and module-failure `frame-02.png` in both
+`gamemonetize-noaudio-mouse-7P1xsY` and the friendly-message recheck
+`gamemonetize-noaudio-mouse-oJlSxV`. Each run directory contains `browser.mp4`,
+encoded from real screencast timestamps; durations range from 0.65 to 17.31
+seconds. Root directly inspected representative none, CrazyGames, GameDistribution
+desktop/touch, SDK-failure, and pre-fix module-failure frames/MP4 samples; the
+browser owner inspected the refreshed friendly-message frame. The remaining
+captured media is available but is not claimed as individually reviewed. SDK
+fakes prove local host behavior only, not live vendor ad delivery.
+
+Theory gained: request acceptance, physical ad start, provider resume, and reward
+proof are independent observations. A host can keep the browser frame pump
+running while Stasis blocks only simulation, and a reward token should be
+consumed only after explicit provider evidence. Untagged global callbacks with
+no correlation contract set a real cross-request attribution limit that local
+generation counters cannot remove.
+
+Good: focused cross-backend contracts, four fresh packages, real browser
+pointer/touch/audio paths, failure recovery, and visible motion evidence are
+recorded. Bad: the full repository validator, hosted checks, portal approval,
+and a published release are still outstanding. Adjustment: refresh artifact
+identity from the focused commit, run final bounded validation, and keep #834
+blocked until the supported release and payload verification exist.
+
+## 2026-10-08 - Workshop render budgets (#836)
+
+Set the configured Android Workshop render ceilings to P50 4.0 ms and P95
+14.0 ms in the reusable device seam workflow and its contract assertions.
+Nightly acceptance reuses that workflow. The measured baseline remains
+historical evidence; sampling, retries, comparison and other budgets stay intact.
+Validation: the task-specified Android emulator, PR seam placement and Android
+release-shell Python contract suites; git diff --check.
+Visual evidence: not applicable (configuration only).
+Theory gained: the reusable device workflow owns the CI budget; documented
+baseline measurements do not define the user-selected acceptance limits.

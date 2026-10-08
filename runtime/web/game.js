@@ -20,6 +20,10 @@
   const errorBox = document.getElementById("stasis-error");
   const loadingBox = document.getElementById("stasis-loading");
   const loadingStatus = document.getElementById("stasis-loading-status");
+  const adControls = document.getElementById("stasis-ad-controls");
+  const adWatchButton = document.getElementById("stasis-ad-watch");
+  const adCancelButton = document.getElementById("stasis-ad-cancel");
+  const adStatus = document.getElementById("stasis-ad-status");
   const setLoading = (message, state = "loading") => {
     if (!loadingBox) return;
     if (loadingStatus) loadingStatus.textContent = message;
@@ -33,6 +37,79 @@
   let pendingExternalActionGeneration = 0;
   const commands = [];
   const game = window.STASIS_GAME || { strings: {}, memory: {}, assets: {} };
+  const AD_STATE_FAILED = 4;
+  const AD_PROVIDERS = new Set(["crazygames", "gamemonetize", "gamedistribution", "poki"]);
+  const portalProfile = game.portal && typeof game.portal === "object" ? game.portal : { provider: "none" };
+  const portalProvider = typeof portalProfile.provider === "string" && AD_PROVIDERS.has(portalProfile.provider)
+    ? portalProfile.provider : "none";
+  const unavailableAdLifecycle = Object.freeze({
+    request: () => 0,
+    poll: () => AD_STATE_FAILED,
+    gameplayBlocked: () => 0,
+    takeReward: () => 0,
+    release() {},
+    lifecycle() {},
+  });
+  let adLifecycle = unavailableAdLifecycle;
+  let setAdAudioPauseReason = () => {};
+  let adGameplayBlocked = false;
+  let currentAdGesture = null;
+  const clearAdGameplayInput = () => {
+    keys.clear();
+    pointer.hover = false;
+    pointer.down = false;
+    pointer.wentDown = false;
+    pointer.wentUp = false;
+    pointer.dx = 0;
+    pointer.dy = 0;
+  };
+  const isAdGameplayBlocked = () => {
+    if (adGameplayBlocked) return true;
+    try { return (adLifecycle.gameplayBlocked() | 0) !== 0; }
+    catch { return false; }
+  };
+  const setAdGameplayBlocked = blocked => {
+    adGameplayBlocked = Boolean(blocked);
+    if (adGameplayBlocked) clearAdGameplayInput();
+    if (document.body?.dataset) document.body.dataset.adGameplayBlocked = String(adGameplayBlocked);
+  };
+  const setAdStatus = message => {
+    const text = String(message || "").slice(0, 256);
+    if (adStatus) {
+      adStatus.textContent = text;
+      adStatus.hidden = !text;
+    }
+    if (document.body?.dataset) document.body.dataset.adStatus = text;
+  };
+  const updateAdGesture = gesture => {
+    currentAdGesture = gesture && gesture.visible !== false ? gesture : null;
+    if (adControls) adControls.hidden = !currentAdGesture;
+    if (adWatchButton) {
+      adWatchButton.disabled = !currentAdGesture || typeof currentAdGesture.activate !== "function";
+      adWatchButton.textContent = currentAdGesture?.label || "Watch ad (touch or mouse required)";
+    }
+    if (!currentAdGesture && gesture?.visible === false) setAdStatus(gesture.message || "");
+    else if (currentAdGesture) setAdStatus(gesture.message || "Use a mouse or touch to start this ad.");
+  };
+  adWatchButton?.addEventListener("pointerup", event => {
+    const activate = currentAdGesture?.activate;
+    if (typeof activate !== "function") return;
+    try {
+      if (activate(event) !== true) {
+        setAdStatus("Use the mouse or touch button to start the ad.");
+      }
+    }
+    catch (error) { setAdStatus(`Ad could not start. ${String(error?.message || error)}`); }
+  });
+  adWatchButton?.addEventListener("click", event => {
+    if (event.detail === 0 && currentAdGesture) {
+      setAdStatus("This portal requires a mouse or touch release to start the ad. You can cancel it with the button below.");
+    }
+  });
+  adCancelButton?.addEventListener("click", () => {
+    try { currentAdGesture?.cancel?.(); }
+    catch (error) { setAdStatus(`Ad request could not be canceled. ${String(error?.message || error)}`); }
+  });
   const STRING_LITERAL_TABLE_VERSION = 1;
   const stringLiteralTableVersion = game.stringLiteralTableVersion ?? 1;
   const stringLiteralTable = game.stringLiteralTable ?? game.literalTable ?? game.string_literals ?? {};
@@ -353,7 +430,11 @@
   const audioStreamSources = new Set();
   let audioStreamActive = false;
   let audioStreamCapacity = 8192;
-  let audioSuspendedByLifecycle = false;
+  const audioLifecycleReasons = new Set();
+  let audioWasRunningBeforeLifecycleSuspend = false;
+  let audioLifecycleResumeInFlight = false;
+  let audioLifecycleResumeToken = 0;
+  let audioResumeRequestedByGesture = false;
   let pendingAudioFrames = 0;
   let nextAudioVoiceHandle = 1;
   let nextAudioVoiceGeneration = 1;
@@ -2311,18 +2392,82 @@
   const updateAudioState = () => {
     document.body.dataset.audioState = audioContext?.state || "closed";
   };
-  const enableWebAudio = () => {
+  const setAudioLifecycleReason = (reason, active) => {
+    if (typeof reason !== "string" || !reason) return;
+    const hadReasons = audioLifecycleReasons.size > 0;
+    if (active) audioLifecycleReasons.add(reason);
+    else audioLifecycleReasons.delete(reason);
+    const hasReasons = audioLifecycleReasons.size > 0;
+    if (hadReasons === hasReasons) return;
+    if (hasReasons) {
+      if (!audioLifecycleResumeInFlight) {
+        audioWasRunningBeforeLifecycleSuspend = audioContext?.state === "running"
+          || Boolean(audioEnablePromise && audioResumeRequestedByGesture);
+      }
+      if (audioContext?.state === "running") {
+        void audioContext.suspend().then(updateAudioState).catch(() => {});
+      }
+      updateAudioState();
+      return;
+    }
+    if (!audioWasRunningBeforeLifecycleSuspend || !audioContext || audioContext.state === "closed") {
+      audioWasRunningBeforeLifecycleSuspend = false;
+      updateAudioState();
+      return;
+    }
+    const resumingContext = audioContext;
+    const resumeToken = ++audioLifecycleResumeToken;
+    audioLifecycleResumeInFlight = true;
+    void resumingContext.resume().then(async () => {
+      if (resumingContext !== audioContext) return;
+      if (audioLifecycleReasons.size > 0) {
+        if (resumingContext.state === "running") await resumingContext.suspend();
+        updateAudioState();
+        return;
+      }
+      if (resumeToken !== audioLifecycleResumeToken) return;
+      audioWasRunningBeforeLifecycleSuspend = false;
+      flushPendingAudio();
+      updateAudioState();
+    }).catch(() => {
+      if (resumingContext === audioContext) updateAudioState();
+    }).finally(() => {
+      if (resumeToken === audioLifecycleResumeToken) audioLifecycleResumeInFlight = false;
+    });
+  };
+  setAdAudioPauseReason = paused => setAudioLifecycleReason("ad", Boolean(paused));
+  const enableWebAudio = (userGesture = false) => {
+    if (audioLifecycleReasons.size > 0) {
+      if (audioContext?.state === "running") {
+        void audioContext.suspend().then(updateAudioState).catch(() => {});
+      }
+      updateAudioState();
+      return Promise.resolve(false);
+    }
+    if (userGesture) audioResumeRequestedByGesture = true;
     let audio;
     try { audio = ensureAudio(); }
     catch { updateAudioState(); return Promise.resolve(false); }
     if (audio.state === "running") {
+      audioResumeRequestedByGesture = false;
       flushPendingAudio();
       updateAudioState();
       return Promise.resolve(true);
     }
-    if (audioEnablePromise) return audioEnablePromise;
+    // A pre-gesture resume can stay pending under browser autoplay policy.
+    // A trusted gesture must issue its own resume attempt instead of waiting
+    // on that promise; identity checks below keep older attempts from clearing it.
+    if (audioEnablePromise && !userGesture) return audioEnablePromise;
     const attempt = audio.resume().then(() => {
+      if (audioLifecycleReasons.size > 0) {
+        if (audio === audioContext && audio.state === "running") {
+          return audio.suspend().then(() => { updateAudioState(); return false; });
+        }
+        updateAudioState();
+        return false;
+      }
       if (audio === audioContext && audio.state === "running") {
+        audioResumeRequestedByGesture = false;
         flushPendingAudio();
         updateAudioState();
         return true;
@@ -2334,31 +2479,16 @@
       return false;
     }).finally(() => {
       if (audioEnablePromise === attempt) audioEnablePromise = undefined;
+      if (audioLifecycleReasons.size === 0) audioResumeRequestedByGesture = false;
     });
     audioEnablePromise = attempt;
     return attempt;
   };
   const suspendWebAudio = () => {
-    if (!audioContext) return;
-    audioSuspendedByLifecycle = true;
-    if (audioContext.state === "running") {
-      void audioContext.suspend().then(updateAudioState).catch(() => {});
-    }
+    setAudioLifecycleReason("visibility", true);
   };
   const resumeWebAudio = () => {
-    if (!audioSuspendedByLifecycle || !audioContext || audioContext.state === "closed") return;
-    audioSuspendedByLifecycle = false;
-    const resumingContext = audioContext;
-    void resumingContext.resume().then(() => {
-      if (audioSuspendedByLifecycle && resumingContext === audioContext) {
-        void resumingContext.suspend().then(updateAudioState).catch(() => {});
-      } else {
-        flushPendingAudio();
-        updateAudioState();
-      }
-    }).catch(() => {
-      if (resumingContext === audioContext) audioSuspendedByLifecycle = true;
-    });
+    setAudioLifecycleReason("visibility", false);
   };
   const shutdownWebAudio = () => {
     audioStreamActive = false;
@@ -2367,7 +2497,10 @@
       entry.source.disconnect();
     }
     audioStreamSources.clear();
-    audioSuspendedByLifecycle = false;
+    audioWasRunningBeforeLifecycleSuspend = false;
+    audioLifecycleResumeInFlight = false;
+    audioLifecycleResumeToken += 1;
+    audioResumeRequestedByGesture = false;
     pendingAudio.length = 0;
     pendingAudioFrames = 0;
     for (const handle of Array.from(audioVoices.keys())) stopAudio(handle);
@@ -2453,6 +2586,73 @@
     else audioAssets.delete(entry.handle);
     assetTasks.delete(task);
   };
+  const callAdNumber = (method, fallback, ...args) => {
+    try {
+      const value = adLifecycle?.[method]?.(...args);
+      const number = Number(value);
+      return Number.isFinite(number) ? number | 0 : fallback;
+    } catch (error) {
+      setAdStatus(`Portal adapter error: ${String(error?.message || error)}`);
+      return fallback;
+    }
+  };
+  const callAdVoid = (method, ...args) => {
+    try { adLifecycle?.[method]?.(...args); }
+    catch (error) { setAdStatus(`Portal adapter error: ${String(error?.message || error)}`); }
+  };
+  const AD_LIFECYCLE_IMPORT_TIMEOUT_MS = 2000;
+  const initializeAdLifecycle = async () => {
+    if (portalProvider === "none") return;
+    const moduleUrl = typeof game.adLifecycleUrl === "string" ? game.adLifecycleUrl : "";
+    if (!moduleUrl) {
+      setAdStatus("This portal adapter is missing from the package; ads are unavailable.");
+      return;
+    }
+    let timer;
+    try {
+      const existingFactory = globalThis.STASIS_AD_LIFECYCLE || window.STASIS_AD_LIFECYCLE;
+      const modulePromise = existingFactory?.createAdLifecycle
+        ? Promise.resolve(existingFactory)
+        : import(new URL(moduleUrl, globalThis.location?.href || document.baseURI || "http://localhost/").href)
+          .then(() => globalThis.STASIS_AD_LIFECYCLE || window.STASIS_AD_LIFECYCLE);
+      const factory = await Promise.race([
+        modulePromise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("ad lifecycle module import timed out")), AD_LIFECYCLE_IMPORT_TIMEOUT_MS);
+        }),
+      ]);
+      clearTimeout(timer);
+      if (typeof factory?.createAdLifecycle !== "function") {
+        throw new Error("ad lifecycle module did not register its factory");
+      }
+      const manager = factory.createAdLifecycle({
+        provider: portalProvider,
+        game_id: typeof portalProfile.game_id === "string" ? portalProfile.game_id : undefined,
+        windowObject: globalThis,
+        documentObject: document,
+        setTimeoutFn: setTimeout,
+        clearTimeoutFn: clearTimeout,
+        nowFn: () => globalThis.performance?.now?.() ?? Date.now(),
+        onGameplayBlocked: setAdGameplayBlocked,
+        onAudioPaused: setAdAudioPauseReason,
+        onGestureNeeded: updateAdGesture,
+        onDiagnostic: setAdStatus,
+      });
+      if (!manager || typeof manager !== "object") throw new Error("ad lifecycle factory returned no manager");
+      adLifecycle = manager;
+      if (manager.ready && typeof manager.ready.then === "function") {
+        void Promise.resolve(manager.ready).then(result => {
+          if (result?.diagnostic) setAdStatus(result.diagnostic);
+        }).catch(error => setAdStatus(`Portal SDK initialization failed: ${String(error?.message || error)}`));
+      }
+    } catch (error) {
+      clearTimeout(timer);
+      adLifecycle = unavailableAdLifecycle;
+      setAdGameplayBlocked(false);
+      setAdAudioPauseReason(false);
+      setAdStatus("Ads are unavailable. You can keep playing.");
+    }
+  };
   const imports = { env: {
     sin_fast: value => Math.sin(value),
     cos_fast: value => Math.cos(value),
@@ -2463,6 +2663,12 @@
     sys_memcpy_u8: sysMemcpyU8,
     sys_memcpy_i32: sysMemcpyI32,
     sys_memcpy_f32: sysMemcpyF32,
+    stasis_jit_ad_request: kind => callAdNumber("request", 0, kind | 0),
+    stasis_jit_ad_poll: handle => callAdNumber("poll", AD_STATE_FAILED, handle | 0),
+    stasis_jit_ad_gameplay_blocked: () => callAdNumber("gameplayBlocked", 0) ? 1 : 0,
+    stasis_jit_ad_take_reward: handle => callAdNumber("takeReward", 0, handle | 0) ? 1 : 0,
+    stasis_jit_ad_release: handle => callAdVoid("release", handle | 0),
+    stasis_jit_portal_lifecycle: event => callAdVoid("lifecycle", event | 0),
     // @stasis-feature network begin
     stasis_web_network_supported: () => typeof WebSocket === "function" ? 1 : 0,
     stasis_web_network_connect: networkConnect,
@@ -2474,16 +2680,17 @@
     stasis_web_network_last_sequence: () => networkClient.lastSequence,
     // @stasis-feature network end
     // @stasis-import web_input_axis begin
-    web_input_axis: () => (keys.has("ArrowRight") || keys.has("KeyD") ? 1 : 0) - (keys.has("ArrowLeft") || keys.has("KeyA") ? 1 : 0),
+    web_input_axis: () => isAdGameplayBlocked() ? 0
+      : (keys.has("ArrowRight") || keys.has("KeyD") ? 1 : 0) - (keys.has("ArrowLeft") || keys.has("KeyA") ? 1 : 0),
     // @stasis-import web_input_axis end
     // @stasis-import web_input_fire begin
-    web_input_fire: () => keys.has("Space") || pointer.down ? 1 : 0,
+    web_input_fire: () => !isAdGameplayBlocked() && (keys.has("Space") || pointer.down) ? 1 : 0,
     // @stasis-import web_input_fire end
     // @stasis-import web_pointer_x begin
-    web_pointer_x: () => pointer.x | 0,
+    web_pointer_x: () => isAdGameplayBlocked() ? 0 : pointer.x | 0,
     // @stasis-import web_pointer_x end
     // @stasis-import web_pointer_down begin
-    web_pointer_down: () => pointer.down ? 1 : 0,
+    web_pointer_down: () => !isAdGameplayBlocked() && pointer.down ? 1 : 0,
     // @stasis-import web_pointer_down end
     // @stasis-import stasis_jit_open_external_url begin
     stasis_jit_open_external_url: openExternalUrl,
@@ -2689,13 +2896,19 @@
     else resumeWebAudio();
   });
   addEventListener("pagehide", event => {
-    if (event.persisted) suspendWebAudio();
+    if (event.persisted) setAudioLifecycleReason("pagehide", true);
     else shutdownWebAudio();
   });
   addEventListener("pageshow", event => {
-    if (event.persisted && !document.hidden) resumeWebAudio();
+    if (event.persisted) setAudioLifecycleReason("pagehide", false);
   });
   // @stasis-feature audio end
+  addEventListener("pagehide", event => {
+    if (event.persisted) return;
+    callAdVoid("dispose");
+    adLifecycle = unavailableAdLifecycle;
+    currentAdGesture = null;
+  });
 
   // The visible canvas has exactly one renderer. Guest memory is copied into
   // reusable host staging arrays before upload; Canvas2D is resource prep only.
@@ -4025,9 +4238,11 @@
     const f32 = new Float32Array(instance.exports.memory.buffer, fLayout.offset, fLayout.length);
     i32.fill(0);
     f32.fill(0);
+    const gameplayBlocked = isAdGameplayBlocked();
+    if (gameplayBlocked) clearAdGameplayInput();
     const elapsedMs = timestamp - startedAt;
     const focused = document.hasFocus() ? 1 : 0;
-    const pointerCount = pointer.hover || pointer.down || pointer.wentDown || pointer.wentUp ? 1 : 0;
+    const pointerCount = !gameplayBlocked && (pointer.hover || pointer.down || pointer.wentDown || pointer.wentUp) ? 1 : 0;
     i32[0] = Math.floor(elapsedMs) | 0;
     i32[7] = pointerCount;
     i32[8] = 0;
@@ -4054,9 +4269,11 @@
     i32[29] = Math.round(display.logicalHeight);
     i32[30] = display.displayGeneration;
     i32[31] = display.densityGeneration;
-    for (const code of keys) {
-      const scancode = sdlScancode(code);
-      if (scancode !== undefined && scancode < 512) i32[32 + scancode] = 1;
+    if (!gameplayBlocked) {
+      for (const code of keys) {
+        const scancode = sdlScancode(code);
+        if (scancode !== undefined && scancode < 512) i32[32 + scancode] = 1;
+      }
     }
     if (pointerCount) {
       i32[544] = pointer.id;
@@ -4327,6 +4544,10 @@
   }
 
   function updatePointer(event) {
+    if (isAdGameplayBlocked()) {
+      clearAdGameplayInput();
+      return;
+    }
     const bounds = canvas.getBoundingClientRect();
     const width = Math.max(1, finitePositive(bounds.width, display.cssWidth));
     const height = Math.max(1, finitePositive(bounds.height, display.cssHeight));
@@ -4352,19 +4573,33 @@
       event.preventDefault();
       return;
     }
+    if (isAdGameplayBlocked()) {
+      clearAdGameplayInput();
+      if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space"].includes(event.code)) event.preventDefault();
+      return;
+    }
+    if (event.repeat && !keys.has(event.code)) return;
     keys.add(event.code);
     // @stasis-feature audio begin
-    void enableWebAudio();
+    void enableWebAudio(true);
     // @stasis-feature audio end
     void applyFullscreenGesture();
     if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space"].includes(event.code)) event.preventDefault();
   });
-  addEventListener("keyup", event => { keys.delete(event.code); void applyFullscreenGesture(); });
-  canvas.addEventListener("pointermove", updatePointer);
+  addEventListener("keyup", event => {
+    keys.delete(event.code);
+    if (isAdGameplayBlocked()) clearAdGameplayInput();
+    void applyFullscreenGesture();
+  });
+  canvas.addEventListener("pointermove", event => {
+    if (isAdGameplayBlocked()) { clearAdGameplayInput(); return; }
+    updatePointer(event);
+  });
   // @stasis-feature audio begin
-  addEventListener("pointerdown", () => { void enableWebAudio(); }, { passive: true });
+  addEventListener("pointerdown", () => { void enableWebAudio(true); }, { passive: true });
   // @stasis-feature audio end
   canvas.addEventListener("pointerdown", event => {
+    if (isAdGameplayBlocked()) { clearAdGameplayInput(); return; }
     updatePointer(event);
     if (!pointer.down) markExternalActionGesture();
     pointer.down = true;
@@ -4374,11 +4609,15 @@
   });
   canvas.addEventListener("pointerleave", () => { pointer.hover = false; });
   canvas.addEventListener("pointerup", event => {
+    if (isAdGameplayBlocked()) { clearAdGameplayInput(); return; }
     updatePointer(event);
     pointer.down = false;
     pointer.wentUp = true;
   });
-  canvas.addEventListener("pointercancel", () => { pointer.hover = false; pointer.down = false; pointer.wentUp = true; });
+  canvas.addEventListener("pointercancel", () => {
+    if (isAdGameplayBlocked()) { clearAdGameplayInput(); return; }
+    pointer.hover = false; pointer.down = false; pointer.wentUp = true;
+  });
   addEventListener("blur", clearExternalActionGesture);
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) clearExternalActionGesture();
@@ -4389,7 +4628,7 @@
   addEventListener("stasis-viewport-extent", markResized);
   document.addEventListener("fullscreenchange", markResized);
   // @stasis-feature audio begin
-  void enableWebAudio();
+  void enableWebAudio(false);
   // @stasis-feature audio end
 
   async function wasmBytes() {
@@ -4406,6 +4645,8 @@
       if (!getGpuBatcher()) {
         throw activeGpuErrors.get("renderer") || new Error("WebGL2 is required by the Stasis Web renderer");
       }
+      await initializeAdLifecycle();
+      callAdVoid("resetGuest");
       const result = await WebAssembly.instantiate(await wasmBytes(), imports);
       instance = result.instance;
       wasmModuleGeneration += 1;
