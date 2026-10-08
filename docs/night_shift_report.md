@@ -998,3 +998,46 @@ Adjustment: snapshot only the needed scalar fields and defer writes; assign
 target coordinates to local `f32` values before that call without changing
 compiler resolution behavior; and add the installed MSVC and Rust LLD
 directories only to the bounded test process.
+
+## 2026-10-08 - Maddox #815 desktop package provenance receipt
+
+Fixed the official macOS package verification failure from release run
+37804747943. The current CLI emits a `native_adapter` key in the desktop
+package receipt, including `null` when no adapter is configured; the verifier
+previously accepted only the two-key legacy receipt. It now accepts the exact
+legacy or current root shape, preserves legacy receipts only when the packaged
+manifest has no adapter, and verifies configured adapter ABI, normalized
+source, digest syntax, and system links against the packaged manifest. The
+manifest's system-link field remains optional; current non-null receipts
+require the producer's system-link object, including `{}` when no links are
+configured. Source normalization follows the validated desktop target's path
+dialect and the Rust producer's serializer. The verifier does not dereference
+the metadata source or claim to recompute its digest because the native C
+source is not present in the final package.
+
+Validation: the current-shape RED is preserved at
+`D:\code\.automation-evidence\nightly-20261008-resumed\task815\verifier-repair\red-current-null.log`;
+the focused desktop receipt tests pass 2/2, the complete release provenance
+module passes 36 tests, and the exact PR-CI Python step passes 60 tests. The
+full `tools/validate_repo.sh` gate and a fresh official cross-platform nightly
+remain pending; the prior release failure is not treated as a release pass.
+
+Visual evidence: not applicable; this changes release metadata verification,
+not rendered output.
+
+Theory gained: the receipt's adapter source is serialized metadata, and
+backslashes in a valid POSIX filename can become slash-looking text after the
+producer's normalization. The producer also always emits the system-link
+object, while its empty platform lists and the manifest's default field are
+omitted. Validate path semantics on the manifest value, then compare the
+serialized receipt value exactly instead of interpreting it as a second
+filesystem path.
+
+Good: current and legacy receipts are both checked against the packaged
+manifest, while ABI, hash, required system-link object, link enums, duplicates,
+and capacity remain fail-closed.
+Bad: the existing verifier rejected every current receipt before checking its
+contents; the first path attempt also rejected valid POSIX backslash metadata.
+Adjustment: validate the new root field and metadata contract explicitly,
+require a validated target for configured adapters, and keep source digests
+syntax-only when the packaged source is unavailable.

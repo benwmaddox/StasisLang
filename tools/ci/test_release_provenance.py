@@ -200,7 +200,7 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 "entry_support": None,
             },
         }
-        return {"project": project, "network_guest": None}
+        return {"project": project, "network_guest": None, "native_adapter": None}
 
     def test_desktop_package_receipt_is_fail_closed(self):
         class Parser:
@@ -228,6 +228,281 @@ class ReleaseProvenanceTests(unittest.TestCase):
             malformed["unexpected"] = True
             with self.assertRaisesRegex(ValueError, "receipt is malformed"):
                 validate_desktop_package_receipt(Parser(), malformed, package)
+
+    def test_desktop_native_adapter_receipt_matches_manifest(self):
+        class Parser:
+            @staticmethod
+            def error(message):
+                raise ValueError(message)
+
+        adapter_hash = hashlib.sha256(b"native adapter source").hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            package = pathlib.Path(temporary)
+            missing_adapter = object()
+
+            def make_case(manifest, receipt_adapter):
+                manifest_bytes = json.dumps(manifest).encode("utf-8")
+                (package / "stasis.json").write_bytes(manifest_bytes)
+                receipt = self.desktop_package_receipt(manifest_bytes)
+                if receipt_adapter is not missing_adapter:
+                    receipt["native_adapter"] = receipt_adapter
+                return receipt
+
+            manifest = {
+                "manifest_version": 3,
+                "desktop": {
+                    "native_adapter": {
+                        "abi_version": 1,
+                        "source": "./native//adapter.c",
+                        "system_links": {
+                            "windows": ["ole32", "windows_app"],
+                            "linux": [],
+                        },
+                    }
+                },
+            }
+            current = {
+                "abi_version": 1,
+                "source": "native/adapter.c",
+                "sha256": adapter_hash,
+                "system_links": {"windows": ["ole32", "windows_app"]},
+            }
+            validate_desktop_package_receipt(
+                Parser(), make_case(manifest, current), package, "windows-x86_64"
+            )
+            self.assertFalse((package / "native" / "adapter.c").exists())
+
+            empty_links_manifest = {
+                "manifest_version": 3,
+                "desktop": {
+                    "native_adapter": {
+                        "abi_version": 1,
+                        "source": "native/adapter.c",
+                        "system_links": {"windows": [], "linux": [], "macos": []},
+                    }
+                },
+            }
+            without_links = {
+                "abi_version": 1,
+                "source": "native/adapter.c",
+                "sha256": adapter_hash,
+                "system_links": {},
+            }
+            validate_desktop_package_receipt(
+                Parser(),
+                make_case(empty_links_manifest, without_links),
+                package,
+                "windows-x86_64",
+            )
+
+            posix_literal_backslash_manifest = {
+                "manifest_version": 3,
+                "desktop": {
+                    "native_adapter": {
+                        "abi_version": 1,
+                        "source": r"native\..\adapter.c",
+                    }
+                },
+            }
+            posix_literal_backslash_receipt = {
+                "abi_version": 1,
+                "source": "native/../adapter.c",
+                "sha256": adapter_hash,
+                "system_links": {},
+            }
+            validate_desktop_package_receipt(
+                Parser(),
+                make_case(
+                    posix_literal_backslash_manifest,
+                    posix_literal_backslash_receipt,
+                ),
+                package,
+                "linux-x86_64",
+            )
+
+            no_adapter_manifest = {"manifest_version": 3}
+            legacy = make_case(no_adapter_manifest, missing_adapter)
+            legacy.pop("native_adapter")
+            validate_desktop_package_receipt(Parser(), legacy, package)
+
+            with self.assertRaisesRegex(ValueError, "missing configured native adapter"):
+                validate_desktop_package_receipt(
+                    Parser(),
+                    make_case(manifest, missing_adapter),
+                    package,
+                    "windows-x86_64",
+                )
+            with self.assertRaisesRegex(ValueError, "missing configured native adapter"):
+                legacy_with_adapter = make_case(manifest, missing_adapter)
+                legacy_with_adapter.pop("native_adapter")
+                validate_desktop_package_receipt(
+                    Parser(), legacy_with_adapter, package, "windows-x86_64"
+                )
+
+            malformed_receipts = (
+                ({**current, "abi_version": True}, "ABI is invalid"),
+                ({**current, "abi_version": 2}, "ABI is invalid"),
+                ({**current, "sha256": "A" * 64}, "invalid desktop native adapter sha256"),
+                ({**current, "extra": True}, "native adapter receipt is malformed"),
+                (
+                    {key: value for key, value in current.items() if key != "system_links"},
+                    "native adapter receipt is malformed",
+                ),
+                (
+                    {**current, "source": "../native/adapter.c"},
+                    "does not match project manifest",
+                ),
+                (
+                    {**current, "system_links": {"unknown": ["ole32"]}},
+                    "system links are malformed",
+                ),
+                (
+                    {**current, "system_links": {"windows": ["kernel32"]}},
+                    "system links are malformed",
+                ),
+                (
+                    {**current, "system_links": {"windows": ["ole32", "ole32"]}},
+                    "contain duplicates",
+                ),
+                (
+                    {**current, "system_links": {"windows": []}},
+                    "system links are malformed",
+                ),
+                (
+                    {
+                        **current,
+                        "system_links": {"windows": ["ole32"], "linux": []},
+                    },
+                    "system links are malformed",
+                ),
+                (
+                    {
+                        **current,
+                        "system_links": {
+                            "windows": [
+                                "advapi32", "ole32", "runtime_object", "shell32",
+                                "user32", "windows_app",
+                            ],
+                            "linux": ["dl", "m", "pthread"],
+                        },
+                    },
+                    "exceed capacity",
+                ),
+            )
+            for malformed_adapter, error in malformed_receipts:
+                with self.subTest(adapter=malformed_adapter), self.assertRaisesRegex(
+                    ValueError, error
+                ):
+                    validate_desktop_package_receipt(
+                        Parser(),
+                        make_case(manifest, malformed_adapter),
+                        package,
+                        "windows-x86_64",
+                    )
+
+            mismatched_manifest = {
+                **manifest,
+                "desktop": {
+                    "native_adapter": {
+                        **manifest["desktop"]["native_adapter"],
+                        "source": "native/other.c",
+                    }
+                },
+            }
+            with self.assertRaisesRegex(ValueError, "does not match project manifest"):
+                validate_desktop_package_receipt(
+                    Parser(),
+                    make_case(mismatched_manifest, current),
+                    package,
+                    "windows-x86_64",
+                )
+
+            for unsafe_source, target in (
+                ("../native/adapter.c", "windows-x86_64"),
+                ("C:native/adapter.c", "windows-x86_64"),
+                ("/native/adapter.c", "linux-x86_64"),
+                ("native/adapter.C", "linux-x86_64"),
+            ):
+                unsafe_manifest = {
+                    "manifest_version": 3,
+                    "desktop": {
+                        "native_adapter": {
+                            "abi_version": 1,
+                            "source": unsafe_source,
+                        }
+                    },
+                }
+                with self.subTest(source=unsafe_source), self.assertRaisesRegex(
+                    ValueError, "source is unsafe"
+                ):
+                    validate_desktop_package_receipt(
+                        Parser(),
+                        make_case(unsafe_manifest, current),
+                        package,
+                        target,
+                    )
+
+            with self.assertRaisesRegex(ValueError, "requires a validated desktop target"):
+                validate_desktop_package_receipt(
+                    Parser(), make_case(manifest, current), package
+                )
+
+            with self.assertRaisesRegex(ValueError, "does not match project manifest"):
+                validate_desktop_package_receipt(
+                    Parser(),
+                    make_case(no_adapter_manifest, current),
+                    package,
+                    "windows-x86_64",
+                )
+
+            malformed_manifests = (
+                (
+                    {
+                        **manifest,
+                        "desktop": {
+                            "native_adapter": {
+                                **manifest["desktop"]["native_adapter"],
+                                "abi_version": True,
+                            }
+                        },
+                    },
+                    "project manifest desktop native adapter ABI is invalid",
+                ),
+                (
+                    {
+                        **manifest,
+                        "desktop": {
+                            "native_adapter": {
+                                **manifest["desktop"]["native_adapter"],
+                                "unexpected": True,
+                            }
+                        },
+                    },
+                    "project manifest desktop native adapter is malformed",
+                ),
+                (
+                    {
+                        **manifest,
+                        "desktop": {
+                            "native_adapter": {
+                                **manifest["desktop"]["native_adapter"],
+                                "system_links": {"unknown": ["ole32"]},
+                            }
+                        },
+                    },
+                    "system links are malformed",
+                ),
+            )
+            for malformed_manifest, error in malformed_manifests:
+                with self.subTest(manifest=malformed_manifest), self.assertRaisesRegex(
+                    ValueError, error
+                ):
+                    validate_desktop_package_receipt(
+                        Parser(),
+                        make_case(malformed_manifest, current),
+                        package,
+                        "windows-x86_64",
+                    )
 
     def test_desktop_package_vendor_receipt_supports_versioned_hashes(self):
         class Parser:
@@ -326,13 +601,32 @@ class ReleaseProvenanceTests(unittest.TestCase):
             (release / "stasis_release_provenance.json").write_text(
                 json.dumps(manifest), encoding="utf-8"
             )
-            packaged_manifest = b'{"name":"ci_smoke"}\n'
+            packaged_manifest = json.dumps(
+                {
+                    "name": "ci_smoke",
+                    "manifest_version": 3,
+                    "desktop": {
+                        "native_adapter": {
+                            "abi_version": 1,
+                            "source": r"native\..\adapter.c",
+                        }
+                    },
+                }
+            ).encode("utf-8")
             (package / "stasis.json").write_bytes(packaged_manifest)
             packaged = dict(manifest)
-            packaged["project_configuration"] = self.project_configuration()
+            packaged["project_configuration"] = self.project_configuration(
+                "linux-x86_64"
+            )
             packaged["desktop_package"] = self.desktop_package_receipt(
                 packaged_manifest
             )
+            packaged["desktop_package"]["native_adapter"] = {
+                "abi_version": 1,
+                "source": "native/../adapter.c",
+                "sha256": hashlib.sha256(b"packaged adapter source").hexdigest(),
+                "system_links": {},
+            }
             vendor_hash = hashlib.sha256(b"packaged vendor snapshot").hexdigest()
             packaged["desktop_package"]["project"]["vendor"] = {
                 "release_id": "nightly-test",
@@ -351,6 +645,24 @@ class ReleaseProvenanceTests(unittest.TestCase):
                 "--expect-desktop-package",
             ]
             self.assertEqual(subprocess.run(command, check=False).returncode, 0)
+
+            packaged["desktop_package"]["native_adapter"]["source"] = (
+                "native/adapter.c"
+            )
+            (package / "stasis_provenance.json").write_text(
+                json.dumps(packaged), encoding="utf-8"
+            )
+            mismatched_adapter = subprocess.run(
+                command, check=False, capture_output=True, text=True
+            )
+            self.assertNotEqual(mismatched_adapter.returncode, 0)
+            self.assertIn("does not match project manifest", mismatched_adapter.stderr)
+            packaged["desktop_package"]["native_adapter"]["source"] = (
+                "native/../adapter.c"
+            )
+            (package / "stasis_provenance.json").write_text(
+                json.dumps(packaged), encoding="utf-8"
+            )
 
             (package / "stasis.json").write_bytes(b'{"name":"tampered"}\n')
             tampered_manifest = subprocess.run(
