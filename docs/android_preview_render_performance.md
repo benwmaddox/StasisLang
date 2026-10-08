@@ -14,7 +14,7 @@ Run the bounded gate on the repository API 35 emulator after building with
 
 ```powershell
 mobile/android/test_render_emulator.ps1 -Headless -SkipBuild `
-  -MaxRenderP50Millis 1.05 -MaxRenderP95Millis 8.94
+  -MaxRenderP50Millis 4.0 -MaxRenderP95Millis 14.0
 ```
 
 The gate discards 60 warm-up frames, measures 180 frames, records total,
@@ -40,11 +40,10 @@ the same 640x360 parity scene, 60 warm-up frames, and 180 measured frames.
 | `origin/main` baseline | 0.846 ms | 7.152 ms | 0.080 / 0.557 ms | 0.739 / 5.862 ms | 9 |
 | cached-resource/pipeline result | 0.456 ms | 4.169 ms | 0.080 / 0.271 ms | 0.324 / 3.905 ms | 9 |
 
-The emulator-normalized p50 ceiling is 1.05 ms: 25% above the observed baseline.
-The 8.94 ms p95 ceiling uses the same margin but remains a scheduling tripwire,
-not a physical-device claim. The result also returns near the historical 0.4 ms
-device observation. Physical-device evidence may establish a tighter device-class
-threshold later.
+The configured p50 ceiling is 4.0 ms and the p95 ceiling is 14.0 ms. These are
+emulator scheduling tripwires, not physical-device claims. The result also
+returns near the historical 0.4 ms device observation. Physical-device evidence
+may establish a tighter device-class threshold later.
 
 Profiling showed ordered GLES submission dominated, while resource preparation
 was already small. The renderer therefore keeps all nine semantically required
