@@ -927,8 +927,9 @@ Added a real CLI regression for an adapter-enabled v3 desktop project whose
 guest exposes only `main()`. Against the frozen pre-fix source, the exact test
 showed `package --target desktop --development-build` returning success and
 publishing `dist/standalone_adapter_probe-desktop` while silently ignoring the
-adapter. The baseline package without an adapter remains part of the same
-regression and will confirm the unchanged standalone path after the guard lands.
+adapter. With the guard, the named test passes by asserting the exact
+engine-callback diagnostic, no published adapter output, and success for the
+adapter-free standalone baseline.
 
 The implementation guard uses the existing engine-mode predicate: an
 adapter-enabled desktop AOT build requires both a zero-argument `tick()` and
@@ -944,10 +945,10 @@ provides the engine callbacks the adapter pumps. A successful standalone
 package with a declared adapter is therefore a contract violation, while an
 adapter-free standalone package must remain publishable.
 
-Good: a real source-built CLI and matched runtime reproduced silent adapter
-acceptance and package publication.
-Bad: the regression stopped at that first failure, so the plain-standalone
-baseline has not yet completed in the guarded run.
-Adjustment: reject the incompatible adapter at the shared desktop AOT
-boundary using the existing engine-mode predicate; keep final source-matched
-validation evidence with the task's external receipts and PR.
+Good: the real source-built CLI now rejects the incompatible package and keeps
+the plain-standalone path working.
+Bad: the first Windows adapter acceptance run exposed that its test harness
+copied the stamped CLI without its required sibling graphics runtime, before
+the first package could be generated.
+Adjustment: stage the freshly built matching runtime beside the isolated CLI;
+the two-generation lifecycle acceptance is pending on the frozen source.

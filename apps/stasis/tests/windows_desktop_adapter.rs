@@ -206,8 +206,19 @@ fn two_fresh_desktop_packages_honor_the_adapter_lifecycle_and_mailbox_contract()
     );
     fs::create_dir_all(&test_tree.0).expect("create adapter acceptance root");
     let toolchain = test_tree.0.join("source-stasis.exe");
-    fs::copy(env!("CARGO_BIN_EXE_stasis"), &toolchain)
-        .expect("copy fresh CLI away from any stale sibling runtime");
+    let fresh_cli = Path::new(env!("CARGO_BIN_EXE_stasis"));
+    // Keep the stamped CLI paired with its fresh sibling runtime, away from installed binaries.
+    fs::copy(fresh_cli, &toolchain).expect("copy fresh CLI away from any stale installed binaries");
+    let fresh_runtime = fresh_cli.with_file_name("stasis_graphics.dll");
+    assert!(
+        fresh_runtime.is_file(),
+        "fresh CLI must have its source-matched graphics runtime"
+    );
+    fs::copy(
+        fresh_runtime,
+        toolchain.with_file_name("stasis_graphics.dll"),
+    )
+    .expect("copy matching runtime beside isolated CLI");
     let (_, first_adapter) = run_generation(&test_tree.0, &toolchain, 1);
     let (_, second_adapter) = run_generation(&test_tree.0, &toolchain, 2);
     assert_eq!(
