@@ -5,15 +5,13 @@ use stasis_compiler::backend::wasm::WasmProcess;
 use stasis_compiler::frontend::parser::rewrite_top_level_test_declarations;
 #[cfg(windows)]
 use stasis_jit::{AotLinkConfig, AotTarget};
-#[cfg(windows)]
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(windows)]
 use std::process::Command;
 
 const FIXTURE_PATH: &str = "tests/stasis/seams/rig2d_probe.stasis";
 const FIXTURE: &str = include_str!("../../../tests/stasis/seams/rig2d_probe.stasis");
-const ROOT: &str = "rig2d_probe";
+const ROOT: &str = "main";
 const STASIS_TEST_PATH: &str = "tests/stasis/rig2d.test.stasis";
 const STASIS_TESTS: &str = include_str!("../../../tests/stasis/rig2d.test.stasis");
 
@@ -24,6 +22,14 @@ struct AotTree(PathBuf);
 impl Drop for AotTree {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct WasmModuleFile(PathBuf);
+
+impl Drop for WasmModuleFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
     }
 }
 
@@ -83,7 +89,7 @@ fn dynload_artifacts() -> (PathBuf, PathBuf) {
 }
 
 #[test]
-fn rig2d_owned_bone_arrays_execute_in_jit_and_compile_for_web() {
+fn rig2d_two_bone_ik_oracle_matches_jit_and_node_wasm() {
     let root = repository_root();
     let mut jit = JitProcess::new();
     jit.set_project_root(root.to_string_lossy())
@@ -105,13 +111,15 @@ fn rig2d_owned_bone_arrays_execute_in_jit_and_compile_for_web() {
         wasm.module_bytes().starts_with(b"\0asm\x01\0\0\0"),
         "rig2d Web fixture must produce a valid WebAssembly module"
     );
+    let wasm_result = run_node_wasm_main(&wasm);
 
     assert_eq!(jit_result, 0, "JIT fixture failure code");
+    assert_eq!(wasm_result, jit_result, "JIT/Node Wasm result parity");
 }
 
 #[cfg(windows)]
 #[test]
-fn rig2d_owned_bone_arrays_match_jit_and_linked_aot() {
+fn rig2d_two_bone_ik_oracle_matches_jit_and_linked_aot() {
     let root = repository_root();
     let mut jit = JitProcess::new();
     jit.set_project_root(root.to_string_lossy())
@@ -154,22 +162,48 @@ fn rig2d_owned_bone_arrays_match_jit_and_linked_aot() {
 
     assert_eq!(jit_result, 0, "JIT fixture failure code");
     let aot_code = status.code().expect("linked AOT process exit code");
-    let signed_execution_required =
-        std::env::var_os("STASIS_REQUIRE_SIGNED_EXECUTION").is_some_and(|value| value == "1");
-    if aot_code == 4551 && !signed_execution_required {
-        eprintln!(
-            "skipping linked AOT execution parity: Windows Application Control returned 4551 and signed execution is not required"
-        );
-        return;
-    }
+    assert!(
+        status.success(),
+        "linked AOT executable returned exit code {aot_code}"
+    );
     assert_eq!(aot_code, jit_result, "JIT/AOT result parity");
+}
+
+fn run_node_wasm_main(wasm: &WasmProcess) -> i32 {
+    let path = std::env::temp_dir().join(format!(
+        "stasis_rig2d_{}_{}.wasm",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let module_file = WasmModuleFile(path);
+    fs::write(&module_file.0, wasm.module_bytes()).expect("write rig2d Wasm module");
+    let node = std::env::var_os("STASIS_NODE").unwrap_or_else(|| "node".into());
+    let output = Command::new(node)
+        .args([
+            "-e",
+            "const fs=require('node:fs');const m=new WebAssembly.Module(fs.readFileSync(process.argv[1]));const imports=WebAssembly.Module.imports(m);if(imports.length!==0){throw new Error('unexpected imports: '+JSON.stringify(imports))}const i=new WebAssembly.Instance(m,{});process.stdout.write(String(i.exports.main()));",
+        ])
+        .arg(&module_file.0)
+        .output()
+        .expect("execute rig2d Wasm in Node");
+    assert!(
+        output.status.success(),
+        "Node failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .parse()
+        .expect("rig2d Wasm main result")
 }
 
 #[test]
 fn rig2d_stasis_tests_pass_in_the_production_jit_test_shape() {
     let (rewritten, tests) =
         rewrite_top_level_test_declarations(STASIS_TESTS).expect("discover Stasis tests");
-    assert_eq!(tests.len(), 12, "focused behavior test count");
+    assert_eq!(tests.len(), 21, "focused behavior test count");
     let mut process = JitProcess::new();
     process
         .set_project_root(repository_root().to_string_lossy())
