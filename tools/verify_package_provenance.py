@@ -19,6 +19,13 @@ CANONICAL_PROJECT_TARGETS = {
     "macos-x86_64", "macos-arm64", "android-arm64", "android-x86_64", "ios-arm64",
     "ios-simulator-arm64",
 }
+DESKTOP_NATIVE_ADAPTER_SYSTEM_LINKS = {
+    "windows": {
+        "advapi32", "ole32", "runtime_object", "shell32", "user32", "windows_app",
+    },
+    "linux": {"dl", "m", "pthread"},
+    "macos": {"app_kit", "foundation", "store_kit"},
+}
 ASSET_PACKAGE_IDENTITY_NAME = "stasis_asset_package.json"
 ASSET_MANIFEST_RELATIVE_PATH = pathlib.PurePosixPath("assets/manifest.json")
 ASSET_PACKAGE_IDENTITY_SCHEMA = "stasis.asset_package"
@@ -441,9 +448,14 @@ def validate_desktop_project_receipt(
 
 
 def validate_desktop_package_receipt(
-    parser: argparse.ArgumentParser, value: object, package_root: pathlib.Path
+    parser: argparse.ArgumentParser,
+    value: object,
+    package_root: pathlib.Path,
+    project_target: str | None = None,
 ) -> None:
-    if not isinstance(value, dict) or set(value) != {"project", "network_guest"}:
+    legacy_keys = {"project", "network_guest"}
+    current_keys = legacy_keys | {"native_adapter"}
+    if not isinstance(value, dict) or set(value) not in (legacy_keys, current_keys):
         parser.error("desktop package provenance receipt is malformed")
     validate_desktop_project_receipt(
         parser, value["project"], "project", package_root
@@ -452,6 +464,149 @@ def validate_desktop_package_receipt(
         validate_desktop_project_receipt(
             parser, value["network_guest"], "network guest", package_root
         )
+
+    manifest_path = package_root / "stasis.json"
+    try:
+        project_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        parser.error("desktop package project manifest is malformed")
+    if not isinstance(project_manifest, dict):
+        parser.error("desktop package project manifest is malformed")
+    expected_adapter = validate_manifest_desktop_native_adapter(
+        parser, project_manifest.get("desktop"), project_target
+    )
+
+    if set(value) == legacy_keys:
+        if expected_adapter is not None:
+            parser.error(
+                "desktop package provenance is missing configured native adapter"
+            )
+        return
+
+    receipt_adapter = value["native_adapter"]
+    if receipt_adapter is None:
+        if expected_adapter is not None:
+            parser.error(
+                "desktop package provenance is missing configured native adapter"
+            )
+        return
+    normalized_receipt_adapter = validate_desktop_native_adapter_receipt(
+        parser, receipt_adapter
+    )
+    if normalized_receipt_adapter != expected_adapter:
+        parser.error(
+            "desktop package native adapter does not match project manifest"
+        )
+
+
+def _native_adapter_path_type(project_target: str | None):
+    if project_target in {"windows-x86_64", "windows-arm64"}:
+        return pathlib.PureWindowsPath
+    if project_target in {
+        "linux-x86_64", "linux-arm64", "macos-x86_64", "macos-arm64"
+    }:
+        return pathlib.PurePosixPath
+    return None
+
+
+def _normalize_desktop_native_adapter_source(
+    parser: argparse.ArgumentParser, value: object, project_target: str | None
+) -> str:
+    if not isinstance(value, str) or not value:
+        parser.error("desktop native adapter source is malformed")
+    path_type = _native_adapter_path_type(project_target)
+    if path_type is None:
+        parser.error("desktop native adapter requires a validated desktop target")
+    source_path = path_type(value)
+    if (
+        source_path.is_absolute()
+        or source_path.drive
+        or ".." in source_path.parts
+        or source_path.suffix != ".c"
+    ):
+        parser.error("desktop native adapter source is unsafe or not a .c file")
+    # Match the Rust producer: normalize host path components, then serialize
+    # with forward slashes. This metadata is not a path to dereference here.
+    return source_path.as_posix().replace("\\", "/")
+
+
+def _normalize_desktop_native_adapter_system_links(
+    parser: argparse.ArgumentParser, value: object
+) -> dict[str, list[str]]:
+    if not isinstance(value, dict) or not set(value).issubset(
+        DESKTOP_NATIVE_ADAPTER_SYSTEM_LINKS
+    ):
+        parser.error("desktop native adapter system links are malformed")
+    normalized: dict[str, list[str]] = {}
+    total = 0
+    for platform, allowed_names in DESKTOP_NATIVE_ADAPTER_SYSTEM_LINKS.items():
+        names = value.get(platform, [])
+        if not isinstance(names, list) or any(
+            not isinstance(name, str) or name not in allowed_names for name in names
+        ):
+            parser.error("desktop native adapter system links are malformed")
+        if len(set(names)) != len(names):
+            parser.error("desktop native adapter system links contain duplicates")
+        total += len(names)
+        if names:
+            normalized[platform] = names
+    if total > 8:
+        parser.error("desktop native adapter system links exceed capacity")
+    return normalized
+
+
+def validate_manifest_desktop_native_adapter(
+    parser: argparse.ArgumentParser,
+    desktop: object,
+    project_target: str | None,
+) -> dict | None:
+    if desktop is None:
+        return None
+    if not isinstance(desktop, dict) or set(desktop) != {"native_adapter"}:
+        parser.error("project manifest desktop configuration is malformed")
+    adapter = desktop["native_adapter"]
+    if not isinstance(adapter, dict) or not {"abi_version", "source"}.issubset(
+        adapter
+    ) or not set(adapter).issubset({"abi_version", "source", "system_links"}):
+        parser.error("project manifest desktop native adapter is malformed")
+    abi_version = adapter["abi_version"]
+    if type(abi_version) is not int or abi_version != 1:
+        parser.error("project manifest desktop native adapter ABI is invalid")
+    source = _normalize_desktop_native_adapter_source(
+        parser, adapter["source"], project_target
+    )
+    system_links = _normalize_desktop_native_adapter_system_links(
+        parser, adapter.get("system_links", {})
+    )
+    normalized = {"abi_version": abi_version, "source": source}
+    if system_links:
+        normalized["system_links"] = system_links
+    return normalized
+
+
+def validate_desktop_native_adapter_receipt(
+    parser: argparse.ArgumentParser, value: object
+) -> dict:
+    required = {"abi_version", "source", "sha256", "system_links"}
+    if not isinstance(value, dict) or set(value) != required:
+        parser.error("desktop package native adapter receipt is malformed")
+    abi_version = value["abi_version"]
+    if type(abi_version) is not int or abi_version != 1:
+        parser.error("desktop package native adapter ABI is invalid")
+    source = value["source"]
+    if not isinstance(source, str) or not source:
+        parser.error("desktop package native adapter source is malformed")
+    validate_receipt_sha256(parser, value["sha256"], "desktop native adapter")
+    receipt_links = value["system_links"]
+    system_links = _normalize_desktop_native_adapter_system_links(
+        parser, receipt_links
+    )
+    if system_links != receipt_links:
+        parser.error("desktop package native adapter system links are malformed")
+    normalized = {"abi_version": abi_version, "source": source}
+    if system_links:
+        normalized["system_links"] = system_links
+    return normalized
 
 
 def verify_included_library_artifacts(
@@ -844,7 +999,10 @@ def main() -> int:
         if desktop_package is desktop_package_missing:
             parser.error("packaged provenance is missing desktop package receipt")
         validate_desktop_package_receipt(
-            parser, desktop_package, args.package_root
+            parser,
+            desktop_package,
+            args.package_root,
+            project_configuration["target"] if project_configuration is not None else None,
         )
         verify_included_library_artifacts(
             parser, included_library_artifacts, args.package_root, project_configuration
