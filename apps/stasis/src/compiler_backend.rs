@@ -10840,6 +10840,18 @@ fn run_self_host_aot_cli_with_backend_and_options(
     );
     let use_engine_mode_contracts = function_entries.iter().any(is_zero_argument_tick)
         && function_entries.iter().any(|entry| entry.name == "render");
+    if options
+        .project_configuration
+        .as_ref()
+        .and_then(|configuration| configuration.desktop_native_adapter.as_ref())
+        .is_some()
+        && !use_engine_mode_contracts
+    {
+        return Err(
+            "desktop native adapter requires engine-mode guest entrypoints: zero-argument tick() and render"
+                .to_string(),
+        );
+    }
 
     let mut summary = if use_engine_mode_contracts {
         let bundle_output_dir = backend

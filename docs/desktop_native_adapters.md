@@ -49,7 +49,11 @@ leave the loop successfully; Stasis still calls adapter `shutdown` and then tear
 down the runtime window. Other nonzero hook results are failures.
 
 These hooks run only in a source-built desktop monolith produced by desktop
-`build --mode release` or `package --target desktop`. Stasis validates the
+`build --mode release` or `package --target desktop`. An adapter-enabled project
+must expose engine-mode guest entrypoints: a zero-argument `tick()` and a
+`render` entrypoint. Desktop packaging rejects an adapter-enabled standalone
+project instead of silently recording and ignoring its adapter; standalone
+packages without an adapter keep their existing path. Stasis validates the
 manifest declaration and adapter source when it checks the project, but JIT
 preview (`check`, `play`, `run`, `live`, and `build --mode dev`) does not compile
 or execute the adapter. Web, Android, and iOS builds likewise ignore this

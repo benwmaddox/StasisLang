@@ -920,3 +920,34 @@ release-shell Python contract suites; git diff --check.
 Visual evidence: not applicable (configuration only).
 Theory gained: the reusable device workflow owns the CI budget; documented
 baseline measurements do not define the user-selected acceptance limits.
+
+## 2026-10-08 - Maddox #815 standalone desktop adapter contract
+
+Added a real CLI regression for an adapter-enabled v3 desktop project whose
+guest exposes only `main()`. Against the frozen pre-fix source, the exact test
+showed `package --target desktop --development-build` returning success and
+publishing `dist/standalone_adapter_probe-desktop` while silently ignoring the
+adapter. The baseline package without an adapter remains part of the same
+regression and will confirm the unchanged standalone path after the guard lands.
+
+The implementation guard uses the existing engine-mode predicate: an
+adapter-enabled desktop AOT build requires both a zero-argument `tick()` and
+`render`. It runs before choosing the engine or standalone packaging branch.
+Web and mobile packaging enter their target-specific flows before this desktop
+AOT path. No visual runtime behavior changes.
+
+Visual evidence: not applicable; this slice rejects an invalid desktop package
+before publication and does not alter rendered output.
+
+Theory gained: desktop adapter registration is meaningful only when the guest
+provides the engine callbacks the adapter pumps. A successful standalone
+package with a declared adapter is therefore a contract violation, while an
+adapter-free standalone package must remain publishable.
+
+Good: a real source-built CLI and matched runtime reproduced silent adapter
+acceptance and package publication.
+Bad: the regression stopped at that first failure, so the plain-standalone
+baseline has not yet completed in the guarded run.
+Adjustment: reject the incompatible adapter at the shared desktop AOT
+boundary using the existing engine-mode predicate; keep final source-matched
+validation evidence with the task's external receipts and PR.
