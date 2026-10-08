@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' blob: 'unsafe-inline' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' blob:; frame-src 'self' blob: about:; img-src 'self' blob: data:; media-src 'self' blob:; font-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./playground.css">
+  <title>Stasis Playground</title>
+</head>
+<body>
+  <header class="toolbar">
+    <a class="brand" href="./playground.html" aria-label="Stasis Playground home"><span class="brand-mark">S</span><span>Stasis <strong>Playground</strong></span></a>
+    <div class="toolbar-status" id="readiness" role="status" aria-live="polite">Loading local compiler and runtime...</div>
+    <div class="toolbar-actions">
+      <button id="run-button" class="button button-primary" type="button" disabled>Run</button>
+      <button id="restart-button" class="button button-secondary" type="button" disabled title="Start a fresh game session">New session</button>
+      <button id="export-button" class="button button-secondary" type="button" disabled>Export ZIP</button>
+    </div>
+  </header>
+  <main class="workbench">
+    <aside class="sidebar" aria-label="Project files and assets">
+      <section class="sidebar-section files-section">
+        <div class="section-heading"><h2>Project files</h2><span id="file-count" class="count">1</span></div>
+        <div class="module-actions">
+          <input id="new-module-name" type="text" value="helpers.stasis" aria-label="New module filename" maxlength="120">
+          <button id="add-module-button" class="icon-button" type="button" aria-label="Add module" title="Add module">+</button>
+        </div>
+        <ul id="file-list" class="file-list" aria-label="Stasis modules"></ul>
+        <button id="delete-module-button" class="text-button" type="button" disabled>Remove selected module</button>
+      </section>
+      <section class="sidebar-section assets-section">
+        <div class="section-heading"><h2>Assets</h2><span id="asset-count" class="count">0</span></div>
+        <p class="section-hint">PNG or SVG up to 8 MiB. SVG is sanitized and converted to PNG.</p>
+        <label class="button button-secondary upload-button" for="asset-input">Import image</label>
+        <input id="asset-input" class="visually-hidden" type="file" accept="image/png,image/svg+xml,.png,.svg" multiple>
+        <ul id="asset-list" class="asset-list" aria-label="Imported images"></ul>
+        <button id="asset-sample-button" class="text-button" type="button" hidden>Load selected asset example</button>
+      </section>
+      <div class="sidebar-footer"><span class="local-dot"></span><span>Runs in this browser</span></div>
+    </aside>
+    <section class="editor-panel" aria-label="Stasis source editor">
+      <div class="panel-heading"><div><span class="eyebrow">SOURCE</span><h1 id="editor-file-name">main.stasis</h1></div><div class="editor-hint">Ctrl / Cmd + Enter to run</div></div>
+      <label class="visually-hidden" for="source-editor">Stasis source code</label>
+      <div class="source-editor-wrap">
+        <pre id="source-highlight" class="source-highlight" aria-hidden="true"></pre>
+        <textarea id="source-editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" aria-label="Stasis source code" aria-autocomplete="list" aria-controls="editor-completions" aria-expanded="false"></textarea>
+        <ul id="editor-completions" class="editor-completions" role="listbox" aria-label="Stasis code completions" hidden></ul>
+      </div>
+      <div id="diagnostics" class="diagnostics" role="status" aria-live="polite">Ready to compile a local Stasis project.</div>
+    </section>
+    <section class="preview-panel" aria-label="Game preview">
+      <div class="panel-heading preview-heading"><div><span class="eyebrow">PREVIEW</span><h2>Game window</h2></div><span id="generation-badge" class="generation-badge">Not running</span></div>
+      <div id="preview-frame-host" class="preview-frame-host"><div class="preview-placeholder"><div class="placeholder-glyph">▶</div><p>Run your project to open the preview.</p><span>The previous game stays active when compilation fails.</span></div></div>
+      <div class="preview-footer"><span><kbd>←</kbd><kbd>→</kbd> move the shape</span><span id="preview-layout">No game loaded</span></div>
+    </section>
+  </main>
+  <script type="module" src="./playground.js"></script>
+</body>
+</html>

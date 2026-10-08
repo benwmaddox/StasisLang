@@ -13,3 +13,5 @@ path = "src/lib.rs"
 
 [dependencies]
 stasis_compiler = { path = "../stasis_compiler", default-features = false, features = ["browser-core"] }
+serde.workspace = true
+serde_json.workspace = true
