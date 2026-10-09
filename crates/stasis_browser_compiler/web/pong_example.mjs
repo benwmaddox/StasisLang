@@ -38,7 +38,6 @@ struct PongState {
     player: PaddleState;
     cpu: PaddleState;
     score_font: i32;
-    score_ascii: ascii[12];
     score_utf8: utf8[12];
     game_over: bool;
 }
@@ -46,11 +45,9 @@ struct PongState {
 global state: PongState;
 
 function refresh_scores(): void {
-    state.score_ascii.ascii_from_i32(state.player.score);
-    state.score_utf8.utf8_from_ascii(state.score_ascii, 12);
+    state.score_utf8.from_i32(state.player.score);
     state.player.score_text.replace_text_from(state.score_font, state.score_utf8);
-    state.score_ascii.ascii_from_i32(state.cpu.score);
-    state.score_utf8.utf8_from_ascii(state.score_ascii, 12);
+    state.score_utf8.from_i32(state.cpu.score);
     state.cpu.score_text.replace_text_from(state.score_font, state.score_utf8);
 }
 

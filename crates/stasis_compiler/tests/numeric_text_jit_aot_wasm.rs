@@ -5,6 +5,7 @@ use stasis_compiler::backend::{
     jit::{JitProcess, JitScalarValue},
     wasm::WasmProcess,
 };
+use stasis_compiler::compiler::Compiler;
 #[cfg(windows)]
 use stasis_jit::{AotLinkConfig, AotTarget};
 use std::fs;
@@ -23,11 +24,20 @@ global numeric_decimals: i32;
 global numeric_width: i32;
 global numeric_fill: u8;
 global numeric_out: ascii[64];
+global numeric_utf8_out: utf8[64];
+global numeric_utf8_exact: utf8[12];
+global numeric_utf8_short: utf8[11];
+global numeric_utf8_nested: NumericTextState;
+global numeric_ascii_out: ascii[64];
 global numeric_i32_exact: ascii[12];
 global numeric_i32_short: ascii[11];
 global numeric_f32_exact: ascii[48];
 global numeric_f32_short: ascii[47];
 global numeric_small: ascii[8];
+
+struct NumericTextState {
+    text: utf8[12];
+}
 
 function numeric_from_i32(): i32 {
     return ascii_from_i32(numeric_out, numeric_i32);
@@ -35,6 +45,42 @@ function numeric_from_i32(): i32 {
 
 function numeric_from_f32(): i32 {
     return ascii_from_f32_fixed(numeric_out, numeric_f32, numeric_decimals);
+}
+
+function numeric_utf8_receiver_i32(): i32 {
+    return numeric_utf8_out.from_i32(numeric_i32);
+}
+
+function numeric_utf8_function_i32(): i32 {
+    return utf8_from_i32(numeric_utf8_out, numeric_i32);
+}
+
+function numeric_utf8_exact_i32(): i32 {
+    return numeric_utf8_exact.from_i32(numeric_i32);
+}
+
+function numeric_utf8_short_i32(): i32 {
+    return numeric_utf8_short.from_i32(numeric_i32);
+}
+
+function numeric_utf8_nested_i32(): i32 {
+    return numeric_utf8_nested.text.from_i32(numeric_i32);
+}
+
+function numeric_ascii_receiver_i32(): i32 {
+    return numeric_ascii_out.from_i32(numeric_i32);
+}
+
+function numeric_utf8_receiver_from_ascii(): i32 {
+    return numeric_utf8_out.from_ascii(numeric_ascii_out, 64);
+}
+
+function numeric_scalar_receiver_i32(): i32 {
+    let converted: f32 = 0.0;
+    let result: i32 = 0;
+    converted.from_i32(numeric_i32);
+    result.from_f32(converted);
+    return result;
 }
 
 function numeric_append_i32(): i32 {
@@ -92,6 +138,7 @@ fn backend_selfcheck_source() -> String {
 import "stdlib.stasis";
 
 global numeric_backend_out: ascii[64];
+global numeric_backend_utf8: utf8[12];
 
 function numeric_make_f32(mantissa: i32, exp2: i32, negative: bool): f32 {
     let value: f32 = i32_to_f32(mantissa);
@@ -146,6 +193,24 @@ function main(): i32 {
         }
         source.push_str(&format!(
             "    if (numeric_backend_out[{}] != 0) {{ return {failure}; }}\n",
+            expected.len()
+        ));
+        failure += 1;
+        source.push_str(&format!(
+            "    status = numeric_backend_utf8.from_i32({expression});\n    if (status != {} || numeric_backend_utf8.length != {} || numeric_backend_utf8.char_length != {}) {{ return {failure}; }}\n",
+            expected.len(),
+            expected.len(),
+            expected.len()
+        ));
+        failure += 1;
+        for (index, byte) in expected.bytes().enumerate() {
+            source.push_str(&format!(
+                "    if (numeric_backend_utf8[{index}] != {byte}) {{ return {failure}; }}\n"
+            ));
+            failure += 1;
+        }
+        source.push_str(&format!(
+            "    if (numeric_backend_utf8[{}] != 0) {{ return {failure}; }}\n",
             expected.len()
         ));
         failure += 1;
@@ -236,7 +301,7 @@ fn linker_path() -> PathBuf {
 }
 
 #[cfg(windows)]
-fn run_linked_aot(aot: &AotProcess) {
+fn run_linked_aot(aot: &AotProcess, expected_exit_code: i32) {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
@@ -277,10 +342,14 @@ fn run_linked_aot(aot: &AotProcess) {
         .status()
         .expect("run linked numeric-text AOT executable");
     let _ = fs::remove_dir_all(directory);
-    assert_eq!(status.code(), Some(0), "linked AOT exact-byte self-check");
+    assert_eq!(
+        status.code(),
+        Some(expected_exit_code),
+        "linked AOT self-check"
+    );
 }
 
-fn run_executable_wasm(wasm: &WasmProcess) {
+fn run_executable_wasm(wasm: &WasmProcess, expected_result: i32) {
     let path = std::env::temp_dir().join(format!(
         "stasis_numeric_text_{}_{}.wasm",
         std::process::id(),
@@ -304,7 +373,10 @@ fn run_executable_wasm(wasm: &WasmProcess) {
         "Node failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "0");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        expected_result.to_string()
+    );
 }
 
 fn assert_no_numeric_format_or_allocator_aot_imports(aot: &mut AotProcess) {
@@ -317,7 +389,7 @@ fn assert_no_numeric_format_or_allocator_aot_imports(aot: &mut AotProcess) {
             .as_nanos()
     ));
     let objects = aot
-        .write_object_files(&directory)
+        .write_object_files_by_id(&directory)
         .expect("write numeric-text AOT objects for import audit");
     let mut undefined = std::collections::BTreeSet::new();
     for (_, path) in objects.values() {
@@ -388,6 +460,14 @@ fn process() -> JitProcess {
     let roots = [
         "numeric_from_i32".to_string(),
         "numeric_from_f32".to_string(),
+        "numeric_utf8_receiver_i32".to_string(),
+        "numeric_utf8_function_i32".to_string(),
+        "numeric_utf8_exact_i32".to_string(),
+        "numeric_utf8_short_i32".to_string(),
+        "numeric_utf8_nested_i32".to_string(),
+        "numeric_ascii_receiver_i32".to_string(),
+        "numeric_utf8_receiver_from_ascii".to_string(),
+        "numeric_scalar_receiver_i32".to_string(),
         "numeric_append_i32".to_string(),
         "numeric_pad_left".to_string(),
         "numeric_i32_exact_capacity".to_string(),
@@ -441,6 +521,346 @@ fn collection_bytes(process: &JitProcess, path: &str, capacity: i32) -> Vec<u8> 
             value
         })
         .collect()
+}
+
+fn seed_utf8(process: &JitProcess, path: &str, capacity: i32, text: &[u8], fill: u8) {
+    for index in 0..capacity {
+        let value = if index as usize == text.len() {
+            0
+        } else {
+            text.get(index as usize).copied().unwrap_or(fill)
+        };
+        process
+            .write_global_collection_scalar(path, "", index, JitScalarValue::U8(value))
+            .expect("seed UTF-8 collection byte");
+    }
+    process
+        .write_global_scalar(
+            &format!("{path}.length"),
+            JitScalarValue::I32(text.len() as i32),
+        )
+        .expect("seed UTF-8 byte length");
+    process
+        .write_global_scalar(
+            &format!("{path}.char_length"),
+            JitScalarValue::I32(text.len() as i32),
+        )
+        .expect("seed UTF-8 character length");
+}
+
+#[test]
+fn utf8_integer_receiver_overloads_write_directly_and_preserve_rejections() {
+    let process = process();
+    for (value, expected) in [
+        (i32::MIN, "-2147483648"),
+        (i32::MAX, "2147483647"),
+        (-1, "-1"),
+        (0, "0"),
+        (1, "1"),
+    ] {
+        process
+            .write_global_scalar("numeric_i32", JitScalarValue::I32(value))
+            .expect("write UTF-8 receiver input");
+        assert_eq!(
+            process.execute_i32_noarg_by_name("numeric_utf8_receiver_i32"),
+            Ok(expected.len() as i32),
+            "receiver i32 value {value}"
+        );
+        let mut expected_bytes = expected.as_bytes().to_vec();
+        expected_bytes.push(0);
+        assert_eq!(
+            collection_output(&process, "numeric_utf8_out"),
+            expected_bytes
+        );
+        assert_eq!(
+            process.read_global_scalar("numeric_utf8_out.char_length"),
+            Ok(JitScalarValue::I32(expected.len() as i32))
+        );
+    }
+
+    process
+        .write_global_scalar("numeric_i32", JitScalarValue::I32(i32::MIN))
+        .expect("write exact-capacity UTF-8 input");
+    assert_eq!(
+        process.execute_i32_noarg_by_name("numeric_utf8_exact_i32"),
+        Ok(11)
+    );
+    assert_eq!(
+        collection_output(&process, "numeric_utf8_exact"),
+        b"-2147483648\0"
+    );
+
+    seed_utf8(&process, "numeric_utf8_short", 11, b"keep", 0x53);
+    process
+        .write_global_collection_scalar("numeric_utf8_short", "", 10, JitScalarValue::U8(0x53))
+        .expect("write UTF-8 rejection canary");
+    let before = collection_bytes(&process, "numeric_utf8_short", 11);
+    assert_eq!(
+        process.execute_i32_noarg_by_name("numeric_utf8_short_i32"),
+        Ok(-1)
+    );
+    assert_eq!(collection_bytes(&process, "numeric_utf8_short", 11), before);
+    assert_eq!(
+        process.read_global_scalar("numeric_utf8_short.length"),
+        Ok(JitScalarValue::I32(4))
+    );
+    assert_eq!(
+        process.read_global_scalar("numeric_utf8_short.char_length"),
+        Ok(JitScalarValue::I32(4))
+    );
+
+    process
+        .write_global_scalar("numeric_i32", JitScalarValue::I32(i32::MAX))
+        .expect("write nested UTF-8 input");
+    assert_eq!(
+        process.execute_i32_noarg_by_name("numeric_utf8_nested_i32"),
+        Ok(10)
+    );
+    assert_eq!(
+        collection_output(&process, "numeric_utf8_nested.text"),
+        b"2147483647\0"
+    );
+
+    process
+        .write_global_scalar("numeric_i32", JitScalarValue::I32(42))
+        .expect("write ASCII overload input");
+    assert_eq!(
+        process.execute_i32_noarg_by_name("numeric_ascii_receiver_i32"),
+        Ok(2)
+    );
+    assert_eq!(collection_output(&process, "numeric_ascii_out"), b"42\0");
+    assert_eq!(
+        process.execute_i32_noarg_by_name("numeric_utf8_receiver_from_ascii"),
+        Ok(2)
+    );
+    assert_eq!(collection_output(&process, "numeric_utf8_out"), b"42\0");
+
+    assert_eq!(
+        process.execute_i32_noarg_by_name("numeric_scalar_receiver_i32"),
+        Ok(42),
+        "numeric scalar conversion remains available"
+    );
+    assert_eq!(
+        process.execute_i32_noarg_by_name("numeric_utf8_function_i32"),
+        Ok(2),
+        "function-form utf8_from_i32 remains available"
+    );
+    assert_eq!(collection_output(&process, "numeric_utf8_out"), b"42\0");
+}
+
+#[test]
+fn conversion_receiver_overload_selects_user_defined_function() {
+    let mut process = JitProcess::new();
+    process.set_required_emit_roots(&["main".to_string()]);
+    process.upsert_file(
+        "user_overload.stasis",
+        concat!(
+            "struct Receiver { value: i32; }\n",
+            "global receiver: Receiver;\n",
+            "function from_i32(self: Receiver, value: i32): i32 { self.value = value; return self.value; }\n",
+            "function main(): i32 { return receiver.from_i32(42); }\n",
+        ),
+    );
+    process
+        .compile()
+        .expect("compile receiver overload through normal typed resolution");
+    assert_eq!(
+        process.execute_i32_noarg_by_name("main"),
+        Ok(42),
+        "user-defined from_i32 overload resolves by receiver type"
+    );
+}
+
+#[test]
+fn ascii_utf8_buffer_arguments_require_explicit_conversion_across_backends() {
+    let source = concat!(
+        "global text: utf8[16];\n",
+        "function take_ascii(value: ascii[]): i32 { return value.length; }\n",
+        "function main(): i32 { return take_ascii(text); }\n",
+        "function tick(): i32 { return 0; }\n",
+        "function render(): i32 { return 0; }\n",
+    );
+
+    let mut jit = JitProcess::new();
+    jit.set_required_emit_roots(&["main".to_string()]);
+    jit.upsert_file("strict_text_arguments.stasis", source);
+    assert!(
+        jit.compile().is_err(),
+        "JIT must reject implicit UTF-8 to ASCII buffer passing"
+    );
+
+    let mut aot = AotProcess::new();
+    aot.set_required_emit_roots(&["main".to_string()]);
+    aot.upsert_file("strict_text_arguments.stasis", source);
+    assert!(
+        aot.compile().is_err(),
+        "native AOT must reject implicit UTF-8 to ASCII buffer passing"
+    );
+
+    let mut wasm = WasmProcess::new();
+    wasm.set_required_emit_roots(&["main".to_string(), "tick".to_string(), "render".to_string()]);
+    wasm.upsert_file("strict_text_arguments.stasis", source);
+    assert!(
+        wasm.compile().is_err(),
+        "Wasm must reject implicit UTF-8 to ASCII buffer passing"
+    );
+
+    for (description, invalid_source) in [
+        (
+            "typed let",
+            "global text: utf8[16]; function main(): i32 { let view: ascii[] = text; return 0; }",
+        ),
+        (
+            "assignment",
+            "global ascii_text: ascii[16]; global utf8_text: utf8[16]; function main(): i32 { ascii_text = utf8_text; return 0; }",
+        ),
+        (
+            "return",
+            "global text: utf8[16]; function as_ascii(): ascii[] { return text; } function main(): i32 { return 0; }",
+        ),
+    ] {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&["main".to_string()]);
+        process.upsert_file("strict_text_assignment.stasis", invalid_source);
+        assert!(
+            process.compile().is_err(),
+            "compiler must reject UTF-8 to ASCII {description}"
+        );
+    }
+
+    let same_family = concat!(
+        "global text: ascii[16];\n",
+        "function take_ascii(value: ascii[]): i32 { return value.length; }\n",
+        "function main(): i32 { return take_ascii(text); }\n",
+    );
+    let mut process = JitProcess::new();
+    process.set_required_emit_roots(&["main".to_string()]);
+    process.upsert_file("matching_text_family.stasis", same_family);
+    process
+        .compile()
+        .expect("ASCII fixed storage remains compatible with an ASCII view");
+}
+
+#[test]
+fn ascii_string_literals_are_contextual_but_non_ascii_literals_are_rejected() {
+    let source = concat!(
+        "global utf8_anchor: utf8[16];\n",
+        "function take_utf8(value: utf8[]): i32 { return value.length; }\n",
+        "function take_ascii(value: ascii[]): i32 { return value.length; }\n",
+        "function main(): i32 { return take_ascii(\"\"); }\n",
+    );
+
+    let mut jit = JitProcess::new();
+    jit.set_required_emit_roots(&["main".to_string()]);
+    jit.upsert_file("ascii_literal_context.stasis", source);
+    jit.compile()
+        .expect("ASCII string literal is contextually typed as ascii[]");
+    assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(0));
+
+    let mut wasm = WasmProcess::new();
+    wasm.set_required_emit_roots(&["main".to_string()]);
+    wasm.upsert_file("ascii_literal_context.stasis", source);
+    wasm.compile()
+        .expect("Wasm retains contextual ASCII literal typing");
+    run_executable_wasm(&wasm, 0);
+
+    let contextual_source = concat!(
+        "global utf8_anchor: utf8[16];\n",
+        "function take_utf8(value: utf8[]): i32 { return value.length; }\n",
+        "function return_ascii_literal(): ascii[] { return \"return\"; }\n",
+        "function main(): i32 { let local: ascii[] = \"let\"; let returned: ascii[] = return_ascii_literal(); if (returned.length != 6 || returned[0] != 114) { return -1; } return local.length; }\n",
+    );
+
+    let mut jit = JitProcess::new();
+    jit.set_required_emit_roots(&["main".to_string()]);
+    jit.upsert_file("ascii_typed_literal_context.stasis", contextual_source);
+    jit.compile()
+        .expect("typed ASCII lets and returns accept ASCII literals");
+    assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(3));
+
+    let mut aot = AotProcess::new();
+    aot.set_required_emit_roots(&["main".to_string()]);
+    aot.upsert_file("ascii_typed_literal_context.stasis", contextual_source);
+    aot.compile()
+        .expect("native AOT accepts contextual ASCII literals in typed lets and returns");
+    #[cfg(windows)]
+    run_linked_aot(&aot, 3);
+
+    let mut wasm = WasmProcess::new();
+    wasm.set_required_emit_roots(&["main".to_string()]);
+    wasm.upsert_file("ascii_typed_literal_context.stasis", contextual_source);
+    wasm.compile()
+        .expect("Wasm accepts contextual ASCII literals in typed lets and returns");
+    run_executable_wasm(&wasm, 3);
+
+    let assignment_source = concat!(
+        "global utf8_anchor: utf8[16];\n",
+        "function take_utf8(value: utf8[]): i32 { return value.length; }\n",
+        "global ascii_storage: ascii[16];\n",
+        "function main(): i32 { ascii_storage = \"assign\"; return 0; }\n",
+    );
+    let mut compiler = Compiler::new();
+    compiler.upsert_file("ascii_typed_literal_assignment.stasis", assignment_source);
+    compiler
+        .check()
+        .expect("semantic analysis accepts an ASCII literal in an ASCII assignment context");
+
+    let non_ascii_sources = [
+        (
+            "non_ascii_literal_argument.stasis",
+            concat!(
+                "global utf8_anchor: utf8[16];\n",
+                "function take_utf8(value: utf8[]): i32 { return value.length; }\n",
+                "function take_ascii(value: ascii[]): i32 { return value.length; }\n",
+                "function main(): i32 { return take_ascii(\"é\"); }\n",
+            ),
+        ),
+        (
+            "non_ascii_literal_let.stasis",
+            concat!(
+                "global utf8_anchor: utf8[16];\n",
+                "function take_utf8(value: utf8[]): i32 { return value.length; }\n",
+                "function main(): i32 { let invalid: ascii[] = \"é\"; return 0; }\n",
+            ),
+        ),
+        (
+            "non_ascii_literal_assignment.stasis",
+            concat!(
+                "global utf8_anchor: utf8[16];\n",
+                "function take_utf8(value: utf8[]): i32 { return value.length; }\n",
+                "global ascii_storage: ascii[16];\n",
+                "function main(): i32 { ascii_storage = \"é\"; return 0; }\n",
+            ),
+        ),
+        (
+            "non_ascii_literal_return.stasis",
+            concat!(
+                "global utf8_anchor: utf8[16];\n",
+                "function take_utf8(value: utf8[]): i32 { return value.length; }\n",
+                "function invalid_return(): ascii[] { return \"é\"; }\n",
+                "function main(): i32 { return 0; }\n",
+            ),
+        ),
+    ];
+    for (path, source) in non_ascii_sources {
+        let mut jit = JitProcess::new();
+        jit.set_required_emit_roots(&["main".to_string()]);
+        jit.upsert_file(path, source);
+        assert!(jit.compile().is_err(), "JIT must reject non-ASCII {path}");
+
+        let mut aot = AotProcess::new();
+        aot.set_required_emit_roots(&["main".to_string()]);
+        aot.upsert_file(path, source);
+        assert!(
+            aot.compile().is_err(),
+            "native AOT must reject non-ASCII {path}"
+        );
+
+        let mut wasm = WasmProcess::new();
+        wasm.set_required_emit_roots(&["main".to_string()]);
+        wasm.upsert_file(path, source);
+        assert!(wasm.compile().is_err(), "Wasm must reject non-ASCII {path}");
+    }
 }
 
 fn seed_ascii(process: &JitProcess, path: &str, capacity: i32, text: &[u8], fill: u8) {
@@ -726,8 +1146,8 @@ fn numeric_text_matches_linked_native_aot_and_executable_wasm() {
     );
     assert_no_numeric_format_or_allocator_aot_imports(&mut aot);
     #[cfg(windows)]
-    run_linked_aot(&aot);
+    run_linked_aot(&aot, 0);
     #[cfg(not(windows))]
     let _ = aot;
-    run_executable_wasm(&wasm);
+    run_executable_wasm(&wasm, 0);
 }

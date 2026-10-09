@@ -807,6 +807,12 @@ pub(crate) fn looks_like_assignment(source: &str, cursor: usize) -> bool {
 }
 
 pub(crate) fn looks_like_from_conversion_statement(source: &str, cursor: usize) -> bool {
+    // A receiver method call on the right side of an assignment is an ordinary
+    // expression. Leave it to the assignment parser instead of interpreting
+    // the left side as the receiver-conversion target.
+    if looks_like_assignment(source, cursor) {
+        return false;
+    }
     let Ok(semicolon) = find_statement_terminator(source, cursor) else {
         return false;
     };

@@ -162,13 +162,28 @@ Rules:
 - Mutations must keep header values synchronized with payload contents.
 - Invalid updates that break these invariants are compile-time errors (when statically known) or runtime errors through checked runtime helpers.
 
-The standard library formats numeric values directly into caller-owned ASCII
-storage:
+The standard library formats numeric values directly into caller-owned text
+storage. The overloaded receiver API is `from_i32(dst, value)` for either an
+`ascii[]` or `utf8[]` destination, and `from_ascii(utf8_dst, ascii_src, limit)`
+for an explicit ASCII-to-UTF-8 copy. The destination type selects the matching
+`from_i32` overload; `ascii[]` and `utf8[]` are distinct types for arguments,
+typed lets, assignments, and returns. They are not implicitly compatible in
+either direction. Use `from_ascii` for ASCII-to-UTF-8 copies.
+The legacy function-form `ascii_from_i32` and `utf8_from_ascii` helpers remain
+as internal compatibility aliases for existing callers. `utf8_from_i32` is
+also available as a function-form convenience for UTF-8 callers.
+
+The text-buffer helpers also provide:
 
 - `ascii_from_i32(dst, value)` replaces the logical contents with the complete
   decimal `i32`; `ascii_append_i32` appends it. `ascii_push_i32` remains the
   existing append helper; it delegates to checked append and ignores the
   rejection result.
+- `utf8_from_i32(dst, value)` replaces an `utf8[]` buffer with the decimal
+  `i32`. The emitted bytes are ASCII, so byte and character lengths are equal.
+- Both `from_i32` receiver overloads and their function-form aliases require
+  room for all characters plus a trailing NUL. On rejection they preserve the
+  buffer payload and metadata.
 - `ascii_from_f32_fixed(dst, value, decimals)` and
   `ascii_append_f32_fixed` accept every finite binary32 value and a precision
   from `0` through `6`. They emit exactly that many fractional digits, round

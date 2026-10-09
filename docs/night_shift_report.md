@@ -1154,3 +1154,47 @@ Visual evidence: the final staged-site editor and image captures under
 `D:/code/.automation-evidence/task268/site-final-git-build-passed/` were inspected;
 the browser receipt records successful completion, swaps, assets, export, and zero
 HTTP application requests after readiness.
+
+## 2026-10-09: direct UTF-8 integer conversion and Pong receiver APIs (#838)
+
+Pong formats each score directly into one bounded UTF-8 scratch buffer with
+`buffer.from_i32(value)`. ASCII and UTF-8 share the concise method name through
+normal typed overloads; their buffer representations remain distinct for call
+arguments, typed lets, assignments, and returns. Explicit `from_ascii` copies
+ASCII into UTF-8. Scalar numeric conversion statements retain their existing
+fallback behavior. Legacy function-form aliases remain available.
+
+The direct formatter uses negative-domain arithmetic for `i32::MIN`, checks
+capacity before writes, and synchronizes the terminator and byte/character
+lengths. Receiver normalization now uses the semantic walker before graph and
+effect analysis so imported methods on global/nested buffers remain reachable.
+Generated overload names already include receiver/parameter types; no ranking
+rule or text-specific naming mechanism was added. No host ABI changed.
+
+Validation: exact Linux core Cargo gate passed 1,246 tests across 44 suites,
+plus the focused diagnostic-order regression. Final numeric integration passed
+9/9 on Linux and Windows host, including linked native AOT and executable Wasm;
+the fresh CLI passed 8 numeric-text tests. Node playground/publication tests
+passed 24/24. ABI and host-runtime contract audits passed 964 and 1,150
+comparisons; 69 tooling/policy tests passed. Fresh Wasm compiler bundle SHA-256:
+`0b526b4fee3115dfb175e0bd5e69c3ada3dec092320ea9f7b13accfefc68420f`.
+Full Chrome acceptance passed scoring, restart, hot swap, rollback, asset import,
+ZIP export, and exported-game boot, with zero failures or post-readiness requests.
+All six independent review personas returned GREEN. The user requested
+consolidation into existing Pong PR #926 rather than a stacked PR.
+
+Visual evidence: inspected starter, game-over, restart, and exported Pong PNGs
+under `D:/code/.automation-evidence/nightly-20261009/task838-browser/`, plus decoded
+frames from `pong-multistep-export.mp4` (H.264, 1440x960, 211 frames, 10.55 seconds).
+They show font scores, the CPU's five-point win/restart message, restarted play,
+and the exported game's sprites and scores.
+
+Theory gained: source overload selection and generated symbol identity are
+separate stages. Distinct text-family compatibility selects the right overload;
+normalizing receiver calls before graph analysis preserves their executable
+bodies. Adjacent receiver APIs should reuse that path rather than infer identity
+from method spelling.
+Good: executable backend tests caught both reachability and text-layout mistakes.
+Bad: an initially broad Wasm argument guard rejected existing numeric widening.
+Adjustment: validate the specific representation boundary before encoding and
+retain the established contextual encoder for numeric conversions.

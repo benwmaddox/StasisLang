@@ -1,11 +1,18 @@
 import "../../src/stdlib/stdlib.stasis";
 
+struct NumericUtf8TextState {
+    value: utf8[12];
+}
+
 global numeric_text_value: ascii[64];
 global numeric_text_exact_i32: ascii[12];
 global numeric_text_short_i32: ascii[11];
 global numeric_text_exact_f32: ascii[48];
 global numeric_text_f64: ascii[64];
 global numeric_text_short_f64: ascii[8];
+global numeric_text_utf8: utf8[12];
+global numeric_text_utf8_short: utf8[11];
+global numeric_text_utf8_state: NumericUtf8TextState;
 
 function numeric_text_is(ascii_value: ascii[], expected_length: i32, first: u8, last: u8): bool {
     return length(ascii_value) == expected_length && ascii_value[0] == first && ascii_value[expected_length - 1] == last && ascii_value[expected_length] == 0;
@@ -175,4 +182,57 @@ test `short f64 text handles nonfinite values and rejects short capacity without
         return false;
     }
     return ascii_from_f64_short(numeric_text_f64, nan, 2) == 3 && numeric_text_is(numeric_text_f64, 3, 110, 110) && numeric_text_f64[1] == 97;
+}
+
+test `UTF-8 integer conversion handles boundaries and typed receiver overloads`(): bool {
+    let minimum: i32 = 0 - 2147483647 - 1;
+    if (
+        utf8_from_i32(numeric_text_utf8, minimum) != 11
+        || length_bytes(numeric_text_utf8) != 11
+        || length_chars(numeric_text_utf8) != 11
+        || numeric_text_utf8[0] != 45
+        || numeric_text_utf8[10] != 56
+        || numeric_text_utf8[11] != 0
+    ) {
+        return false;
+    }
+
+    numeric_text_utf8_state.value.from_i32(2147483647);
+    if (
+        numeric_text_utf8_state.value.length != 10
+        || numeric_text_utf8_state.value.char_length != 10
+        || numeric_text_utf8_state.value[0] != 50
+        || numeric_text_utf8_state.value[9] != 55
+        || numeric_text_utf8_state.value[10] != 0
+    ) {
+        return false;
+    }
+
+    numeric_text_value.from_i32(42);
+    if (length(numeric_text_value) != 2 || numeric_text_value[0] != 52 || numeric_text_value[1] != 50) {
+        return false;
+    }
+    if (numeric_text_utf8.from_ascii(numeric_text_value, 12) != 2 || numeric_text_utf8[2] != 0) {
+        return false;
+    }
+
+    if (utf8_from_ascii(numeric_text_utf8_short, "keep", 11) != 4) {
+        return false;
+    }
+    if (
+        numeric_text_utf8_short.from_i32(minimum) != -1
+        || length_bytes(numeric_text_utf8_short) != 4
+        || length_chars(numeric_text_utf8_short) != 4
+        || numeric_text_utf8_short[0] != 107
+        || numeric_text_utf8_short[3] != 112
+        || numeric_text_utf8_short[4] != 0
+    ) {
+        return false;
+    }
+
+    let scalar: f32 = 0.0;
+    scalar.from_i32(42);
+    let round_trip: i32 = 0;
+    round_trip.from_f32(scalar);
+    return round_trip == 42;
 }

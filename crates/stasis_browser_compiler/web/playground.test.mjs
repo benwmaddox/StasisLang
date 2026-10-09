@@ -64,8 +64,9 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
       assert.match(source, /state\.paddle\.load_sprite_from\("assets\/pong-paddle\.png"/);
       assert.match(source, /state\.ball\.sprite\.load_sprite_from\("assets\/pong-ball\.png"/);
       assert.match(source, /load_font\("assets\/ui\.ttf", 18\)/);
-      assert.match(source, /state\.score_ascii\.ascii_from_i32\(/);
-      assert.match(source, /state\.score_utf8\.utf8_from_ascii\(/);
+      assert.match(source, /state\.score_utf8\.from_i32\(state\.player\.score\)/);
+      assert.match(source, /state\.score_utf8\.from_i32\(state\.cpu\.score\)/);
+      assert.doesNotMatch(source, /score_ascii|ascii_from_i32|utf8_from_ascii/);
       assert.match(source, /state\.player\.score_text\.replace_text_from\(/);
       assert.match(source, /state\.cpu\.score_text\.replace_text_from\(/);
       assert.match(source, /state\.player\.score_text\.draw\(/);

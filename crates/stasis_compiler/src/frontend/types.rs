@@ -540,9 +540,6 @@ impl TypeTable {
         if are_i32_scalar_abi_compatible(argument_key, parameter_key) {
             return true;
         }
-        if is_text_buffer_key(argument_key) && is_text_buffer_key(parameter_key) {
-            return true;
-        }
         if (is_text_buffer_key(argument_key) && is_byte_array_key(parameter_key, self))
             || (is_text_buffer_key(parameter_key) && is_byte_array_key(argument_key, self))
         {
@@ -988,6 +985,15 @@ impl TypeTable {
         if target_type == TYPE_ID_BOOL || expression_type == TYPE_ID_BOOL {
             return false;
         }
+        let target_key = self.type_key(target_type);
+        let expression_key = self.type_key(expression_type);
+        if (target_key.is_some_and(is_ascii_buffer_key)
+            && expression_key.is_some_and(is_utf8_buffer_key))
+            || (target_key.is_some_and(is_utf8_buffer_key)
+                && expression_key.is_some_and(is_ascii_buffer_key))
+        {
+            return false;
+        }
         self.is_i32_abi_compatible(target_type) && self.is_i32_abi_compatible(expression_type)
     }
 }
@@ -1029,13 +1035,15 @@ fn is_i32_lane_builtin(key: &TypeKey) -> bool {
 }
 
 fn is_text_buffer_key(key: &TypeKey) -> bool {
-    matches!(
-        key,
-        TypeKey::AsciiFixed { .. }
-            | TypeKey::AsciiView
-            | TypeKey::Utf8Fixed { .. }
-            | TypeKey::Utf8View
-    )
+    is_ascii_buffer_key(key) || is_utf8_buffer_key(key)
+}
+
+fn is_ascii_buffer_key(key: &TypeKey) -> bool {
+    matches!(key, TypeKey::AsciiFixed { .. } | TypeKey::AsciiView)
+}
+
+fn is_utf8_buffer_key(key: &TypeKey) -> bool {
+    matches!(key, TypeKey::Utf8Fixed { .. } | TypeKey::Utf8View)
 }
 
 fn is_byte_array_key(key: &TypeKey, table: &TypeTable) -> bool {
@@ -1785,7 +1793,7 @@ mod tests {
     }
 
     #[test]
-    fn ascii_utf8_buffer_arguments_are_cross_compatible_for_calls() {
+    fn ascii_and_utf8_buffer_arguments_require_matching_text_families() {
         let mut table = TypeTable::new();
         let ascii_fixed = table.resolve_or_intern("ascii[16]").expect("ascii[16]");
         let ascii_view = table.resolve_or_intern("ascii[]").expect("ascii[]");
@@ -1795,10 +1803,14 @@ mod tests {
 
         assert!(table.is_argument_compatible_with_param(ascii_fixed, ascii_view));
         assert!(table.is_argument_compatible_with_param(utf8_fixed, utf8_view));
-        assert!(table.is_argument_compatible_with_param(ascii_fixed, utf8_view));
-        assert!(table.is_argument_compatible_with_param(utf8_fixed, ascii_view));
-        assert!(table.is_argument_compatible_with_param(ascii_view, utf8_view));
-        assert!(table.is_argument_compatible_with_param(utf8_view, ascii_view));
+        assert!(!table.is_argument_compatible_with_param(ascii_fixed, utf8_view));
+        assert!(!table.is_argument_compatible_with_param(utf8_fixed, ascii_view));
+        assert!(!table.is_argument_compatible_with_param(ascii_view, utf8_view));
+        assert!(!table.is_argument_compatible_with_param(utf8_view, ascii_view));
+        assert!(table.assignment_types_are_compatible(ascii_view, ascii_fixed));
+        assert!(table.assignment_types_are_compatible(utf8_view, utf8_fixed));
+        assert!(!table.assignment_types_are_compatible(ascii_view, utf8_fixed));
+        assert!(!table.assignment_types_are_compatible(utf8_view, ascii_fixed));
         assert!(table.is_argument_compatible_with_param(utf8_view, u8_view));
         assert!(table.is_argument_compatible_with_param(u8_view, ascii_view));
     }

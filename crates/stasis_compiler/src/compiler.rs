@@ -994,7 +994,6 @@ impl Compiler {
             self.parsed_statement_ids.insert(*function_id);
         }
         self.statement_cache = next_statement_cache;
-        let mut analysis_statements = self.parsed_statements.clone();
         for function in self
             .functions
             .iter()
@@ -1002,7 +1001,7 @@ impl Compiler {
         {
             let file = &self.files[function.file_id as usize];
             qualify_module_calls(
-                &mut analysis_statements[function.storage_index as usize],
+                &mut self.parsed_statements[function.storage_index as usize],
                 &file.path,
                 &self.module_graph,
                 &self.files,
@@ -1012,6 +1011,21 @@ impl Compiler {
             )
             .map_err(CompileError::Frontend)?;
         }
+        let conversion_targets = receiver_conversion_targets_by_function(
+            &self.files,
+            &self.functions,
+            &self.module_graph,
+            &self.module_resolution,
+        );
+        let semantic_validation_error = validate_program_semantics(
+            &self.files,
+            &self.functions,
+            &mut self.parsed_statements,
+            &self.types,
+            &conversion_targets,
+        )
+        .err();
+        let analysis_statements = self.parsed_statements.clone();
         let (summaries, context_fingerprint) = build_function_data_flow_summaries(
             &self.files,
             &self.functions,
@@ -1081,12 +1095,7 @@ impl Compiler {
             self.last_source_diagnostic = Some(diagnostic);
             return Err(CompileError::Frontend(violation.message));
         }
-        if let Err((storage_index, message)) = validate_program_semantics(
-            &self.files,
-            &self.functions,
-            &analysis_statements,
-            &self.types,
-        ) {
+        if let Some((storage_index, message)) = semantic_validation_error {
             if let Some(function) = self.functions.get(storage_index as usize).cloned() {
                 self.record_function_diagnostic(&function, &message);
             }
@@ -2030,32 +2039,9 @@ fn resolve_module_call(
         }
     }
 
-    let candidates = resolution.function_indices(name);
-    let local_modules: BTreeSet<String> = candidates
-        .iter()
-        .filter_map(|index| {
-            let function = &functions[*index];
-            (files[function.file_id as usize].path == caller_path)
-                .then(|| function.module_alias.clone())
-        })
-        .collect();
-    let modules = if local_modules.is_empty() {
-        let mut imported_paths = graph.dependency_closure(caller_path);
-        imported_paths.remove(caller_path);
-        candidates
-            .iter()
-            .filter_map(|index| {
-                let function = &functions[*index];
-                imported_paths
-                    .contains(&files[function.file_id as usize].path)
-                    .then(|| function.module_alias.clone())
-            })
-            .collect::<BTreeSet<_>>()
-    } else {
-        local_modules
-    };
+    let modules = visible_module_aliases(name, caller_path, graph, files, functions, resolution);
     match modules.len() {
-        0 if qualifier.is_none() && !candidates.is_empty() => {
+        0 if qualifier.is_none() && !resolution.function_indices(name).is_empty() => {
             Err(ModuleCallResolutionError::Inaccessible)
         }
         0 => Ok(ModuleCallResolution {
@@ -2068,6 +2054,74 @@ fn resolve_module_call(
         }),
         _ => Err(ModuleCallResolutionError::Ambiguous),
     }
+}
+
+fn visible_module_aliases(
+    name: &str,
+    caller_path: &str,
+    graph: &ModuleGraph,
+    files: &[SourceFile],
+    functions: &[FunctionMeta],
+    resolution: &ModuleResolutionIndex,
+) -> BTreeSet<String> {
+    let candidates = resolution.function_indices(name);
+    let local_modules: BTreeSet<String> = candidates
+        .iter()
+        .filter_map(|index| {
+            let function = &functions[*index];
+            (files[function.file_id as usize].path == caller_path)
+                .then(|| function.module_alias.clone())
+        })
+        .collect();
+    if !local_modules.is_empty() {
+        return local_modules;
+    }
+    let mut imported_paths = graph.dependency_closure(caller_path);
+    imported_paths.remove(caller_path);
+    candidates
+        .iter()
+        .filter_map(|index| {
+            let function = &functions[*index];
+            imported_paths
+                .contains(&files[function.file_id as usize].path)
+                .then(|| function.module_alias.clone())
+        })
+        .collect()
+}
+
+fn receiver_conversion_targets_by_function(
+    files: &[SourceFile],
+    functions: &[FunctionMeta],
+    graph: &ModuleGraph,
+    resolution: &ModuleResolutionIndex,
+) -> BTreeMap<u32, BTreeMap<String, Vec<String>>> {
+    let method_names = ["from_i32", "from_f32", "from_f64"];
+    let mut targets_by_function = BTreeMap::new();
+    for caller in functions {
+        let caller_path = &files[caller.file_id as usize].path;
+        let mut methods = BTreeMap::new();
+        for method in method_names {
+            let modules =
+                visible_module_aliases(method, caller_path, graph, files, functions, resolution);
+            let targets = modules
+                .into_iter()
+                .map(|alias| {
+                    if alias.is_empty() {
+                        method.to_string()
+                    } else {
+                        format!("{alias}.{method}")
+                    }
+                })
+                .collect::<Vec<_>>();
+            if !targets.is_empty() {
+                methods.insert(method.to_string(), targets);
+            }
+        }
+        if !methods.is_empty() {
+            targets_by_function.insert(caller.storage_index, methods);
+        }
+    }
+    targets_by_function
 }
 
 fn module_call_resolution_message(

@@ -1,9 +1,9 @@
 use crate::backend::compile_analysis::{
     fixed_array_lane_type_and_len, is_collection_handle_type, is_i32_abi_compatible_type,
     is_i32_numeric_type, is_i32_scalar_lane_type, is_struct_view_type, resolve_call_signature,
-    validate_owned_local_fixed_array_contract, CallSignature, CallSignatureMap, CollectionInfoMap,
-    ConstantValue, ConstantValueMap, ExternImportKey, ForeachCollectionInfo, GlobalPathTypeMap,
-    NamedStructFieldTypeMap,
+    unambiguous_call_params, validate_owned_local_fixed_array_contract, CallSignature,
+    CallSignatureMap, CollectionInfoMap, ConstantValue, ConstantValueMap, ExternImportKey,
+    ForeachCollectionInfo, GlobalPathTypeMap, NamedStructFieldTypeMap,
 };
 pub(crate) use crate::backend::hash::{hash_global_path, hash_string_literal};
 use crate::compiler::{FunctionId, FunctionMeta};
@@ -95,21 +95,6 @@ fn integer_binary_result_type(
     } else {
         TYPE_ID_I32
     }
-}
-
-fn unambiguous_call_params(
-    target: &str,
-    arg_count: usize,
-    call_signatures: &CallSignatureMap,
-) -> Option<Vec<TypeId>> {
-    let mut candidates = call_signatures
-        .get(target)?
-        .iter()
-        .filter(|signature| signature.params.len() == arg_count);
-    let first = candidates.next()?.params.clone();
-    candidates
-        .all(|candidate| candidate.params == first)
-        .then_some(first)
 }
 
 fn emit_integer_assignment_value(
@@ -11286,7 +11271,23 @@ pub(crate) fn emit_simple_expression(
         SimpleExpr::StringLiteral(value) => {
             let literal_id = hash_string_literal(value);
             stasis_dynload::upsert_jit_string_literal(literal_id, value);
-            let string_type_id = type_table.string_literal_type_id().unwrap_or(TYPE_ID_I32);
+            let string_type_id = if let Some(expected) = expected_type.filter(|expected| {
+                type_table.type_info(*expected).is_some_and(|info| {
+                    matches!(
+                        info.category,
+                        TypeCategory::AsciiFixed | TypeCategory::AsciiView
+                    )
+                })
+            }) {
+                if !value.is_ascii() {
+                    return Err(
+                        "non-ASCII string literal cannot initialize an ASCII buffer".to_string()
+                    );
+                }
+                expected
+            } else {
+                type_table.string_literal_type_id().unwrap_or(TYPE_ID_I32)
+            };
             Ok(ValueBinding {
                 value: builder.ins().iconst(types::I32, i64::from(literal_id)),
                 type_id: string_type_id,

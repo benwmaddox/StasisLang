@@ -5905,6 +5905,15 @@ fn encode_call_arguments(
     }
     let mut encoded = Vec::new();
     for (arg, param_type) in args.iter().zip(signature.params.iter()) {
+        if !matches!(arg, SimpleExpr::StringLiteral(_)) {
+            if let Some(actual) = infer_web_call_argument_type(arg, context) {
+                if is_ascii_utf8_buffer_mismatch(actual, *param_type, context.types) {
+                    return Err(format!(
+                        "web call argument type mismatch: expected {param_type}, found {actual}"
+                    ));
+                }
+            }
+        }
         if is_named_struct_array_type(*param_type, context.types, context.named_structs) {
             let actual = encode_named_struct_array_view_expr(arg, context, &mut encoded)?;
             if !context
@@ -5935,6 +5944,56 @@ fn encode_call_arguments(
     Ok(encoded)
 }
 
+fn is_ascii_utf8_buffer_mismatch(argument: TypeId, parameter: TypeId, types: &TypeTable) -> bool {
+    let Some(argument_category) = types.type_info(argument).map(|info| info.category) else {
+        return false;
+    };
+    let Some(parameter_category) = types.type_info(parameter).map(|info| info.category) else {
+        return false;
+    };
+    matches!(
+        (argument_category, parameter_category),
+        (
+            TypeCategory::AsciiFixed | TypeCategory::AsciiView,
+            TypeCategory::Utf8Fixed | TypeCategory::Utf8View
+        ) | (
+            TypeCategory::Utf8Fixed | TypeCategory::Utf8View,
+            TypeCategory::AsciiFixed | TypeCategory::AsciiView
+        )
+    )
+}
+
+fn infer_web_call_argument_type(value: &SimpleExpr, context: &EncodeContext<'_>) -> Option<TypeId> {
+    match value {
+        SimpleExpr::DefaultValue(type_id) => Some(*type_id),
+        SimpleExpr::Int(_) => Some(TYPE_ID_I32),
+        SimpleExpr::Float(_) => Some(TYPE_ID_F32),
+        SimpleExpr::Bool(_) | SimpleExpr::Condition(_) => Some(TYPE_ID_BOOL),
+        SimpleExpr::StringLiteral(_) => context.types.string_literal_type_id(),
+        SimpleExpr::Identifier(name) => infer_struct_view_type(value, context)
+            .or_else(|| context.locals.get(name).map(|binding| binding.type_id))
+            .or_else(|| context.global_types.get(name).copied())
+            .or_else(|| context.memory.get(name).map(|binding| binding.type_id))
+            .or_else(|| match context.constants.get(name) {
+                Some(ConstantValue::I32 { type_id, .. })
+                | Some(ConstantValue::String { type_id, .. }) => Some(*type_id),
+                Some(ConstantValue::F32(_)) => Some(TYPE_ID_F32),
+                Some(ConstantValue::F64(_)) => Some(TYPE_ID_F64),
+                Some(ConstantValue::Bool(_)) => Some(TYPE_ID_BOOL),
+                None => None,
+            }),
+        SimpleExpr::IndexedPath {
+            collection_path,
+            suffix,
+            ..
+        } => memory_binding(context, collection_path, suffix)
+            .ok()
+            .map(|binding| binding.type_id),
+        SimpleExpr::Unary { operand, .. } => infer_web_call_argument_type(operand, context),
+        SimpleExpr::Call { .. } | SimpleExpr::Binary { .. } => None,
+    }
+}
+
 fn resolve_call(
     target: &str,
     args: &[SimpleExpr],
@@ -5961,7 +6020,7 @@ fn resolve_call(
     };
     let mut argument_types = Vec::with_capacity(args.len());
     for argument in args {
-        if let Some(type_id) = infer_struct_view_type(argument, context) {
+        if let Some(type_id) = infer_web_call_argument_type(argument, context) {
             argument_types.push(type_id);
             continue;
         }
@@ -6387,6 +6446,19 @@ fn encode_expr_as(
             Ok(TYPE_ID_BOOL)
         }
         SimpleExpr::StringLiteral(value) => {
+            if expected.is_some_and(|type_id| {
+                context.types.type_info(type_id).is_some_and(|info| {
+                    matches!(
+                        info.category,
+                        TypeCategory::AsciiFixed | TypeCategory::AsciiView
+                    )
+                })
+            }) && !value.is_ascii()
+            {
+                return Err(
+                    "non-ASCII string literal cannot initialize an ASCII buffer".to_string()
+                );
+            }
             out.push(0x41);
             sleb(hash_string_literal(value), out);
             Ok(expected.unwrap_or(TYPE_ID_I32))
