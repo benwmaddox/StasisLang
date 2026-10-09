@@ -18,7 +18,7 @@ use crate::frontend::parser::{
     ParsedExternFunctionDeclaration, ParsedFunctionSignature, ParsedGenericParameter,
     ParsedGenericParameterKind, ParsedStructDefinitionRange,
 };
-use crate::frontend::types::TypedCollectionKind;
+use crate::frontend::types::{SourceTypeOrigin, TypedCollectionKind};
 use crate::ir::hir::{ExprBinaryOp, ExprUnaryOp};
 
 const MAX_SPECIALIZATIONS: usize = 4096;
@@ -258,7 +258,7 @@ impl From<String> for ExpansionError {
 pub(crate) fn expand_sources(
     files: &mut [SourceFile],
     module_graph: &ModuleGraph,
-) -> Result<(), ExpansionError> {
+) -> Result<BTreeMap<String, SourceTypeOrigin>, ExpansionError> {
     let input_bytes = files.iter().try_fold(0usize, |total, file| {
         total
             .checked_add(file.original_content.len())
@@ -284,24 +284,79 @@ pub(crate) fn expand_sources(
             file.content = file.original_content.clone();
             file.hash = hash_text(&file.content);
         }
-        return Ok(());
+        return Ok(BTreeMap::new());
     }
     let mut expansion = Expansion::new(raw_files, input_bytes, module_graph.clone())?;
     expansion.reject_explicit_generic_calls()?;
     if expansion.generic_structs.is_empty() && expansion.generic_functions.is_empty() {
+        let source_type_origins = expansion.source_type_origins(false);
         for file in files {
             file.content = file.original_content.clone();
             file.hash = hash_text(&file.content);
         }
-        return Ok(());
+        return Ok(source_type_origins);
     }
     expansion.populate_concrete_paths()?;
     expansion.seed_direct_uses()?;
     expansion.process_worklist()?;
-    expansion.write_sources(files)
+    let source_type_origins = expansion.source_type_origins(true);
+    expansion.write_sources(files)?;
+    Ok(source_type_origins)
 }
 
 impl Expansion {
+    fn source_type_origins(&self, generated_names: bool) -> BTreeMap<String, SourceTypeOrigin> {
+        let mut candidates = BTreeMap::<String, BTreeSet<SourceTypeOrigin>>::new();
+        for definition in self.ordinary_structs_by_name.values().flatten() {
+            let origin = SourceTypeOrigin {
+                path: definition.path.clone(),
+                name: definition.name.clone(),
+            };
+            let emitted_name = if generated_names {
+                ordinary_struct_generated_name(definition)
+            } else {
+                definition.name.clone()
+            };
+            candidates
+                .entry(emitted_name)
+                .or_default()
+                .insert(origin.clone());
+            let module_alias = self
+                .module_graph
+                .module(&definition.path)
+                .map(|module| module.alias.clone())
+                .unwrap_or_else(|| module_alias_for_path(&definition.path));
+            candidates
+                .entry(format!("{module_alias}.{}", definition.name))
+                .or_default()
+                .insert(origin);
+        }
+        for (key, specialization) in &self.struct_specializations {
+            let Some(definition) = self.generic_structs.get(&key.definition) else {
+                continue;
+            };
+            candidates
+                .entry(specialization.generated_name.clone())
+                .or_default()
+                .insert(SourceTypeOrigin {
+                    path: definition.path.clone(),
+                    name: definition.name.clone(),
+                });
+        }
+        candidates
+            .into_iter()
+            .filter_map(|(emitted_name, origins)| {
+                if origins.len() != 1 {
+                    return None;
+                }
+                origins
+                    .into_iter()
+                    .next()
+                    .map(|origin| (emitted_name, origin))
+            })
+            .collect()
+    }
+
     fn environment_for_file(&self, file_index: usize) -> GenericEnvironment {
         let path = self.files[file_index].path.clone();
         GenericEnvironment {

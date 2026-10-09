@@ -553,28 +553,29 @@ impl Compiler {
             return Err(CompileError::Frontend(error));
         }
         self.refresh_module_graph()?;
-        crate::frontend::generics::expand_sources(&mut self.files, &self.module_graph).map_err(
-            |error| {
-                let diagnostic_file = error
-                    .path
-                    .as_deref()
-                    .and_then(|path| self.files.iter().find(|file| file.path == path))
-                    .or_else(|| self.files.first());
-                self.last_source_diagnostic = diagnostic_file.map(|file| {
-                    let mut diagnostic = crate::SourceDiagnostic::new(
-                        file.path.clone(),
-                        error.start.min(file.original_content.len()),
-                        error.end.min(file.original_content.len()),
-                        error.symbol.clone(),
-                        error.message.clone(),
-                    )
-                    .with_code(error.code.clone());
-                    diagnostic.related = error.related.clone();
-                    diagnostic
-                });
-                CompileError::Frontend(error.message)
-            },
-        )?;
+        let source_type_origins =
+            crate::frontend::generics::expand_sources(&mut self.files, &self.module_graph)
+                .map_err(|error| {
+                    let diagnostic_file = error
+                        .path
+                        .as_deref()
+                        .and_then(|path| self.files.iter().find(|file| file.path == path))
+                        .or_else(|| self.files.first());
+                    self.last_source_diagnostic = diagnostic_file.map(|file| {
+                        let mut diagnostic = crate::SourceDiagnostic::new(
+                            file.path.clone(),
+                            error.start.min(file.original_content.len()),
+                            error.end.min(file.original_content.len()),
+                            error.symbol.clone(),
+                            error.message.clone(),
+                        )
+                        .with_code(error.code.clone());
+                        diagnostic.related = error.related.clone();
+                        diagnostic
+                    });
+                    CompileError::Frontend(error.message)
+                })?;
+        self.types.replace_source_type_origins(source_type_origins);
         let changed_paths: Vec<String> = self
             .files
             .iter()

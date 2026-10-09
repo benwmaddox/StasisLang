@@ -826,11 +826,19 @@ fn matching_angle_token(source: &str, tokens: &[Token], open: usize) -> Option<u
 pub fn parse_top_level_functions_with_diagnostic(
     source: &str,
 ) -> Result<Vec<ParsedFunctionSignature>, ParserDiagnostic> {
-    parse_top_level_functions_impl(source)
+    parse_top_level_functions_impl(source, false)
+}
+
+/// Parses signatures for both function definitions and bodyless declarations.
+pub fn parse_top_level_function_signatures_with_diagnostic(
+    source: &str,
+) -> Result<Vec<ParsedFunctionSignature>, ParserDiagnostic> {
+    parse_top_level_functions_impl(source, true)
 }
 
 fn parse_top_level_functions_impl(
     source: &str,
+    include_declarations: bool,
 ) -> Result<Vec<ParsedFunctionSignature>, ParserDiagnostic> {
     let tokens = lex_with_diagnostic(source)
         .map_err(|error| lexer_error_context(source, error.message, error.offset))?;
@@ -1043,6 +1051,18 @@ fn parse_top_level_functions_impl(
             .get(cursor)
             .is_some_and(|token| token.kind == TokenKind::Semicolon)
         {
+            let semicolon = tokens[cursor];
+            if include_declarations {
+                out.push(ParsedFunctionSignature {
+                    name,
+                    generic_parameters,
+                    annotations,
+                    params,
+                    return_type_name,
+                    signature_range: signature_start..semicolon.start,
+                    body_range: semicolon.end..semicolon.end,
+                });
+            }
             cursor += 1;
             continue;
         }
@@ -2395,6 +2415,62 @@ function actual(): i32 { return 1; }
         assert_eq!(parsed[0].return_type_name, "i32");
         assert_eq!(parsed[0].params.len(), 0);
         assert_eq!(&source[parsed[0].body_range.clone()], "{ return 0; }");
+    }
+
+    #[test]
+    fn signature_catalog_includes_prototypes_without_changing_body_only_api() {
+        let source = concat!(
+            "function @effects(graphics)@asset_path(path)@extern(\"stasis_jit_sprite_load_from\") ",
+            "load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;\n",
+            "function implementation(): i32 { return 0; }\n",
+        );
+
+        let body_only = parse_top_level_functions_with_diagnostic(source).expect("body parser");
+        assert_eq!(
+            body_only
+                .iter()
+                .map(|function| function.name.as_str())
+                .collect::<Vec<_>>(),
+            ["implementation"]
+        );
+
+        let signatures =
+            parse_top_level_function_signatures_with_diagnostic(source).expect("signature catalog");
+        assert_eq!(
+            signatures
+                .iter()
+                .map(|function| function.name.as_str())
+                .collect::<Vec<_>>(),
+            ["load_sprite_from", "implementation"]
+        );
+        let load_sprite = &signatures[0];
+        assert_eq!(
+            load_sprite
+                .annotations
+                .iter()
+                .map(|annotation| annotation.name.as_str())
+                .collect::<Vec<_>>(),
+            ["effects", "asset_path", "extern"]
+        );
+        assert_eq!(
+            load_sprite
+                .params
+                .iter()
+                .map(|parameter| (parameter.name.as_str(), parameter.type_name.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("self", "Sprite"),
+                ("path", "string"),
+                ("width", "i32"),
+                ("height", "i32"),
+            ]
+        );
+        assert_eq!(load_sprite.return_type_name, "bool");
+        assert!(load_sprite.body_range.is_empty());
+        assert_eq!(
+            &source[load_sprite.signature_range.clone()],
+            "function @effects(graphics)@asset_path(path)@extern(\"stasis_jit_sprite_load_from\") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool"
+        );
     }
 
     #[test]

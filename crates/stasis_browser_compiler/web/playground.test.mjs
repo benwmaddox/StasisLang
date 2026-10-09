@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 
 import { inspectPngHeader, normalizeAssetPath } from "./project_assets.mjs";
 import { buildStoredZip, crc32, createExportEntries, normalizeArchivePath } from "./export_package.mjs";
@@ -7,6 +8,65 @@ import {
   applyEditorCompletion, buildHighlightedFragment, editorKeyAction,
   isCompletionContext, isCurrentEditorAnalysis,
 } from "./editor_view.mjs";
+
+const playgroundSource = readFileSync(new URL("./playground.js", import.meta.url), "utf8");
+const playgroundHtml = readFileSync(new URL("./playground.html", import.meta.url), "utf8");
+
+function starterSources() {
+  const defaultSource = playgroundSource.match(/const DEFAULT_SOURCE = `([\s\S]*?)`;\r?\n/);
+  const spriteSource = playgroundSource.match(/function createSpriteExample\(path\) \{\s*const escaped = JSON\.stringify\(path\);\s*return `([\s\S]*?)`;\s*\}/);
+  assert.ok(defaultSource, "default playground source is embedded");
+  assert.ok(spriteSource, "asset example source is embedded");
+  return [defaultSource[1], spriteSource[1]];
+}
+
+test("playground starters use canonical portable Stasis APIs and types", () => {
+  for (const [index, source] of starterSources().entries()) {
+    assert.match(source, /import "vendor\/stasis\/stdlib\/graphics\.stasis";/);
+    assert.match(source, /import "vendor\/stasis\/stdlib\/host_frame\.stasis";/);
+    assert.doesNotMatch(source, /@extern\("web_/);
+    assert.doesNotMatch(source, /enum_to_i32/);
+    assert.match(source, /input_frame: HostFrame;/);
+    assert.equal([...source.matchAll(/\bglobal\s+/g)].length, 1, "one coherent global game state");
+    assert.match(source, /global state: (PongState|SpriteExampleState);/);
+    assert.match(source, /function main\(\): i32/);
+    assert.match(source, /init_window\(640, 360,/);
+    assert.match(source, /function tick\(\): i32/);
+    assert.match(source, /function render\(\): i32/);
+    assert.match(source, /input_frame\.refresh\(\);/);
+    if (index === 1) {
+      assert.match(source, /input_frame\.pointers\[0\]\.x_logical/);
+      assert.match(source, /input_frame\.keys\[SCANCODE_LEFT\]/);
+      assert.match(source, /input_frame\.keys\[SCANCODE_RIGHT\]/);
+      assert.match(source, /const SCANCODE_LEFT: i32 = 80;/);
+      assert.match(source, /const SCANCODE_RIGHT: i32 = 79;/);
+      assert.match(source, /const SCANCODE_A: i32 = 4;/);
+      assert.match(source, /const SCANCODE_D: i32 = 7;/);
+      assert.match(source, /sample_sprite: Sprite;/);
+      assert.match(source, /sample_sprite\.load_sprite_from\(/);
+      assert.match(source, /state\.sample_sprite\.draw\(state\.sprite_x,/);
+    } else {
+      assert.match(source, /ball_x: f32;/);
+      assert.match(source, /ball_y: f32;/);
+      assert.match(source, /ball_vx: f32;/);
+      assert.match(source, /ball_vy: f32;/);
+      assert.match(source, /player_score: i32;/);
+      assert.match(source, /cpu_score: i32;/);
+      assert.match(source, /const SCANCODE_UP: i32 = 82;/);
+      assert.match(source, /const SCANCODE_DOWN: i32 = 81;/);
+      assert.match(source, /const SCANCODE_W: i32 = 26;/);
+      assert.match(source, /const SCANCODE_S: i32 = 22;/);
+      assert.match(source, /const SCANCODE_SPACE: i32 = 44;/);
+      assert.match(source, /input_frame\.keys\[SCANCODE_UP\]/);
+      assert.match(source, /input_frame\.keys\[SCANCODE_DOWN\]/);
+      assert.match(source, /input_frame\.pointers\[0\]\.y_logical/);
+      assert.match(source, /input_frame\.pointers\[0\]\.went_down/);
+      assert.match(playgroundHtml, /first to 5/);
+      assert.match(playgroundHtml, /Space/);
+      assert.match(playgroundHtml, /tap restarts/);
+    }
+  }
+});
 
 function pngHeader(width, height) {
   const bytes = new Uint8Array(24);

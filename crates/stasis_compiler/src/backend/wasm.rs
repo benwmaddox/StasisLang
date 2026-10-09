@@ -665,7 +665,7 @@ fn build_replay_state_write_plan(
         types,
     )?;
     for opaque in &layout.opaque {
-        if !is_replay_host_or_presentation_path(&layout, &opaque.path) {
+        if !is_replay_host_or_presentation_path(&analysis.global_path_types, types, &opaque.path) {
             return Ok(None);
         }
     }
@@ -685,7 +685,7 @@ fn build_replay_state_write_plan(
     let mut scalars = layout.scalars.iter().collect::<Vec<_>>();
     scalars.sort_by(|left, right| left.path.cmp(&right.path));
     for scalar in scalars {
-        if is_replay_host_or_presentation_path(&layout, &scalar.path) {
+        if is_replay_host_or_presentation_path(&analysis.global_path_types, types, &scalar.path) {
             continue;
         }
         append_replay_scalar_write(
@@ -700,7 +700,8 @@ fn build_replay_state_write_plan(
     let mut collections = layout.collections.iter().collect::<Vec<_>>();
     collections.sort_by(|left, right| left.path.cmp(&right.path));
     for collection in collections {
-        if is_replay_host_or_presentation_path(&layout, &collection.path) {
+        if is_replay_host_or_presentation_path(&analysis.global_path_types, types, &collection.path)
+        {
             continue;
         }
         append_replay_collection_writes(&mut plan, &mut offset, collection, memory)?;
@@ -7397,6 +7398,153 @@ WebAssembly.instantiate(fs.readFileSync(path), {}).then(({instance}) => {
         assert_eq!(result["restored"], descriptor.required_bytes);
         assert_eq!(result["result"], descriptor.required_bytes);
         assert_eq!(result["actual"], serde_json::json!(expected));
+    }
+
+    #[test]
+    fn imported_host_frame_is_excluded_while_same_named_game_state_round_trips() {
+        let mut process = WasmProcess::new();
+        let project_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .to_string_lossy()
+            .into_owned();
+        process
+            .set_project_root(project_root)
+            .expect("set project root");
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "imported_host_frame_snapshot.stasis",
+            r#"
+import "src/stdlib/graphics.stasis";
+import "src/stdlib/host_frame.stasis";
+import "src/stdlib/rig2d.stasis";
+struct HostFrame { keep: i32; }
+struct SnapshotState {
+    observed: host_frame.HostFrame;
+    user_frame: HostFrame;
+    writer: graphics.SpriteRunWriter;
+    score: i32;
+}
+global state: SnapshotState;
+function main(): i32 {
+    state.observed.tick_index = 100;
+    state.user_frame.keep = 7;
+    state.score = 41;
+    return 0;
+}
+function tick(): i32 {
+    state.observed.tick_index = 200;
+    state.user_frame.keep = 8;
+    state.score = 42;
+    return 0;
+}
+function render(): i32 {
+    return state.observed.tick_index * 1000 + state.user_frame.keep * 100 + state.score;
+}
+"#,
+        );
+        process
+            .compile()
+            .expect("compile imported HostFrame snapshot fixture");
+
+        let snapshot = process
+            .program_snapshot()
+            .expect("imported HostFrame program snapshot");
+        let observed_type = snapshot.analysis.global_path_types["state.observed"];
+        let user_frame_type = snapshot.analysis.global_path_types["state.user_frame"];
+        let observed_type_name = &snapshot.types().type_info(observed_type).unwrap().name;
+        let user_frame_type_name = &snapshot.types().type_info(user_frame_type).unwrap().name;
+        assert!(observed_type_name.starts_with("__module_type_"));
+        assert!(user_frame_type_name.starts_with("__module_type_"));
+        assert_ne!(observed_type_name, user_frame_type_name);
+        let descriptor = snapshot.replay_compatibility().state_snapshot;
+        assert_eq!(descriptor.required_bytes, 8);
+        assert_eq!(
+            descriptor
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["state.score", "state.user_frame.keep"]
+        );
+
+        let exports = exported_function_names(process.module_bytes());
+        assert!(exports.contains(&"stasis_replay_state_snapshot_size".to_string()));
+        assert!(exports.contains(&"stasis_replay_state_snapshot_write".to_string()));
+        assert!(exports.contains(&"stasis_replay_state_snapshot_restore".to_string()));
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let wasm_path = std::env::temp_dir().join(format!(
+            "stasis_wasm_imported_host_frame_snapshot_{}_{}.wasm",
+            std::process::id(),
+            stamp
+        ));
+        fs::write(&wasm_path, process.module_bytes()).expect("write imported HostFrame wasm");
+        let script = r#"
+const fs = require('node:fs');
+const path = process.argv[1];
+WebAssembly.instantiate(fs.readFileSync(path), {}).then(({instance}) => {
+  const e = instance.exports;
+  const required = e.stasis_replay_state_snapshot_size();
+  e.main();
+  const mainRender = e.render();
+  const oldBytes = e.memory.buffer.byteLength;
+  e.memory.grow(1);
+  const view = new Uint8Array(e.memory.buffer);
+  const originalPtr = oldBytes;
+  const mutatedPtr = originalPtr + required;
+  const restoredPtr = mutatedPtr + required;
+  const write = ptr => {
+    const result = e.stasis_replay_state_snapshot_write(ptr, required);
+    return {result, bytes: Array.from(view.slice(ptr, ptr + required))};
+  };
+  const original = write(originalPtr);
+  e.tick();
+  const tickRender = e.render();
+  const mutated = write(mutatedPtr);
+  const restored = e.stasis_replay_state_snapshot_restore(originalPtr, required);
+  const afterRestoreRender = e.render();
+  const afterRestore = write(restoredPtr);
+  process.stdout.write(JSON.stringify({
+    required,
+    mainRender,
+    tickRender,
+    restored,
+    afterRestoreRender,
+    original,
+    mutated,
+    afterRestore
+  }));
+}).catch((error) => { console.error(error); process.exit(1); });
+"#;
+        let output = Command::new("node")
+            .args(["-e", script])
+            .arg(&wasm_path)
+            .output()
+            .expect("run Node imported HostFrame snapshot oracle");
+        let _ = fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("parse imported HostFrame oracle");
+        let expected_original = serde_json::json!([41, 0, 0, 0, 7, 0, 0, 0]);
+        let expected_mutated = serde_json::json!([42, 0, 0, 0, 8, 0, 0, 0]);
+        assert_eq!(result["required"], descriptor.required_bytes);
+        assert_eq!(result["mainRender"], 100_741);
+        assert_eq!(result["tickRender"], 200_842);
+        assert_eq!(result["restored"], descriptor.required_bytes);
+        assert_eq!(result["afterRestoreRender"], 200_741);
+        assert_eq!(result["original"]["result"], descriptor.required_bytes);
+        assert_eq!(result["original"]["bytes"], expected_original);
+        assert_eq!(result["mutated"]["result"], descriptor.required_bytes);
+        assert_eq!(result["mutated"]["bytes"], expected_mutated);
+        assert_eq!(result["afterRestore"]["result"], descriptor.required_bytes);
+        assert_eq!(result["afterRestore"]["bytes"], expected_original);
     }
 
     #[test]

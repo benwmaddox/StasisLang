@@ -171,12 +171,16 @@ impl ProgramReplayStateSnapshot {
     }
 }
 
-fn build_replay_state_snapshot(layout: &StateLayout) -> Result<ProgramReplayStateSnapshot, String> {
+fn build_replay_state_snapshot(
+    layout: &StateLayout,
+    global_path_types: &crate::backend::compile_analysis::GlobalPathTypeMap,
+    types: &TypeTable,
+) -> Result<ProgramReplayStateSnapshot, String> {
     let mut entries = Vec::new();
     let mut unsupported_paths = layout
         .opaque
         .iter()
-        .filter(|value| !is_replay_host_or_presentation_path(layout, &value.path))
+        .filter(|value| !is_replay_host_or_presentation_path(global_path_types, types, &value.path))
         .map(|value| value.path.clone())
         .collect::<Vec<_>>();
     let mut offset = 0u64;
@@ -184,7 +188,7 @@ fn build_replay_state_snapshot(layout: &StateLayout) -> Result<ProgramReplayStat
     let mut scalars = layout.scalars.iter().collect::<Vec<_>>();
     scalars.sort_by(|left, right| left.path.cmp(&right.path));
     for scalar in scalars {
-        if is_replay_host_or_presentation_path(layout, &scalar.path) {
+        if is_replay_host_or_presentation_path(global_path_types, types, &scalar.path) {
             continue;
         }
         let Some(element_bytes) = replay_storage_width(scalar.storage_type_name()) else {
@@ -208,7 +212,7 @@ fn build_replay_state_snapshot(layout: &StateLayout) -> Result<ProgramReplayStat
     let mut collections = layout.collections.iter().collect::<Vec<_>>();
     collections.sort_by(|left, right| left.path.cmp(&right.path));
     for collection in collections {
-        if is_replay_host_or_presentation_path(layout, &collection.path) {
+        if is_replay_host_or_presentation_path(global_path_types, types, &collection.path) {
             continue;
         }
         let mut fields = collection.fields.iter().collect::<Vec<_>>();
@@ -469,7 +473,8 @@ impl ProgramSnapshot {
             &analysis.typed_collection_descriptors,
             types,
         )?;
-        let replay_state_snapshot = build_replay_state_snapshot(&state_layout)?;
+        let replay_state_snapshot =
+            build_replay_state_snapshot(&state_layout, &analysis.global_path_types, types)?;
         let layout_digest = state_layout_digest(&state_layout)?;
         let compiler_layout_digest = compiler_layout_digest(&analysis, functions, types);
         let mut collections: Vec<ProgramCollectionMetadata> = analysis
@@ -957,6 +962,13 @@ function @extern("stasis_jit_sprite_draw") draw(self: Sprite, x: f32, y: f32, al
 extern function load_font(path: string, size: i32): i32;
 extern function measure_text(font: i32, text: string): f32;
 "#;
+
+    fn workspace_project_root() -> String {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .to_string_lossy()
+            .into_owned()
+    }
 
     fn compile_text_coverage_pair(source: &str) -> (ProgramSnapshot, ProgramSnapshot) {
         let source = format!("{TEXT_COVERAGE_EXTERN_PRELUDE}\n{source}");
@@ -2505,42 +2517,149 @@ function read(value: i32): i32 { return value; }
     }
 
     #[test]
-    fn custom_named_host_frame_state_is_excluded_from_replay_snapshot() {
+    fn canonical_imported_host_and_graphics_types_are_excluded_from_replay_snapshot() {
         let mut jit = JitProcess::new();
+        jit.set_project_root(workspace_project_root())
+            .expect("set project root");
         jit.upsert_file(
             "main.stasis",
             r#"
-struct HostFrame { sequence: i32; buttons: i32[4]; }
-struct SpriteRunWriter { token: i32; runs: i32[2]; }
-global replay_host_frame: HostFrame;
-global custom_writer: SpriteRunWriter;
+import "src/stdlib/graphics.stasis";
+import "src/stdlib/host_frame.stasis";
+global observed: host_frame.HostFrame;
+global writer: graphics.SpriteRunWriter;
 global score: i32;
 function main(): i32 { return score; }
 function tick(): i32 { score += 1; return 0; }
 function render(): i32 { return 0; }
 "#,
         );
-        jit.compile().expect("compile custom HostFrame fixture");
-        let snapshot = jit.program_snapshot().expect("HostFrame snapshot");
+        jit.compile().expect("compile canonical host frame fixture");
+        let snapshot = jit.program_snapshot().expect("canonical host snapshot");
+        let observed_type = snapshot.analysis.global_path_types["observed"];
+        let writer_type = snapshot.analysis.global_path_types["writer"];
+        assert_eq!(
+            snapshot.types().type_info(observed_type).unwrap().name,
+            "host_frame.HostFrame",
+            "this fixture exercises the ungenerated canonical import spelling"
+        );
+        assert_eq!(
+            snapshot.types().type_info(writer_type).unwrap().name,
+            "graphics.SpriteRunWriter",
+            "this fixture exercises the ungenerated graphics import spelling"
+        );
         let replay_state = snapshot.replay_compatibility().state_snapshot;
+        assert_eq!(replay_state.required_bytes, 4);
+        assert_eq!(
+            replay_state
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["score"],
+            "only canonical game state should enter the portable snapshot"
+        );
+    }
+
+    #[test]
+    fn same_named_user_type_remains_portable_and_native_tick_restore_preserves_host_observation() {
+        let mut jit = JitProcess::new();
+        jit.set_project_root(workspace_project_root())
+            .expect("set project root");
+        jit.upsert_file(
+            "main.stasis",
+            r#"
+import "src/stdlib/graphics.stasis";
+import "src/stdlib/host_frame.stasis";
+import "src/stdlib/rig2d.stasis";
+struct HostFrame { keep: i32; }
+struct GameState {
+    observed: host_frame.HostFrame;
+    user_frame: HostFrame;
+    writer: graphics.SpriteRunWriter;
+    score: i32;
+}
+global state: GameState;
+function main(): i32 {
+    state.observed.tick_index = 100;
+    state.user_frame.keep = 7;
+    state.score = 41;
+    return 0;
+}
+function tick(): i32 {
+    state.observed.tick_index = 200;
+    state.user_frame.keep = 8;
+    state.score = 42;
+    return 0;
+}
+function render(): i32 {
+    return state.observed.tick_index * 1000 + state.user_frame.keep * 100 + state.score;
+}
+"#,
+        );
+        jit.compile()
+            .expect("compile canonical and user HostFrame fixture");
+        let snapshot = jit.program_snapshot().expect("generic HostFrame snapshot");
+        let observed_type = snapshot.analysis.global_path_types["state.observed"];
+        let user_frame_type = snapshot.analysis.global_path_types["state.user_frame"];
+        let observed_type_name = &snapshot.types().type_info(observed_type).unwrap().name;
+        let user_frame_type_name = &snapshot.types().type_info(user_frame_type).unwrap().name;
+        assert!(observed_type_name.starts_with("__module_type_"));
+        assert!(user_frame_type_name.starts_with("__module_type_"));
+        assert_ne!(observed_type_name, user_frame_type_name);
+        let replay_state = snapshot.replay_compatibility().state_snapshot;
+        assert_eq!(replay_state.required_bytes, 8);
         assert!(replay_state
             .entries
             .iter()
-            .any(|entry| entry.path == "score"));
-        assert!(
-            !replay_state
+            .any(|entry| entry.path == "state.user_frame.keep"));
+        assert!(replay_state
+            .entries
+            .iter()
+            .any(|entry| entry.path == "state.score"));
+        assert!(!replay_state.entries.iter().any(|entry| {
+            entry.path.starts_with("state.observed") || entry.path.starts_with("state.writer")
+        }));
+
+        #[cfg(windows)]
+        {
+            use crate::backend::jit::JitScalarValue;
+
+            jit.execute_i32_noarg_by_name("main")
+                .expect("execute initial state setup");
+            assert_eq!(
+                jit.execute_i32_noarg_by_name("render")
+                    .expect("render initial state"),
+                100_741
+            );
+            let portable_snapshot = replay_state
                 .entries
                 .iter()
-                .any(|entry| entry.path.starts_with("replay_host_frame")),
-            "custom-named HostFrame fields must not enter the portable simulation snapshot"
-        );
-        assert!(
-            !replay_state
-                .entries
-                .iter()
-                .any(|entry| entry.path.starts_with("custom_writer")),
-            "custom-named SpriteRunWriter fields must not enter the portable simulation snapshot"
-        );
+                .map(|entry| {
+                    (
+                        entry.path.clone(),
+                        jit.read_global_scalar(&entry.path)
+                            .expect("read portable scalar"),
+                    )
+                })
+                .collect::<Vec<(String, JitScalarValue)>>();
+
+            jit.execute_i32_noarg_by_name("tick")
+                .expect("execute next simulation tick");
+            assert_eq!(
+                jit.execute_i32_noarg_by_name("render")
+                    .expect("render next simulation tick"),
+                200_842
+            );
+            jit.restore_global_scalars(&portable_snapshot)
+                .expect("restore portable state");
+            assert_eq!(
+                jit.execute_i32_noarg_by_name("render")
+                    .expect("render after restore"),
+                200_741,
+                "restore the game fields while preserving the current HostFrame observation"
+            );
+        }
     }
     #[test]
     fn replay_snapshot_distinguishes_primitive_collections_from_scalars() {
