@@ -112,6 +112,12 @@ kbd { margin-right: .12rem; padding: .1rem .28rem; border: 1px solid #39484a; bo
   .button { padding: .45rem .65rem; }
 }
 
+@media (min-width: 761px) {
+  .workbench { grid-template-rows: minmax(0, 1fr); }
+  .sidebar { min-height: 0; overflow: auto; }
+  .sidebar > .sidebar-section, .sidebar > .sidebar-footer { flex: 0 0 auto; }
+}
+
 @media (max-width: 760px) {
   html, body { height: auto; min-height: 100%; overflow: auto; }
   body { grid-template-rows: 60px auto; }
