@@ -153,7 +153,7 @@ try {
     const editor = window.STASIS_PLAYGROUND_EDITOR;
     const runtime = editor.getIframe().contentWindow.STASIS_PLAYGROUND;
     const source = editor.getFile('main.stasis').source;
-    editor.setFile('main.stasis', source + '\\nfunction @effects(state) on_code_swap(): void { state.cpu_score = 4; state.ball_x = -20.0; state.ball_vx = -4.0; }\\n');
+    editor.setFile('main.stasis', source + '\\nfunction @effects(state) on_code_swap(): void { state.cpu.score = 4; state.ball.x = -20.0; state.ball.vx = -4.0; }\\n');
     await editor.run();
     await runtime.step();
     const finished = runtime.snapshot();
@@ -176,9 +176,9 @@ try {
     assert.ok(entry, `missing starter snapshot field ${name}`);
     return Buffer.from(Object.values(snapshot.bytes)).readInt32LE(entry.offset);
   };
-  assert.equal(starterScalar(starterMatch.finished, "state.cpu_score"), 5);
+  assert.equal(starterScalar(starterMatch.finished, "state.cpu.score"), 5);
   assert.equal(starterScalar(starterMatch.finished, "state.game_over"), 1);
-  assert.equal(starterScalar(starterMatch.restarted, "state.cpu_score"), 0);
+  assert.equal(starterScalar(starterMatch.restarted, "state.cpu.score"), 0);
   assert.equal(starterScalar(starterMatch.restarted, "state.game_over"), 0);
   await screenshot("starter-pong-restarted");
   const editorDraft = 'global score: i32;\nfunction helper(value: i32): i32 { return value; }\nfunction main(): i32 { return hel';

@@ -16,53 +16,59 @@ const SCANCODE_SPACE: i32 = 44;
 const SCANCODE_UP: i32 = 82;
 const SCANCODE_DOWN: i32 = 81;
 
+struct BallState {
+    sprite: Sprite;
+    x: f32;
+    y: f32;
+    vx: f32;
+    vy: f32;
+}
+
+struct PaddleState {
+    y: f32;
+    score: i32;
+    score_text: TextRun;
+}
+
 struct PongState {
     input_frame: HostFrame;
     arena: Sprite;
     paddle: Sprite;
-    ball: Sprite;
+    ball: BallState;
+    player: PaddleState;
+    cpu: PaddleState;
     score_font: i32;
-    player_score_text: TextRun;
-    cpu_score_text: TextRun;
     score_ascii: ascii[12];
     score_utf8: utf8[12];
-    ball_x: f32;
-    ball_y: f32;
-    ball_vx: f32;
-    ball_vy: f32;
-    player_y: f32;
-    cpu_y: f32;
-    player_score: i32;
-    cpu_score: i32;
     game_over: i32;
 }
 
 global state: PongState;
 
 function refresh_scores(): void {
-    state.score_ascii.ascii_from_i32(state.player_score);
+    state.score_ascii.ascii_from_i32(state.player.score);
     state.score_utf8.utf8_from_ascii(state.score_ascii, 12);
-    state.player_score_text.replace_text_from(state.score_font, state.score_utf8);
-    state.score_ascii.ascii_from_i32(state.cpu_score);
+    state.player.score_text.replace_text_from(state.score_font, state.score_utf8);
+    state.score_ascii.ascii_from_i32(state.cpu.score);
     state.score_utf8.utf8_from_ascii(state.score_ascii, 12);
-    state.cpu_score_text.replace_text_from(state.score_font, state.score_utf8);
+    state.cpu.score_text.replace_text_from(state.score_font, state.score_utf8);
 }
 
 function serve(direction: i32): void {
-    state.ball_x = SCREEN_WIDTH / 2.0;
-    state.ball_y = SCREEN_HEIGHT / 2.0;
-    state.ball_vx = 4.0;
-    state.ball_vy = 2.25;
+    state.ball.x = SCREEN_WIDTH / 2.0;
+    state.ball.y = SCREEN_HEIGHT / 2.0;
+    state.ball.vx = 4.0;
+    state.ball.vy = 2.25;
     if (direction < 0) {
-        state.ball_vx = 0.0 - state.ball_vx;
+        state.ball.vx = 0.0 - state.ball.vx;
     }
 }
 
 function reset_match(): void {
-    state.player_y = 144.0;
-    state.cpu_y = 144.0;
-    state.player_score = 0;
-    state.cpu_score = 0;
+    state.player.y = 144.0;
+    state.cpu.y = 144.0;
+    state.player.score = 0;
+    state.cpu.score = 0;
     state.game_over = 0;
     serve(1);
     refresh_scores();
@@ -72,7 +78,7 @@ function main(): i32 {
     init_window(640, 360, "Stasis Pong");
     state.arena.load_sprite_from("assets/pong-arena.png", 640, 360);
     state.paddle.load_sprite_from("assets/pong-paddle.png", 12, 72);
-    state.ball.load_sprite_from("assets/pong-ball.png", 16, 16);
+    state.ball.sprite.load_sprite_from("assets/pong-ball.png", 16, 16);
     state.score_font = load_font("assets/ui.ttf", 18);
     reset_match();
     return 0;
@@ -90,78 +96,78 @@ function clamp_paddle(y: f32): f32 {
 
 function move_player(): void {
     if (state.input_frame.pointer_count > 0 && state.input_frame.pointers[0].is_down) {
-        state.player_y = state.input_frame.pointers[0].y_logical - PADDLE_HEIGHT / 2.0;
+        state.player.y = state.input_frame.pointers[0].y_logical - PADDLE_HEIGHT / 2.0;
     } else if (state.input_frame.keys[SCANCODE_UP] != 0 || state.input_frame.keys[SCANCODE_W] != 0) {
-        state.player_y -= 5.0;
+        state.player.y -= 5.0;
     } else if (state.input_frame.keys[SCANCODE_DOWN] != 0 || state.input_frame.keys[SCANCODE_S] != 0) {
-        state.player_y += 5.0;
+        state.player.y += 5.0;
     }
-    state.player_y = clamp_paddle(state.player_y);
+    state.player.y = clamp_paddle(state.player.y);
 }
 
 function move_cpu(): void {
-    let cpu_center: f32 = state.cpu_y + PADDLE_HEIGHT / 2.0;
-    if (state.ball_y < cpu_center) {
-        state.cpu_y -= 2.4;
-    } else if (state.ball_y > cpu_center) {
-        state.cpu_y += 2.4;
+    let cpu_center: f32 = state.cpu.y + PADDLE_HEIGHT / 2.0;
+    if (state.ball.y < cpu_center) {
+        state.cpu.y -= 2.4;
+    } else if (state.ball.y > cpu_center) {
+        state.cpu.y += 2.4;
     }
-    state.cpu_y = clamp_paddle(state.cpu_y);
+    state.cpu.y = clamp_paddle(state.cpu.y);
 }
 
 function bounce_from_paddle(paddle_y: f32, contact_x: f32): void {
-    state.ball_x = contact_x;
-    state.ball_vx = 0.0 - state.ball_vx;
-    if (state.ball_y < paddle_y + PADDLE_HEIGHT / 2.0) {
-        state.ball_vy -= 1.0;
-    } else if (state.ball_y > paddle_y + PADDLE_HEIGHT / 2.0) {
-        state.ball_vy += 1.0;
+    state.ball.x = contact_x;
+    state.ball.vx = 0.0 - state.ball.vx;
+    if (state.ball.y < paddle_y + PADDLE_HEIGHT / 2.0) {
+        state.ball.vy -= 1.0;
+    } else if (state.ball.y > paddle_y + PADDLE_HEIGHT / 2.0) {
+        state.ball.vy += 1.0;
     }
 }
 
 function move_ball(): void {
-    state.ball_x += state.ball_vx;
-    state.ball_y += state.ball_vy;
+    state.ball.x += state.ball.vx;
+    state.ball.y += state.ball.vy;
 
-    if (state.ball_y < 18.0) {
-        state.ball_y = 18.0;
-        state.ball_vy = 0.0 - state.ball_vy;
-    } else if (state.ball_y > 342.0) {
-        state.ball_y = 342.0;
-        state.ball_vy = 0.0 - state.ball_vy;
+    if (state.ball.y < 18.0) {
+        state.ball.y = 18.0;
+        state.ball.vy = 0.0 - state.ball.vy;
+    } else if (state.ball.y > 342.0) {
+        state.ball.y = 342.0;
+        state.ball.vy = 0.0 - state.ball.vy;
     }
 
-    if (state.ball_vx < 0.0 && state.ball_x <= 49.0 && state.ball_x >= 23.0
-        && state.ball_y + BALL_RADIUS >= state.player_y
-        && state.ball_y - BALL_RADIUS <= state.player_y + PADDLE_HEIGHT) {
-        bounce_from_paddle(state.player_y, 49.0);
+    if (state.ball.vx < 0.0 && state.ball.x <= 49.0 && state.ball.x >= 23.0
+        && state.ball.y + BALL_RADIUS >= state.player.y
+        && state.ball.y - BALL_RADIUS <= state.player.y + PADDLE_HEIGHT) {
+        bounce_from_paddle(state.player.y, 49.0);
     }
-    if (state.ball_vx > 0.0 && state.ball_x >= 591.0 && state.ball_x <= 617.0
-        && state.ball_y + BALL_RADIUS >= state.cpu_y
-        && state.ball_y - BALL_RADIUS <= state.cpu_y + PADDLE_HEIGHT) {
-        bounce_from_paddle(state.cpu_y, 591.0);
+    if (state.ball.vx > 0.0 && state.ball.x >= 591.0 && state.ball.x <= 617.0
+        && state.ball.y + BALL_RADIUS >= state.cpu.y
+        && state.ball.y - BALL_RADIUS <= state.cpu.y + PADDLE_HEIGHT) {
+        bounce_from_paddle(state.cpu.y, 591.0);
     }
 
-    if (state.ball_vy > 5.0) {
-        state.ball_vy = 5.0;
-    } else if (state.ball_vy < -5.0) {
-        state.ball_vy = -5.0;
+    if (state.ball.vy > 5.0) {
+        state.ball.vy = 5.0;
+    } else if (state.ball.vy < -5.0) {
+        state.ball.vy = -5.0;
     }
 }
 
 function check_score(): void {
-    if (state.ball_x < 0.0 - BALL_RADIUS - 1.0) {
-        state.cpu_score += 1;
+    if (state.ball.x < 0.0 - BALL_RADIUS - 1.0) {
+        state.cpu.score += 1;
         refresh_scores();
-        if (state.cpu_score >= WIN_SCORE) {
+        if (state.cpu.score >= WIN_SCORE) {
             state.game_over = 1;
         } else {
             serve(1);
         }
-    } else if (state.ball_x > SCREEN_WIDTH + BALL_RADIUS + 1.0) {
-        state.player_score += 1;
+    } else if (state.ball.x > SCREEN_WIDTH + BALL_RADIUS + 1.0) {
+        state.player.score += 1;
         refresh_scores();
-        if (state.player_score >= WIN_SCORE) {
+        if (state.player.score >= WIN_SCORE) {
             state.game_over = 1;
         } else {
             serve(-1);
@@ -188,14 +194,14 @@ function tick(): i32 {
 
 function render(): i32 {
     state.arena.draw(0.0, 0.0, 255, 0);
-    state.paddle.draw(PADDLE_X, state.player_y, 255, 0);
-    state.paddle.draw(CPU_PADDLE_X, state.cpu_y, 255, 0);
-    state.ball.draw(state.ball_x - 8.0, state.ball_y - 8.0, 255, 0);
-    state.player_score_text.draw(280.0, 24.0, 0.34, 0.91, 0.80, 1.0);
-    state.cpu_score_text.draw(344.0, 24.0, 1.0, 0.75, 0.38, 1.0);
+    state.paddle.draw(PADDLE_X, state.player.y, 255, 0);
+    state.paddle.draw(CPU_PADDLE_X, state.cpu.y, 255, 0);
+    state.ball.sprite.draw(state.ball.x - 8.0, state.ball.y - 8.0, 255, 0);
+    state.player.score_text.draw(280.0, 24.0, 0.34, 0.91, 0.80, 1.0);
+    state.cpu.score_text.draw(344.0, 24.0, 1.0, 0.75, 0.38, 1.0);
 
     if (state.game_over != 0) {
-        if (state.player_score >= WIN_SCORE) {
+        if (state.player.score >= WIN_SCORE) {
             state.score_font.draw_text("YOU WIN", 257.0, 150.0, 0.34, 0.91, 0.80, 1.0);
         } else {
             state.score_font.draw_text("CPU WINS", 248.0, 150.0, 1.0, 0.75, 0.38, 1.0);

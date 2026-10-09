@@ -46,12 +46,10 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
       assert.match(source, /sample_sprite\.load_sprite_from\(/);
       assert.match(source, /state\.sample_sprite\.draw\(state\.sprite_x,/);
     } else {
-      assert.match(source, /ball_x: f32;/);
-      assert.match(source, /ball_y: f32;/);
-      assert.match(source, /ball_vx: f32;/);
-      assert.match(source, /ball_vy: f32;/);
-      assert.match(source, /player_score: i32;/);
-      assert.match(source, /cpu_score: i32;/);
+      assert.match(source, /ball: BallState;/);
+      assert.match(source, /player: PaddleState;/);
+      assert.match(source, /cpu: PaddleState;/);
+      assert.doesNotMatch(source, /\b(?:ball_[xy]|ball_v[xy]|(?:player|cpu)_(?:y|score|score_text))\b/);
       assert.match(source, /const SCANCODE_UP: i32 = 82;/);
       assert.match(source, /const SCANCODE_DOWN: i32 = 81;/);
       assert.match(source, /const SCANCODE_W: i32 = 26;/);
@@ -63,13 +61,13 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
       assert.match(source, /input_frame\.pointers\[0\]\.went_down/);
       assert.match(source, /state\.arena\.load_sprite_from\("assets\/pong-arena\.png"/);
       assert.match(source, /state\.paddle\.load_sprite_from\("assets\/pong-paddle\.png"/);
-      assert.match(source, /state\.ball\.load_sprite_from\("assets\/pong-ball\.png"/);
+      assert.match(source, /state\.ball\.sprite\.load_sprite_from\("assets\/pong-ball\.png"/);
       assert.match(source, /load_font\("assets\/ui\.ttf", 18\)/);
       assert.match(source, /state\.score_ascii\.ascii_from_i32\(/);
       assert.match(source, /state\.score_utf8\.utf8_from_ascii\(/);
-      assert.match(source, /state\.player_score_text\.replace_text_from\(/);
-      assert.match(source, /state\.cpu_score_text\.replace_text_from\(/);
-      assert.match(source, /state\.player_score_text\.draw\(/);
+      assert.match(source, /state\.player\.score_text\.replace_text_from\(/);
+      assert.match(source, /state\.cpu\.score_text\.replace_text_from\(/);
+      assert.match(source, /state\.player\.score_text\.draw\(/);
       assert.match(source, /state\.score_font\.draw_text\("YOU WIN"/);
       assert.match(source, /state\.score_font\.draw_text\("CPU WINS"/);
       assert.match(source, /state\.score_font\.draw_text\("SPACE OR TAP TO RESTART"/);
