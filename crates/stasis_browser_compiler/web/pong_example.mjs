@@ -1,0 +1,252 @@
+export const DEFAULT_PONG_SOURCE = `import "vendor/stasis/stdlib/graphics.stasis";
+import "vendor/stasis/stdlib/host_frame.stasis";
+
+const SCREEN_WIDTH: f32 = 640.0;
+const SCREEN_HEIGHT: f32 = 360.0;
+const PADDLE_X: f32 = 30.0;
+const CPU_PADDLE_X: f32 = 598.0;
+const PADDLE_HEIGHT: f32 = 72.0;
+const BALL_RADIUS: f32 = 7.0;
+const WIN_SCORE: i32 = 5;
+
+// HostFrame.keys uses SDL scancode slots.
+const SCANCODE_W: i32 = 26;
+const SCANCODE_S: i32 = 22;
+const SCANCODE_SPACE: i32 = 44;
+const SCANCODE_UP: i32 = 82;
+const SCANCODE_DOWN: i32 = 81;
+
+struct PongState {
+    input_frame: HostFrame;
+    arena: Sprite;
+    paddle: Sprite;
+    ball: Sprite;
+    score_font: i32;
+    player_score_text: TextRun;
+    cpu_score_text: TextRun;
+    score_ascii: ascii[12];
+    score_utf8: utf8[12];
+    ball_x: f32;
+    ball_y: f32;
+    ball_vx: f32;
+    ball_vy: f32;
+    player_y: f32;
+    cpu_y: f32;
+    player_score: i32;
+    cpu_score: i32;
+    game_over: i32;
+}
+
+global state: PongState;
+
+function refresh_scores(): void {
+    ascii_from_i32(state.score_ascii, state.player_score);
+    utf8_from_ascii(state.score_utf8, state.score_ascii, 12);
+    state.player_score_text.replace_text_from(state.score_font, state.score_utf8);
+    ascii_from_i32(state.score_ascii, state.cpu_score);
+    utf8_from_ascii(state.score_utf8, state.score_ascii, 12);
+    state.cpu_score_text.replace_text_from(state.score_font, state.score_utf8);
+}
+
+function serve(direction: i32): void {
+    state.ball_x = SCREEN_WIDTH / 2.0;
+    state.ball_y = SCREEN_HEIGHT / 2.0;
+    state.ball_vx = 4.0;
+    state.ball_vy = 2.25;
+    if (direction < 0) {
+        state.ball_vx = 0.0 - state.ball_vx;
+    }
+}
+
+function reset_match(): void {
+    state.player_y = 144.0;
+    state.cpu_y = 144.0;
+    state.player_score = 0;
+    state.cpu_score = 0;
+    state.game_over = 0;
+    serve(1);
+    refresh_scores();
+}
+
+function main(): i32 {
+    init_window(640, 360, "Stasis Pong");
+    state.arena.load_sprite_from("assets/pong-arena.png", 640, 360);
+    state.paddle.load_sprite_from("assets/pong-paddle.png", 12, 72);
+    state.ball.load_sprite_from("assets/pong-ball.png", 16, 16);
+    state.score_font = load_font("assets/ui.ttf", 18);
+    reset_match();
+    return 0;
+}
+
+function clamp_paddle(y: f32): f32 {
+    if (y < 20.0) {
+        return 20.0;
+    }
+    if (y > 268.0) {
+        return 268.0;
+    }
+    return y;
+}
+
+function move_player(): void {
+    if (state.input_frame.pointer_count > 0 && state.input_frame.pointers[0].is_down) {
+        state.player_y = state.input_frame.pointers[0].y_logical - PADDLE_HEIGHT / 2.0;
+    } else if (state.input_frame.keys[SCANCODE_UP] != 0 || state.input_frame.keys[SCANCODE_W] != 0) {
+        state.player_y -= 5.0;
+    } else if (state.input_frame.keys[SCANCODE_DOWN] != 0 || state.input_frame.keys[SCANCODE_S] != 0) {
+        state.player_y += 5.0;
+    }
+    state.player_y = clamp_paddle(state.player_y);
+}
+
+function move_cpu(): void {
+    let cpu_center: f32 = state.cpu_y + PADDLE_HEIGHT / 2.0;
+    if (state.ball_y < cpu_center) {
+        state.cpu_y -= 2.4;
+    } else if (state.ball_y > cpu_center) {
+        state.cpu_y += 2.4;
+    }
+    state.cpu_y = clamp_paddle(state.cpu_y);
+}
+
+function bounce_from_paddle(paddle_y: f32, contact_x: f32): void {
+    state.ball_x = contact_x;
+    state.ball_vx = 0.0 - state.ball_vx;
+    if (state.ball_y < paddle_y + PADDLE_HEIGHT / 2.0) {
+        state.ball_vy -= 1.0;
+    } else if (state.ball_y > paddle_y + PADDLE_HEIGHT / 2.0) {
+        state.ball_vy += 1.0;
+    }
+}
+
+function move_ball(): void {
+    state.ball_x += state.ball_vx;
+    state.ball_y += state.ball_vy;
+
+    if (state.ball_y < 18.0) {
+        state.ball_y = 18.0;
+        state.ball_vy = 0.0 - state.ball_vy;
+    } else if (state.ball_y > 342.0) {
+        state.ball_y = 342.0;
+        state.ball_vy = 0.0 - state.ball_vy;
+    }
+
+    if (state.ball_vx < 0.0 && state.ball_x <= 49.0 && state.ball_x >= 23.0
+        && state.ball_y + BALL_RADIUS >= state.player_y
+        && state.ball_y - BALL_RADIUS <= state.player_y + PADDLE_HEIGHT) {
+        bounce_from_paddle(state.player_y, 49.0);
+    }
+    if (state.ball_vx > 0.0 && state.ball_x >= 591.0 && state.ball_x <= 617.0
+        && state.ball_y + BALL_RADIUS >= state.cpu_y
+        && state.ball_y - BALL_RADIUS <= state.cpu_y + PADDLE_HEIGHT) {
+        bounce_from_paddle(state.cpu_y, 591.0);
+    }
+
+    if (state.ball_vy > 5.0) {
+        state.ball_vy = 5.0;
+    } else if (state.ball_vy < -5.0) {
+        state.ball_vy = -5.0;
+    }
+}
+
+function check_score(): void {
+    if (state.ball_x < 0.0 - BALL_RADIUS - 1.0) {
+        state.cpu_score += 1;
+        refresh_scores();
+        if (state.cpu_score >= WIN_SCORE) {
+            state.game_over = 1;
+        } else {
+            serve(1);
+        }
+    } else if (state.ball_x > SCREEN_WIDTH + BALL_RADIUS + 1.0) {
+        state.player_score += 1;
+        refresh_scores();
+        if (state.player_score >= WIN_SCORE) {
+            state.game_over = 1;
+        } else {
+            serve(-1);
+        }
+    }
+}
+
+function tick(): i32 {
+    state.input_frame.refresh();
+    if (state.game_over != 0) {
+        if (state.input_frame.keys[SCANCODE_SPACE] != 0
+            || (state.input_frame.pointer_count > 0 && state.input_frame.pointers[0].went_down)) {
+            reset_match();
+        }
+        return 0;
+    }
+
+    move_player();
+    move_cpu();
+    move_ball();
+    check_score();
+    return 0;
+}
+
+function render(): i32 {
+    state.arena.draw(0.0, 0.0, 255, 0);
+    state.paddle.draw(PADDLE_X, state.player_y, 255, 0);
+    state.paddle.draw(CPU_PADDLE_X, state.cpu_y, 255, 0);
+    state.ball.draw(state.ball_x - 8.0, state.ball_y - 8.0, 255, 0);
+    state.player_score_text.draw(280.0, 24.0, 0.34, 0.91, 0.80, 1.0);
+    state.cpu_score_text.draw(344.0, 24.0, 1.0, 0.75, 0.38, 1.0);
+
+    if (state.game_over != 0) {
+        if (state.player_score >= WIN_SCORE) {
+            draw_text(state.score_font, "YOU WIN", 257.0, 150.0, 0.34, 0.91, 0.80, 1.0);
+        } else {
+            draw_text(state.score_font, "CPU WINS", 248.0, 150.0, 1.0, 0.75, 0.38, 1.0);
+        }
+        draw_text(state.score_font, "SPACE OR TAP TO RESTART", 113.0, 194.0, 0.96, 0.93, 0.82, 1.0);
+    }
+    return 0;
+}
+`;
+
+export const DEFAULT_PONG_IMAGES = Object.freeze([
+  {
+    name: "pong-arena.svg",
+    path: "assets/pong-arena.png",
+    source: `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <rect width="640" height="360" fill="#07141d"/>
+  <rect x="12" y="12" width="616" height="336" rx="18" fill="#0a202b" stroke="#28525d" stroke-width="2"/>
+  <rect x="26" y="28" width="588" height="304" rx="10" fill="#0b1b25" stroke="#173d49" stroke-width="2"/>
+  <circle cx="320" cy="180" r="56" fill="none" stroke="#1d4550" stroke-width="2"/>
+  <line x1="320" y1="36" x2="320" y2="324" stroke="#32616b" stroke-width="4" stroke-dasharray="10 14" stroke-linecap="round"/>
+  <line x1="44" y1="42" x2="100" y2="42" stroke="#1b404b" stroke-width="2"/>
+  <line x1="540" y1="318" x2="596" y2="318" stroke="#1b404b" stroke-width="2"/>
+</svg>`,
+  },
+  {
+    name: "pong-paddle.svg",
+    path: "assets/pong-paddle.png",
+    source: `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="72" viewBox="0 0 12 72">
+  <rect x="1" y="1" width="10" height="70" rx="5" fill="#54ead4"/>
+  <rect x="3" y="7" width="2" height="58" rx="1" fill="#d2fff6" opacity="0.55"/>
+</svg>`,
+  },
+  {
+    name: "pong-ball.svg",
+    path: "assets/pong-ball.png",
+    source: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <circle cx="8" cy="8" r="6.5" fill="#f6ca74" stroke="#fff0bd" stroke-width="1.5"/>
+  <circle cx="6" cy="6" r="1.5" fill="#fff8df"/>
+</svg>`,
+  },
+]);
+
+export async function importDefaultPongImages(assetStore) {
+  const imported = [];
+  for (const asset of DEFAULT_PONG_IMAGES) {
+    const file = new File([asset.source], asset.name, { type: "image/svg+xml" });
+    const result = await assetStore.importFile(file);
+    if (result.path !== asset.path) {
+      throw new Error(`default Pong image ${asset.name} imported to unexpected path ${result.path}`);
+    }
+    imported.push(result);
+  }
+  return imported;
+}
