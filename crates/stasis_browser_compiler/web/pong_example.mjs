@@ -40,11 +40,11 @@ struct PongState {
 global state: PongState;
 
 function refresh_scores(): void {
-    ascii_from_i32(state.score_ascii, state.player_score);
-    utf8_from_ascii(state.score_utf8, state.score_ascii, 12);
+    state.score_ascii.ascii_from_i32(state.player_score);
+    state.score_utf8.utf8_from_ascii(state.score_ascii, 12);
     state.player_score_text.replace_text_from(state.score_font, state.score_utf8);
-    ascii_from_i32(state.score_ascii, state.cpu_score);
-    utf8_from_ascii(state.score_utf8, state.score_ascii, 12);
+    state.score_ascii.ascii_from_i32(state.cpu_score);
+    state.score_utf8.utf8_from_ascii(state.score_ascii, 12);
     state.cpu_score_text.replace_text_from(state.score_font, state.score_utf8);
 }
 
@@ -196,11 +196,11 @@ function render(): i32 {
 
     if (state.game_over != 0) {
         if (state.player_score >= WIN_SCORE) {
-            draw_text(state.score_font, "YOU WIN", 257.0, 150.0, 0.34, 0.91, 0.80, 1.0);
+            state.score_font.draw_text("YOU WIN", 257.0, 150.0, 0.34, 0.91, 0.80, 1.0);
         } else {
-            draw_text(state.score_font, "CPU WINS", 248.0, 150.0, 1.0, 0.75, 0.38, 1.0);
+            state.score_font.draw_text("CPU WINS", 248.0, 150.0, 1.0, 0.75, 0.38, 1.0);
         }
-        draw_text(state.score_font, "SPACE OR TAP TO RESTART", 113.0, 194.0, 0.96, 0.93, 0.82, 1.0);
+        state.score_font.draw_text("SPACE OR TAP TO RESTART", 113.0, 194.0, 0.96, 0.93, 0.82, 1.0);
     }
     return 0;
 }
