@@ -347,10 +347,276 @@ static JIT_HOST_ENTRY_TARGETS: AtomicUsize = AtomicUsize::new(0);
 static JIT_DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "network")]
 static NETWORK_HOST_HANDLE: AtomicUsize = AtomicUsize::new(0);
+#[cfg(feature = "network")]
+const NETWORK_HOST_RESERVED: usize = usize::MAX;
+#[cfg(feature = "network")]
+static NETWORK_HOST_OWNER_ID: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "network")]
+static NEXT_NETWORK_HOST_OWNER_ID: AtomicU64 = AtomicU64::new(1);
+#[cfg(feature = "network")]
+static NETWORK_HOST_LIFECYCLE: OnceLock<Mutex<()>> = OnceLock::new();
 static JIT_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
 static JIT_PROFILE_GENERATION: AtomicU64 = AtomicU64::new(1);
 static RECORDING_CLOCK_FPS: AtomicU64 = AtomicU64::new(0);
 static RECORDING_CLOCK_FRAME: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "network")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupervisedNetworkHostError {
+    AlreadyOwned,
+    InvalidBundle,
+    StartFailed,
+    ReadinessUnavailable,
+    ReadinessFailed,
+}
+
+#[cfg(feature = "network")]
+impl std::fmt::Display for SupervisedNetworkHostError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::AlreadyOwned => "network host is already owned",
+            Self::InvalidBundle => "network bundle is invalid",
+            Self::StartFailed => "network host could not start",
+            Self::ReadinessUnavailable => "network readiness channel is unavailable",
+            Self::ReadinessFailed => "network readiness handoff failed",
+        })
+    }
+}
+
+#[cfg(feature = "network")]
+impl std::error::Error for SupervisedNetworkHostError {}
+
+#[cfg(feature = "network")]
+struct SupervisedNetworkHostInner {
+    handle: usize,
+    owner_id: u64,
+    readiness_attempted: AtomicBool,
+}
+
+#[cfg(feature = "network")]
+impl Drop for SupervisedNetworkHostInner {
+    fn drop(&mut self) {
+        let _lifecycle = network_host_lifecycle_lock();
+        release_supervised_network_host_locked(self.handle, self.owner_id);
+    }
+}
+
+/// Owns the process-wide JIT network host slot for one supervised live run.
+///
+/// Clones share one lease. Guest JIT network calls continue to use its native
+/// host through the existing handle, while guest start/stop cannot replace it.
+#[cfg(feature = "network")]
+#[derive(Clone)]
+pub struct SupervisedNetworkHostGuard {
+    inner: Arc<SupervisedNetworkHostInner>,
+}
+
+#[cfg(feature = "network")]
+impl std::fmt::Debug for SupervisedNetworkHostGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SupervisedNetworkHostGuard")
+            .finish()
+    }
+}
+
+#[cfg(feature = "network")]
+impl SupervisedNetworkHostGuard {
+    /// Starts a loopback host on an ephemeral port and claims the shared JIT slot.
+    pub fn start(bundle: &[u8]) -> Result<Self, SupervisedNetworkHostError> {
+        let (handle, owner_id) = start_supervised_network_host(|| {
+            if bundle.len() > stasis_network::MAX_TOTAL_BYTES + 1024 {
+                return Err(SupervisedNetworkHostError::InvalidBundle);
+            }
+            let bundle = stasis_network::StaticBundle::decode(bundle)
+                .map_err(|_| SupervisedNetworkHostError::InvalidBundle)?;
+            let host = stasis_network::NetworkHost::bind(0, bundle)
+                .map_err(|_| SupervisedNetworkHostError::StartFailed)?;
+            let port = host.address().port();
+            Ok((Box::into_raw(Box::new(host)) as usize, port))
+        })?;
+        Ok(Self {
+            inner: Arc::new(SupervisedNetworkHostInner {
+                handle,
+                owner_id,
+                readiness_attempted: AtomicBool::new(false),
+            }),
+        })
+    }
+
+    /// Sends the private readiness frame once the guest has initialized.
+    pub fn publish_readiness(&self) -> Result<(), SupervisedNetworkHostError> {
+        let _lifecycle = network_host_lifecycle_lock();
+        if !supervised_network_host_is_active_locked(&self.inner) {
+            return Err(SupervisedNetworkHostError::ReadinessUnavailable);
+        }
+        if self.inner.readiness_attempted.swap(true, Ordering::AcqRel) {
+            return Err(SupervisedNetworkHostError::ReadinessUnavailable);
+        }
+        let result = unsafe {
+            stasis_network::stasis_network_host_publish_supervision_join_url(
+                self.inner.handle as *mut stasis_network::NetworkHost,
+            )
+        };
+        match result {
+            1 => Ok(()),
+            0 => {
+                release_supervised_network_host_locked(self.inner.handle, self.inner.owner_id);
+                Err(SupervisedNetworkHostError::ReadinessUnavailable)
+            }
+            _ => {
+                release_supervised_network_host_locked(self.inner.handle, self.inner.owner_id);
+                Err(SupervisedNetworkHostError::ReadinessFailed)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "network")]
+fn network_host_lifecycle_lock() -> std::sync::MutexGuard<'static, ()> {
+    NETWORK_HOST_LIFECYCLE
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(feature = "network")]
+fn next_network_host_owner_id() -> Option<u64> {
+    let mut current = NEXT_NETWORK_HOST_OWNER_ID.load(Ordering::Relaxed);
+    loop {
+        let next = current.checked_add(1)?;
+        match NEXT_NETWORK_HOST_OWNER_ID.compare_exchange_weak(
+            current,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return Some(current),
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+#[cfg(feature = "network")]
+struct NetworkHostReservation {
+    slot_value: usize,
+    committed: bool,
+}
+
+#[cfg(feature = "network")]
+impl NetworkHostReservation {
+    fn claim() -> Result<Self, SupervisedNetworkHostError> {
+        let _lifecycle = network_host_lifecycle_lock();
+        NETWORK_HOST_HANDLE
+            .compare_exchange(
+                0,
+                NETWORK_HOST_RESERVED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| SupervisedNetworkHostError::AlreadyOwned)?;
+        Ok(Self {
+            slot_value: NETWORK_HOST_RESERVED,
+            committed: false,
+        })
+    }
+
+    fn publish(&mut self, handle: usize, owner_id: u64) -> Result<(), SupervisedNetworkHostError> {
+        if handle == 0 || handle == NETWORK_HOST_RESERVED {
+            return Err(SupervisedNetworkHostError::StartFailed);
+        }
+        let _lifecycle = network_host_lifecycle_lock();
+        NETWORK_HOST_HANDLE
+            .compare_exchange(self.slot_value, handle, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| SupervisedNetworkHostError::StartFailed)?;
+        self.slot_value = handle;
+        NETWORK_HOST_OWNER_ID.store(owner_id, Ordering::Release);
+        self.committed = true;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "network")]
+impl Drop for NetworkHostReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _lifecycle = network_host_lifecycle_lock();
+        if NETWORK_HOST_HANDLE
+            .compare_exchange(self.slot_value, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let was_live_handle = self.slot_value != NETWORK_HOST_RESERVED;
+        NETWORK_HOST_OWNER_ID.store(0, Ordering::Release);
+        if was_live_handle {
+            unsafe {
+                stasis_network::stasis_network_host_stop(
+                    self.slot_value as *mut stasis_network::NetworkHost,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "network")]
+fn start_supervised_network_host(
+    start: impl FnOnce() -> Result<(usize, u16), SupervisedNetworkHostError>,
+) -> Result<(usize, u64), SupervisedNetworkHostError> {
+    let mut reservation = NetworkHostReservation::claim()?;
+    let owner_id = next_network_host_owner_id().ok_or(SupervisedNetworkHostError::StartFailed)?;
+    let (handle, port) = start()?;
+    if handle == 0 || handle == NETWORK_HOST_RESERVED {
+        return Err(SupervisedNetworkHostError::StartFailed);
+    }
+    if port == 0 {
+        unsafe {
+            stasis_network::stasis_network_host_stop(handle as *mut stasis_network::NetworkHost);
+        }
+        return Err(SupervisedNetworkHostError::StartFailed);
+    }
+    if reservation.publish(handle, owner_id).is_err() {
+        unsafe {
+            stasis_network::stasis_network_host_stop(handle as *mut stasis_network::NetworkHost);
+        }
+        return Err(SupervisedNetworkHostError::StartFailed);
+    }
+    Ok((handle, owner_id))
+}
+
+#[cfg(feature = "network")]
+fn supervised_network_host_is_active_locked(inner: &SupervisedNetworkHostInner) -> bool {
+    NETWORK_HOST_HANDLE.load(Ordering::Acquire) == inner.handle
+        && NETWORK_HOST_OWNER_ID.load(Ordering::Acquire) == inner.owner_id
+}
+
+#[cfg(feature = "network")]
+fn release_supervised_network_host_locked(handle: usize, owner_id: u64) -> bool {
+    if handle == 0
+        || handle == NETWORK_HOST_RESERVED
+        || NETWORK_HOST_OWNER_ID.load(Ordering::Acquire) != owner_id
+        || NETWORK_HOST_HANDLE
+            .compare_exchange(handle, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return false;
+    }
+    NETWORK_HOST_OWNER_ID.store(0, Ordering::Release);
+    unsafe {
+        stasis_network::stasis_network_host_stop(handle as *mut stasis_network::NetworkHost);
+    }
+    true
+}
+
+#[cfg(feature = "network")]
+fn network_host_live_handle_locked() -> Option<usize> {
+    match NETWORK_HOST_HANDLE.load(Ordering::Acquire) {
+        0 | NETWORK_HOST_RESERVED => None,
+        handle => Some(handle),
+    }
+}
 
 pub fn set_recording_clock(fps: u32, frame: u64) {
     RECORDING_CLOCK_FPS.store(u64::from(fps), Ordering::Release);
@@ -5124,9 +5390,9 @@ pub extern "C" fn stasis_jit_network_host_start_bind(
     }
     #[cfg(feature = "network")]
     {
-        if NETWORK_HOST_HANDLE.load(Ordering::Acquire) != 0 {
+        let Ok(mut reservation) = NetworkHostReservation::claim() else {
             return -2;
-        }
+        };
         let Some(content) = jit_text_arg_bytes(content_id) else {
             return -1;
         };
@@ -5145,7 +5411,12 @@ pub extern "C" fn stasis_jit_network_host_start_bind(
         if handle.is_null() {
             return -3;
         }
-        NETWORK_HOST_HANDLE.store(handle as usize, Ordering::Release);
+        if reservation.publish(handle as usize, 0).is_err() {
+            unsafe {
+                stasis_network::stasis_network_host_stop(handle);
+            }
+            return -3;
+        }
         i32::from(port)
     }
 }
@@ -5186,15 +5457,15 @@ pub extern "C" fn stasis_jit_network_host_start_bind_text(content_id: i32, bind_
 pub extern "C" fn stasis_jit_network_host_status() -> i32 {
     #[cfg(feature = "network")]
     {
-        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
-        if handle == 0 {
-            0
-        } else {
+        let _lifecycle = network_host_lifecycle_lock();
+        if let Some(handle) = network_host_live_handle_locked() {
             unsafe {
                 stasis_network::stasis_network_host_status(
                     handle as *mut stasis_network::NetworkHost,
                 )
             }
+        } else {
+            0
         }
     }
     #[cfg(not(feature = "network"))]
@@ -5206,15 +5477,15 @@ pub extern "C" fn stasis_jit_network_host_status() -> i32 {
 pub extern "C" fn stasis_jit_network_host_overflow_count() -> i32 {
     #[cfg(feature = "network")]
     {
-        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
-        if handle == 0 {
-            0
-        } else {
+        let _lifecycle = network_host_lifecycle_lock();
+        if let Some(handle) = network_host_live_handle_locked() {
             unsafe {
                 stasis_network::stasis_network_host_overflow_count(
                     handle as *mut stasis_network::NetworkHost,
                 ) as i32
             }
+        } else {
+            0
         }
     }
     #[cfg(not(feature = "network"))]
@@ -5226,14 +5497,14 @@ pub extern "C" fn stasis_jit_network_host_overflow_count() -> i32 {
 pub extern "C" fn stasis_jit_network_host_port() -> i32 {
     #[cfg(feature = "network")]
     {
-        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
-        if handle == 0 {
-            0
-        } else {
+        let _lifecycle = network_host_lifecycle_lock();
+        if let Some(handle) = network_host_live_handle_locked() {
             unsafe {
                 stasis_network::stasis_network_host_port(handle as *mut stasis_network::NetworkHost)
                     as i32
             }
+        } else {
+            0
         }
     }
     #[cfg(not(feature = "network"))]
@@ -5258,21 +5529,23 @@ pub extern "C" fn stasis_jit_network_host_poll(
     }
     #[cfg(feature = "network")]
     {
-        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
-        if handle == 0 {
-            return -3;
-        }
         let mut event = stasis_network::StasisNetworkEvent {
             kind: 0,
             connection: 0,
             length: 0,
             payload: [0; stasis_network::MAX_MESSAGE_BYTES],
         };
-        let result = unsafe {
-            stasis_network::stasis_network_host_poll(
-                handle as *mut stasis_network::NetworkHost,
-                &mut event,
-            )
+        let result = {
+            let _lifecycle = network_host_lifecycle_lock();
+            let Some(handle) = network_host_live_handle_locked() else {
+                return -3;
+            };
+            unsafe {
+                stasis_network::stasis_network_host_poll(
+                    handle as *mut stasis_network::NetworkHost,
+                    &mut event,
+                )
+            }
         };
         if result <= 0 {
             return result;
@@ -5317,10 +5590,6 @@ pub extern "C" fn stasis_jit_network_host_send(
     }
     #[cfg(feature = "network")]
     {
-        let handle = NETWORK_HOST_HANDLE.load(Ordering::Acquire);
-        if handle == 0 {
-            return -3;
-        }
         let mut payload = Vec::with_capacity(payload_length as usize);
         for index in 0..payload_length {
             let value = stasis_jit_global_i32_array_load(payload_id, 0, index);
@@ -5329,6 +5598,10 @@ pub extern "C" fn stasis_jit_network_host_send(
             };
             payload.push(value);
         }
+        let _lifecycle = network_host_lifecycle_lock();
+        let Some(handle) = network_host_live_handle_locked() else {
+            return -3;
+        };
         unsafe {
             stasis_network::stasis_network_host_send(
                 handle as *mut stasis_network::NetworkHost,
@@ -5343,8 +5616,18 @@ pub extern "C" fn stasis_jit_network_host_send(
 pub extern "C" fn stasis_jit_network_host_stop() {
     #[cfg(feature = "network")]
     {
-        let handle = NETWORK_HOST_HANDLE.swap(0, Ordering::AcqRel);
-        if handle != 0 {
+        let _lifecycle = network_host_lifecycle_lock();
+        if NETWORK_HOST_OWNER_ID.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let Some(handle) = network_host_live_handle_locked() else {
+            return;
+        };
+        if NETWORK_HOST_HANDLE
+            .compare_exchange(handle, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            NETWORK_HOST_OWNER_ID.store(0, Ordering::Release);
             unsafe {
                 stasis_network::stasis_network_host_stop(
                     handle as *mut stasis_network::NetworkHost,
@@ -10487,5 +10770,395 @@ mod tests {
         .expect_err("stale publication")
         .contains("stale JIT host-entry revision"));
         assert_eq!(invoke_noarg_i32(tick_trampoline), Ok(2));
+    }
+
+    #[cfg(feature = "network")]
+    fn supervised_network_test_bundle() -> Vec<u8> {
+        stasis_network::StaticBundle::new(vec![stasis_network::BundleFile {
+            path: "index.html".to_string(),
+            mime: "text/html".to_string(),
+            bytes: b"<!doctype html><title>test</title>".to_vec(),
+        }])
+        .expect("valid test bundle")
+        .encode()
+        .expect("encode test bundle")
+    }
+
+    #[cfg(feature = "network")]
+    #[test]
+    fn supervised_network_host_guard_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SupervisedNetworkHostGuard>();
+    }
+
+    #[cfg(feature = "network")]
+    fn supervised_network_host_join_url() -> String {
+        let _lifecycle = network_host_lifecycle_lock();
+        let handle = network_host_live_handle_locked().expect("active network host");
+        let mut url = [0 as c_char; 513];
+        let mut length = 0usize;
+        let copied = unsafe {
+            stasis_network::stasis_network_host_copy_join_url(
+                handle as *mut stasis_network::NetworkHost,
+                url.as_mut_ptr(),
+                url.len(),
+                &mut length,
+            )
+        };
+        assert_eq!(copied, 0, "copy active test host invite");
+        assert!(
+            (1..=512).contains(&length),
+            "test invite has a bounded size"
+        );
+        let bytes = unsafe { std::slice::from_raw_parts(url.as_ptr().cast::<u8>(), length) };
+        String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| panic!("test invite is UTF-8"))
+    }
+
+    #[cfg(feature = "network")]
+    fn poll_supervised_network_host_message(fields_id: i32, payload_id: i32) -> (i32, Vec<u8>) {
+        for _ in 0..500 {
+            if stasis_jit_network_host_poll(fields_id, 3, payload_id, 1024) > 0 {
+                let kind = stasis_jit_global_i32_array_load(fields_id, 0, 0);
+                let connection = stasis_jit_global_i32_array_load(fields_id, 0, 1);
+                let length = stasis_jit_global_i32_array_load(fields_id, 0, 2);
+                if kind == stasis_network::EventKind::Message as i32 {
+                    let payload = (0..length)
+                        .map(|index| stasis_jit_global_i32_array_load(payload_id, 0, index) as u8)
+                        .collect();
+                    return (connection, payload);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for a JIT network message")
+    }
+
+    #[cfg(feature = "network")]
+    struct RestoreSupervisionHandle(Option<std::ffi::OsString>);
+
+    #[cfg(feature = "network")]
+    impl RestoreSupervisionHandle {
+        fn capture() -> Self {
+            Self(std::env::var_os(stasis_network::SUPERVISION_HANDLE_ENV))
+        }
+    }
+
+    #[cfg(feature = "network")]
+    impl Drop for RestoreSupervisionHandle {
+        fn drop(&mut self) {
+            if let Some(value) = self.0.take() {
+                std::env::set_var(stasis_network::SUPERVISION_HANDLE_ENV, value);
+            } else {
+                std::env::remove_var(stasis_network::SUPERVISION_HANDLE_ENV);
+            }
+        }
+    }
+
+    #[cfg(feature = "network")]
+    #[test]
+    fn supervised_network_host_guard_uses_the_existing_jit_handle_for_live_traffic() {
+        let _guard = test_lock();
+        let bundle = supervised_network_test_bundle();
+        let host = SupervisedNetworkHostGuard::start(&bundle).expect("start supervised host");
+        let retained_host = host.clone();
+        let port = stasis_jit_network_host_port();
+        assert!(port > 0);
+        assert_eq!(stasis_jit_network_host_status(), 1);
+
+        assert_eq!(
+            stasis_jit_network_host_start_bind(123, 1, 0x7f000001),
+            -2,
+            "guest start is busy while the guard owns the slot"
+        );
+        stasis_jit_network_host_stop();
+        assert_eq!(stasis_jit_network_host_status(), 1);
+        assert_eq!(stasis_jit_network_host_port(), port);
+
+        let join_url = supervised_network_host_join_url();
+        let client = stasis_network::client::NetworkClient::new(&join_url)
+            .expect("create test peer from the live host invite");
+        assert_eq!(client.connect(), 0);
+        let fields_id = 0x6380_0101;
+        let payload_id = 0x6380_0102;
+        let mut joined_connection = None;
+        for _ in 0..500 {
+            // The host advances only when the JIT poll path is called, which
+            // services the peer handshake as well as queued message events.
+            if stasis_jit_network_host_poll(fields_id, 3, payload_id, 1024) > 0
+                && stasis_jit_global_i32_array_load(fields_id, 0, 0)
+                    == stasis_network::EventKind::Connected as i32
+            {
+                joined_connection = Some(stasis_jit_global_i32_array_load(fields_id, 0, 1));
+            }
+            if client.status() == stasis_network::client::STATUS_CONNECTED
+                && joined_connection.is_some()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(client.status(), stasis_network::client::STATUS_CONNECTED);
+        let joined_connection = joined_connection.expect("preserve the JIT Connected event");
+        assert_eq!(client.send(b"jit-to-host"), 0);
+
+        let (connection, received) = poll_supervised_network_host_message(fields_id, payload_id);
+        assert!(connection > 0);
+        assert_eq!(connection, joined_connection);
+        assert_eq!(received.as_slice(), b"jit-to-host");
+
+        let reply_id = 0x6380_0103;
+        let reply = b"host-to-jit";
+        for (index, byte) in reply.iter().copied().enumerate() {
+            stasis_jit_global_i32_array_store(reply_id, 0, index as i32, i32::from(byte));
+        }
+        assert_eq!(
+            stasis_jit_network_host_send(connection, reply_id, reply.len() as i32),
+            0
+        );
+        let mut peer_payload = [0; 64];
+        let mut peer_length = 0;
+        for _ in 0..500 {
+            let length = client.poll(&mut peer_payload);
+            if length > 0 {
+                peer_length = length as usize;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(&peer_payload[..peer_length], reply);
+
+        drop(client);
+        drop(host);
+        assert_eq!(stasis_jit_network_host_status(), 1);
+        assert_eq!(stasis_jit_network_host_port(), port);
+        drop(retained_host);
+        assert_eq!(stasis_jit_network_host_status(), 0);
+        assert_eq!(stasis_jit_network_host_port(), 0);
+        assert_eq!(NETWORK_HOST_HANDLE.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(feature = "network")]
+    #[test]
+    fn supervised_network_host_guard_leaves_an_existing_guest_host_running() {
+        let _guard = test_lock();
+        let bundle = supervised_network_test_bundle();
+        let content_id = 0x6380_0201;
+        clear_registered_global_memory();
+        let mut bundle_bytes = bundle.clone();
+        register_global_u8_array(content_id, 0, bundle_bytes.as_mut_ptr(), bundle_bytes.len());
+        stasis_jit_collection_i32_store(content_id, 1, bundle_bytes.len() as i32);
+        let memory_cleanup = NetworkTestRegisteredMemoryCleanup;
+        let cleanup = GuestNetworkHostCleanup;
+        let guest_port =
+            stasis_jit_network_host_start_bind(content_id, bundle.len() as i32, 0x7f000001);
+        assert!(guest_port > 0);
+        clear_registered_global_memory();
+
+        assert_eq!(
+            SupervisedNetworkHostGuard::start(&bundle)
+                .expect_err("a running guest host owns the slot"),
+            SupervisedNetworkHostError::AlreadyOwned
+        );
+        assert_eq!(
+            SupervisedNetworkHostGuard::start(b"invalid bundle")
+                .expect_err("an occupied slot is rejected before parsing a second bundle"),
+            SupervisedNetworkHostError::AlreadyOwned
+        );
+        assert_eq!(stasis_jit_network_host_status(), 1);
+        assert_eq!(stasis_jit_network_host_port(), guest_port);
+
+        stasis_jit_network_host_stop();
+        assert_eq!(stasis_jit_network_host_status(), 0);
+        drop(cleanup);
+        drop(memory_cleanup);
+    }
+
+    #[cfg(feature = "network")]
+    struct GuestNetworkHostCleanup;
+
+    #[cfg(feature = "network")]
+    impl Drop for GuestNetworkHostCleanup {
+        fn drop(&mut self) {
+            stasis_jit_network_host_stop();
+        }
+    }
+
+    #[cfg(feature = "network")]
+    struct NetworkTestRegisteredMemoryCleanup;
+
+    #[cfg(feature = "network")]
+    impl Drop for NetworkTestRegisteredMemoryCleanup {
+        fn drop(&mut self) {
+            clear_registered_global_memory();
+        }
+    }
+
+    #[cfg(feature = "network")]
+    #[test]
+    fn supervised_network_host_guard_releases_a_failed_start_reservation() {
+        let _guard = test_lock();
+        let started = AtomicBool::new(false);
+        let result = start_supervised_network_host(|| {
+            started.store(true, Ordering::Release);
+            Err(SupervisedNetworkHostError::StartFailed)
+        });
+        assert_eq!(result, Err(SupervisedNetworkHostError::StartFailed));
+        assert!(started.load(Ordering::Acquire));
+        assert_eq!(NETWORK_HOST_HANDLE.load(Ordering::Acquire), 0);
+        assert_eq!(NETWORK_HOST_OWNER_ID.load(Ordering::Acquire), 0);
+
+        assert_eq!(
+            SupervisedNetworkHostGuard::start(b"invalid bundle")
+                .expect_err("reject invalid bundle bytes"),
+            SupervisedNetworkHostError::InvalidBundle
+        );
+        assert_eq!(NETWORK_HOST_HANDLE.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(feature = "network")]
+    #[test]
+    fn supervised_network_host_guard_cleans_readiness_failure_without_stopping_a_new_owner() {
+        let _guard = test_lock();
+        let _restore = RestoreSupervisionHandle::capture();
+        std::env::remove_var(stasis_network::SUPERVISION_HANDLE_ENV);
+        let bundle = supervised_network_test_bundle();
+        let failed = SupervisedNetworkHostGuard::start(&bundle).expect("start first host");
+        let stale = failed.clone();
+        let stale_owner_id = failed.inner.owner_id;
+        assert_eq!(
+            failed.publish_readiness(),
+            Err(SupervisedNetworkHostError::ReadinessUnavailable)
+        );
+        assert_eq!(stasis_jit_network_host_status(), 0);
+        drop(failed);
+
+        let current = SupervisedNetworkHostGuard::start(&bundle).expect("start replacement host");
+        let current_port = stasis_jit_network_host_port();
+        assert!(current_port > 0);
+        assert_ne!(stale_owner_id, current.inner.owner_id);
+        {
+            let _lifecycle = network_host_lifecycle_lock();
+            assert!(
+                !release_supervised_network_host_locked(current.inner.handle, stale_owner_id),
+                "a stale owner token cannot release a reused pointer"
+            );
+        }
+        drop(stale);
+        assert_eq!(stasis_jit_network_host_status(), 1);
+        assert_eq!(stasis_jit_network_host_port(), current_port);
+        drop(current);
+        assert_eq!(stasis_jit_network_host_status(), 0);
+    }
+
+    #[cfg(all(feature = "network", windows))]
+    #[test]
+    fn supervised_network_host_guard_publishes_readiness_once() {
+        use std::io::Read;
+
+        let _guard = test_lock();
+        let _restore = RestoreSupervisionHandle::capture();
+        let bundle = supervised_network_test_bundle();
+        let host = SupervisedNetworkHostGuard::start(&bundle).expect("start supervised host");
+        let port = stasis_jit_network_host_port();
+        let (mut frame_reader, frame_writer) = stasis_network::supervision_windows::pipe_to_child()
+            .expect("create private readiness pipe");
+        let raw_handle = stasis_network::supervision_windows::raw_handle(&frame_writer).to_string();
+        std::env::set_var(stasis_network::SUPERVISION_HANDLE_ENV, raw_handle);
+        std::mem::forget(frame_writer);
+
+        host.publish_readiness()
+            .expect("publish the private readiness frame");
+        assert!(std::env::var_os(stasis_network::SUPERVISION_HANDLE_ENV).is_none());
+        let mut prefix = vec![0; stasis_network::SUPERVISION_FRAME_MAGIC.len() + 4];
+        frame_reader
+            .read_exact(&mut prefix)
+            .expect("read readiness frame header");
+        assert_eq!(
+            &prefix[..stasis_network::SUPERVISION_FRAME_MAGIC.len()],
+            stasis_network::SUPERVISION_FRAME_MAGIC
+        );
+        let length = u32::from_be_bytes(
+            prefix[stasis_network::SUPERVISION_FRAME_MAGIC.len()..]
+                .try_into()
+                .expect("frame length field"),
+        ) as usize;
+        assert!(
+            (1..=512).contains(&length),
+            "private invite has a bounded size"
+        );
+        let mut invite = vec![0; length];
+        frame_reader
+            .read_exact(&mut invite)
+            .expect("read complete private invite");
+        assert!(
+            invite.starts_with(b"http://127.0.0.1:"),
+            "invite is loopback-only"
+        );
+        invite.fill(0);
+
+        assert_eq!(
+            host.publish_readiness(),
+            Err(SupervisedNetworkHostError::ReadinessUnavailable)
+        );
+        assert_eq!(stasis_jit_network_host_status(), 1);
+        assert_eq!(stasis_jit_network_host_port(), port);
+        drop(host);
+        assert_eq!(stasis_jit_network_host_status(), 0);
+    }
+
+    #[cfg(all(feature = "network", windows))]
+    #[test]
+    fn supervised_network_host_guard_cleans_a_failed_private_readiness_write() {
+        let _guard = test_lock();
+        let _restore = RestoreSupervisionHandle::capture();
+        let (reader, writer) = stasis_network::supervision_windows::pipe_to_child()
+            .expect("create private readiness pipe");
+        let raw_handle = stasis_network::supervision_windows::raw_handle(&writer).to_string();
+        std::env::set_var(stasis_network::SUPERVISION_HANDLE_ENV, raw_handle);
+        std::mem::forget(writer);
+        drop(reader);
+
+        let bundle = supervised_network_test_bundle();
+        let host = SupervisedNetworkHostGuard::start(&bundle).expect("start supervised host");
+        assert_eq!(
+            host.publish_readiness(),
+            Err(SupervisedNetworkHostError::ReadinessFailed)
+        );
+        assert!(std::env::var_os(stasis_network::SUPERVISION_HANDLE_ENV).is_none());
+        assert_eq!(stasis_jit_network_host_status(), 0);
+        drop(host);
+        assert_eq!(stasis_jit_network_host_port(), 0);
+    }
+
+    #[cfg(feature = "network")]
+    #[test]
+    fn supervised_network_host_guard_drop_races_status_poll_and_guest_stop_safely() {
+        let _guard = test_lock();
+        let bundle = supervised_network_test_bundle();
+        let host = SupervisedNetworkHostGuard::start(&bundle).expect("start supervised host");
+        let running = Arc::new(AtomicBool::new(true));
+        let mut workers = Vec::new();
+        for _ in 0..3 {
+            let running = Arc::clone(&running);
+            workers.push(std::thread::spawn(move || {
+                while running.load(Ordering::Acquire) {
+                    let status = stasis_jit_network_host_status();
+                    assert!(matches!(status, 0 | 1));
+                    let poll = stasis_jit_network_host_poll(0, 3, 0, 16);
+                    assert!(matches!(poll, 0 | -3));
+                    stasis_jit_network_host_stop();
+                    std::thread::yield_now();
+                }
+            }));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        drop(host);
+        running.store(false, Ordering::Release);
+        for worker in workers {
+            worker.join().expect("network host access race worker");
+        }
+        assert_eq!(stasis_jit_network_host_status(), 0);
+        assert_eq!(stasis_jit_network_host_port(), 0);
+        assert_eq!(NETWORK_HOST_HANDLE.load(Ordering::Acquire), 0);
     }
 }

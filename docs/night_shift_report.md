@@ -1,5 +1,63 @@
 # Night Shift Report
 
+## 2026-10-09 - Maddox #638 supervised live authority
+
+Added an opt-in Windows supervisor mode that launches the existing Stasis CLI as
+the live JIT authority and bridges bounded control, response, readiness, peer,
+and capture channels without a hidden child process. The authority stages and
+verifies a fresh network guest bundle, reserves its host before application
+startup, and publishes readiness only after the live workspace and frame setup
+are ready. Fixed-schema requests accept normal host input, pause/resume, one-tick
+scheduling, captures, and quit; current viewport checks reject invalid input and
+oversized captures before acknowledgement or native image scheduling. Requests,
+pipe writes, capture evidence, peer receipts, and shared shutdown cleanup have
+explicit bounds. Packaged supervision remains on its existing mode.
+
+Added a separate real-game TTT fixture using four byte-identical modules pinned
+to Maddox and Friends commit `cb43e41a2c0a9c1f1123365885f731a35184a351` with
+hashes recorded in `tests/fixtures/network_supervision/live_ttt/provenance.json`.
+The host uses ordinary pointer frames and the peer uses the authenticated native
+`NetworkClient` protocol. The independent peer oracle verified the win, rematch,
+draw, and catalog return across 20 exact snapshots and 43 numeric receipts.
+Four retained 640x360 PNGs were inspected; they show the win, cleared rematch,
+full draw, and catalog. Six additional process cases passed: unread supervisor
+stdout, malformed JSONL, stdin EOF, idle timeout, peer exit, and authority exit.
+Each failed nonzero within its bound and both recorded child processes were gone.
+
+Validation through the frozen Windows/MSVC runtime launcher passed:
+
+- `cargo test -p stasis_runner supervised_live::tests -- --test-threads=1` (5/5).
+- `cargo test -p stasis supervised_ -- --test-threads=1` (5/5).
+- `cargo test -p stasis_network --features supervision-cli --lib supervision:: -- --test-threads=1 --nocapture` (7/7).
+- `cargo test -p stasis_network --test supervision -- --test-threads=1` (3/3).
+- `cargo test -p stasis_network --test native_client -- --test-threads=1` (6/6).
+- `cargo test -p stasis_dynload --features network --lib -- --test-threads=1` (88/88).
+
+Fresh `stasis`, `stasis-network-supervise`, and `supervision_live_ttt_peer`
+binaries were built with the same local validation identity. The end-to-end
+`run_acceptance.ps1` passed the exact state, receipt, capture-hash/dimension,
+aggregate-evidence-size, and bounded-child-cleanup oracles. `cargo fmt --all`
+and `git diff --check` passed. The legacy packaged regression
+`tools/ci/test_network_supervision.ps1` also passed with fresh CLI and matching
+graphics runtime/runner artifacts (`NETWORK_SUPERVISION_ACCEPTANCE_OK`). The
+cold Windows CI job now derives the commit identity and builds matching native
+artifacts before running that source-checkout test.
+
+Visual evidence: inspected the four retained PNGs from the successful live run;
+the application rendered a red host win, an empty rematch board, the complete
+red/blue draw, and the catalog. Also inspected
+`D:/code/.automation-evidence/nightly-20261009/task638/live-acceptance/evidence/ttt-checkpoint-sequence.mp4`,
+a 223-frame checkpoint sequence assembled from those four actual captures. It
+marks win, rematch, draw, and catalog; it is not a continuous input recording.
+The SDL dummy display means the PNGs are captured renderer output, not a visible
+desktop window recording.
+
+Theory gained: a scheduled step is only an acknowledgement that one tick was
+queued; the peer's next authoritative snapshot is the evidence that host input
+actually reached the game. Windows JSONL clients commonly use CRLF, so the
+supervisor strips exactly the terminal CR while preserving embedded CR for the
+strict DTO parser to reject.
+
 ## 2026-10-03
 
 - Added a dispatch-only iOS Generics simulator workflow with fresh matching host runtime/compiler builds, ARM64 runner checks, fail-closed package provenance/evidence validation, and partial artifact upload.

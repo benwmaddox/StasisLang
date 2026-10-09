@@ -62,6 +62,7 @@ use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zip::System as ZipSystem;
@@ -522,6 +523,12 @@ enum ToolchainCommand {
         /// Read live commands from stdin and emit response envelopes as JSON lines.
         #[arg(long, conflicts_with = "live_script")]
         live_stdio: bool,
+        /// Restrict live control to the supervisor's private bounded pipe protocol.
+        #[arg(long, requires = "live_stdio")]
+        supervised_live: bool,
+        /// Retain supervised captures and peer receipts under this private run directory.
+        #[arg(long, value_name = "PATH", requires = "supervised_live")]
+        evidence_root: Option<PathBuf>,
         #[arg(long, default_value_t = 16_000)]
         tick_sleep_us: u64,
         #[arg(long)]
@@ -2226,6 +2233,8 @@ fn execute(
                     live_script,
                     live_json,
                     live_stdio,
+                    supervised_live,
+                    evidence_root,
                     tick_sleep_us,
                     ticks,
                 } => {
@@ -2243,6 +2252,8 @@ fn execute(
                             live_script.as_deref(),
                             live_json,
                             live_stdio,
+                            supervised_live,
+                            evidence_root.as_deref(),
                             tick_sleep_us,
                             ticks,
                         )
@@ -4541,9 +4552,17 @@ fn run_workspace_live(
     script: Option<&Path>,
     json_lines: bool,
     stdio: bool,
+    supervised_live: bool,
+    evidence_root: Option<&Path>,
     tick_sleep_micros: u64,
     max_ticks: Option<u64>,
 ) -> Result<CommandResult, String> {
+    if supervised_live && (!stdio || script.is_some() || json_lines || max_ticks.is_some()) {
+        return Err("supervised live requires interactive private-pipe mode".to_string());
+    }
+    if supervised_live != evidence_root.is_some() {
+        return Err("supervised live requires an evidence root".to_string());
+    }
     if !data_bind.is_empty() && data_bind.len() != 2 {
         return Err("--data-bind requires DATA_PATH and STRUCT_META_PATH".to_string());
     }
@@ -4560,14 +4579,55 @@ fn run_workspace_live(
     let (client, server) = live_session(stasis_runner::live::DEFAULT_LIVE_QUEUE_CAPACITY);
     let transport = if stdio { "stdio" } else { "script" };
     let script = script.map(|path| workspace.root.join(path));
-    let terminal =
-        thread::spawn(move || run_live_terminal(client, script.as_deref(), json_lines, stdio));
+    let (supervised_control, supervised_response, supervised_capture_root, supervised_host) =
+        if supervised_live {
+            let (control, response, capture_root) = stasis_network::supervision::take_child_pipes()
+                .map_err(|_| "supervised live pipes are invalid".to_string())?
+                .into_parts();
+            let requested_root =
+                validate_supervised_live_evidence_root(evidence_root.expect("required above"))?;
+            let inherited_root = capture_root
+                .canonicalize()
+                .map_err(|_| "supervised live evidence root is invalid".to_string())?;
+            if inherited_root != requested_root {
+                return Err(
+                    "supervised live evidence root did not match its inherited handle".into(),
+                );
+            }
+            let bundle = build_supervised_live_network_bundle(workspace)?;
+            let host = stasis_dynload::SupervisedNetworkHostGuard::start(&bundle)
+                .map_err(|_| "supervised live network host could not start".to_string())?;
+            (
+                Some(control),
+                Some(response),
+                Some(requested_root),
+                Some(host),
+            )
+        } else {
+            (None, None, None, None)
+        };
+    let terminal = match (supervised_control, supervised_response) {
+        (Some(control), Some(response)) => {
+            thread::spawn(move || run_supervised_live_terminal(client, control, response))
+        }
+        (None, None) => {
+            thread::spawn(move || run_live_terminal(client, script.as_deref(), json_lines, stdio))
+        }
+        _ => return Err("supervised live pipes are incomplete".to_string()),
+    };
     let config = LiveRunConfig::new(
         workspace.root.clone(),
         entry_relative,
         PathBuf::from(&workspace.manifest.output),
     )
     .with_window_title(&workspace.manifest.name);
+    let config = match (supervised_capture_root.as_ref(), supervised_host.as_ref()) {
+        (Some(capture_root), Some(host)) => config
+            .with_supervised_capture_root(capture_root.clone())
+            .with_supervised_host(host.clone()),
+        (None, None) => config,
+        _ => return Err("supervised live setup is incomplete".to_string()),
+    };
     let run_result = run_live_in_process_with_data_and_project_configuration(
         &entry_path,
         watch_dir.as_deref(),
@@ -4605,6 +4665,137 @@ fn run_workspace_live(
     ))
 }
 
+static NEXT_SUPERVISED_BUNDLE_STAGE: AtomicUsize = AtomicUsize::new(0);
+
+struct SupervisedBundleStage(PathBuf);
+
+impl SupervisedBundleStage {
+    fn create() -> Result<Self, String> {
+        let temp = env::temp_dir()
+            .canonicalize()
+            .map_err(|_| "temporary network staging root is unavailable".to_string())?;
+        for _ in 0..32 {
+            let nonce = NEXT_SUPERVISED_BUNDLE_STAGE.fetch_add(1, Ordering::Relaxed);
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let candidate = temp.join(format!(
+                "stasis-supervised-network-{}-{stamp}-{nonce}",
+                std::process::id()
+            ));
+            match fs::create_dir(&candidate) {
+                Ok(()) => return Ok(Self(candidate)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err("temporary network staging root could not be created".into()),
+            }
+        }
+        Err("temporary network staging root could not be created".into())
+    }
+}
+
+impl Drop for SupervisedBundleStage {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn build_supervised_live_network_bundle(workspace: &Workspace) -> Result<Vec<u8>, String> {
+    let stage = SupervisedBundleStage::create()?;
+    stage_desktop_network_guest(workspace, &stage.0, true)
+        .map_err(|_| "supervised live network guest could not be staged".to_string())?;
+    let bundle_path = stage.0.join("network_guest.bundle");
+    let manifest_path = stage.0.join("network_guest.bundle.json");
+    let bundle_metadata = fs::symlink_metadata(&bundle_path)
+        .map_err(|_| "supervised live network guest bundle is unavailable".to_string())?;
+    let manifest_metadata = fs::symlink_metadata(&manifest_path)
+        .map_err(|_| "supervised live network guest metadata is unavailable".to_string())?;
+    let max_bytes = (stasis_network::MAX_TOTAL_BYTES + 1024) as u64;
+    if bundle_metadata.file_type().is_symlink()
+        || path_is_reparse_point(&bundle_path)?
+        || !bundle_metadata.is_file()
+        || bundle_metadata.len() == 0
+        || bundle_metadata.len() > max_bytes
+        || manifest_metadata.file_type().is_symlink()
+        || path_is_reparse_point(&manifest_path)?
+        || !manifest_metadata.is_file()
+        || manifest_metadata.len() > 4096
+    {
+        return Err("supervised live network guest bundle is invalid".into());
+    }
+    let manifest_bytes = fs::read(&manifest_path)
+        .map_err(|_| "supervised live network guest metadata is unavailable".to_string())?;
+    let manifest: Value = serde_json::from_slice(&manifest_bytes)
+        .map_err(|_| "supervised live network guest metadata is invalid".to_string())?;
+    if manifest.as_object().is_none_or(|object| object.len() != 4)
+        || manifest.get("format").and_then(Value::as_str) != Some("stasis.static_bundle.v1")
+        || manifest.get("path").and_then(Value::as_str) != Some("network_guest.bundle")
+        || manifest.get("length").and_then(Value::as_u64) != Some(bundle_metadata.len())
+    {
+        return Err("supervised live network guest metadata is invalid".into());
+    }
+    let file = fs::File::open(&bundle_path)
+        .map_err(|_| "supervised live network guest bundle is unavailable".to_string())?;
+    let capacity = usize::try_from(bundle_metadata.len())
+        .map_err(|_| "supervised live network guest bundle is invalid".to_string())?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(max_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "supervised live network guest bundle is unavailable".to_string())?;
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    if bytes.len() as u64 != bundle_metadata.len()
+        || manifest.get("sha256").and_then(Value::as_str) != Some(digest.as_str())
+    {
+        return Err("supervised live network guest bundle identity is invalid".into());
+    }
+    Ok(bytes)
+}
+
+fn validate_supervised_live_evidence_root(root: &Path) -> Result<PathBuf, String> {
+    if !root.is_absolute() {
+        return Err("supervised live evidence root is invalid".into());
+    }
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|_| "supervised live evidence root is unavailable".to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() || path_is_reparse_point(root)? {
+        return Err("supervised live evidence root is invalid".into());
+    }
+    let canonical = root
+        .canonicalize()
+        .map_err(|_| "supervised live evidence root is invalid".to_string())?;
+    let temp = env::temp_dir()
+        .canonicalize()
+        .map_err(|_| "supervised live evidence root is invalid".to_string())?;
+    if canonical == temp || !canonical.starts_with(&temp) {
+        return Err("supervised live evidence root is invalid".into());
+    }
+    let mut entries = fs::read_dir(&canonical)
+        .map_err(|_| "supervised live evidence root is unavailable".to_string())?;
+    if entries
+        .next()
+        .transpose()
+        .map_err(|_| "supervised live evidence root is unavailable".to_string())?
+        .is_some()
+    {
+        return Err("supervised live evidence root must be empty".into());
+    }
+    Ok(canonical)
+}
+
+fn path_is_reparse_point(path: &Path) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        stasis_network::supervision_windows::is_reparse_point(path)
+            .map_err(|_| "supervised path could not be validated".to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|_| "supervised path could not be validated".to_string())?;
+        Ok(metadata.file_type().is_symlink())
+    }
+}
+
 fn resolve_live_entry(workspace: &Workspace, entry: &Path) -> Result<(PathBuf, PathBuf), String> {
     if entry.as_os_str().is_empty() {
         return Err("live transport entry must not be empty".to_string());
@@ -4639,6 +4830,222 @@ fn resolve_live_entry(workspace: &Workspace, entry: &Path) -> Result<(PathBuf, P
         .map_err(|_| "live transport entry resolves outside the workspace".to_string())?
         .to_path_buf();
     Ok((entry_path, entry_relative))
+}
+
+fn read_supervised_control_line<R: BufRead>(
+    reader: &mut R,
+) -> Result<Option<Vec<u8>>, &'static str> {
+    const MAX_LINE_BYTES: usize = stasis_runner::supervised_live::MAX_SUPERVISED_LIVE_LINE_BYTES;
+    let mut line = Vec::with_capacity(128);
+    loop {
+        let available = reader.fill_buf().map_err(|_| "control pipe read failed")?;
+        if available.is_empty() {
+            return if line.is_empty() {
+                Ok(None)
+            } else {
+                Err("control line was unterminated")
+            };
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        let content = newline.map_or(consumed, |index| index);
+        if line.len().saturating_add(content) > MAX_LINE_BYTES {
+            return Err("control line exceeded its bound");
+        }
+        line.extend_from_slice(&available[..content]);
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(Some(line));
+        }
+    }
+}
+
+fn run_supervised_live_terminal(
+    client: stasis_runner::live::LiveSessionClient,
+    control: fs::File,
+    mut response_writer: fs::File,
+) -> Result<(), String> {
+    use stasis_runner::supervised_live::{
+        response_for_request, SupervisedLiveErrorCode, SupervisedLiveEvent, SupervisedLiveRequest,
+        SupervisedLiveRequestBudget,
+    };
+
+    let result = (|| {
+        let mut reader = io::BufReader::with_capacity(1024, control);
+        let mut budget = SupervisedLiveRequestBudget::new(Instant::now());
+        let mut seen_ids = BTreeSet::new();
+        loop {
+            let line = match read_supervised_control_line(&mut reader) {
+                Ok(Some(line)) => line,
+                Ok(None) => {
+                    client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit))?;
+                    return Ok(());
+                }
+                Err(_) => return Err("supervised live control input was invalid".into()),
+            };
+            let budget_result = budget.record(Instant::now());
+            let request = SupervisedLiveRequest::parse_line(&line)
+                .map_err(|_| "supervised live control request was invalid".to_string())?;
+            if !seen_ids.insert(request.request_id) {
+                let response = response_for_request(
+                    &request,
+                    0,
+                    SupervisedLiveEvent::Rejected,
+                    None,
+                    Some(SupervisedLiveErrorCode::InvalidRequest),
+                )
+                .map_err(|_| "supervised live request was invalid".to_string())?;
+                write_supervised_live_response(&mut response_writer, &response)?;
+                return Err("supervised live request was duplicated".into());
+            }
+            let request_error = budget_result
+                .err()
+                .or_else(|| budget.capture_attempt(&request).err());
+            if let Some(error) = request_error {
+                let response = response_for_request(
+                    &request,
+                    0,
+                    SupervisedLiveEvent::Rejected,
+                    None,
+                    Some(error),
+                )
+                .map_err(|_| "supervised live request was invalid".to_string())?;
+                write_supervised_live_response(&mut response_writer, &response)?;
+                return Err("supervised live request limit was reached".into());
+            }
+            let live_request = request.to_live_request();
+            let request_id = live_request.request_id;
+            client.submit(live_request)?;
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let live_response = loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err("supervised live command timed out".into());
+                }
+                let response = client.receive_timeout(remaining)?;
+                if response.request_id == request_id {
+                    break response;
+                }
+            };
+            let response = project_supervised_live_response(&request, live_response)?;
+            write_supervised_live_response(&mut response_writer, &response)?;
+            if matches!(
+                request.command,
+                stasis_runner::supervised_live::SupervisedLiveCommand::Quit
+            ) {
+                return if response.ok {
+                    Ok(())
+                } else {
+                    Err("supervised live quit was rejected".into())
+                };
+            }
+        }
+    })();
+    if result.is_err() {
+        let _ = client.submit(LiveRequest::new(u64::MAX, LiveCommand::Quit));
+    }
+    result
+}
+
+fn write_supervised_live_response(
+    writer: &mut fs::File,
+    response: &stasis_runner::supervised_live::SupervisedLiveResponse,
+) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec(response)
+        .map_err(|_| "supervised live response could not be serialized".to_string())?;
+    if bytes.len() > stasis_runner::supervised_live::MAX_SUPERVISED_LIVE_LINE_BYTES {
+        return Err("supervised live response exceeded its bound".into());
+    }
+    bytes.push(b'\n');
+    // The supervisor permits one outstanding response and continuously drains this 4096-byte pipe.
+    writer
+        .write_all(&bytes)
+        .and_then(|()| writer.flush())
+        .map_err(|_| "supervised live response pipe failed".to_string())
+}
+
+fn project_supervised_live_response(
+    request: &stasis_runner::supervised_live::SupervisedLiveRequest,
+    response: LiveResponse,
+) -> Result<stasis_runner::supervised_live::SupervisedLiveResponse, String> {
+    use stasis_runner::supervised_live::{
+        response_for_request, SupervisedLiveCapture, SupervisedLiveCommand,
+        SupervisedLiveErrorCode, SupervisedLiveEvent,
+    };
+    if response.request_id != u64::from(request.request_id) {
+        return Err("supervised live response ID did not match".into());
+    }
+    let expected = match &request.command {
+        SupervisedLiveCommand::Pause => ("paused", SupervisedLiveEvent::Paused),
+        SupervisedLiveCommand::Resume => ("resumed", SupervisedLiveEvent::Resumed),
+        SupervisedLiveCommand::Step { .. } => {
+            ("step_scheduled", SupervisedLiveEvent::StepScheduled)
+        }
+        SupervisedLiveCommand::SetInputState { .. } => {
+            ("input_state_set", SupervisedLiveEvent::InputApplied)
+        }
+        SupervisedLiveCommand::CaptureFrame { .. } => {
+            ("capture_completed", SupervisedLiveEvent::CaptureSaved)
+        }
+        SupervisedLiveCommand::Quit => ("quitting", SupervisedLiveEvent::Quit),
+    };
+    if !response.ok || response.kind != expected.0 {
+        let code = match &request.command {
+            SupervisedLiveCommand::CaptureFrame { .. } => SupervisedLiveErrorCode::CaptureRejected,
+            SupervisedLiveCommand::SetInputState { .. } => SupervisedLiveErrorCode::InvalidRequest,
+            _ => SupervisedLiveErrorCode::RuntimeFailed,
+        };
+        return response_for_request(
+            request,
+            response.tick,
+            SupervisedLiveEvent::Rejected,
+            None,
+            Some(code),
+        )
+        .map_err(|_| "supervised live response was invalid".to_string());
+    }
+    let capture = if let SupervisedLiveCommand::CaptureFrame { artifact_id } = &request.command {
+        let artifact_id = *artifact_id;
+        let data = response
+            .data
+            .as_ref()
+            .ok_or_else(|| "supervised live capture metadata was invalid".to_string())?;
+        let expected_artifact = stasis_runner::supervised_live::artifact_name(artifact_id)
+            .ok_or_else(|| "supervised live capture ID was invalid".to_string())?;
+        if data.get("artifact").and_then(Value::as_str) != Some(expected_artifact.as_str()) {
+            return Err("supervised live capture metadata was invalid".into());
+        }
+        Some(SupervisedLiveCapture {
+            artifact_id,
+            width: u16::try_from(
+                data.get("width")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| "supervised live capture metadata was invalid".to_string())?,
+            )
+            .map_err(|_| "supervised live capture metadata was invalid".to_string())?,
+            height: u16::try_from(
+                data.get("height")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| "supervised live capture metadata was invalid".to_string())?,
+            )
+            .map_err(|_| "supervised live capture metadata was invalid".to_string())?,
+            byte_length: u32::try_from(
+                data.get("byte_length")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| "supervised live capture metadata was invalid".to_string())?,
+            )
+            .map_err(|_| "supervised live capture metadata was invalid".to_string())?,
+            sha256: data
+                .get("sha256")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "supervised live capture metadata was invalid".to_string())?
+                .to_string(),
+        })
+    } else {
+        None
+    };
+    response_for_request(request, response.tick, expected.1, capture, None)
+        .map_err(|_| "supervised live response was invalid".to_string())
 }
 
 fn run_live_terminal(
@@ -12328,6 +12735,87 @@ mod tests {
 
     use super::*;
     use stasis::DesktopSystemLinks;
+
+    #[test]
+    fn supervised_live_projection_keeps_scheduled_steps_and_errors_fixed() {
+        use stasis_runner::supervised_live::{
+            SupervisedLiveCommand, SupervisedLiveErrorCode, SupervisedLiveEvent,
+            SupervisedLiveRequest,
+        };
+
+        let step = SupervisedLiveRequest {
+            schema_version: stasis_runner::supervised_live::SUPERVISED_LIVE_SCHEMA_VERSION,
+            request_id: 41,
+            command: SupervisedLiveCommand::Step { ticks: 1 },
+        };
+        let projected = project_supervised_live_response(
+            &step,
+            LiveResponse::success(41, 9, "step_scheduled", serde_json::json!({})),
+        )
+        .expect("scheduled step projection");
+        assert_eq!(projected.event, SupervisedLiveEvent::StepScheduled);
+        assert_eq!(projected.tick, 9);
+
+        let input = SupervisedLiveRequest {
+            schema_version: stasis_runner::supervised_live::SUPERVISED_LIVE_SCHEMA_VERSION,
+            request_id: 42,
+            command: SupervisedLiveCommand::SetInputState { pointers: vec![] },
+        };
+        let projected = project_supervised_live_response(
+            &input,
+            LiveResponse::failure(42, 9, "C:/private/source + invite=https://secret"),
+        )
+        .expect("fixed rejection projection");
+        assert_eq!(projected.event, SupervisedLiveEvent::Rejected);
+        assert_eq!(
+            projected.error_code,
+            Some(SupervisedLiveErrorCode::InvalidRequest)
+        );
+        let encoded = serde_json::to_string(&projected).expect("encode projected response");
+        assert!(!encoded.contains("private"));
+        assert!(!encoded.contains("invite"));
+        assert!(!encoded.contains("secret"));
+    }
+
+    #[test]
+    fn supervised_live_capture_projection_requires_fixed_artifact_metadata() {
+        use stasis_runner::supervised_live::{
+            SupervisedLiveCommand, SupervisedLiveEvent, SupervisedLiveRequest,
+        };
+
+        let request = SupervisedLiveRequest {
+            schema_version: stasis_runner::supervised_live::SUPERVISED_LIVE_SCHEMA_VERSION,
+            request_id: 43,
+            command: SupervisedLiveCommand::CaptureFrame { artifact_id: 3 },
+        };
+        let digest = "a".repeat(64);
+        let response = LiveResponse::success(
+            43,
+            9,
+            "capture_completed",
+            serde_json::json!({
+                "artifact": "supervised-capture-03",
+                "width": 640,
+                "height": 360,
+                "byte_length": 1024,
+                "sha256": digest,
+                "path": "C:/private/capture.png"
+            }),
+        );
+        let projected =
+            project_supervised_live_response(&request, response).expect("fixed capture projection");
+        assert_eq!(projected.event, SupervisedLiveEvent::CaptureSaved);
+        assert_eq!(
+            projected
+                .capture
+                .as_ref()
+                .map(|capture| capture.artifact_id),
+            Some(3)
+        );
+        let encoded = serde_json::to_string(&projected).expect("encode capture response");
+        assert!(!encoded.contains("path"));
+        assert!(!encoded.contains("private"));
+    }
 
     fn mobile_network_artifact_fixture() -> NativeNetworkArtifacts {
         NativeNetworkArtifacts {

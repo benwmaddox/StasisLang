@@ -1,0 +1,799 @@
+// Authoritative terminal presentation and rematch state.
+//
+// Game rules own the settled board and result.  This module only records the
+// viewer-safe result projection and the explicit, sequenced consent transition
+// that may lead to a new StartGame dispatch.  It never reads a game board and
+// never restarts a game by itself.
+import "/src/protocol.stasis";
+
+const TERMINAL_FLOW_MAX_SEATS: i32 = 8;
+const TERMINAL_FLOW_MASK_LIMIT: i32 = 255;
+const TERMINAL_FLOW_PHASE_IDLE: i32 = 0;
+const TERMINAL_FLOW_PHASE_SETTLED: i32 = 1;
+const TERMINAL_FLOW_PHASE_REMATCH_REQUESTED: i32 = 2;
+const TERMINAL_FLOW_PHASE_REMATCH_WAITING: i32 = 3;
+const TERMINAL_FLOW_PHASE_REMATCH_READY: i32 = 4;
+const TERMINAL_FLOW_PHASE_DECLINED: i32 = 5;
+const TERMINAL_FLOW_PHASE_INTERRUPTED: i32 = 6;
+const TERMINAL_FLOW_PHASE_RESTARTED: i32 = 7;
+const TERMINAL_FLOW_PHASE_RETURN_CONFIRMATION: i32 = 8;
+const TERMINAL_FLOW_PHASE_RETURNING: i32 = 9;
+const TERMINAL_FLOW_PHASE_RETURNED: i32 = 10;
+const TERMINAL_FLOW_RESULT_NONE: i32 = 0;
+const TERMINAL_FLOW_RESULT_WIN: i32 = 1;
+const TERMINAL_FLOW_RESULT_LOSS: i32 = 2;
+const TERMINAL_FLOW_RESULT_DRAW: i32 = 3;
+const TERMINAL_FLOW_RESULT_SCORE: i32 = 4;
+const TERMINAL_FLOW_RESULT_RANK: i32 = 5;
+const TERMINAL_FLOW_RESULT_MULTI_ROUND: i32 = 6;
+const TERMINAL_FLOW_OUTCOME_UNKNOWN: i32 = 0;
+const TERMINAL_FLOW_OUTCOME_WIN: i32 = 1;
+const TERMINAL_FLOW_OUTCOME_LOSS: i32 = 2;
+const TERMINAL_FLOW_OUTCOME_DRAW: i32 = 3;
+const TERMINAL_FLOW_INTERRUPTION_NONE: i32 = 0;
+const TERMINAL_FLOW_INTERRUPTION_HOST_DEPARTURE: i32 = 1;
+const TERMINAL_FLOW_INTERRUPTION_PARTICIPANT_DISCONNECT: i32 = 2;
+const TERMINAL_FLOW_INTERRUPTION_REMATCH_DECLINED: i32 = 3;
+const TERMINAL_FLOW_COMMAND_REQUEST: i32 = 18;
+const TERMINAL_FLOW_COMMAND_RESPONSE: i32 = 19;
+const TERMINAL_FLOW_COMMAND_RETURN: i32 = 20;
+// Version for the separate, viewer-safe terminal trailer. Existing game
+// snapshot schemas remain unchanged; a future trailer change must advance
+// this discriminator deterministically.
+const TERMINAL_FLOW_SNAPSHOT_SCHEMA_VERSION: i32 = 1;
+
+struct TerminalFlowState {
+    active: bool;
+    phase: i32;
+    game_id: i32;
+    round_id: i32;
+    result_kind: i32;
+    winner_mask: i32;
+    viewer_seat: i32;
+    participant_mask: i32;
+    connected_mask: i32;
+    required_mask: i32;
+    requested_mask: i32;
+    accepted_mask: i32;
+    declined_mask: i32;
+    interruption_reason: i32;
+    round_index: i32;
+    round_total: i32;
+    score_count: i32;
+    scores: i32[8];
+    ranks: i32[8];
+    rematch_seed: i32;
+    restart_pending: bool;
+    restart_transition_count: i32;
+    return_requested: bool;
+    state_revision: i32;
+}
+
+global terminal_flow: TerminalFlowState;
+
+function terminal_flow_mask_for_seat(seat_id: i32): i32 {
+    if (seat_id < 0 || seat_id >= TERMINAL_FLOW_MAX_SEATS) {
+        return 0;
+    }
+    let mask: i32 = 1;
+    for (let index: i32 = 0; index < seat_id; index += 1) {
+        mask *= 2;
+    }
+    return mask;
+}
+
+function terminal_flow_mask_has(mask: i32, seat_id: i32): bool {
+    let bit: i32 = terminal_flow_mask_for_seat(seat_id);
+    return bit > 0 && mask >= 0 && mask / bit % 2 == 1;
+}
+
+function terminal_flow_mask_count(mask: i32): i32 {
+    let count: i32 = 0;
+    for (let seat_id: i32 = 0; seat_id < TERMINAL_FLOW_MAX_SEATS; seat_id += 1) {
+        if (terminal_flow_mask_has(mask, seat_id)) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+function terminal_flow_mask_contains(available: i32, required: i32): bool {
+    if (!terminal_flow_valid_mask(available) || !terminal_flow_valid_mask(required)) {
+        return false;
+    }
+    for (let seat_id: i32 = 0; seat_id < TERMINAL_FLOW_MAX_SEATS; seat_id += 1) {
+        if (terminal_flow_mask_has(required, seat_id) && !terminal_flow_mask_has(available, seat_id)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function terminal_flow_mask_without(mask: i32, removed: i32): i32 {
+    let result: i32 = 0;
+    for (let seat_id: i32 = 0; seat_id < TERMINAL_FLOW_MAX_SEATS; seat_id += 1) {
+        if (terminal_flow_mask_has(mask, seat_id) && !terminal_flow_mask_has(removed, seat_id)) {
+            result += terminal_flow_mask_for_seat(seat_id);
+        }
+    }
+    return result;
+}
+
+function terminal_flow_valid_mask(mask: i32): bool {
+    return mask >= 0 && mask <= TERMINAL_FLOW_MASK_LIMIT;
+}
+
+function terminal_flow_valid_result_kind(result_kind: i32): bool {
+    return result_kind >= TERMINAL_FLOW_RESULT_WIN && result_kind <= TERMINAL_FLOW_RESULT_MULTI_ROUND;
+}
+
+function terminal_flow_reset_scores(): void {
+    terminal_flow.score_count = 0;
+    for (let seat_id: i32 = 0; seat_id < TERMINAL_FLOW_MAX_SEATS; seat_id += 1) {
+        terminal_flow.scores[seat_id] = 0;
+        terminal_flow.ranks[seat_id] = 0;
+    }
+}
+
+function terminal_flow_reset(): void {
+    terminal_flow.active = false;
+    terminal_flow.phase = TERMINAL_FLOW_PHASE_IDLE;
+    terminal_flow.game_id = 0;
+    terminal_flow.round_id = 0;
+    terminal_flow.result_kind = TERMINAL_FLOW_RESULT_NONE;
+    terminal_flow.winner_mask = 0;
+    terminal_flow.viewer_seat = -1;
+    terminal_flow.participant_mask = 0;
+    terminal_flow.connected_mask = 0;
+    terminal_flow.required_mask = 0;
+    terminal_flow.requested_mask = 0;
+    terminal_flow.accepted_mask = 0;
+    terminal_flow.declined_mask = 0;
+    terminal_flow.interruption_reason = TERMINAL_FLOW_INTERRUPTION_NONE;
+    terminal_flow.round_index = 0;
+    terminal_flow.round_total = 0;
+    terminal_flow.rematch_seed = 0;
+    terminal_flow.restart_pending = false;
+    terminal_flow.restart_transition_count = 0;
+    terminal_flow.return_requested = false;
+    terminal_flow.state_revision = 0;
+    terminal_flow_reset_scores();
+}
+
+// A settled projection is opened only by a caller that has observed the
+// selected rule module's explicit terminal phase.  No winner is inferred here.
+function terminal_flow_open(game_id: i32, round_id: i32, result_kind: i32, winner_mask: i32, participant_mask: i32, connected_mask: i32): bool {
+    if (
+        game_id <= 0
+        || round_id < 0
+        || !terminal_flow_valid_result_kind(result_kind)
+        || !terminal_flow_valid_mask(winner_mask)
+        || !terminal_flow_valid_mask(participant_mask)
+        || !terminal_flow_valid_mask(connected_mask)
+        || participant_mask <= 0
+        || !terminal_flow_mask_contains(participant_mask, winner_mask)
+        || !terminal_flow_mask_contains(participant_mask, connected_mask)
+        ||(result_kind == TERMINAL_FLOW_RESULT_WIN && winner_mask == 0)
+    ) {
+        return false;
+    }
+    if (
+        terminal_flow.active
+        && terminal_flow.game_id == game_id
+        && terminal_flow.round_id == round_id
+        && terminal_flow.phase != TERMINAL_FLOW_PHASE_RESTARTED
+    ) {
+        return false;
+    }
+    let prior_restart_count: i32 = terminal_flow.restart_transition_count;
+    terminal_flow.active = true;
+    terminal_flow.phase = TERMINAL_FLOW_PHASE_SETTLED;
+    terminal_flow.game_id = game_id;
+    terminal_flow.round_id = round_id;
+    terminal_flow.result_kind = result_kind;
+    terminal_flow.winner_mask = winner_mask;
+    terminal_flow.viewer_seat = -1;
+    terminal_flow.participant_mask = participant_mask;
+    terminal_flow.connected_mask = connected_mask;
+    terminal_flow.required_mask = participant_mask;
+    terminal_flow.requested_mask = 0;
+    terminal_flow.accepted_mask = 0;
+    terminal_flow.declined_mask = 0;
+    terminal_flow.interruption_reason = TERMINAL_FLOW_INTERRUPTION_NONE;
+    terminal_flow.round_index = 0;
+    terminal_flow.round_total = 0;
+    terminal_flow.rematch_seed = 0;
+    terminal_flow.restart_pending = false;
+    terminal_flow.restart_transition_count = prior_restart_count;
+    terminal_flow.return_requested = false;
+    terminal_flow.state_revision += 1;
+    terminal_flow_reset_scores();
+    if (!terminal_flow_mask_contains(connected_mask, participant_mask)) {
+        terminal_flow_sync_connection(connected_mask);
+    }
+    return true;
+}
+
+// Explicit terminal gate for adapters that receive a numeric game phase.
+function terminal_flow_open_if_terminal(
+    terminal: bool,
+    game_id: i32,
+    round_id: i32,
+    result_kind: i32,
+    winner_mask: i32,
+    participant_mask: i32,
+    connected_mask: i32
+): bool {
+    if (!terminal) {
+        return false;
+    }
+    return terminal_flow_open(game_id, round_id, result_kind, winner_mask, participant_mask, connected_mask);
+}
+
+function terminal_flow_is_active(): bool {
+    return terminal_flow.active && terminal_flow.phase != TERMINAL_FLOW_PHASE_IDLE;
+}
+
+function terminal_flow_is_open(): bool {
+    return terminal_flow_is_active();
+}
+
+function terminal_flow_is_settled(): bool {
+    return terminal_flow_is_active() && terminal_flow.phase == TERMINAL_FLOW_PHASE_SETTLED;
+}
+
+function terminal_flow_phase(): i32 {
+    return terminal_flow.phase;
+}
+
+function terminal_flow_rematch_phase(): i32 {
+    return terminal_flow.phase;
+}
+
+function terminal_flow_game_id(): i32 {
+    return terminal_flow.game_id;
+}
+
+function terminal_flow_round_id(): i32 {
+    return terminal_flow.round_id;
+}
+
+function terminal_flow_result_kind(): i32 {
+    return terminal_flow.result_kind;
+}
+
+function terminal_flow_winner_mask(): i32 {
+    return terminal_flow.winner_mask;
+}
+
+function terminal_flow_viewer_seat(): i32 {
+    return terminal_flow.viewer_seat;
+}
+
+function terminal_flow_set_viewer(seat_id: i32): bool {
+    if (seat_id < -1 || seat_id >= TERMINAL_FLOW_MAX_SEATS) {
+        return false;
+    }
+    terminal_flow.viewer_seat = seat_id;
+    return true;
+}
+
+function terminal_flow_participant_mask(): i32 {
+    return terminal_flow.participant_mask;
+}
+
+function terminal_flow_connected_mask(): i32 {
+    return terminal_flow.connected_mask;
+}
+
+function terminal_flow_required_mask(): i32 {
+    return terminal_flow.required_mask;
+}
+
+function terminal_flow_required_participant_mask(): i32 {
+    return terminal_flow.required_mask;
+}
+
+function terminal_flow_requested_mask(): i32 {
+    return terminal_flow.requested_mask;
+}
+
+function terminal_flow_accepted_mask(): i32 {
+    return terminal_flow.accepted_mask;
+}
+
+function terminal_flow_declined_mask(): i32 {
+    return terminal_flow.declined_mask;
+}
+
+function terminal_flow_interruption_reason(): i32 {
+    return terminal_flow.interruption_reason;
+}
+
+function terminal_flow_round_index(): i32 {
+    return terminal_flow.round_index;
+}
+
+function terminal_flow_round_total(): i32 {
+    return terminal_flow.round_total;
+}
+
+function terminal_flow_set_rounds(round_index: i32, round_total: i32): bool {
+    if (round_index < 0 || round_total < 0 || round_index > round_total) {
+        return false;
+    }
+    if (terminal_flow.round_index != round_index || terminal_flow.round_total != round_total) {
+        terminal_flow.state_revision += 1;
+    }
+    terminal_flow.round_index = round_index;
+    terminal_flow.round_total = round_total;
+    return true;
+}
+
+function terminal_flow_set_score(seat_id: i32, score: i32, rank: i32): bool {
+    if (!terminal_flow_is_active() || !terminal_flow_mask_has(terminal_flow.participant_mask, seat_id) || rank < 0) {
+        return false;
+    }
+    let previous_score: i32 = terminal_flow.scores[seat_id];
+    let previous_rank: i32 = terminal_flow.ranks[seat_id];
+    let previous_score_count: i32 = terminal_flow.score_count;
+    terminal_flow.scores[seat_id] = score;
+    terminal_flow.ranks[seat_id] = rank;
+    if (terminal_flow.score_count <= seat_id) {
+        terminal_flow.score_count = seat_id + 1;
+    }
+    if (previous_score != score || previous_rank != rank || previous_score_count != terminal_flow.score_count) {
+        terminal_flow.state_revision += 1;
+    }
+    return true;
+}
+
+function terminal_flow_score_count(): i32 {
+    return terminal_flow.score_count;
+}
+
+function terminal_flow_score_for(seat_id: i32): i32 {
+    if (seat_id < 0 || seat_id >= TERMINAL_FLOW_MAX_SEATS) {
+        return 0;
+    }
+    return terminal_flow.scores[seat_id];
+}
+
+function terminal_flow_viewer_score(seat_id: i32): i32 {
+    return terminal_flow_score_for(seat_id);
+}
+
+function terminal_flow_rank_for(seat_id: i32): i32 {
+    if (seat_id < 0 || seat_id >= TERMINAL_FLOW_MAX_SEATS) {
+        return 0;
+    }
+    return terminal_flow.ranks[seat_id];
+}
+
+function terminal_flow_viewer_rank(seat_id: i32): i32 {
+    return terminal_flow_rank_for(seat_id);
+}
+
+function terminal_flow_state_revision(): i32 {
+    return terminal_flow.state_revision;
+}
+
+function terminal_flow_viewer_outcome(seat_id: i32): i32 {
+    if (!terminal_flow_is_active() || !terminal_flow_mask_has(terminal_flow.participant_mask, seat_id)) {
+        return TERMINAL_FLOW_OUTCOME_UNKNOWN;
+    }
+    if (terminal_flow.result_kind == TERMINAL_FLOW_RESULT_SCORE || terminal_flow.result_kind == TERMINAL_FLOW_RESULT_RANK) {
+        return TERMINAL_FLOW_OUTCOME_UNKNOWN;
+    }
+    if (terminal_flow.result_kind == TERMINAL_FLOW_RESULT_LOSS) {
+        return TERMINAL_FLOW_OUTCOME_LOSS;
+    }
+    if (terminal_flow.result_kind == TERMINAL_FLOW_RESULT_DRAW || terminal_flow.winner_mask == 0) {
+        return TERMINAL_FLOW_OUTCOME_DRAW;
+    }
+    if (terminal_flow_mask_count(terminal_flow.winner_mask) != 1) {
+        return TERMINAL_FLOW_OUTCOME_DRAW;
+    }
+    if (terminal_flow_mask_has(terminal_flow.winner_mask, seat_id)) {
+        return TERMINAL_FLOW_OUTCOME_WIN;
+    }
+    return TERMINAL_FLOW_OUTCOME_LOSS;
+}
+
+// The stored kind describes the rule module's terminal projection.  This
+// viewer-relative kind is useful to adapters that want one explicit result
+// token while retaining MULTI_ROUND/SCORE/RANK as the family-level contract.
+function terminal_flow_result_kind_for(seat_id: i32): i32 {
+    if (
+        terminal_flow.result_kind == TERMINAL_FLOW_RESULT_SCORE
+        || terminal_flow.result_kind == TERMINAL_FLOW_RESULT_RANK
+        || terminal_flow.result_kind == TERMINAL_FLOW_RESULT_MULTI_ROUND
+    ) {
+        return terminal_flow.result_kind;
+    }
+    let outcome: i32 = terminal_flow_viewer_outcome(seat_id);
+    if (outcome == TERMINAL_FLOW_OUTCOME_WIN) {
+        return TERMINAL_FLOW_RESULT_WIN;
+    }
+    if (outcome == TERMINAL_FLOW_OUTCOME_LOSS) {
+        return TERMINAL_FLOW_RESULT_LOSS;
+    }
+    if (outcome == TERMINAL_FLOW_OUTCOME_DRAW) {
+        return TERMINAL_FLOW_RESULT_DRAW;
+    }
+    return TERMINAL_FLOW_RESULT_NONE;
+}
+
+function terminal_flow_viewer_result_kind(seat_id: i32): i32 {
+    return terminal_flow_result_kind_for(seat_id);
+}
+
+function terminal_flow_result_label_for(seat_id: i32): string {
+    if (terminal_flow.result_kind == TERMINAL_FLOW_RESULT_SCORE) {
+        return "FINAL SCORE";
+    }
+    if (terminal_flow.result_kind == TERMINAL_FLOW_RESULT_RANK) {
+        return "FINAL RANK";
+    }
+    let outcome: i32 = terminal_flow_viewer_outcome(seat_id);
+    if (outcome == TERMINAL_FLOW_OUTCOME_WIN) {
+        return "YOU WIN";
+    }
+    if (outcome == TERMINAL_FLOW_OUTCOME_LOSS) {
+        return "YOU LOSE";
+    }
+    if (outcome == TERMINAL_FLOW_OUTCOME_DRAW) {
+        return "DRAW";
+    }
+    return "RESULT";
+}
+
+function terminal_flow_result_title(seat_id: i32): string {
+    return terminal_flow_result_label_for(seat_id);
+}
+
+function terminal_flow_result_copy(seat_id: i32): string {
+    if (terminal_flow.result_kind == TERMINAL_FLOW_RESULT_SCORE) {
+        return "The final score is authoritative.";
+    }
+    if (terminal_flow.result_kind == TERMINAL_FLOW_RESULT_RANK) {
+        return "The final rank is authoritative.";
+    }
+    let outcome: i32 = terminal_flow_viewer_outcome(seat_id);
+    if (outcome == TERMINAL_FLOW_OUTCOME_WIN) {
+        return "Great round. You took the win.";
+    }
+    if (outcome == TERMINAL_FLOW_OUTCOME_LOSS) {
+        return "The board is settled. Your friend won this one.";
+    }
+    if (outcome == TERMINAL_FLOW_OUTCOME_DRAW) {
+        return "Even finish. The board is settled.";
+    }
+    return "The authoritative result is settled.";
+}
+
+function terminal_flow_rematch_seed(): i32 {
+    return terminal_flow.rematch_seed;
+}
+
+function terminal_flow_restart_pending(): bool {
+    return terminal_flow.restart_pending;
+}
+
+function terminal_flow_start_pending(): bool {
+    return terminal_flow.restart_pending;
+}
+
+function terminal_flow_restart_transition_count(): i32 {
+    return terminal_flow.restart_transition_count;
+}
+
+function terminal_flow_restart_count(): i32 {
+    return terminal_flow.restart_transition_count;
+}
+
+function terminal_flow_return_requested(): bool {
+    return terminal_flow.return_requested;
+}
+
+function terminal_flow_can_request_rematch(seat_id: i32, seed: i32): bool {
+    return(
+        terminal_flow_is_active()
+        && terminal_flow.phase == TERMINAL_FLOW_PHASE_SETTLED
+        && seat_id == 0
+        && seed > 0
+        && seed <= 1000000
+        && terminal_flow_mask_has(terminal_flow.required_mask, seat_id)
+        && terminal_flow_mask_has(terminal_flow.connected_mask, seat_id)
+    );
+}
+
+function terminal_flow_request_rematch(seat_id: i32, seed: i32): CommandResult {
+    if (!terminal_flow_can_request_rematch(seat_id, seed)) {
+        return CommandResult.GameFinishedRejected;
+    }
+    let host_bit: i32 = terminal_flow_mask_for_seat(0);
+    terminal_flow.rematch_seed = seed;
+    terminal_flow.requested_mask = host_bit;
+    terminal_flow.accepted_mask = host_bit;
+    terminal_flow.declined_mask = 0;
+    terminal_flow.interruption_reason = TERMINAL_FLOW_INTERRUPTION_NONE;
+    terminal_flow.restart_pending = false;
+    terminal_flow.phase = TERMINAL_FLOW_PHASE_REMATCH_REQUESTED;
+    terminal_flow.state_revision += 1;
+    return CommandResult.Accepted;
+}
+
+function terminal_flow_rematch_request(seat_id: i32, seed: i32): CommandResult {
+    return terminal_flow_request_rematch(seat_id, seed);
+}
+
+function terminal_flow_can_respond_rematch(seat_id: i32, accept: i32): bool {
+    return(
+        terminal_flow_is_active()
+        &&(terminal_flow.phase == TERMINAL_FLOW_PHASE_REMATCH_REQUESTED || terminal_flow.phase == TERMINAL_FLOW_PHASE_REMATCH_WAITING)
+        && seat_id >= 0
+        && seat_id < TERMINAL_FLOW_MAX_SEATS
+        && seat_id != 0
+        &&(accept == 0 || accept == 1)
+        && terminal_flow_mask_has(terminal_flow.required_mask, seat_id)
+        && terminal_flow_mask_has(terminal_flow.connected_mask, seat_id)
+        && !terminal_flow_mask_has(terminal_flow.accepted_mask, seat_id)
+        && !terminal_flow_mask_has(terminal_flow.declined_mask, seat_id)
+    );
+}
+
+function terminal_flow_respond_rematch(seat_id: i32, accept: i32): CommandResult {
+    if (!terminal_flow_can_respond_rematch(seat_id, accept)) {
+        return CommandResult.GameFinishedRejected;
+    }
+    let bit: i32 = terminal_flow_mask_for_seat(seat_id);
+    terminal_flow.requested_mask += bit;
+    if (accept == 1) {
+        terminal_flow.accepted_mask += bit;
+        if (terminal_flow_mask_contains(terminal_flow.accepted_mask, terminal_flow.required_mask)) {
+            terminal_flow.phase = TERMINAL_FLOW_PHASE_REMATCH_READY;
+            terminal_flow.restart_pending = true;
+        } else {
+            terminal_flow.phase = TERMINAL_FLOW_PHASE_REMATCH_WAITING;
+        }
+    } else {
+        terminal_flow.declined_mask += bit;
+        terminal_flow.interruption_reason = TERMINAL_FLOW_INTERRUPTION_REMATCH_DECLINED;
+        terminal_flow.restart_pending = false;
+        terminal_flow.phase = TERMINAL_FLOW_PHASE_DECLINED;
+    }
+    terminal_flow.state_revision += 1;
+    return CommandResult.Accepted;
+}
+
+function terminal_flow_rematch_response(seat_id: i32, accept: i32): CommandResult {
+    return terminal_flow_respond_rematch(seat_id, accept);
+}
+
+function terminal_flow_accept_rematch(seat_id: i32): CommandResult {
+    return terminal_flow_respond_rematch(seat_id, 1);
+}
+
+function terminal_flow_decline_rematch(seat_id: i32): CommandResult {
+    return terminal_flow_respond_rematch(seat_id, 0);
+}
+
+function terminal_flow_restart_authorized(): bool {
+    return(
+        terminal_flow_is_active()
+        && terminal_flow.phase == TERMINAL_FLOW_PHASE_REMATCH_READY
+        && terminal_flow.restart_pending
+        && terminal_flow.declined_mask == 0
+        && terminal_flow_mask_contains(terminal_flow.accepted_mask, terminal_flow.required_mask)
+        && terminal_flow_mask_contains(terminal_flow.connected_mask, terminal_flow.required_mask)
+    );
+}
+
+function terminal_flow_ready_to_restart(): bool {
+    return terminal_flow_restart_authorized();
+}
+
+function terminal_flow_start_authorized(): bool {
+    return terminal_flow_restart_authorized();
+}
+
+// The selected-game registry calls this only after its existing StartGame
+// branch has successfully reset and started the authoritative rule module.
+// Repeated calls are harmless and cannot schedule a second transition.
+function terminal_flow_mark_restart_committed(): bool {
+    if (!terminal_flow_restart_authorized()) {
+        return false;
+    }
+    terminal_flow.restart_pending = false;
+    terminal_flow.restart_transition_count += 1;
+    terminal_flow.phase = TERMINAL_FLOW_PHASE_RESTARTED;
+    terminal_flow.active = false;
+    terminal_flow.state_revision += 1;
+    return true;
+}
+
+function terminal_flow_clear_after_restart(): void {
+    if (terminal_flow.phase == TERMINAL_FLOW_PHASE_RESTARTED) {
+        terminal_flow.active = false;
+    }
+}
+
+function terminal_flow_sync_connection(connected_mask: i32): bool {
+    if (!terminal_flow_is_active() || !terminal_flow_valid_mask(connected_mask)) {
+        return false;
+    }
+    let previous_connected_mask: i32 = terminal_flow.connected_mask;
+    let previous_phase: i32 = terminal_flow.phase;
+    let previous_reason: i32 = terminal_flow.interruption_reason;
+    terminal_flow.connected_mask = connected_mask;
+    if (
+        terminal_flow.phase == TERMINAL_FLOW_PHASE_RESTARTED
+        || terminal_flow.phase == TERMINAL_FLOW_PHASE_RETURNED
+        || terminal_flow.phase == TERMINAL_FLOW_PHASE_RETURNING
+    ) {
+        return true;
+    }
+    let missing: i32 = terminal_flow_mask_without(terminal_flow.required_mask, connected_mask);
+    if (missing == 0) {
+        return true;
+    }
+    terminal_flow.restart_pending = false;
+    let interruption_reason: i32 = TERMINAL_FLOW_INTERRUPTION_PARTICIPANT_DISCONNECT;
+    if (!terminal_flow_mask_has(connected_mask, 0)) {
+        interruption_reason = TERMINAL_FLOW_INTERRUPTION_HOST_DEPARTURE;
+    }
+    // A settled decline remains the visible terminal decision even if a
+    // participant disconnects afterward.  Other phases transition once to
+    // INTERRUPTED; repeated room syncs with the same mask are idempotent.
+    if (terminal_flow.phase != TERMINAL_FLOW_PHASE_DECLINED) {
+        terminal_flow.interruption_reason = interruption_reason;
+        terminal_flow.phase = TERMINAL_FLOW_PHASE_INTERRUPTED;
+    }
+    if (previous_connected_mask != connected_mask || previous_phase != terminal_flow.phase || previous_reason != terminal_flow.interruption_reason) {
+        terminal_flow.state_revision += 1;
+    }
+    return true;
+}
+
+function terminal_flow_interruption_copy(): string {
+    if (terminal_flow.interruption_reason == TERMINAL_FLOW_INTERRUPTION_HOST_DEPARTURE) {
+        return "The host left. Rematch is unavailable.";
+    }
+    if (terminal_flow.interruption_reason == TERMINAL_FLOW_INTERRUPTION_REMATCH_DECLINED) {
+        return "Your friend declined the rematch.";
+    }
+    if (terminal_flow.interruption_reason == TERMINAL_FLOW_INTERRUPTION_PARTICIPANT_DISCONNECT) {
+        return "A player disconnected. Waiting is paused safely.";
+    }
+    return "This match was interrupted safely.";
+}
+
+function terminal_flow_waiting_mask(): i32 {
+    return terminal_flow_mask_without(
+        terminal_flow_mask_without(terminal_flow.required_mask, terminal_flow.accepted_mask),
+        terminal_flow.declined_mask
+    );
+}
+
+function terminal_flow_waiting_seat_mask(): i32 {
+    return terminal_flow_waiting_mask();
+}
+
+function terminal_flow_waiting_seat_label(seat_id: i32): string {
+    if (!terminal_flow_mask_has(terminal_flow_waiting_mask(), seat_id)) {
+        return "READY";
+    }
+    if (seat_id == terminal_flow.viewer_seat) {
+        return "YOU";
+    }
+    if (seat_id == 0) {
+        return "HOST";
+    }
+    return "FRIEND";
+}
+
+function terminal_flow_waiting_copy_for(seat_id: i32): string {
+    if (terminal_flow_waiting_mask() == 0) {
+        return "Everyone is ready.";
+    }
+    if (terminal_flow_mask_has(terminal_flow_waiting_mask(), seat_id)) {
+        return "Your response is needed.";
+    }
+    return "Waiting for your friend.";
+}
+
+function terminal_flow_waiting_for_friend(): bool {
+    return terminal_flow.phase == TERMINAL_FLOW_PHASE_REMATCH_REQUESTED || terminal_flow.phase == TERMINAL_FLOW_PHASE_REMATCH_WAITING;
+}
+
+function terminal_flow_waiting_copy(): string {
+    if (terminal_flow.phase == TERMINAL_FLOW_PHASE_REMATCH_READY) {
+        return "Friend accepted. Starting the rematch...";
+    }
+    if (terminal_flow_waiting_for_friend()) {
+        return "Waiting for your friend to accept.";
+    }
+    if (terminal_flow.phase == TERMINAL_FLOW_PHASE_DECLINED) {
+        return "Rematch declined. The settled board stays visible.";
+    }
+    if (terminal_flow.phase == TERMINAL_FLOW_PHASE_INTERRUPTED) {
+        return terminal_flow_interruption_copy();
+    }
+    return "The result is settled.";
+}
+
+function terminal_flow_request_return(): bool {
+    if (!terminal_flow_is_active() || terminal_flow.phase == TERMINAL_FLOW_PHASE_RETURNING) {
+        return false;
+    }
+    terminal_flow.return_requested = true;
+    terminal_flow.phase = TERMINAL_FLOW_PHASE_RETURN_CONFIRMATION;
+    terminal_flow.state_revision += 1;
+    return true;
+}
+
+function terminal_flow_begin_return(): bool {
+    return terminal_flow_request_return();
+}
+
+function terminal_flow_cancel_return(): bool {
+    if (!terminal_flow_is_active() || terminal_flow.phase != TERMINAL_FLOW_PHASE_RETURN_CONFIRMATION) {
+        return false;
+    }
+    terminal_flow.return_requested = false;
+    terminal_flow.phase = TERMINAL_FLOW_PHASE_SETTLED;
+    terminal_flow.state_revision += 1;
+    return true;
+}
+
+function terminal_flow_confirm_return(): bool {
+    if (!terminal_flow_is_active() || terminal_flow.phase != TERMINAL_FLOW_PHASE_RETURN_CONFIRMATION) {
+        return false;
+    }
+    terminal_flow.return_requested = true;
+    terminal_flow.phase = TERMINAL_FLOW_PHASE_RETURNING;
+    terminal_flow.state_revision += 1;
+    return true;
+}
+
+function terminal_flow_mark_returned(): bool {
+    if (!terminal_flow_is_active() || terminal_flow.phase != TERMINAL_FLOW_PHASE_RETURNING) {
+        return false;
+    }
+    terminal_flow.active = false;
+    terminal_flow.phase = TERMINAL_FLOW_PHASE_RETURNED;
+    terminal_flow.restart_pending = false;
+    terminal_flow.state_revision += 1;
+    return true;
+}
+
+function terminal_flow_return_copy(): string {
+    return "Return to the game catalog? The settled board will close.";
+}
+
+function terminal_flow_hash(): i32 {
+    let hash: i32 = 31 + terminal_flow.phase * 37 + terminal_flow.game_id * 41 + terminal_flow.round_id * 43;
+    if (terminal_flow.active) {
+        hash = hash * 47 + 1;
+    } else {
+        hash = hash * 47;
+    }
+    hash = hash * 47 + terminal_flow.result_kind;
+    hash = hash * 47 + terminal_flow.winner_mask;
+    hash = hash * 47 + terminal_flow.participant_mask;
+    hash = hash * 47 + terminal_flow.connected_mask;
+    hash = hash * 47 + terminal_flow.required_mask;
+    hash = hash * 47 + terminal_flow.requested_mask;
+    hash = hash * 47 + terminal_flow.accepted_mask;
+    hash = hash * 47 + terminal_flow.declined_mask;
+    hash = hash * 47 + terminal_flow.interruption_reason;
+    hash = hash * 47 + terminal_flow.rematch_seed;
+    hash = hash * 47 + terminal_flow.restart_transition_count;
+    hash = hash * 47 + terminal_flow.state_revision;
+    for (let seat_id: i32 = 0; seat_id < TERMINAL_FLOW_MAX_SEATS; seat_id += 1) {
+        hash = hash * 47 + terminal_flow.scores[seat_id];
+        hash = hash * 47 + terminal_flow.ranks[seat_id];
+    }
+    return hash;
+}

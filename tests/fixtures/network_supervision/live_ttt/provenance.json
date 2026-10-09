@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "upstream_repository": "maddox-and-friends",
+  "upstream_commit": "cb43e41a2c0a9c1f1123365885f731a35184a351",
+  "copied_files": [
+    {
+      "path": "src/protocol.stasis",
+      "sha256": "20fe9ed589fe878f975ab2fa29a3820efe55b6c7c8820a632879984bf5d283c9"
+    },
+    {
+      "path": "src/tic_tac_toe.stasis",
+      "sha256": "e290d38cacb3384e6adf11f26c1c0f8c16e6ad48b6fd3e11a14b89ef7ab37da3"
+    },
+    {
+      "path": "src/terminal_flow.stasis",
+      "sha256": "13b87cdbaaf5db3d18e6072f2b3d608e2a8b1d292b13bde67a0975e18b32b62e"
+    },
+    {
+      "path": "src/network_protocol.stasis",
+      "sha256": "a9eb9377df74d56c635636bf79d6b450913bd1130471d6643699d6f65fd12a9f"
+    }
+  ],
+  "transformations": [],
+  "upstream_license_or_notice_files": []
+}

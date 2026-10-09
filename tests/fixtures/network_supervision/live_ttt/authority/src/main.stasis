@@ -1,0 +1,472 @@
+import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
+import "/src/protocol.stasis";
+import "/src/tic_tac_toe.stasis";
+import "/src/terminal_flow.stasis";
+import "/src/network_protocol.stasis";
+
+const LIVE_EVENT_CONNECTED: i32 = 1;
+const LIVE_EVENT_MESSAGE: i32 = 3;
+const LIVE_EVENT_DISCONNECTED: i32 = 4;
+const LIVE_GAME_CATALOG: i32 = 0;
+const LIVE_GAME_TTT: i32 = 1;
+const LIVE_SCREEN_CATALOG: i32 = 0;
+const LIVE_SCREEN_TTT: i32 = 1;
+const LIVE_SEAT_HOST: i32 = 0;
+const LIVE_SEAT_GUEST: i32 = 1;
+const LIVE_SESSION_EPOCH: i32 = 1;
+const LIVE_WIRE_BYTES: i32 = 144;
+
+global live_host_frame: HostFrame;
+global live_event_fields: i32[3];
+global live_event_bytes: i32[144];
+global live_outbound_bytes: i32[144];
+global live_projection: i32[16];
+global live_peer_connection: i32;
+global live_guest_joined: bool;
+global live_guest_sequence: i32;
+global live_revision: i32;
+global live_hash: i32;
+global live_screen: i32;
+global live_round: i32;
+
+function @internal @extern("stasis_jit_network_host_poll") live_network_poll(
+    fields: i32[],
+    field_capacity: i32,
+    payload: i32[],
+    payload_capacity: i32
+): i32;
+function @internal @extern("stasis_jit_network_host_send") live_network_send(connection: i32, payload: i32[], payload_length: i32): i32;
+
+function live_byte(index: i32): i32 {
+    if (index < 0 || index >= LIVE_WIRE_BYTES) {
+        return 0;
+    }
+    return live_event_bytes[index];
+}
+
+function live_read_i32(offset: i32): i32 {
+    let b0: i32 = live_byte(offset);
+    let b1: i32 = live_byte(offset + 1);
+    let b2: i32 = live_byte(offset + 2);
+    let b3: i32 = live_byte(offset + 3);
+    if (b0 >= 128) {
+        return(-2147483647 - 1) +(b0 - 128) * 16777216 + b1 * 65536 + b2 * 256 + b3;
+    }
+    return b0 * 16777216 + b1 * 65536 + b2 * 256 + b3;
+}
+
+function live_write_i32(value: i32, offset: i32): void {
+    let magnitude: i32 = value;
+    let high: i32 = 0;
+    if (value < 0) {
+        magnitude = value + 2147483647 + 1;
+        high = 128;
+    }
+    live_outbound_bytes[offset] = high + magnitude / 16777216;
+    magnitude = magnitude % 16777216;
+    live_outbound_bytes[offset + 1] = magnitude / 65536;
+    magnitude = magnitude % 65536;
+    live_outbound_bytes[offset + 2] = magnitude / 256;
+    live_outbound_bytes[offset + 3] = magnitude % 256;
+}
+
+function live_decode(): NetworkEnvelopeResult {
+    if (live_event_fields[2] != LIVE_WIRE_BYTES) {
+        return NetworkEnvelopeResult.EnvelopeLengthRejected;
+    }
+    for (let word: i32 = 0; word < NETWORK_ENVELOPE_WORD_COUNT; word += 1) {
+        network_envelope_wire_words[word] = live_read_i32(word * 4);
+    }
+    network_envelope_wire_word_count = NETWORK_ENVELOPE_WORD_COUNT;
+    return network_envelope_decode();
+}
+
+function live_encode(): bool {
+    if (network_envelope_encode() != NetworkEnvelopeResult.EnvelopeValid) {
+        return false;
+    }
+    for (let word: i32 = 0; word < NETWORK_ENVELOPE_WORD_COUNT; word += 1) {
+        live_write_i32(network_envelope_wire_words[word], word * 4);
+    }
+    return true;
+}
+
+function live_send_current(connection: i32): bool {
+    return connection > 0 && live_encode() && live_network_send(connection, live_outbound_bytes, LIVE_WIRE_BYTES) == 0;
+}
+
+function live_refresh_projection(): bool {
+    let word_count: i32 = ttt_snapshot_encode();
+    if (word_count != 14) {
+        live_hash = 0;
+        return false;
+    }
+    for (let index: i32 = 0; index < 14; index += 1) {
+        live_projection[index] = ttt_snapshot_words[index];
+    }
+    live_projection[14] = terminal_flow_phase();
+    live_projection[15] = live_screen;
+    let hash: i32 = 17;
+    for (let index: i32 = 0; index < 16; index += 1) {
+        hash = hash * 31 + live_projection[index];
+    }
+    live_hash = hash;
+    return true;
+}
+
+function live_prepare_base(kind: NetworkEnvelopeKind, connection: i32, seat: i32, sequence: i32): void {
+    network_envelope_reset();
+    network_envelope.kind = kind;
+    if (live_screen == LIVE_SCREEN_TTT) {
+        network_envelope.game_id = LIVE_GAME_TTT;
+    } else {
+        network_envelope.game_id = LIVE_GAME_CATALOG;
+    }
+    network_envelope.pack_id = 0;
+    network_envelope.rules_version = 1;
+    network_envelope.snapshot_version = 1;
+    network_envelope.session_epoch = LIVE_SESSION_EPOCH;
+    network_envelope.connection_handle = connection;
+    network_envelope.seat_handle = seat;
+    network_envelope.sequence = sequence;
+    network_envelope.ack = live_guest_sequence;
+    network_envelope.authoritative_revision = live_revision;
+    network_envelope.authoritative_hash = live_hash;
+}
+
+function live_send_ack(connection: i32, sequence: i32, result: CommandResult): bool {
+    if (!live_refresh_projection()) {
+        return false;
+    }
+    live_prepare_base(NetworkEnvelopeKind.EnvelopeAck, connection, LIVE_SEAT_GUEST, sequence);
+    network_envelope.payload_count = 2;
+    network_envelope.payload_words[0] = result;
+    network_envelope.payload_words[1] = live_revision;
+    return live_send_current(connection);
+}
+
+function live_envelope_error_code(result: NetworkEnvelopeResult): i32 {
+    if (result == NetworkEnvelopeResult.EnvelopeMagicRejected) {
+        return 1;
+    }
+    if (result == NetworkEnvelopeResult.EnvelopeVersionRejected) {
+        return 2;
+    }
+    if (result == NetworkEnvelopeResult.EnvelopeLengthRejected) {
+        return 3;
+    }
+    if (result == NetworkEnvelopeResult.EnvelopeKindRejected) {
+        return 4;
+    }
+    if (result == NetworkEnvelopeResult.EnvelopeBoundsRejected) {
+        return 5;
+    }
+    if (result == NetworkEnvelopeResult.EnvelopeFieldRejected) {
+        return 6;
+    }
+    return 7;
+}
+
+function live_send_error(connection: i32, result: NetworkEnvelopeResult): bool {
+    if (!live_refresh_projection()) {
+        return false;
+    }
+    let seat: i32 = -1;
+    if (live_guest_joined) {
+        seat = LIVE_SEAT_GUEST;
+    }
+    live_prepare_base(NetworkEnvelopeKind.EnvelopeError, connection, seat, 0);
+    network_envelope.payload_count = 1;
+    network_envelope.payload_words[0] = live_envelope_error_code(result);
+    return live_send_current(connection);
+}
+
+function live_send_snapshot(): bool {
+    if (!live_guest_joined || live_peer_connection <= 0) {
+        return false;
+    }
+    if (!live_refresh_projection()) {
+        return false;
+    }
+    live_prepare_base(NetworkEnvelopeKind.EnvelopeSnapshotChunk, live_peer_connection, LIVE_SEAT_GUEST, live_guest_sequence);
+    network_envelope.chunk_index = 0;
+    network_envelope.chunk_count = 1;
+    network_envelope.payload_count = 16;
+    for (let index: i32 = 0; index < 16; index += 1) {
+        network_envelope.payload_words[index] = live_projection[index];
+    }
+    return live_send_current(live_peer_connection);
+}
+
+function live_join_shape_valid(connection: i32): bool {
+    return(
+        connection == live_peer_connection
+        && network_decoded_envelope.kind == NetworkEnvelopeKind.EnvelopeJoin
+        && network_decoded_envelope.game_id == LIVE_GAME_CATALOG
+        && network_decoded_envelope.pack_id == 0
+        && network_decoded_envelope.rules_version == 1
+        && network_decoded_envelope.snapshot_version == 1
+        && network_decoded_envelope.session_epoch == LIVE_SESSION_EPOCH
+        && network_decoded_envelope.connection_handle == 0
+        && network_decoded_envelope.seat_handle == -1
+        && network_decoded_envelope.sequence == 0
+        && network_decoded_envelope.payload_count == 0
+    );
+}
+
+function live_command_shape_valid(connection: i32): bool {
+    return(
+        live_guest_joined
+        && connection == live_peer_connection
+        && network_decoded_envelope.kind == NetworkEnvelopeKind.EnvelopeCommand
+        && network_decoded_envelope.game_id == LIVE_GAME_TTT
+        && network_decoded_envelope.pack_id == 0
+        && network_decoded_envelope.rules_version == 1
+        && network_decoded_envelope.snapshot_version == 1
+        && network_decoded_envelope.session_epoch == LIVE_SESSION_EPOCH
+        && network_decoded_envelope.connection_handle == connection
+        && network_decoded_envelope.seat_handle == LIVE_SEAT_GUEST
+        && network_decoded_envelope.payload_count >= 1
+        && network_decoded_envelope.payload_count <= 2
+    );
+}
+
+function live_open_terminal_if_needed(): void {
+    if (tic_tac_toe.phase == TicTacToePhase.Won) {
+        let winner_mask: i32 = terminal_flow_mask_for_seat(tic_tac_toe.winner_seat);
+        let opened: bool = terminal_flow_open(LIVE_GAME_TTT, live_round, 1, winner_mask, 3, 3);
+    } else if (tic_tac_toe.phase == TicTacToePhase.Draw) {
+        let opened: bool = terminal_flow_open(LIVE_GAME_TTT, live_round, 3, 0, 3, 3);
+    }
+}
+
+function live_process_command(connection: i32): void {
+    let sequence: i32 = network_decoded_envelope.sequence;
+    if (!live_command_shape_valid(connection)) {
+        let sent: bool = live_send_ack(connection, sequence, CommandResult.CommandRejected);
+        return;
+    }
+    if (sequence != live_guest_sequence + 1) {
+        let sent: bool = live_send_ack(connection, sequence, CommandResult.SequenceRejected);
+        return;
+    }
+
+    let command: i32 = network_decoded_envelope.payload_words[0];
+    let result: CommandResult = CommandResult.CommandRejected;
+    if (command == 2 && network_decoded_envelope.payload_count == 2 && live_screen == LIVE_SCREEN_TTT) {
+        result = ttt_apply_move(LIVE_SEAT_GUEST, network_decoded_envelope.payload_words[1]);
+        if (result == CommandResult.Accepted) {
+            live_open_terminal_if_needed();
+        }
+    } else if (command == 19 && network_decoded_envelope.payload_count == 2 && live_screen == LIVE_SCREEN_TTT) {
+        result = terminal_flow_respond_rematch(LIVE_SEAT_GUEST, network_decoded_envelope.payload_words[1]);
+        if (result == CommandResult.Accepted && terminal_flow_restart_authorized()) {
+            ttt_reset();
+            live_round += 1;
+            let committed: bool = terminal_flow_mark_restart_committed();
+        }
+    } else if (command == 20 && network_decoded_envelope.payload_count == 1 && live_screen == LIVE_SCREEN_TTT) {
+        if (terminal_flow_request_return()) {
+            result = CommandResult.Accepted;
+        } else {
+            result = CommandResult.GameFinishedRejected;
+        }
+    }
+
+    live_guest_sequence = sequence;
+    if (result == CommandResult.Accepted) {
+        live_revision += 1;
+    }
+    let sent_ack: bool = live_send_ack(connection, sequence, result);
+    if (result == CommandResult.Accepted) {
+        let sent_snapshot: bool = live_send_snapshot();
+    }
+}
+
+function live_process_message(connection: i32): void {
+    let decoded: NetworkEnvelopeResult = live_decode();
+    if (decoded != NetworkEnvelopeResult.EnvelopeValid) {
+        let sent: bool = live_send_error(connection, decoded);
+        return;
+    }
+    if (network_decoded_envelope.kind == NetworkEnvelopeKind.EnvelopeJoin) {
+        if (!live_guest_joined && live_join_shape_valid(connection)) {
+            live_guest_joined = true;
+            live_guest_sequence = 0;
+            let sent_ack: bool = live_send_ack(connection, 0, CommandResult.Accepted);
+            let sent_snapshot: bool = live_send_snapshot();
+        } else {
+            let sent: bool = live_send_ack(connection, network_decoded_envelope.sequence, CommandResult.CommandRejected);
+        }
+        return;
+    }
+    live_process_command(connection);
+}
+
+function live_poll_network(): i32 {
+    for (let event_index: i32 = 0; event_index < 8; event_index += 1) {
+        let result: i32 = live_network_poll(live_event_fields, live_event_fields.max_length, live_event_bytes, live_event_bytes.max_length);
+        if (result < 0) {
+            return 40;
+        }
+        if (result > 0) {
+            let connection: i32 = live_event_fields[1];
+            if (live_event_fields[0] == LIVE_EVENT_CONNECTED) {
+                if (live_peer_connection == 0) {
+                    live_peer_connection = connection;
+                }
+            } else if (live_event_fields[0] == LIVE_EVENT_MESSAGE && connection == live_peer_connection) {
+                live_process_message(connection);
+            } else if (live_event_fields[0] == LIVE_EVENT_DISCONNECTED && connection == live_peer_connection) {
+                live_guest_joined = false;
+                live_peer_connection = 0;
+                if (terminal_flow_is_active()) {
+                    let synced: bool = terminal_flow_sync_connection(1);
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+function live_catalog_hit(x: f32, y: f32): bool {
+    return x >= 360.0 && x < 600.0 && y >= 60.0 && y < 130.0;
+}
+
+function live_return_hit(x: f32, y: f32): bool {
+    return x >= 360.0 && x < 600.0 && y >= 285.0 && y < 350.0;
+}
+
+function live_host_release(x: f32, y: f32): void {
+    if (live_screen == LIVE_SCREEN_CATALOG) {
+        if (live_catalog_hit(x, y) && live_guest_joined) {
+            ttt_reset();
+            terminal_flow_reset();
+            live_screen = LIVE_SCREEN_TTT;
+            live_round = 1;
+            live_revision += 1;
+            let sent: bool = live_send_snapshot();
+        }
+        return;
+    }
+
+    if (tic_tac_toe.phase == TicTacToePhase.Playing) {
+        let cell: i32 = ttt_cell_from_pointer(x, y);
+        let result: CommandResult = ttt_apply_move(LIVE_SEAT_HOST, cell);
+        if (result == CommandResult.Accepted) {
+            live_open_terminal_if_needed();
+            live_revision += 1;
+            let sent: bool = live_send_snapshot();
+        }
+        return;
+    }
+
+    if (terminal_flow_phase() == 8 && live_return_hit(x, y)) {
+        if (terminal_flow_confirm_return()) {
+            let returned: bool = terminal_flow_mark_returned();
+            live_screen = LIVE_SCREEN_CATALOG;
+            live_revision += 1;
+            let sent: bool = live_send_snapshot();
+        }
+    } else if (ttt_rematch_hit(x, y)) {
+        let result: CommandResult = terminal_flow_request_rematch(LIVE_SEAT_HOST, live_round + 100);
+        if (result == CommandResult.Accepted) {
+            live_revision += 1;
+            let sent: bool = live_send_snapshot();
+        }
+    } else if (live_return_hit(x, y)) {
+        if (terminal_flow_request_return()) {
+            live_revision += 1;
+            let sent: bool = live_send_snapshot();
+        }
+    }
+}
+
+function main(): i32 {
+    if (!init_window(640, 360, "Supervised Live Tic-Tac-Toe")) {
+        return 1;
+    }
+    live_peer_connection = 0;
+    live_guest_joined = false;
+    live_guest_sequence = 0;
+    live_revision = 1;
+    live_hash = 0;
+    live_screen = LIVE_SCREEN_CATALOG;
+    live_round = 0;
+    ttt_reset();
+    terminal_flow_reset();
+    if (!live_refresh_projection()) {
+        return 2;
+    }
+    return 0;
+}
+
+function tick(): i32 {
+    live_host_frame.refresh();
+    let network_result: i32 = live_poll_network();
+    if (network_result != 0) {
+        return network_result;
+    }
+    for (let index: i32 = 0; index < 8; index += 1) {
+        if (index < live_host_frame.pointer_count && live_host_frame.pointers[index].went_up) {
+            live_host_release(live_host_frame.pointers[index].x_logical, live_host_frame.pointers[index].y_logical);
+        }
+    }
+    return 0;
+}
+
+function live_draw_board(): void {
+    fill_rect(60.0, 60.0, 270.0, 270.0, 0.08, 0.10, 0.16, 1.0);
+    draw_line(150.0, 60.0, 150.0, 330.0, 0.75, 0.80, 0.90, 1.0);
+    draw_line(240.0, 60.0, 240.0, 330.0, 0.75, 0.80, 0.90, 1.0);
+    draw_line(60.0, 150.0, 330.0, 150.0, 0.75, 0.80, 0.90, 1.0);
+    draw_line(60.0, 240.0, 330.0, 240.0, 0.75, 0.80, 0.90, 1.0);
+    for (let cell: i32 = 0; cell < 9; cell += 1) {
+        let row: i32 = cell / 3;
+        let column: i32 = cell % 3;
+        let x: f32 = 72.0 + i32_to_f32(column) * 90.0;
+        let y: f32 = 72.0 + i32_to_f32(row) * 90.0;
+        let mark: i32 = ttt_cell_value(cell);
+        if (ttt_cell_is_winning(cell, mark)) {
+            fill_rect(x - 6.0, y - 6.0, 78.0, 78.0, 0.12, 0.34, 0.18, 1.0);
+        }
+        if (mark == 1) {
+            fill_rect(x, y, 66.0, 66.0, 0.92, 0.30, 0.24, 1.0);
+            fill_rect(x + 14.0, y + 14.0, 38.0, 38.0, 0.08, 0.10, 0.16, 1.0);
+        } else if (mark == 2) {
+            fill_rect(x + 25.0, y, 16.0, 66.0, 0.20, 0.72, 0.92, 1.0);
+            fill_rect(x, y + 25.0, 66.0, 16.0, 0.20, 0.72, 0.92, 1.0);
+        }
+    }
+}
+
+function render(): i32 {
+    clear(0.02, 0.04, 0.08, 1.0);
+    if (live_screen == LIVE_SCREEN_CATALOG) {
+        fill_rect(40.0, 40.0, 280.0, 280.0, 0.08, 0.12, 0.20, 1.0);
+        fill_rect(360.0, 60.0, 240.0, 70.0, 0.18, 0.55, 0.82, 1.0);
+        fill_rect(380.0, 80.0, 30.0, 30.0, 0.92, 0.30, 0.24, 1.0);
+        fill_rect(430.0, 80.0, 30.0, 30.0, 0.20, 0.72, 0.92, 1.0);
+    } else {
+        live_draw_board();
+        if (tic_tac_toe.phase == TicTacToePhase.Playing) {
+            fill_rect(360.0, 60.0, 240.0, 70.0, 0.14, 0.20, 0.30, 1.0);
+            if (tic_tac_toe.current_seat == LIVE_SEAT_HOST) {
+                fill_rect(380.0, 80.0, 200.0, 30.0, 0.92, 0.30, 0.24, 1.0);
+            } else {
+                fill_rect(380.0, 80.0, 200.0, 30.0, 0.20, 0.72, 0.92, 1.0);
+            }
+        } else {
+            fill_rect(360.0, 150.0, 240.0, 120.0, 0.16, 0.58, 0.32, 1.0);
+            fill_rect(360.0, 285.0, 240.0, 65.0, 0.72, 0.28, 0.22, 1.0);
+            if (terminal_flow_phase() == 8) {
+                fill_rect(372.0, 297.0, 216.0, 41.0, 0.96, 0.74, 0.20, 1.0);
+            }
+        }
+    }
+    return 0;
+}
+
+function on_code_swap(): void {
+    return;
+}

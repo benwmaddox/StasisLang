@@ -42,6 +42,9 @@ pub const RESUME_CREDENTIAL_BYTES: usize = 16;
 const SESSION_PATH: &str = "/session";
 pub const ADVERTISE_IPV4_ENV: &str = "STASIS_NETWORK_ADVERTISE_IPV4";
 pub const SUPERVISION_HANDLE_ENV: &str = "STASIS_NETWORK_SUPERVISION_HANDLE";
+pub const SUPERVISION_CONTROL_HANDLE_ENV: &str = "STASIS_NETWORK_SUPERVISION_CONTROL_HANDLE";
+pub const SUPERVISION_RESPONSE_HANDLE_ENV: &str = "STASIS_NETWORK_SUPERVISION_RESPONSE_HANDLE";
+pub const SUPERVISION_CAPTURE_ROOT_ENV: &str = "STASIS_NETWORK_SUPERVISION_CAPTURE_ROOT";
 pub const SUPERVISION_FRAME_MAGIC: &[u8] = b"STASIS-SUPERVISION/1\n";
 
 #[cfg(windows)]
@@ -52,12 +55,15 @@ pub mod supervision_windows {
     use std::io;
     use std::mem::{size_of, zeroed};
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::path::Path;
     use windows_sys::Win32::Foundation::{
-        SetHandleInformation, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        DuplicateHandle, SetHandleInformation, DUPLICATE_SAME_ACCESS, HANDLE_FLAG_INHERIT,
+        WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_PIPE};
     use windows_sys::Win32::System::JobObjects::{
         CreateJobObjectW, JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
         QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
@@ -66,12 +72,13 @@ pub mod supervision_windows {
     };
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::{
-        CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
+        CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
         InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
         WaitForSingleObject, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT,
         EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
         PROC_THREAD_ATTRIBUTE_JOB_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     };
+    use windows_sys::Win32::System::IO::CancelSynchronousIo;
 
     fn pipe_handles() -> io::Result<(OwnedHandle, OwnedHandle)> {
         let mut read = std::ptr::null_mut();
@@ -122,6 +129,125 @@ pub mod supervision_windows {
 
     pub fn raw_handle(handle: &OwnedHandle) -> usize {
         handle.as_raw_handle() as usize
+    }
+
+    pub fn is_reparse_point(path: &Path) -> io::Result<bool> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        Ok(metadata.file_attributes() & 0x400 != 0)
+    }
+
+    pub fn duplicate_stdout_file() -> io::Result<File> {
+        let stdout = std::io::stdout();
+        let source = stdout.as_raw_handle();
+        if source.is_null() || source as isize == -1 {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "standard output is unavailable",
+            ));
+        }
+        let process = unsafe { GetCurrentProcess() };
+        let mut duplicate = std::ptr::null_mut();
+        if unsafe {
+            DuplicateHandle(
+                process,
+                source,
+                process,
+                &mut duplicate,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: DuplicateHandle returned one independent handle to the stdout pipe.
+        Ok(File::from(unsafe {
+            OwnedHandle::from_raw_handle(duplicate)
+        }))
+    }
+
+    pub fn cancel_synchronous_io(thread: &std::thread::JoinHandle<()>) -> io::Result<()> {
+        if unsafe { CancelSynchronousIo(thread.as_raw_handle()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    pub fn take_inherited_pipe(name: &str) -> io::Result<File> {
+        let raw = std::env::var(name)
+            .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "missing inherited pipe"))?;
+        std::env::remove_var(name);
+        let raw = parse_pipe_handle(&raw)?;
+        let handle = raw as windows_sys::Win32::Foundation::HANDLE;
+        if unsafe { GetFileType(handle) } != FILE_TYPE_PIPE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "inherited handle is not a pipe",
+            ));
+        }
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle) };
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "inherited pipe could not be secured",
+            ));
+        }
+        // SAFETY: the environment transferred sole ownership of this validated handle.
+        let owned = unsafe { OwnedHandle::from_raw_handle(handle) };
+        Ok(File::from(owned))
+    }
+
+    pub fn validate_inherited_pipes(names: &[&str]) -> io::Result<()> {
+        let values = names
+            .iter()
+            .map(|name| {
+                std::env::var(name)
+                    .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "missing inherited pipe"))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let handles = parse_unique_pipe_handles(&values)?;
+        for raw in handles {
+            let handle = raw as windows_sys::Win32::Foundation::HANDLE;
+            if unsafe { GetFileType(handle) } != FILE_TYPE_PIPE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "inherited handle is not a pipe",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_pipe_handle(value: &str) -> io::Result<usize> {
+        let raw = value
+            .parse::<usize>()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid inherited pipe"))?;
+        if raw <= 2 || raw == usize::MAX {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid inherited pipe",
+            ));
+        }
+        Ok(raw)
+    }
+
+    fn parse_unique_pipe_handles(values: &[String]) -> io::Result<Vec<usize>> {
+        let handles = values
+            .iter()
+            .map(|value| parse_pipe_handle(value))
+            .collect::<io::Result<Vec<_>>>()?;
+        let unique = handles
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        if unique.len() != handles.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "inherited pipe handles must be distinct",
+            ));
+        }
+        Ok(handles)
     }
 
     pub struct Process {
@@ -218,6 +344,7 @@ pub mod supervision_windows {
             args: &[String],
             overrides: &[(OsString, OsString)],
             stdin: Option<&OwnedHandle>,
+            stdout: Option<&OwnedHandle>,
             extra_inherited: &[&OwnedHandle],
         ) -> io::Result<Process> {
             let application = wide(program.as_os_str())?;
@@ -235,7 +362,8 @@ pub mod supervision_windows {
                 .into();
             inherit(&null, true)?;
             let input = stdin.unwrap_or(&null).as_raw_handle();
-            let mut handles = vec![input, null.as_raw_handle()];
+            let output = stdout.unwrap_or(&null).as_raw_handle();
+            let mut handles = vec![input, output, null.as_raw_handle()];
             handles.extend(extra_inherited.iter().map(|handle| handle.as_raw_handle()));
             handles.sort_unstable();
             handles.dedup();
@@ -276,7 +404,7 @@ pub mod supervision_windows {
                 startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
                 startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
                 startup.StartupInfo.hStdInput = input;
-                startup.StartupInfo.hStdOutput = null.as_raw_handle();
+                startup.StartupInfo.hStdOutput = output;
                 startup.StartupInfo.hStdError = null.as_raw_handle();
                 startup.lpAttributeList = list;
                 let mut info: PROCESS_INFORMATION = unsafe { zeroed() };
@@ -417,6 +545,27 @@ pub mod supervision_windows {
             );
             assert!(text.contains("stasis_test_env=second\0"));
             assert!(environment(&[(OsString::from("a=b"), OsString::from("value"))]).is_err());
+        }
+
+        #[test]
+        fn inherited_pipe_values_reject_aliases_and_pseudo_handles() {
+            assert!(parse_pipe_handle("0").is_err());
+            assert!(parse_pipe_handle("1").is_err());
+            assert!(parse_pipe_handle("2").is_err());
+            assert!(parse_pipe_handle(&usize::MAX.to_string()).is_err());
+            assert!(parse_pipe_handle("not-a-handle").is_err());
+            assert_eq!(
+                parse_unique_pipe_handles(&["12".into(), "13".into(), "14".into()]).unwrap(),
+                vec![12, 13, 14]
+            );
+            for values in [
+                vec!["12".into(), "12".into(), "13".into()],
+                vec!["12".into(), "13".into(), "12".into()],
+                vec!["12".into(), "13".into(), "-1".into()],
+                vec!["12".into(), "13".into(), usize::MAX.to_string()],
+            ] {
+                assert!(parse_unique_pipe_handles(&values).is_err());
+            }
         }
     }
 }

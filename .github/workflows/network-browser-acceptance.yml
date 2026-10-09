@@ -150,11 +150,45 @@ jobs:
 
   windows-production-supervision:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      STASIS_RELEASE_ID: ci-network-supervision-${{ github.run_id }}
+      STASIS_SOURCE_COMMIT: ${{ github.sha }}
+      STASIS_BUILD_TARGET: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+      - name: Compute matching supervision toolchain fingerprint
+        shell: pwsh
+        run: |
+          $fingerprint = (python tools/compute_toolchain_fingerprint.py --source-commit $env:STASIS_SOURCE_COMMIT --release-id $env:STASIS_RELEASE_ID).Trim()
+          if ($LASTEXITCODE -ne 0 -or $fingerprint -notmatch '^[0-9a-f]{64}$') { throw "Failed to compute supervision toolchain fingerprint" }
+          "STASIS_BUILD_FINGERPRINT=$fingerprint" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build matching supervision graphics runtime and runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $generator = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/windows/select-cmake-vs-generator.ps1).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "Visual Studio generator detection failed" }
+          $runtimeBuild = "target/network-supervision-runtime"
+          cmake -S runtime -B $runtimeBuild -G $generator -A x64 `
+            -DSTASIS_GRAPHICS_BUNDLE_SDL=ON `
+            -DSTASIS_GRAPHICS_BUILD_SHARED=ON `
+            -DSTASIS_GRAPHICS_BUILD_STATIC=OFF `
+            -DSTASIS_BUILD_RUNNER=ON `
+            -DSTASIS_BUILD_SYS=OFF `
+            -DSTASIS_RELEASE_ID="$env:STASIS_RELEASE_ID" `
+            -DSTASIS_BUILD_FINGERPRINT="$env:STASIS_BUILD_FINGERPRINT"
+          if ($LASTEXITCODE -ne 0) { throw "Matching supervision runtime configuration failed" }
+          cmake --build $runtimeBuild --config Release --target stasis_graphics stasis_runner
+          if ($LASTEXITCODE -ne 0) { throw "Matching supervision runtime build failed" }
+          $runtime = (Resolve-Path "$runtimeBuild/bin/Release/stasis_graphics.dll").Path
+          $runner = (Resolve-Path "$runtimeBuild/bin/Release/stasis_runner.exe").Path
+          "STASIS_RUNTIME_DLL_PATH=$runtime" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STASIS_RUNTIME_LIBRARY_PATH=$runtime" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STASIS_RUNTIME_RUNNER_PATH=$runner" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Test supervisor command bounds
         run: python tools/cargo_cache.py run -- cargo test -p stasis_network --test supervision
       - name: Test packaged authority and external socket peer

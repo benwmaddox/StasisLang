@@ -1,0 +1,5 @@
+# These four files are byte-frozen upstream fixtures; preserve their CRLF bytes.
+protocol.stasis -text whitespace=cr-at-eol
+tic_tac_toe.stasis -text whitespace=cr-at-eol
+terminal_flow.stasis -text whitespace=cr-at-eol
+network_protocol.stasis -text whitespace=cr-at-eol

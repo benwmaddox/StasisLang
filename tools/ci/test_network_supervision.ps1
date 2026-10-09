@@ -58,6 +58,13 @@ function Assert-Executable([string]$Path, [string]$Label) {
     return (Resolve-Path -LiteralPath $Path).Path
 }
 
+function Assert-File([string]$Path, [string]$Label) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or !(Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "$Label is unavailable"
+    }
+    return (Resolve-Path -LiteralPath $Path).Path
+}
+
 if ($InstalledToolchain) {
     if ([string]::IsNullOrWhiteSpace($Toolchain) -or [string]::IsNullOrWhiteSpace($Supervisor)) {
         throw "-InstalledToolchain requires both -Toolchain and -Supervisor"
@@ -95,12 +102,27 @@ if (!$InstalledToolchain -and
     $env:STASIS_SIGNING_LOCAL_RECORD = Join-Path $scratch "no-signing-record.json"
 }
 if (!$InstalledToolchain) {
-    # The Cargo build may sit beside an unrelated previously built runtime DLL.
-    # Isolate the source CLI so installed-toolchain identity checks cannot bind
-    # it to that stale sibling while it builds a fresh development package.
+    # Keep source-build identity checks strict while isolating the CLI from
+    # stale files beside Cargo output. Stage only the explicit native artifacts
+    # supplied by the matching Windows runtime build; the CLI still verifies
+    # the copied graphics DLL's release and build fingerprint before packaging.
     $isolatedToolchain = Join-Path $scratch "t/stasis.exe"
-    New-Item -ItemType Directory -Path (Split-Path $isolatedToolchain -Parent) | Out-Null
+    $isolatedToolchainDirectory = Split-Path $isolatedToolchain -Parent
+    New-Item -ItemType Directory -Path $isolatedToolchainDirectory | Out-Null
     Copy-Item -LiteralPath $Toolchain -Destination $isolatedToolchain
+    $graphicsRuntimeSource = Assert-File $env:STASIS_RUNTIME_DLL_PATH "matching Stasis graphics runtime"
+    $runtimeRunnerSource = Assert-File $env:STASIS_RUNTIME_RUNNER_PATH "matching Stasis runtime runner"
+    if ([IO.Path]::GetFileName($graphicsRuntimeSource) -ine "stasis_graphics.dll" -or
+        [IO.Path]::GetFileName($runtimeRunnerSource) -ine "stasis_runner.exe") {
+        throw "matching Stasis native runtime artifact names are invalid"
+    }
+    $isolatedGraphicsRuntime = Join-Path $isolatedToolchainDirectory "stasis_graphics.dll"
+    $isolatedRuntimeRunner = Join-Path $isolatedToolchainDirectory "stasis_runner.exe"
+    Copy-Item -LiteralPath $graphicsRuntimeSource -Destination $isolatedGraphicsRuntime
+    Copy-Item -LiteralPath $runtimeRunnerSource -Destination $isolatedRuntimeRunner
+    $env:STASIS_RUNTIME_DLL_PATH = $isolatedGraphicsRuntime
+    $env:STASIS_RUNTIME_LIBRARY_PATH = $isolatedGraphicsRuntime
+    $env:STASIS_RUNTIME_RUNNER_PATH = $isolatedRuntimeRunner
     $Toolchain = $isolatedToolchain
 }
 

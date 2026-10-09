@@ -1,0 +1,221 @@
+// Versioned, bounded wire contract shared by local input and future adapters.
+const POCKET_PROTOCOL_VERSION: i32 = 1;
+const MAX_SEATS: i32 = 8;
+const COMMAND_ARG_LIMIT: i32 = 1024;
+const SESSION_TICK_RATE_HZ: i32 = 60;
+const SESSION_GRACE_MS: i32 = 60000;
+
+enum CommandKind {
+    None,
+    StartGame,
+    TicTacToeMove,
+    ResetGame,
+    GoFishAsk,
+    SelectGame,
+    MazeInput,
+    CheckersMove,
+    NavalFire,
+    WordMatchChoose,
+    SketchPoint,
+    SketchGuessChoose,
+    CaptionChoose,
+    CaptionVote,
+    ChessMove,
+    RallyInput,
+    // Generic static-pack action. The registry maps this only to explicitly
+    // compiled pack branches; it is not an arbitrary plugin payload.
+    PackAction,
+    // Room projection acknowledgement.  Arg0 is exactly 0 or 1 and the
+    // envelope seat identity is the only seat that can be changed.
+    SetReady,
+    // Terminal-flow commands retain the append-only discriminator space after
+    // the legacy SetReady command. RematchRequest carries a positive seed,
+    // RematchResponse carries accept (1) or decline (0), and ReturnToCatalog
+    // carries no arguments.
+    RematchRequest,
+    RematchResponse,
+    ReturnToCatalog,
+}
+
+enum CommandResult {
+    Accepted,
+    ProtocolVersionRejected,
+    StaleSessionRejected,
+    UnknownSeatRejected,
+    UnauthorizedTokenRejected,
+    DisconnectedSeatRejected,
+    SequenceRejected,
+    CommandRejected,
+    ArgumentRejected,
+    WrongTurnRejected,
+    OccupiedCellRejected,
+    OutOfRangeRejected,
+    GameFinishedRejected,
+    InvalidTargetRejected,
+    RequestedRankNotHeldRejected,
+}
+
+// Append-only wire discriminators. Existing values are intentionally stable;
+// terminal commands occupy the next three slots so old peers fail closed.
+function command_kind_wire_value(kind: CommandKind): i32 {
+    if (kind == CommandKind.StartGame) {
+        return 1;
+    }
+    if (kind == CommandKind.TicTacToeMove) {
+        return 2;
+    }
+    if (kind == CommandKind.ResetGame) {
+        return 3;
+    }
+    if (kind == CommandKind.GoFishAsk) {
+        return 4;
+    }
+    if (kind == CommandKind.SelectGame) {
+        return 5;
+    }
+    if (kind == CommandKind.MazeInput) {
+        return 6;
+    }
+    if (kind == CommandKind.CheckersMove) {
+        return 7;
+    }
+    if (kind == CommandKind.NavalFire) {
+        return 8;
+    }
+    if (kind == CommandKind.WordMatchChoose) {
+        return 9;
+    }
+    if (kind == CommandKind.SketchPoint) {
+        return 10;
+    }
+    if (kind == CommandKind.SketchGuessChoose) {
+        return 11;
+    }
+    if (kind == CommandKind.CaptionChoose) {
+        return 12;
+    }
+    if (kind == CommandKind.CaptionVote) {
+        return 13;
+    }
+    if (kind == CommandKind.ChessMove) {
+        return 14;
+    }
+    if (kind == CommandKind.RallyInput) {
+        return 15;
+    }
+    if (kind == CommandKind.PackAction) {
+        return 16;
+    }
+    if (kind == CommandKind.SetReady) {
+        return 17;
+    }
+    if (kind == CommandKind.RematchRequest) {
+        return 18;
+    }
+    if (kind == CommandKind.RematchResponse) {
+        return 19;
+    }
+    if (kind == CommandKind.ReturnToCatalog) {
+        return 20;
+    }
+    return 0;
+}
+
+function command_kind_wire_valid(value: i32): bool {
+    return value >= 1 && value <= 20;
+}
+
+function command_kind_from_wire(value: i32): CommandKind {
+    if (value == 1) {
+        return CommandKind.StartGame;
+    }
+    if (value == 2) {
+        return CommandKind.TicTacToeMove;
+    }
+    if (value == 3) {
+        return CommandKind.ResetGame;
+    }
+    if (value == 4) {
+        return CommandKind.GoFishAsk;
+    }
+    if (value == 5) {
+        return CommandKind.SelectGame;
+    }
+    if (value == 6) {
+        return CommandKind.MazeInput;
+    }
+    if (value == 7) {
+        return CommandKind.CheckersMove;
+    }
+    if (value == 8) {
+        return CommandKind.NavalFire;
+    }
+    if (value == 9) {
+        return CommandKind.WordMatchChoose;
+    }
+    if (value == 10) {
+        return CommandKind.SketchPoint;
+    }
+    if (value == 11) {
+        return CommandKind.SketchGuessChoose;
+    }
+    if (value == 12) {
+        return CommandKind.CaptionChoose;
+    }
+    if (value == 13) {
+        return CommandKind.CaptionVote;
+    }
+    if (value == 14) {
+        return CommandKind.ChessMove;
+    }
+    if (value == 15) {
+        return CommandKind.RallyInput;
+    }
+    if (value == 16) {
+        return CommandKind.PackAction;
+    }
+    if (value == 17) {
+        return CommandKind.SetReady;
+    }
+    if (value == 18) {
+        return CommandKind.RematchRequest;
+    }
+    if (value == 19) {
+        return CommandKind.RematchResponse;
+    }
+    if (value == 20) {
+        return CommandKind.ReturnToCatalog;
+    }
+    return CommandKind.None;
+}
+
+struct CommandEnvelope {
+    protocol_version: i32;
+    session_epoch: i32;
+    client_id: i32;
+    seat_id: i32;
+    stable_handle: i32;
+    sequence: i32;
+    kind: CommandKind;
+    arg0: i32;
+    arg1: i32;
+}
+
+struct PlayerSeat {
+    assigned: bool;
+    connected: bool;
+    client_id: i32;
+    stable_handle: i32;
+    last_processed_sequence: i32;
+}
+
+struct SessionState {
+    protocol_version: i32;
+    session_epoch: i32;
+    revision: i32;
+    last_result: CommandResult;
+    seats: PlayerSeat[8];
+    paused: bool;
+    reconnect_grace_ms: i32;
+    session_ended: bool;
+}
