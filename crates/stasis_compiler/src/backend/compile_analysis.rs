@@ -1757,10 +1757,10 @@ pub(crate) fn resolve_call_signature<'a>(
             && arg_types
                 .iter()
                 .zip(candidate.params.iter())
-                .all(|(arg, param)| {
+                .all(|(argument, parameter)| {
                     are_call_argument_and_param_compatible(
-                        *arg,
-                        *param,
+                        *argument,
+                        *parameter,
                         type_table,
                         named_struct_field_types,
                     )
@@ -1779,6 +1779,21 @@ pub(crate) fn resolve_call_signature<'a>(
         ));
     }
     Ok(first)
+}
+
+pub(crate) fn unambiguous_call_params(
+    target: &str,
+    arg_count: usize,
+    call_signatures: &CallSignatureMap,
+) -> Option<Vec<TypeId>> {
+    let mut candidates = call_signatures
+        .get(target)?
+        .iter()
+        .filter(|signature| signature.params.len() == arg_count);
+    let first = candidates.next()?.params.clone();
+    candidates
+        .all(|candidate| candidate.params == first)
+        .then_some(first)
 }
 
 pub(crate) fn are_call_argument_and_param_compatible(
@@ -1837,6 +1852,90 @@ mod tests {
         assert!(!is_i32_numeric_type(typed, &type_table));
         assert!(!is_supported_call_lane_type(typed, &type_table, false));
         assert!(!is_supported_call_lane_type(typed, &type_table, true));
+    }
+
+    #[test]
+    fn receiver_overload_resolution_prefers_the_matching_text_buffer_family() {
+        let mut type_table = TypeTable::new();
+        let ascii_buffer = type_table
+            .resolve_or_intern("ascii[12]")
+            .expect("fixed ASCII buffer");
+        let ascii_view = type_table.resolve_or_intern("ascii[]").expect("ASCII view");
+        let utf8_buffer = type_table
+            .resolve_or_intern("utf8[12]")
+            .expect("fixed UTF8 buffer");
+        let utf8_view = type_table.resolve_or_intern("utf8[]").expect("UTF8 view");
+        let signatures = HashMap::from([(
+            "from_i32".to_string(),
+            vec![
+                CallSignature {
+                    function_id: Some(2),
+                    extern_symbol: None,
+                    params: vec![utf8_view, TYPE_ID_I32],
+                    return_type: TYPE_ID_I32,
+                },
+                CallSignature {
+                    function_id: Some(1),
+                    extern_symbol: None,
+                    params: vec![ascii_view, TYPE_ID_I32],
+                    return_type: TYPE_ID_I32,
+                },
+            ],
+        )]);
+        let fields = NamedStructFieldTypeMap::new();
+
+        assert_eq!(
+            resolve_call_signature(
+                "from_i32",
+                &[ascii_buffer, TYPE_ID_I32],
+                &signatures,
+                &type_table,
+                &fields,
+            )
+            .expect("ASCII receiver selects ASCII overload")
+            .function_id,
+            Some(1)
+        );
+        assert_eq!(
+            resolve_call_signature(
+                "from_i32",
+                &[utf8_buffer, TYPE_ID_I32],
+                &signatures,
+                &type_table,
+                &fields,
+            )
+            .expect("UTF8 receiver selects UTF8 overload")
+            .function_id,
+            Some(2)
+        );
+
+        let byte_view = type_table.resolve_or_intern("u8[]").expect("byte view");
+        let tradeoff_signatures = HashMap::from([(
+            "tradeoff".to_string(),
+            vec![
+                CallSignature {
+                    function_id: Some(3),
+                    extern_symbol: None,
+                    params: vec![ascii_view, TYPE_ID_U8],
+                    return_type: TYPE_ID_I32,
+                },
+                CallSignature {
+                    function_id: Some(4),
+                    extern_symbol: None,
+                    params: vec![byte_view, TYPE_ID_I32],
+                    return_type: TYPE_ID_I32,
+                },
+            ],
+        )]);
+        let error = resolve_call_signature(
+            "tradeoff",
+            &[ascii_buffer, TYPE_ID_I32],
+            &tradeoff_signatures,
+            &type_table,
+            &fields,
+        )
+        .expect_err("cross-parameter compatibility tradeoff stays ambiguous");
+        assert!(error.contains("ambiguous overload"), "{error}");
     }
 
     #[test]

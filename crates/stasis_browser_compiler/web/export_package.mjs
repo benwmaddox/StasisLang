@@ -134,14 +134,30 @@ export async function createExportEntries({ entry, files, assets, metadata, game
   const assetList = Array.from(assets || []);
   const assetOverrides = Object.create(null);
   const assetMetadata = Object.create(null);
+  const assetRecords = [];
   for (const asset of assetList) {
     const path = normalizeArchivePath(asset.path);
-    if (!path.startsWith("assets/") || !path.toLowerCase().endsWith(".png")) throw new Error(`unsupported exported asset path ${path}`);
-    assetOverrides[path] = path;
-    assetMetadata[path] = {
-      encoding: "png", width: asset.width, height: asset.height,
-      byte_length: bytesOf(asset.bytes).byteLength, sha256: asset.sha256,
-    };
+    if (!path.startsWith("assets/")) throw new Error(`unsupported exported asset path ${path}`);
+    const bytes = bytesOf(asset.bytes).slice();
+    const byteLength = bytes.byteLength;
+    const sha256 = asset.sha256 || await sha256Hex(bytes);
+    const extension = path.split(".").at(-1).toLowerCase();
+    if (extension === "png") {
+      if (!Number.isInteger(asset.width) || asset.width <= 0 || !Number.isInteger(asset.height) || asset.height <= 0) {
+        throw new Error(`PNG asset ${path} has invalid dimensions`);
+      }
+      assetOverrides[path] = path;
+      assetMetadata[path] = { encoding: "png", width: asset.width, height: asset.height, byte_length: byteLength, sha256 };
+      assetRecords.push({ path, width: asset.width, height: asset.height, byteLength, sha256 });
+    } else if (extension === "ttf") {
+      assetOverrides[path] = path;
+      assetMetadata[path] = { encoding: "ttf", byte_length: byteLength, sha256 };
+      assetRecords.push({ path, byteLength, sha256, encoding: "ttf" });
+    } else if (path === "assets/OFL.txt") {
+      assetRecords.push({ path, byteLength, sha256, role: "license" });
+    } else {
+      throw new Error(`unsupported exported asset path ${path}`);
+    }
   }
   config.assets = assetOverrides;
   config.asset_urls = {};
@@ -176,10 +192,7 @@ export async function createExportEntries({ entry, files, assets, metadata, game
     layoutDigest: metadata.layoutDigest,
     imports: metadata.imports || [],
     sources: manifestFiles,
-    assets: assetList.map(asset => ({
-      path: asset.path, width: asset.width, height: asset.height,
-      byteLength: bytesOf(asset.bytes).byteLength, sha256: asset.sha256,
-    })),
+    assets: assetRecords,
     files: ["index.html", "game.js", "game.wasm", "manifest.json", "provenance.json", ...assetList.map(asset => asset.path), ...manifestFiles.map(file => file.path)],
   };
   const provenance = {

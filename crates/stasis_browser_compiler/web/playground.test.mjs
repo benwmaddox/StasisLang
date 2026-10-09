@@ -2,22 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 
-import { inspectPngHeader, normalizeAssetPath } from "./project_assets.mjs";
+import { inspectPngHeader, normalizeAssetPath, ProjectAssetStore } from "./project_assets.mjs";
 import { buildStoredZip, crc32, createExportEntries, normalizeArchivePath } from "./export_package.mjs";
 import {
   applyEditorCompletion, buildHighlightedFragment, editorKeyAction,
   isCompletionContext, isCurrentEditorAnalysis,
 } from "./editor_view.mjs";
+import { DEFAULT_PONG_SOURCE, DEFAULT_PONG_IMAGES, importDefaultPongImages } from "./pong_example.mjs";
 
 const playgroundSource = readFileSync(new URL("./playground.js", import.meta.url), "utf8");
 const playgroundHtml = readFileSync(new URL("./playground.html", import.meta.url), "utf8");
 
 function starterSources() {
-  const defaultSource = playgroundSource.match(/const DEFAULT_SOURCE = `([\s\S]*?)`;\r?\n/);
-  const spriteSource = playgroundSource.match(/function createSpriteExample\(path\) \{\s*const escaped = JSON\.stringify\(path\);\s*return `([\s\S]*?)`;\s*\}/);
-  assert.ok(defaultSource, "default playground source is embedded");
-  assert.ok(spriteSource, "asset example source is embedded");
-  return [defaultSource[1], spriteSource[1]];
+  const start = playgroundSource.indexOf("function createSpriteExample(path) {");
+  const end = playgroundSource.indexOf("\nasync function importAsset(file)", start);
+  assert.ok(start >= 0 && end > start, "asset example source is embedded");
+  return [DEFAULT_PONG_SOURCE, playgroundSource.slice(start, end)];
 }
 
 test("playground starters use canonical portable Stasis APIs and types", () => {
@@ -46,12 +46,11 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
       assert.match(source, /sample_sprite\.load_sprite_from\(/);
       assert.match(source, /state\.sample_sprite\.draw\(state\.sprite_x,/);
     } else {
-      assert.match(source, /ball_x: f32;/);
-      assert.match(source, /ball_y: f32;/);
-      assert.match(source, /ball_vx: f32;/);
-      assert.match(source, /ball_vy: f32;/);
-      assert.match(source, /player_score: i32;/);
-      assert.match(source, /cpu_score: i32;/);
+      assert.match(source, /ball: BallState;/);
+      assert.match(source, /player: PaddleState;/);
+      assert.match(source, /cpu: PaddleState;/);
+      assert.match(source, /game_over: bool;/);
+      assert.doesNotMatch(source, /\b(?:ball_[xy]|ball_v[xy]|(?:player|cpu)_(?:y|score|score_text))\b/);
       assert.match(source, /const SCANCODE_UP: i32 = 82;/);
       assert.match(source, /const SCANCODE_DOWN: i32 = 81;/);
       assert.match(source, /const SCANCODE_W: i32 = 26;/);
@@ -61,11 +60,53 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
       assert.match(source, /input_frame\.keys\[SCANCODE_DOWN\]/);
       assert.match(source, /input_frame\.pointers\[0\]\.y_logical/);
       assert.match(source, /input_frame\.pointers\[0\]\.went_down/);
+      assert.match(source, /state\.arena\.load_sprite_from\("assets\/pong-arena\.png"/);
+      assert.match(source, /state\.paddle\.load_sprite_from\("assets\/pong-paddle\.png"/);
+      assert.match(source, /state\.ball\.sprite\.load_sprite_from\("assets\/pong-ball\.png"/);
+      assert.match(source, /load_font\("assets\/ui\.ttf", 18\)/);
+      assert.match(source, /state\.score_utf8\.from_i32\(state\.player\.score\)/);
+      assert.match(source, /state\.score_utf8\.from_i32\(state\.cpu\.score\)/);
+      assert.doesNotMatch(source, /score_ascii|ascii_from_i32|utf8_from_ascii/);
+      assert.match(source, /state\.player\.score_text\.replace_text_from\(/);
+      assert.match(source, /state\.cpu\.score_text\.replace_text_from\(/);
+      assert.match(source, /state\.player\.score_text\.draw\(/);
+      assert.match(source, /state\.score_font\.draw_text\("YOU WIN"/);
+      assert.match(source, /state\.score_font\.draw_text\("CPU WINS"/);
+      assert.match(source, /state\.score_font\.draw_text\("SPACE OR TAP TO RESTART"/);
+      assert.doesNotMatch(source, /draw_digit/);
       assert.match(playgroundHtml, /first to 5/);
       assert.match(playgroundHtml, /Space/);
-      assert.match(playgroundHtml, /tap restarts/);
+      assert.match(playgroundHtml, /tap after the match to restart/);
     }
   }
+});
+
+test("default Pong images are small SVGs imported before playground readiness", () => {
+  assert.deepEqual(DEFAULT_PONG_IMAGES.map(asset => [asset.name, asset.path]), [
+    ["pong-arena.svg", "assets/pong-arena.png"],
+    ["pong-paddle.svg", "assets/pong-paddle.png"],
+    ["pong-ball.svg", "assets/pong-ball.png"],
+  ]);
+  for (const asset of DEFAULT_PONG_IMAGES) {
+    assert.match(asset.source, /^<svg\b/);
+    assert.ok(asset.source.includes('xmlns="http://www.w3.org/2000/svg"'));
+    assert.doesNotMatch(asset.source, /<script|<image|on[a-z]+\s*=|url\s*\(/i);
+  }
+  assert.ok(playgroundSource.includes("importDefaultPongImages(assets)"));
+  assert.ok(playgroundSource.includes("Promise.all([workerReady, fetchStaticDependencies(), loadDefaultPongAssets()])"));
+  assert.ok(playgroundSource.includes("overrides.assets[DEFAULT_FONT_PATH] = defaultFont.url"));
+});
+
+test("default Pong SVGs import through the shared project asset pipeline", async () => {
+  const importedNames = [];
+  const imported = await importDefaultPongImages({
+    async importFile(file) {
+      importedNames.push(file.name);
+      return { path: "assets/" + file.name.replace(/\.svg$/i, ".png") };
+    },
+  });
+  assert.deepEqual(importedNames, DEFAULT_PONG_IMAGES.map(asset => asset.name));
+  assert.deepEqual(imported.map(asset => asset.path), DEFAULT_PONG_IMAGES.map(asset => asset.path));
 });
 
 function pngHeader(width, height) {
@@ -146,13 +187,17 @@ test("export entries include runnable files, source manifest, and local asset pa
   const entries = await createExportEntries({
     entry: "main.stasis",
     files: [{ path: "main.stasis", source: "function main(): i32 { return 0; }" }],
-    assets: [{ path: "assets/player.png", bytes: Uint8Array.of(1, 2, 3), width: 1, height: 1, sha256: "abc" }],
+    assets: [
+      { path: "assets/player.png", bytes: Uint8Array.of(1, 2, 3), width: 1, height: 1, sha256: "abc" },
+      { path: "assets/ui.ttf", bytes: Uint8Array.of(4, 5, 6), mimeType: "font/ttf", sha256: "font-hash" },
+      { path: "assets/OFL.txt", bytes: "SIL Open Font License", mimeType: "text/plain", sha256: "license-hash" },
+    ],
     metadata,
     gameWasm: Uint8Array.of(0, 97, 115, 109, 1, 0, 0, 0),
     runtimeScript: "async function wasmBytes(){return fetch('__STASIS_WASM_URL__')}" ,
   });
   const archive = readStoredZip(buildStoredZip(entries));
-  for (const path of ["index.html", "game.js", "game.wasm", "manifest.json", "provenance.json", "assets/player.png", "project/main.stasis"]) {
+  for (const path of ["index.html", "game.js", "game.wasm", "manifest.json", "provenance.json", "assets/player.png", "assets/ui.ttf", "assets/OFL.txt", "project/main.stasis"]) {
     assert.ok(archive.has(path), `archive should include ${path}`);
   }
   const html = new TextDecoder().decode(archive.get("index.html").data);
@@ -162,7 +207,15 @@ test("export entries include runnable files, source manifest, and local asset pa
   assert.ok(!runtime.includes("__STASIS_WASM_URL__"));
   const manifest = JSON.parse(new TextDecoder().decode(archive.get("manifest.json").data));
   assert.equal(manifest.entry, "main.stasis");
-  assert.equal(manifest.assets[0].path, "assets/player.png");
+  assert.deepEqual(manifest.assets[0], {
+    path: "assets/player.png", width: 1, height: 1, byteLength: 3, sha256: "abc",
+  });
+  assert.deepEqual(manifest.assets[1], {
+    path: "assets/ui.ttf", byteLength: 3, sha256: "font-hash", encoding: "ttf",
+  });
+  assert.equal(manifest.assets[2].role, "license");
+  assert.equal(new TextDecoder().decode(archive.get("assets/OFL.txt").data), "SIL Open Font License");
+  assert.match(html, /assets\/ui\.ttf/);
   assert.ok(manifest.files.includes("provenance.json"));
 });
 
@@ -343,6 +396,7 @@ async function waitUntil(predicate, message) {
 }
 
 test("overlapping initial run and restart publish only the newest ready iframe", async () => {
+  const priorImportFile = ProjectAssetStore.prototype.importFile;
   const prior = new Map(["document", "window", "Worker", "fetch"].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const elements = new Map();
   const fakeDocument = {
@@ -414,9 +468,16 @@ test("overlapping initial run and restart publish only the newest ready iframe",
   globalThis.document = fakeDocument;
   globalThis.window = {};
   globalThis.Worker = FakeWorker;
-  globalThis.fetch = async path => path === "./game.js"
-    ? { ok: true, text: async () => "const wasmUrl = '__STASIS_WASM_URL__';" }
-    : { ok: true, json: async () => [{ path: "vendor/stasis/stdlib/test.stasis", source: "// local test standard library" }] };
+  ProjectAssetStore.prototype.importFile = async file => ({
+    path: "assets/" + file.name.replace(/\.svg$/i, ".png"),
+  });
+  globalThis.fetch = async path => {
+    if (path === "./game.js") return { ok: true, text: async () => "const wasmUrl = '__STASIS_WASM_URL__';" };
+    if (path === "./ui.ttf" || path === "./OFL.txt") {
+      return { ok: true, arrayBuffer: async () => Uint8Array.of(1, 2, 3).buffer };
+    }
+    return { ok: true, json: async () => [{ path: "vendor/stasis/stdlib/test.stasis", source: "// local test standard library" }] };
+  };
 
   try {
     const moduleUrl = new URL("./playground.js", import.meta.url);
@@ -554,6 +615,7 @@ test("overlapping initial run and restart publish only the newest ready iframe",
     assert.match(api.getState().error, /Uncaught SyntaxError: Unexpected token/);
     assert.match(api.getState().error, /compiler_worker\.js:17:4/);
   } finally {
+    ProjectAssetStore.prototype.importFile = priorImportFile;
     for (const [key, descriptor] of prior) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);
       else delete globalThis[key];

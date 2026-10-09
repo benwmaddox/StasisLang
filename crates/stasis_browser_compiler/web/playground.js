@@ -4,199 +4,11 @@ import {
   applyEditorCompletion, buildHighlightedFragment, editorKeyAction,
   isCompletionContext, isCurrentEditorAnalysis,
 } from "./editor_view.mjs";
+import { DEFAULT_PONG_SOURCE, importDefaultPongImages } from "./pong_example.mjs";
 
-const DEFAULT_SOURCE = `import "vendor/stasis/stdlib/graphics.stasis";
-import "vendor/stasis/stdlib/host_frame.stasis";
-
-struct PongState {
-    input_frame: HostFrame;
-    ball_x: f32;
-    ball_y: f32;
-    ball_vx: f32;
-    ball_vy: f32;
-    player_y: f32;
-    cpu_y: f32;
-    player_score: i32;
-    cpu_score: i32;
-    game_over: i32;
-}
-
-global state: PongState;
-
-// HostFrame.keys uses SDL scancode slots.
-const SCANCODE_W: i32 = 26;
-const SCANCODE_S: i32 = 22;
-const SCANCODE_SPACE: i32 = 44;
-const SCANCODE_UP: i32 = 82;
-const SCANCODE_DOWN: i32 = 81;
-
-function serve(direction: i32): void {
-    state.ball_x = 320.0;
-    state.ball_y = 180.0;
-    state.ball_vx = 4.0;
-    state.ball_vy = 2.25;
-    if (direction < 0) {
-        state.ball_vx = 0.0 - state.ball_vx;
-    }
-}
-
-function main(): i32 {
-    init_window(640, 360, "Stasis Pong");
-    state.player_y = 144.0;
-    state.cpu_y = 144.0;
-    state.player_score = 0;
-    state.cpu_score = 0;
-    state.game_over = 0;
-    serve(1);
-    return 0;
-}
-
-function draw_digit(value: i32, x: f32, y: f32, red: f32, green: f32, blue: f32): void {
-    if (value != 1 && value != 4) {
-        fill_rect(x + 4.0, y, 14.0, 3.0, red, green, blue, 1.0);
-    }
-    if (value == 0 || value == 1 || value == 2 || value == 3 || value == 4) {
-        fill_rect(x + 18.0, y + 3.0, 3.0, 10.0, red, green, blue, 1.0);
-    }
-    if (value == 0 || value == 1 || value == 3 || value == 4 || value == 5) {
-        fill_rect(x + 18.0, y + 16.0, 3.0, 10.0, red, green, blue, 1.0);
-    }
-    if (value == 0 || value == 2 || value == 3 || value == 5) {
-        fill_rect(x + 4.0, y + 27.0, 14.0, 3.0, red, green, blue, 1.0);
-    }
-    if (value == 0 || value == 2) {
-        fill_rect(x + 1.0, y + 16.0, 3.0, 10.0, red, green, blue, 1.0);
-    }
-    if (value == 0 || value == 4 || value == 5) {
-        fill_rect(x + 1.0, y + 3.0, 3.0, 10.0, red, green, blue, 1.0);
-    }
-    if (value == 2 || value == 3 || value == 4 || value == 5) {
-        fill_rect(x + 4.0, y + 13.0, 14.0, 3.0, red, green, blue, 1.0);
-    }
-}
-
-function tick(): i32 {
-    state.input_frame.refresh();
-    if (state.game_over != 0) {
-        if (state.input_frame.keys[SCANCODE_SPACE] != 0 || (state.input_frame.pointer_count > 0 && state.input_frame.pointers[0].went_down)) {
-            state.player_y = 144.0;
-            state.cpu_y = 144.0;
-            state.player_score = 0;
-            state.cpu_score = 0;
-            state.game_over = 0;
-            serve(1);
-        }
-        return 0;
-    }
-
-    if (state.input_frame.pointer_count > 0 && state.input_frame.pointers[0].is_down) {
-        state.player_y = state.input_frame.pointers[0].y_logical - 36.0;
-    } else if (state.input_frame.keys[SCANCODE_UP] != 0 || state.input_frame.keys[SCANCODE_W] != 0) {
-        state.player_y -= 5.0;
-    } else if (state.input_frame.keys[SCANCODE_DOWN] != 0 || state.input_frame.keys[SCANCODE_S] != 0) {
-        state.player_y += 5.0;
-    }
-    if (state.player_y < 20.0) {
-        state.player_y = 20.0;
-    }
-    if (state.player_y > 268.0) {
-        state.player_y = 268.0;
-    }
-
-    if (state.ball_y < state.cpu_y + 36.0) {
-        state.cpu_y -= 2.4;
-    } else if (state.ball_y > state.cpu_y + 36.0) {
-        state.cpu_y += 2.4;
-    }
-    if (state.cpu_y < 20.0) {
-        state.cpu_y = 20.0;
-    }
-    if (state.cpu_y > 268.0) {
-        state.cpu_y = 268.0;
-    }
-
-    state.ball_x += state.ball_vx;
-    state.ball_y += state.ball_vy;
-    if (state.ball_y < 18.0) {
-        state.ball_y = 18.0;
-        state.ball_vy = 0.0 - state.ball_vy;
-    }
-    if (state.ball_y > 342.0) {
-        state.ball_y = 342.0;
-        state.ball_vy = 0.0 - state.ball_vy;
-    }
-
-    if (state.ball_vx < 0.0 && state.ball_x <= 49.0 && state.ball_x >= 23.0 && state.ball_y + 7.0 >= state.player_y && state.ball_y - 7.0 <= state.player_y + 72.0) {
-        state.ball_x = 49.0;
-        state.ball_vx = 0.0 - state.ball_vx;
-        if (state.ball_y < state.player_y + 36.0) {
-            state.ball_vy -= 1.0;
-        } else if (state.ball_y > state.player_y + 36.0) {
-            state.ball_vy += 1.0;
-        }
-    }
-    if (state.ball_vx > 0.0 && state.ball_x >= 591.0 && state.ball_x <= 617.0 && state.ball_y + 7.0 >= state.cpu_y && state.ball_y - 7.0 <= state.cpu_y + 72.0) {
-        state.ball_x = 591.0;
-        state.ball_vx = 0.0 - state.ball_vx;
-        if (state.ball_y < state.cpu_y + 36.0) {
-            state.ball_vy -= 1.0;
-        } else if (state.ball_y > state.cpu_y + 36.0) {
-            state.ball_vy += 1.0;
-        }
-    }
-    if (state.ball_vy > 5.0) {
-        state.ball_vy = 5.0;
-    }
-    if (state.ball_vy < -5.0) {
-        state.ball_vy = -5.0;
-    }
-
-    if (state.ball_x < -8.0) {
-        state.cpu_score += 1;
-        if (state.cpu_score >= 5) {
-            state.game_over = 1;
-        } else {
-            serve(1);
-        }
-    } else if (state.ball_x > 648.0) {
-        state.player_score += 1;
-        if (state.player_score >= 5) {
-            state.game_over = 1;
-        } else {
-            serve(-1);
-        }
-    }
-    return 0;
-}
-
-function render(): i32 {
-    clear(0.04, 0.09, 0.11, 1.0);
-    fill_rect(0.0, 18.0, 640.0, 3.0, 0.20, 0.39, 0.40, 1.0);
-    fill_rect(0.0, 339.0, 640.0, 3.0, 0.20, 0.39, 0.40, 1.0);
-    fill_rect(318.0, 72.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
-    fill_rect(318.0, 108.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
-    fill_rect(318.0, 144.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
-    fill_rect(318.0, 180.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
-    fill_rect(318.0, 216.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
-    fill_rect(318.0, 252.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
-    fill_rect(318.0, 288.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
-    fill_rect(30.0, state.player_y, 12.0, 72.0, 0.32, 0.88, 0.68, 1.0);
-    fill_rect(598.0, state.cpu_y, 12.0, 72.0, 0.94, 0.61, 0.45, 1.0);
-    fill_rect(state.ball_x - 7.0, state.ball_y - 7.0, 14.0, 14.0, 0.96, 0.85, 0.56, 1.0);
-    draw_digit(state.player_score, 283.0, 24.0, 0.32, 0.88, 0.68);
-    draw_digit(state.cpu_score, 336.0, 24.0, 0.94, 0.61, 0.45);
-    if (state.game_over != 0) {
-        if (state.player_score >= 5) {
-            fill_rect(244.0, 153.0, 152.0, 54.0, 0.10, 0.28, 0.22, 1.0);
-        } else {
-            fill_rect(244.0, 153.0, 152.0, 54.0, 0.32, 0.17, 0.15, 1.0);
-        }
-        fill_rect(267.0, 169.0, 106.0, 5.0, 0.96, 0.85, 0.56, 1.0);
-        fill_rect(287.0, 185.0, 66.0, 5.0, 0.96, 0.85, 0.56, 1.0);
-    }
-    return 0;
-}
-`;
+const DEFAULT_SOURCE = DEFAULT_PONG_SOURCE;
+const DEFAULT_FONT_PATH = "assets/ui.ttf";
+const DEFAULT_LICENSE_PATH = "assets/OFL.txt";
 
 const MAX_PROJECT_FILES = 64;
 const MAX_SOURCE_BYTES = 1024 * 1024;
@@ -210,6 +22,8 @@ const elements = Object.fromEntries([
 
 const files = new Map([["main.stasis", DEFAULT_SOURCE]]);
 const assets = new ProjectAssetStore();
+let defaultFont = null;
+let defaultLicense = null;
 const pending = new Map();
 const pendingAnalyses = new Map();
 let stdlibFiles = [];
@@ -464,6 +278,29 @@ async function fetchStaticDependencies() {
     }
     return { path, source: file.source };
   }).sort((left, right) => left.path.localeCompare(right.path));
+}
+
+async function loadDefaultPongAssets() {
+  const [fontResponse, licenseResponse] = await Promise.all([
+    fetch("./ui.ttf", { cache: "no-store" }),
+    fetch("./OFL.txt", { cache: "no-store" }),
+    importDefaultPongImages(assets),
+  ]);
+  if (!fontResponse.ok) throw new Error(`bundled Pong font request failed with HTTP ${fontResponse.status}`);
+  if (!licenseResponse.ok) throw new Error(`bundled font license request failed with HTTP ${licenseResponse.status}`);
+  const fontBytes = new Uint8Array(await fontResponse.arrayBuffer());
+  const licenseBytes = new Uint8Array(await licenseResponse.arrayBuffer());
+  if (!fontBytes.byteLength || !licenseBytes.byteLength) throw new Error("bundled Pong font or its license is empty");
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", fontBytes));
+  const sha256 = Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
+  const blob = new Blob([fontBytes], { type: "font/ttf" });
+  defaultFont = {
+    path: DEFAULT_FONT_PATH, name: "Press Start 2P", mimeType: "font/ttf",
+    bytes: fontBytes, byteLength: fontBytes.byteLength, sha256,
+    url: URL.createObjectURL(blob),
+  };
+  defaultLicense = { path: DEFAULT_LICENSE_PATH, bytes: licenseBytes };
+  renderAssetList();
 }
 
 function allSourceFiles() {
@@ -763,7 +600,9 @@ function compilationWithAssets(compilation) {
   const gameWasm = safeBytes(compilation.gameWasm);
   const metadata = cloneJson(compilation.metadata);
   if (!metadata || !metadata.config) throw new Error("compiler response did not include a runtime configuration");
+  if (!defaultFont?.url) throw new Error("the bundled Pong font is not ready");
   const overrides = assets.configOverrides();
+  overrides.assets[DEFAULT_FONT_PATH] = defaultFont.url;
   metadata.config.assets = overrides.assets;
   metadata.config.asset_urls = {};
   metadata.config.asset_metadata = overrides.asset_metadata;
@@ -968,6 +807,7 @@ async function importAsset(file) {
 }
 
 function removeAsset(path) {
+  if (String(path) === DEFAULT_FONT_PATH) return false;
   const removed = assets.remove(path);
   if (removed) {
     renderAssetList();
@@ -976,11 +816,21 @@ function removeAsset(path) {
   return removed;
 }
 
+function projectAssetRecords() {
+  const images = assets.list().map(({ previewUrl, ...asset }) => asset);
+  return defaultFont ? [...images, {
+    path: defaultFont.path, name: defaultFont.name, mimeType: defaultFont.mimeType,
+    byteLength: defaultFont.byteLength, sha256: defaultFont.sha256,
+  }] : images;
+}
+
 async function exportProject() {
   status("Compiling project for offline export...", "info");
   try {
     const compilation = await requestCompile();
     const entries = assets.exportEntries().map(asset => ({ ...asset, ...assets.list().find(item => item.path === asset.path) }));
+    entries.push({ path: DEFAULT_FONT_PATH, bytes: defaultFont.bytes.slice(), mimeType: "font/ttf" });
+    entries.push({ path: DEFAULT_LICENSE_PATH, bytes: defaultLicense.bytes.slice(), mimeType: "text/plain" });
     const blob = await exportProjectZip({
       entry: "main.stasis", files: Array.from(files, ([path, source]) => ({ path, source })).concat(stdlibFiles),
       assets: entries, metadata: compilation.metadata, gameWasm: compilation.gameWasm, runtimeScript,
@@ -998,7 +848,7 @@ const api = {
   isReady: false,
   getProject() {
     setCurrentEditorValue();
-    return { entry: "main.stasis", files: Array.from(files, ([path, source]) => ({ path, source })), assets: assets.list().map(({ previewUrl, ...asset }) => asset), status: editorStatus };
+    return { entry: "main.stasis", files: Array.from(files, ([path, source]) => ({ path, source })), assets: projectAssetRecords(), status: editorStatus };
   },
   getFile(path) {
     const safe = safeModulePath(path);
@@ -1082,13 +932,10 @@ const api = {
   },
   importAsset,
   removeAsset,
-  getAssets() { return assets.list().map(({ previewUrl, ...asset }) => asset); },
+  getAssets() { return projectAssetRecords(); },
   getAsset(path) {
     const safePath = String(path);
-    const asset = assets.list().find(candidate => candidate.path === safePath);
-    if (!asset) return null;
-    const { previewUrl, ...record } = asset;
-    return record;
+    return projectAssetRecords().find(candidate => candidate.path === safePath) || null;
   },
   exportProject,
   getState() {
@@ -1172,7 +1019,7 @@ elements.assetSampleButton.addEventListener("click", () => {
 
 renderFileList();
 renderAssetList();
-api.ready = Promise.all([workerReady, fetchStaticDependencies()]).then(([workerInfo]) => {
+api.ready = Promise.all([workerReady, fetchStaticDependencies(), loadDefaultPongAssets()]).then(([workerInfo]) => {
   api.isReady = true;
   updateRunState();
   status(`Ready · ${stdlibFiles.length} local standard modules`, "ready");

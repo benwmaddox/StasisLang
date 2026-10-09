@@ -18,6 +18,10 @@ for (const file of (await readdir(webRoot)).filter(file =>
   await copyFile(path.join(webRoot, file), path.join(output, file));
 }
 await copyFile(path.join(repository, "runtime/web/game.js"), path.join(output, "game.js"));
+// Keep the starter font and its redistribution license local and exportable.
+for (const file of ["ui.ttf", "OFL.txt"]) {
+  await copyFile(path.join(repository, "samples/ui_gallery/assets", file), path.join(output, file));
+}
 // Bundle caller-visible library sources before the editor becomes ready. The
 // compiler still receives a complete virtual project and never reads disk.
 const libraryRoot = path.join(repository, "src/stdlib");

@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::backend::compile_analysis::{
-    collect_supported_call_signatures, resolve_call_signature, CallSignatureMap,
-    ResolvedExternCallSignature,
+    collect_supported_call_signatures, resolve_call_signature, unambiguous_call_params,
+    CallSignatureMap, ResolvedExternCallSignature,
 };
 use crate::compiler::{FunctionMeta, SourceFile};
 use crate::frontend::body_parser::parse_simple_expression;
@@ -13,8 +13,8 @@ use crate::frontend::types::{
     TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_VOID,
 };
 use crate::ir::hir::{
-    eval_const_i64, AssignOp, AssignTarget, ComparisonOp, ExprBinaryOp, ExprUnaryOp,
-    SimpleCondition, SimpleExpr, SimpleStmt,
+    eval_const_i64, AssignOp, AssignTarget, ComparisonOp, ConversionKind, ExprBinaryOp,
+    ExprUnaryOp, SimpleCondition, SimpleExpr, SimpleStmt,
 };
 
 mod effect_contracts;
@@ -297,35 +297,11 @@ struct AnalysisContext<'a> {
 pub(crate) fn validate_program_semantics(
     files: &[SourceFile],
     functions: &[FunctionMeta],
-    statements_by_id: &[Vec<SimpleStmt>],
+    statements_by_id: &mut [Vec<SimpleStmt>],
     types: &TypeTable,
+    candidate_targets_by_function: &BTreeMap<u32, BTreeMap<String, Vec<String>>>,
 ) -> Result<(), (u32, String)> {
-    // Resolve storage types before checking properties, including globals whose
-    // types never appear in a function signature.
     let mut semantic_types = types.clone();
-    let constants = crate::backend::compile_analysis::collect_top_level_constant_values(
-        files,
-        &mut semantic_types,
-    )
-    .map_err(|message| (0, message))?;
-    let paths = crate::backend::compile_analysis::collect_global_path_types(
-        files,
-        &mut semantic_types,
-        &constants,
-    )
-    .map_err(|message| (0, message))?;
-    let fields = crate::backend::compile_analysis::collect_named_struct_field_types(
-        files,
-        &mut semantic_types,
-        &constants,
-    )
-    .map_err(|message| (0, message))?;
-    let mut context =
-        build_context(files, functions, &semantic_types).map_err(|message| (0, message))?;
-    context.path_types.extend(paths);
-    for (owner, fields) in fields {
-        context.field_types.entry(owner).or_default().extend(fields);
-    }
     for function in functions {
         if semantic_types.is_typed_collection_type(function.return_type) {
             return Err((
@@ -350,8 +326,12 @@ pub(crate) fn validate_program_semantics(
                 ),
             ));
         }
+    }
+    let context = build_semantic_context(files, functions, &mut semantic_types)
+        .map_err(|message| (0, message))?;
+    for function in functions {
         let statements = statements_by_id
-            .get(function.storage_index as usize)
+            .get_mut(function.storage_index as usize)
             .ok_or_else(|| {
                 (
                     function.storage_index,
@@ -370,6 +350,9 @@ pub(crate) fn validate_program_semantics(
             &context,
             &mut local_types,
             0,
+            candidate_targets_by_function
+                .get(&function.storage_index)
+                .unwrap_or(&BTreeMap::new()),
         )
         .map_err(|message| (function.storage_index, message))?;
     }
@@ -378,14 +361,99 @@ pub(crate) fn validate_program_semantics(
     Ok(())
 }
 
+fn expression_for_assignment_target(target: &AssignTarget) -> SimpleExpr {
+    match target {
+        AssignTarget::Local(path) | AssignTarget::GlobalPath(path) => {
+            SimpleExpr::Identifier(path.clone())
+        }
+        AssignTarget::IndexedPath {
+            collection_path,
+            index,
+            suffix,
+            nested_index,
+        } => SimpleExpr::IndexedPath {
+            collection_path: collection_path.clone(),
+            index: Box::new(index.clone()),
+            suffix: suffix.clone(),
+            nested_index: nested_index.clone().map(Box::new),
+        },
+    }
+}
+
+fn conversion_method_name(kind: ConversionKind) -> &'static str {
+    match kind {
+        ConversionKind::FromI32 => "from_i32",
+        ConversionKind::FromF32 => "from_f32",
+        ConversionKind::FromF64 => "from_f64",
+    }
+}
+
+fn conversion_source_type(kind: ConversionKind) -> TypeId {
+    match kind {
+        ConversionKind::FromI32 => TYPE_ID_I32,
+        ConversionKind::FromF32 => TYPE_ID_F32,
+        ConversionKind::FromF64 => TYPE_ID_F64,
+    }
+}
+
 fn validate_statements(
-    statements: &[SimpleStmt],
+    statements: &mut [SimpleStmt],
     return_type: TypeId,
     context: &AnalysisContext<'_>,
     local_types: &mut BTreeMap<String, TypeId>,
     loop_depth: usize,
+    candidate_targets: &BTreeMap<String, Vec<String>>,
 ) -> Result<(), String> {
     for statement in statements {
+        if let SimpleStmt::Convert {
+            target,
+            kind,
+            source,
+        } = statement
+        {
+            let method = conversion_method_name(*kind);
+            let receiver_type = semantic_assignment_target_type(target, context, local_types);
+            let source_type = semantic_expression_type(source, context, local_types);
+            if let (Some(receiver_type), Some(source_type)) = (receiver_type, source_type) {
+                if source_type == conversion_source_type(*kind) {
+                    let argument_types = [receiver_type, source_type];
+                    let mut matches = Vec::new();
+                    for call_target in candidate_targets.get(method).into_iter().flatten() {
+                        match resolve_call_signature(
+                            call_target,
+                            &argument_types,
+                            &context.call_signatures,
+                            context.types,
+                            &context.field_types,
+                        ) {
+                            Ok(_) => matches.push(call_target.clone()),
+                            Err(error)
+                                if error.starts_with("ambiguous overload for call target") =>
+                            {
+                                return Err(error);
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    match matches.as_slice() {
+                        [matched_target] => {
+                            let receiver = expression_for_assignment_target(target);
+                            let arguments = vec![receiver, source.clone()];
+                            *statement = SimpleStmt::Expr(SimpleExpr::Call {
+                                target: matched_target.clone(),
+                                args: arguments,
+                            });
+                        }
+                        [] => {}
+                        _ => {
+                            return Err(format!(
+                                "ambiguous receiver conversion '{method}' matches multiple imported modules"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         match statement {
             SimpleStmt::Noop => {}
             SimpleStmt::Let {
@@ -420,11 +488,11 @@ fn validate_statements(
                         "let binding '{name}' cannot store a typed collection value"
                     ));
                 }
-                if let (Some(expected), Some(found)) = (type_id, expression_type) {
-                    if !assignment_types_compatible(*expected, found, context.types) {
+                if let (Some(expected), Some(found)) = (*type_id, expression_type) {
+                    if !assignment_types_compatible(expected, found, context.types) {
                         return Err(type_mismatch(
                             &format!("let binding '{name}'"),
-                            *expected,
+                            expected,
                             found,
                             context.types,
                         ));
@@ -530,6 +598,7 @@ fn validate_statements(
                     context,
                     &mut then_locals,
                     loop_depth,
+                    candidate_targets,
                 )?;
                 if let Some(else_statements) = else_statements {
                     let mut else_locals = local_types.clone();
@@ -539,6 +608,7 @@ fn validate_statements(
                         context,
                         &mut else_locals,
                         loop_depth,
+                        candidate_targets,
                     )?;
                 }
             }
@@ -550,11 +620,12 @@ fn validate_statements(
             } => {
                 let mut loop_locals = local_types.clone();
                 validate_statements(
-                    std::slice::from_ref(init.as_ref()),
+                    std::slice::from_mut(init.as_mut()),
                     return_type,
                     context,
                     &mut loop_locals,
                     loop_depth + 1,
+                    candidate_targets,
                 )?;
                 validate_condition_access(condition, context, &loop_locals)?;
                 validate_condition(condition, context, &loop_locals)?;
@@ -565,13 +636,15 @@ fn validate_statements(
                     context,
                     &mut body_locals,
                     loop_depth + 1,
+                    candidate_targets,
                 )?;
                 validate_statements(
-                    std::slice::from_ref(step.as_ref()),
+                    std::slice::from_mut(step.as_mut()),
                     return_type,
                     context,
                     &mut loop_locals,
                     loop_depth + 1,
+                    candidate_targets,
                 )?;
             }
             SimpleStmt::Foreach {
@@ -612,6 +685,7 @@ fn validate_statements(
                     context,
                     &mut loop_locals,
                     loop_depth + 1,
+                    candidate_targets,
                 )?;
             }
             SimpleStmt::Expr(expression) => {
@@ -2204,6 +2278,12 @@ fn semantic_expression_type_with_expected(
     context: &AnalysisContext<'_>,
     local_types: &BTreeMap<String, TypeId>,
 ) -> Option<TypeId> {
+    if let (SimpleExpr::StringLiteral(value), Some(expected)) = (expression, expected) {
+        if let Some(contextual_type) = contextual_ascii_literal_type(value, expected, context.types)
+        {
+            return Some(contextual_type);
+        }
+    }
     if let Some(expected) = expected.filter(|type_id| {
         context.types.integer_width_bits(*type_id).is_some()
             && is_contextual_bitwise_expression(expression)
@@ -2216,6 +2296,21 @@ fn semantic_expression_type_with_expected(
         return Some(TYPE_ID_F64);
     }
     inferred
+}
+
+fn contextual_ascii_literal_type(
+    value: &str,
+    expected: TypeId,
+    types: &TypeTable,
+) -> Option<TypeId> {
+    (value.is_ascii()
+        && types.type_info(expected).is_some_and(|info| {
+            matches!(
+                info.category,
+                TypeCategory::AsciiFixed | TypeCategory::AsciiView
+            )
+        }))
+    .then_some(expected)
 }
 
 fn is_contextual_bitwise_expression(expression: &SimpleExpr) -> bool {
@@ -3476,7 +3571,8 @@ pub(crate) fn build_function_data_flow_summaries(
             )
         })
         .collect();
-    let context = build_context(files, functions, types)?;
+    let mut semantic_types = types.clone();
+    let context = build_semantic_context(files, functions, &mut semantic_types)?;
     let reuse_candidate = previous.len() == included_function_ids.len()
         && previous_context_fingerprint == context.fingerprint;
     let mut direct_by_id = Vec::with_capacity(functions.len());
@@ -3998,6 +4094,26 @@ fn hash_expression_shape(expression: &SimpleExpr, hasher: &mut DefaultHasher) {
             hash_expression_shape(rhs, hasher);
         }
     }
+}
+
+fn build_semantic_context<'a>(
+    files: &[SourceFile],
+    functions: &'a [FunctionMeta],
+    types: &'a mut TypeTable,
+) -> Result<AnalysisContext<'a>, String> {
+    let constants =
+        crate::backend::compile_analysis::collect_top_level_constant_values(files, types)?;
+    let paths =
+        crate::backend::compile_analysis::collect_global_path_types(files, types, &constants)?;
+    let fields = crate::backend::compile_analysis::collect_named_struct_field_types(
+        files, types, &constants,
+    )?;
+    let mut context = build_context(files, functions, types)?;
+    context.path_types.extend(paths);
+    for (owner, fields) in fields {
+        context.field_types.entry(owner).or_default().extend(fields);
+    }
+    Ok(context)
 }
 
 fn build_context<'a>(
@@ -5203,19 +5319,42 @@ fn resolve_internal_call(
     local_types: &BTreeMap<String, TypeId>,
     aliases: &BTreeMap<String, String>,
 ) -> Option<u32> {
-    let argument_types: Vec<TypeId> = args
-        .iter()
-        .map(|argument| expression_type(argument, context, local_types, aliases))
-        .collect::<Option<_>>()?;
-    resolve_call_signature(
+    let argument_types = call_argument_types(target, args, context, local_types, aliases)?;
+    let resolved = resolve_call_signature(
         target,
         &argument_types,
         &context.call_signatures,
         context.types,
         &context.field_types,
-    )
-    .ok()?
-    .function_id
+    );
+    resolved.ok()?.function_id
+}
+
+fn call_argument_types(
+    target: &str,
+    args: &[SimpleExpr],
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+    aliases: &BTreeMap<String, String>,
+) -> Option<Vec<TypeId>> {
+    let contextual_params = unambiguous_call_params(target, args.len(), &context.call_signatures);
+    args.iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            if let SimpleExpr::StringLiteral(value) = argument {
+                let parameter = contextual_params
+                    .as_ref()
+                    .and_then(|parameters| parameters.get(index))
+                    .copied();
+                if let Some(contextual_type) = parameter.and_then(|parameter| {
+                    contextual_ascii_literal_type(value, parameter, context.types)
+                }) {
+                    return Some(contextual_type);
+                }
+            }
+            expression_type(argument, context, local_types, aliases)
+        })
+        .collect()
 }
 
 fn expression_type(
@@ -5270,10 +5409,8 @@ fn expression_type(
                 "f32_to_i32" | "f32_to_bits" | "fixed32_from_i32" | "fixed32_to_i32"
                 | "fixed32_mul" | "fixed32_div" | "fixed32_from_ratio" => Some(TYPE_ID_I32),
                 _ => {
-                    let argument_types: Vec<TypeId> = args
-                        .iter()
-                        .map(|argument| expression_type(argument, context, local_types, aliases))
-                        .collect::<Option<_>>()?;
+                    let argument_types =
+                        call_argument_types(target, args, context, local_types, aliases)?;
                     resolve_call_signature(
                         target,
                         &argument_types,
@@ -8236,17 +8373,19 @@ mod tests {
         }
 
         let mut locals = BTreeMap::new();
+        let mut statements = [SimpleStmt::Foreach {
+            item_name: "item".to_string(),
+            index_name: None,
+            collection_path: "actors".to_string(),
+            body_statements: Vec::new(),
+        }];
         let error = validate_statements(
-            &[SimpleStmt::Foreach {
-                item_name: "item".to_string(),
-                index_name: None,
-                collection_path: "actors".to_string(),
-                body_statements: Vec::new(),
-            }],
+            &mut statements,
             TYPE_ID_VOID,
             &context,
             &mut locals,
             0,
+            &BTreeMap::new(),
         )
         .expect_err("typed collection foreach source must be rejected");
         assert!(error.contains("typed collection paths"), "{error}");
@@ -8256,7 +8395,7 @@ mod tests {
     fn typed_collection_function_params_and_returns_are_rejected() {
         let (types, files) = typed_pool_fixture("");
         let pool_type = types.resolve("pool<i32, 2>").expect("pool type id");
-        let statements = vec![vec![SimpleStmt::Return(SimpleExpr::Int(0))]];
+        let mut statements = vec![vec![SimpleStmt::Return(SimpleExpr::Int(0))]];
 
         let parameter_error = validate_program_semantics(
             &files,
@@ -8266,8 +8405,9 @@ mod tests {
                 vec![pool_type],
                 TYPE_ID_I32,
             )],
-            &statements,
+            &mut statements,
             &types,
+            &BTreeMap::new(),
         )
         .expect_err("typed collection parameter must be rejected")
         .1;
@@ -8281,8 +8421,9 @@ mod tests {
                 Vec::new(),
                 pool_type,
             )],
-            &statements,
+            &mut statements,
             &types,
+            &BTreeMap::new(),
         )
         .expect_err("typed collection return must be rejected")
         .1;

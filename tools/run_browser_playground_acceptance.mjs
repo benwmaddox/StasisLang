@@ -15,8 +15,23 @@ await mkdir(evidence, { recursive: true });
 const profile = await mkdtemp(path.join(evidence, "chrome-"));
 const requests = [];
 const exportedFiles = new Map();
+const starterExportFiles = new Map();
+function unpackExport(archiveBytes, files) {
+  let offset = 0;
+  while (archiveBytes.readUInt32LE(offset) === 0x04034b50) {
+    assert.equal(archiveBytes.readUInt16LE(offset + 8), 0, "export must use stored ZIP entries");
+    const length = archiveBytes.readUInt32LE(offset + 18);
+    const nameLength = archiveBytes.readUInt16LE(offset + 26);
+    const extraLength = archiveBytes.readUInt16LE(offset + 28);
+    const name = archiveBytes.subarray(offset + 30, offset + 30 + nameLength).toString("utf8");
+    assert.ok(!name.includes("..") && !name.startsWith("/") && !files.has(name));
+    const begin = offset + 30 + nameLength + extraLength;
+    files.set(name, archiveBytes.subarray(begin, begin + length));
+    offset = begin + length;
+  }
+}
 const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript",
-  ".json": "application/json", ".css": "text/css", ".wasm": "application/wasm", ".png": "image/png" };
+  ".json": "application/json", ".css": "text/css", ".wasm": "application/wasm", ".png": "image/png", ".ttf": "font/ttf", ".txt": "text/plain" };
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, "http://localhost");
   requests.push({ method: request.method, path: url.pathname });
@@ -26,7 +41,9 @@ const server = createServer(async (request, response) => {
       : url.pathname === "/" ? "/playground.html" : url.pathname;
     const name = decodeURIComponent(route).slice(1);
     assert.ok(name && !name.split("/").some(part => !part || part === "." || part === "..") && !name.includes("\\"));
-    const bytes = name.startsWith("export/") ? exportedFiles.get(name.slice(7)) : await readFile(path.join(siteRoot || bundle, name));
+    const bytes = name.startsWith("export/") ? exportedFiles.get(name.slice(7))
+      : name.startsWith("starter-export/") ? starterExportFiles.get(name.slice(15))
+      : await readFile(path.join(siteRoot || bundle, name));
     assert.ok(bytes);
     response.setHeader("Content-Type", types[path.extname(name)] || "application/octet-stream");
     response.setHeader("Cache-Control", "no-store");
@@ -113,6 +130,62 @@ try {
     .some(entry => entry.path.startsWith("state.input_frame.")),
   "hot swaps must preserve game state without restoring host input observations");
   await call("Page.startScreencast", { format: "png", maxWidth: 1440, maxHeight: viewportHeight, everyNthFrame: 3 });
+  await evaluate("window.STASIS_PLAYGROUND_EDITOR.run()");
+  await delay(1000);
+  const starterRender = await evaluate(`(() => {
+    const child = window.STASIS_PLAYGROUND_EDITOR.getIframe().contentWindow;
+    child.STASIS_PLAYGROUND.pause(true);
+    return { assets: window.STASIS_PLAYGROUND_EDITOR.getAssets(),
+      text: child.document.body.dataset.text, sprites: child.document.body.dataset.spriteDecodedCount,
+      error: child.document.getElementById('stasis-error').textContent };
+  })()`);
+  assert.equal(starterRender.error, "");
+  assert.ok(Number(starterRender.text) >= 2, "starter scores must render through the font pipeline");
+  assert.ok(Number(starterRender.sprites) >= 3, "starter SVG sprites must decode");
+  await screenshot("starter-pong");
+  const starterArchive = await evaluate(`(async()=>{const blob=await window.STASIS_PLAYGROUND_EDITOR.exportProject(); const bytes=new Uint8Array(await blob.arrayBuffer()); let text=''; for(let i=0;i<bytes.length;i+=16384)text+=String.fromCharCode(...bytes.subarray(i,i+16384));return btoa(text)})()`);
+  const starterArchiveBytes = Buffer.from(starterArchive, "base64");
+  unpackExport(starterArchiveBytes, starterExportFiles);
+  assert.ok(starterExportFiles.has("assets/ui.ttf"), "starter export includes its font");
+  assert.ok(starterExportFiles.has("assets/OFL.txt"), "starter export includes the font license");
+  await writeFile(path.join(evidence, "starter-export.zip"), starterArchiveBytes);
+  const starterFinished = await evaluate(`(async () => {
+    const editor = window.STASIS_PLAYGROUND_EDITOR;
+    const runtime = editor.getIframe().contentWindow.STASIS_PLAYGROUND;
+    const source = editor.getFile('main.stasis').source;
+    editor.setFile('main.stasis', source + '\\nfunction @effects(state) on_code_swap(): void { state.cpu.score = 4; state.ball.x = -20.0; state.ball.vx = -4.0; }\\n');
+    await editor.run();
+    await runtime.step();
+    const finished = runtime.snapshot();
+    editor.setFile('main.stasis', source);
+    return finished;
+  })()`);
+  await screenshot("starter-pong-game-over");
+  const starterRestarted = await evaluate(`(async () => {
+    const editor = window.STASIS_PLAYGROUND_EDITOR;
+    const runtime = editor.getIframe().contentWindow.STASIS_PLAYGROUND;
+    const child = editor.getIframe().contentWindow;
+    child.dispatchEvent(new child.KeyboardEvent('keydown', { code: 'Space', key: ' ' }));
+    await runtime.step();
+    child.dispatchEvent(new child.KeyboardEvent('keyup', { code: 'Space', key: ' ' }));
+    return runtime.snapshot();
+  })()`);
+  const starterMatch = { finished: starterFinished, restarted: starterRestarted };
+  const starterScalar = (snapshot, name) => {
+    const entry = starterCompilation.metadata.replayCompatibility.state_snapshot.entries.find(entry => entry.path === name);
+    assert.ok(entry, `missing starter snapshot field ${name}`);
+    const bytes = Buffer.from(Object.values(snapshot.bytes));
+    if (entry.storage_type === "bool") {
+      assert.equal(entry.element_bytes, 1, "Wasm snapshots store booleans as one byte");
+      return bytes.readUInt8(entry.offset) !== 0;
+    }
+    return bytes.readInt32LE(entry.offset);
+  };
+  assert.equal(starterScalar(starterMatch.finished, "state.cpu.score"), 5);
+  assert.equal(starterScalar(starterMatch.finished, "state.game_over"), true);
+  assert.equal(starterScalar(starterMatch.restarted, "state.cpu.score"), 0);
+  assert.equal(starterScalar(starterMatch.restarted, "state.game_over"), false);
+  await screenshot("starter-pong-restarted");
   const editorDraft = 'global score: i32;\nfunction helper(value: i32): i32 { return value; }\nfunction main(): i32 { return hel';
   await evaluate(`(() => { const editor=window.STASIS_PLAYGROUND_EDITOR; editor.setFile("main.stasis",${JSON.stringify(editorDraft)}); editor.setEntry("main.stasis"); const area=document.getElementById("source-editor"); area.focus(); area.setSelectionRange(area.value.length,area.value.length); })()`);
   await call("Input.dispatchKeyEvent", {type:"keyDown",key:" ",code:"Space",modifiers:2});
@@ -141,7 +214,7 @@ function render(): i32 { web_begin_frame(7, 16, 32); web_draw_rect(counter % 500
 function @effects(counter) on_code_swap(): void { counter += 100; }
 `;
   await evaluate(`(() => { const editor = window.STASIS_PLAYGROUND_EDITOR; for (const file of editor.getProject().files) editor.deleteFile(file.path); editor.setFile("main.stasis", ${JSON.stringify(source)}); editor.setFile("movement.stasis", "function amount(): i32 { return 1; }"); editor.setEntry("main.stasis"); })()`);
-  const first = await evaluate("window.STASIS_PLAYGROUND_EDITOR.run()");
+  const first = await evaluate("window.STASIS_PLAYGROUND_EDITOR.restart()");
   assert.ok(Number.isInteger(first.generation) && first.generation >= 0);
   await delay(1500);
   await screenshot("initial-game");
@@ -249,18 +322,7 @@ function render(): i32 { clear(0.04, 0.07, 0.12, 1.0); draw_sprite(uploaded.spri
   const archive = await evaluate(`(async()=>{const blob=await window.STASIS_PLAYGROUND_EDITOR.exportProject(); const bytes=new Uint8Array(await blob.arrayBuffer()); let text=''; for(let i=0;i<bytes.length;i+=16384)text+=String.fromCharCode(...bytes.subarray(i,i+16384));return btoa(text)})()`);
   const archiveBytes = Buffer.from(archive, "base64");
   await writeFile(path.join(evidence, "export.zip"), archiveBytes);
-  let offset = 0;
-  while (archiveBytes.readUInt32LE(offset) === 0x04034b50) {
-    assert.equal(archiveBytes.readUInt16LE(offset + 8), 0, "export must use stored ZIP entries");
-    const length = archiveBytes.readUInt32LE(offset + 18);
-    const nameLength = archiveBytes.readUInt16LE(offset + 26);
-    const extraLength = archiveBytes.readUInt16LE(offset + 28);
-    const name = archiveBytes.subarray(offset + 30, offset + 30 + nameLength).toString("utf8");
-    assert.ok(!name.includes("..") && !name.startsWith("/") && !exportedFiles.has(name));
-    const begin = offset + 30 + nameLength + extraLength;
-    exportedFiles.set(name, archiveBytes.subarray(begin, begin + length));
-    offset = begin + length;
-  }
+  unpackExport(archiveBytes, exportedFiles);
   for (const file of ["index.html", "game.js", "game.wasm"]) assert.ok(exportedFiles.has(file), `missing export ${file}`);
   assert.ok([...exportedFiles.keys()].some(name=>name.includes(assetResult.first.path)));
   await delay(250);
@@ -279,9 +341,18 @@ function render(): i32 { clear(0.04, 0.07, 0.12, 1.0); draw_sprite(uploaded.spri
   assert.equal(exportedState.backend, "WebGL2");
   assert.ok(Number(exportedState.sprites) >= 2, "exported PNG and rasterized SVG must decode and render");
   await screenshot("exported-asset-game");
+  await call("Page.navigate", { url: `http://127.0.0.1:${server.address().port}/starter-export/index.html` });
+  await until(() => evaluate("Boolean(window.STASIS_RUNTIME_PROMISE)"), "exported starter boot");
+  await evaluate("window.STASIS_RUNTIME_PROMISE");
+  await delay(1000);
+  const starterExportState = await evaluate("({error:document.getElementById('stasis-error')?.textContent,text:document.body.dataset.text,sprites:document.body.dataset.spriteDecodedCount})");
+  assert.equal(starterExportState.error || "", "");
+  assert.ok(Number(starterExportState.text) >= 2, "exported starter renders font scores");
+  assert.ok(Number(starterExportState.sprites) >= 3, "exported starter renders all SVG sprites");
+  await screenshot("exported-starter-pong");
   assert.deepEqual(failures, []);
   const receipt = {schema:"stasis.browser_playground_acceptance.v1",siteRoot,browser:await call("Browser.getVersion"),
-    starterCompilation,editorAnalysis,first,snapshots,rollback,overlappingSessions,assets:assetResult,export:{files:[...exportedFiles.keys()],byteLength:archiveBytes.length,state:exportedState},
+    starterCompilation,starterRender,starterMatch,starterExportState,editorAnalysis,first,snapshots,rollback,overlappingSessions,assets:assetResult,export:{files:[...exportedFiles.keys()],byteLength:archiveBytes.length,state:exportedState},
     network:{readyBoundary,requestsAfterReady,requests},frames:frames.length,failures};
   await writeFile(path.join(evidence,"receipt.json"), `${JSON.stringify(receipt,null,2)}\n`);
   console.log(JSON.stringify({status:"passed",receipt:path.join(evidence,"receipt.json"),frames:frames.length,exportBytes:archiveBytes.length}));
