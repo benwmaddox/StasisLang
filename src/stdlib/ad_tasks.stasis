@@ -5,6 +5,7 @@ enum AdState {
     Finished,
     Failed,
     Unavailable,
+    Loading,
 }
 
 enum AdKind {
@@ -74,6 +75,8 @@ function @internal ad_task_poll_status(self: AdTask): AdState {
         self.state = AdState.Finished;
     } else if (state_code == 5) {
         self.state = AdState.Unavailable;
+    } else if (state_code == 6) {
+        self.state = AdState.Loading;
     } else {
         self.state = AdState.Failed;
     }
@@ -86,7 +89,7 @@ function status(self: AdTask): AdState {
 
 function should_block_gameplay(self: AdTask): bool {
     let state: AdState = ad_task_poll_status(self);
-    if (state == AdState.Requesting || state == AdState.Playing) {
+    if (state == AdState.Requesting || state == AdState.Loading || state == AdState.Playing) {
         return true;
     }
     return ad_task_gameplay_blocked_raw() != 0;

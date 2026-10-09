@@ -123,6 +123,8 @@ function render(): i32 {
     web_draw_rect(32, 86, 576, 12, 38, 92, 112);
     if (browser_ad_state == AdState.Requesting) {
         web_draw_rect(32, 86, 576, 12, 246, 171, 72);
+    } else if (browser_ad_state == AdState.Loading) {
+        web_draw_rect(32, 86, 576, 12, 238, 210, 82);
     } else if (browser_ad_state == AdState.Playing) {
         web_draw_rect(32, 86, 576, 12, 218, 80, 80);
     } else if (browser_ad_last_terminal_state == AdState.Failed) {

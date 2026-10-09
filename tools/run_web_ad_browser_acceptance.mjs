@@ -258,8 +258,11 @@ try {
             else resolvePromise();
           };
           addBreak(mode.noFill ? (requestKind || "midgame") + "-no-fill" : requestKind || "midgame", finish);
-          if (mode.noFill) setTimeout(finish, 100);
-          else if (!mode.noStart) setTimeout(() => emit("SDK_GAME_PAUSE"), 100);
+          if (mode.noFill) setTimeout(() => { emit("AD_ERROR"); finish(); }, 100);
+          else if (!mode.noStart) {
+            emit("AD_METADATA");
+            setTimeout(() => emit("SDK_GAME_PAUSE"), 300);
+          }
           return promise;
         }};
         queueMicrotask(() => {
@@ -604,6 +607,11 @@ try {
     if (provider === "gamedistribution") {
       await activateGameDistributionRequest(1);
       await screenshot("activation");
+      const loading = await waitCounters(value => value.state === 6, "GameDistribution did not expose documented loading progress");
+      assert.equal(loading.hostBlocked, true, "confirmed loading did not block guest gameplay");
+      if (withAudio) assert.equal(await evaluate("__webAdProof.audio.contexts.at(-1)?.state"), "running", "audio paused before actual ad start");
+      await screenshot("loading");
+      snapshots.push({ label: "loading", counters: loading, audio: await evaluate("__webAdProof.audio.contexts.at(-1)?.state || 'none'") });
     }
 
     let started;
@@ -763,7 +771,7 @@ try {
     const noFillRequest = await waitCounters(value => value.handle > 0 && value.state === 1,
       "no-fill/no-start diagnostic request did not enter the polling state");
     if (provider === "gamedistribution") await activateGameDistributionRequest(4);
-    const noFillTerminal = await waitCounters(value => value.handle === 0 && value.terminal === (provider === "crazygames" || provider === "gamemonetize" ? 4 : 3),
+    const noFillTerminal = await waitCounters(value => value.handle === 0 && value.terminal === (provider === "crazygames" || provider === "gamemonetize" || provider === "gamedistribution" ? 4 : 3),
       "no-fill/no-start path did not return to a terminal playable state", provider === "gamemonetize" ? 18_000 : 10_000);
     await waitCounters(value => !value.hostBlocked, "no-fill/no-start path kept the host gameplay block active");
     await delay(150);
