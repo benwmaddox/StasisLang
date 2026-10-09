@@ -87,7 +87,7 @@ Do not overwrite an open `AdTask` with a second request. `begin` returns `AdBegi
 
 ## Reward consumption and release
 
-Only the host's provider-specific proof can make `take_reward()` succeed. It consumes that handle's token once, including when the handle was copied. A second call returns false. Release, guest reset, disposal, and a request deadline abandon any unconsumed reward; releasing a handle is not proof of ad completion. Ordinary provider error and no-fill outcomes do not grant a reward. GameDistribution completion proof is independent of its promise: proof already received remains available on the same unreleased rewarded handle if `showAd()` later throws or its promise rejects. Keep request outcome separate from reward evidence.
+Only the host's provider-specific proof can make `take_reward()` succeed. It consumes that handle's token once, including when the handle was copied. A second call returns false. Release, guest reset, disposal, and a request deadline abandon any unconsumed reward; releasing a handle is not proof of ad completion. Ordinary provider error and no-fill outcomes do not grant a reward. GameDistribution completion proof is independent of its break outcome: proof already received remains available on the same unreleased rewarded handle if `AD_ERROR`, `SDK_ERROR`, a synchronous `showAd()` throw, or a rejected promise later fails the request. Keep request outcome separate from reward evidence.
 
 The current adapter capability is:
 

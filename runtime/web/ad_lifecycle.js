@@ -258,6 +258,15 @@
       retireCall(call);
     }
 
+    function failGameDistributionCall(call, message) {
+      if (!call || call.physicalTerminal) return;
+      // Reward completion is independent of GameDistribution's break result.
+      // A terminal error must not revoke proof already emitted by the SDK.
+      setPublicState(call, AdState.Failed);
+      if (message) diagnostic(message);
+      retireCall(call);
+    }
+
     function failIssuedUncertain(call, message) {
       if (!call || call.physicalTerminal) return;
       if (call.provider === "gamedistribution") {
@@ -451,7 +460,7 @@
       if (eventName === "SDK_ERROR") {
         if (!readySettled) settleReady(false, "GameDistribution SDK initialization failed.");
         else if (activeCall?.provider === "gamedistribution" && activeCall.issued && !activeCall.physicalTerminal) {
-          failIssuedCall(activeCall, "GameDistribution reported an SDK error.");
+          failGameDistributionCall(activeCall, "GameDistribution reported an SDK error.");
         } else diagnostic("GameDistribution reported an SDK error.");
         return;
       }
@@ -461,7 +470,7 @@
       }
       if (eventName === "AD_ERROR") {
         if (activeCall?.provider === "gamedistribution" && activeCall.issued && !activeCall.physicalTerminal) {
-          failIssuedCall(activeCall, "GameDistribution could not load this ad.");
+          failGameDistributionCall(activeCall, "GameDistribution could not load this ad.");
         } else diagnostic("GameDistribution reported an ad error.");
         return;
       }

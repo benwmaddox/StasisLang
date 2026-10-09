@@ -1035,8 +1035,8 @@ test("GameDistribution global resume without a matching pause does not settle a 
   h.manager.dispose();
 });
 
-test("GameDistribution no-fill and ad errors resume immediately without rewarding", async () => {
-  for (const terminal of ["AD_ERROR", "AD_SDK_CANCELED"]) {
+test("GameDistribution no-fill and provider errors resume immediately without rewarding", async () => {
+  for (const terminal of ["AD_ERROR", "SDK_ERROR", "AD_SDK_CANCELED"]) {
     const h = makeHarness("gamedistribution");
     const result = deferred();
     h.windowObject.gdsdk = { showAd: () => result.promise };
@@ -1054,6 +1054,32 @@ test("GameDistribution no-fill and ad errors resume immediately without rewardin
     result.resolve();
     await flushPromises();
     assert.equal(h.manager.poll(handle), 4);
+    h.manager.dispose();
+  }
+});
+
+test("GameDistribution terminal errors preserve prior reward proof exactly once", async () => {
+  for (const terminal of ["AD_ERROR", "SDK_ERROR"]) {
+    const h = makeHarness("gamedistribution");
+    const result = deferred();
+    h.windowObject.gdsdk = { showAd: () => result.promise };
+    const handle = h.manager.request(1);
+    h.emitVendorEvent("SDK_READY");
+    await readyAfterMicrotasks(h.manager);
+    activateGameDistributionGesture(h);
+    h.emitVendorEvent("AD_METADATA");
+    assert.equal(h.manager.poll(handle), 6);
+
+    h.emitVendorEvent("SDK_REWARDED_WATCH_COMPLETE");
+    h.emitVendorEvent(terminal);
+    assert.equal(h.manager.poll(handle), 4, `${terminal} should fail the public request`);
+    assert.equal(h.manager.gameplayBlocked(), 0, `${terminal} should resume gameplay immediately`);
+    assert.equal(h.manager.takeReward(handle), 1, `${terminal} must preserve previously verified proof`);
+    assert.equal(h.manager.takeReward(handle), 0, `${terminal} proof remains single-use`);
+
+    result.resolve();
+    await flushPromises();
+    assert.equal(h.manager.poll(handle), 4, "promise settlement cannot revive the failed request");
     h.manager.dispose();
   }
 });
