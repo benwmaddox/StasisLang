@@ -482,11 +482,19 @@ fn network_host_lifecycle_lock() -> std::sync::MutexGuard<'static, ()> {
 
 #[cfg(feature = "network")]
 fn next_network_host_owner_id() -> Option<u64> {
-    NEXT_NETWORK_HOST_OWNER_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            current.checked_add(1)
-        })
-        .ok()
+    let mut current = NEXT_NETWORK_HOST_OWNER_ID.load(Ordering::Relaxed);
+    loop {
+        let next = current.checked_add(1)?;
+        match NEXT_NETWORK_HOST_OWNER_ID.compare_exchange_weak(
+            current,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return Some(current),
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 #[cfg(feature = "network")]
