@@ -182,6 +182,21 @@ async function markReady(harness, event = "SDK_READY") {
   return harness.manager.ready;
 }
 
+function activateGameDistributionGesture(harness) {
+  harness.windowObject.navigator.userActivation.isActive = true;
+  const gesture = harness.calls.gestures.at(-1);
+  assert.equal(gesture?.visible, true, "GameDistribution should present its activation prompt");
+  assert.equal(gesture.activate({
+    type: "pointerup",
+    pointerType: "mouse",
+    isPrimary: true,
+    button: 0,
+    isTrusted: true,
+    eventPhase: 2,
+    currentTarget: {},
+  }), true);
+}
+
 test("factory exposes the reviewed ABI, lifecycle codes, and deterministic none profile", async () => {
   assert.equal(typeof createAdLifecycle, "function");
   const h = makeHarness("none");
@@ -234,7 +249,7 @@ test("lifecycle notifications wait for SDK readiness and replay documented event
 });
 
 
-test("CrazyGames initializes asynchronously and an init deadline fails waiting requests safely", async () => {
+test("request deadline covers an unresolved SDK initialization and init timeout remains bounded", async () => {
   const init = deferred();
   const h = makeHarness("crazygames");
   const adCalls = attachCrazy(h, { init: () => init.promise });
@@ -243,19 +258,24 @@ test("CrazyGames initializes asynchronously and an init deadline fails waiting r
   assert.equal(h.manager.poll(handle), 1);
   assert.equal(h.manager.gameplayBlocked(), 1);
   assert.deepEqual(h.calls.audio, [false]);
-  h.clock.advance(7999);
+  h.clock.advance(4999);
   assert.equal(h.manager.poll(handle), 1);
   h.clock.advance(1);
+  assert.equal(h.manager.poll(handle), 4);
+  h.clock.advance(1);
+  assert.equal(h.manager.poll(handle), 4);
+  assert.equal(h.manager.gameplayBlocked(), 0);
+  assert.equal(adCalls.length, 0);
+  h.clock.advance(2999);
   assert.deepEqual(await h.manager.ready, {
     available: false,
     diagnostic: "Ad SDK initialization timed out.",
   });
-  assert.equal(h.manager.poll(handle), 5);
+  assert.equal(h.manager.poll(handle), 4);
   assert.equal(h.manager.gameplayBlocked(), 0);
-  assert.equal(adCalls.length, 0);
   init.resolve();
   await flushPromises();
-  assert.equal(h.manager.poll(handle), 5);
+  assert.equal(h.manager.poll(handle), 4);
 });
 
 test("CrazyGames rewards only its successful rewarded finish and pauses only on actual start", async () => {
@@ -328,13 +348,13 @@ test("CrazyGames no-fill, Basic Launch, init rejection, and synchronous invocati
   assert.equal(throwing.manager.gameplayBlocked(), 0);
 });
 
-test("CrazyGames no-start timeout does not erase an issued orphan or suppress a late actual start", async () => {
+test("CrazyGames unknown-state deadline keeps an issued orphan reserved and honors a late actual start", async () => {
   const h = makeHarness("crazygames");
   const adCalls = attachCrazy(h);
   const handle = h.manager.request(1);
   await readyAfterMicrotasks(h.manager);
   assert.equal(h.manager.gameplayBlocked(), 1);
-  h.clock.advance(14999);
+  h.clock.advance(4999);
   assert.equal(h.manager.poll(handle), 1);
   h.clock.advance(1);
   assert.equal(h.manager.poll(handle), 4);
@@ -351,16 +371,34 @@ test("CrazyGames no-start timeout does not erase an issued orphan or suppress a 
   assert.equal(h.calls.audio.at(-1), false);
 });
 
-test("CrazyGames no-start timeout abandons reward even if a late finish callback arrives", async () => {
+test("CrazyGames unknown-state deadline abandons reward even if a late finish callback arrives", async () => {
   const h = makeHarness("crazygames");
   const adCalls = attachCrazy(h);
   const handle = h.manager.request(1);
   await readyAfterMicrotasks(h.manager);
-  h.clock.advance(15000);
+  h.clock.advance(5000);
   assert.equal(h.manager.poll(handle), 4);
   adCalls[0].callbacks.adFinished();
   assert.equal(h.manager.poll(handle), 4);
   assert.equal(h.manager.takeReward(handle), 0);
+});
+
+test("actual CrazyGames playback clears the deadline and remains blocked past both limits", async () => {
+  const h = makeHarness("crazygames");
+  const adCalls = attachCrazy(h);
+  const handle = h.manager.request(0);
+  await readyAfterMicrotasks(h.manager);
+  h.clock.advance(4999);
+  adCalls[0].callbacks.adStarted();
+  assert.equal(h.manager.poll(handle), 2);
+  assert.equal(h.calls.audio.at(-1), true);
+  h.clock.advance(30001);
+  assert.equal(h.manager.poll(handle), 2);
+  assert.equal(h.manager.gameplayBlocked(), 1);
+  assert.equal(h.calls.audio.at(-1), true);
+  adCalls[0].callbacks.adFinished();
+  assert.equal(h.manager.poll(handle), 3);
+  assert.equal(h.manager.gameplayBlocked(), 0);
 });
 
 test("Poki resolves no-ad breaks without audio changes and rewards only boolean true", async () => {
@@ -479,28 +517,30 @@ test("a synchronous throw after CrazyGames or Poki reports start cannot clear th
 });
 
 
-test("Poki no-start watchdog settles publicly while retaining an issued call until promise settlement", async () => {
+test("Poki unknown-state deadline settles publicly while retaining an issued call until promise settlement", async () => {
   const h = makeHarness("poki");
   const adCalls = attachPoki(h);
   const first = h.manager.request(0);
   await readyAfterMicrotasks(h.manager);
   assert.equal(h.manager.gameplayBlocked(), 1);
-  h.clock.advance(15000);
+  h.clock.advance(5000);
   assert.equal(h.manager.poll(first), 4);
   assert.equal(h.manager.gameplayBlocked(), 0);
   assert.equal(h.manager.request(0), -1);
+  h.clock.advance(30000);
+  assert.equal(h.manager.poll(first), 4, "unknown state must use one 5-second request budget");
   adCalls[0].result.resolve(undefined);
   await flushPromises();
   assert.equal(h.manager.poll(first), 4);
   assert.ok(h.manager.request(0) > first);
 });
 
-test("Poki no-start timeout abandons a rewarded handle despite a later boolean success", async () => {
+test("Poki unknown-state deadline abandons a rewarded handle despite a later boolean success", async () => {
   const h = makeHarness("poki");
   const adCalls = attachPoki(h);
   const handle = h.manager.request(1);
   await readyAfterMicrotasks(h.manager);
-  h.clock.advance(15000);
+  h.clock.advance(5000);
   assert.equal(h.manager.poll(handle), 4);
   adCalls[0].result.resolve(true);
   await flushPromises();
@@ -547,13 +587,13 @@ test("GameMonetize waits for SDK_READY, supports only documented break calls, an
   assert.equal(invocations.length, 1);
 });
 
-test("GameMonetize no-start timeout leaves the issued call orphaned through release and reset", async () => {
+test("GameMonetize unknown-state deadline leaves the issued call orphaned through release and reset", async () => {
   const h = makeHarness("gamemonetize");
   h.windowObject.sdk = { showBanner() {} };
   const handle = h.manager.request(0);
   h.windowObject.SDK_OPTIONS.onEvent({ name: "SDK_READY" });
   await readyAfterMicrotasks(h.manager);
-  h.clock.advance(15000);
+  h.clock.advance(5000);
   assert.equal(h.manager.poll(handle), 4);
   assert.equal(h.manager.gameplayBlocked(), 0);
   h.manager.resetGuest();
@@ -856,7 +896,7 @@ test("GameDistribution requires an explicit trusted pointerup and active user ac
   assert.ok(h.manager.request(0) > handle);
 });
 
-test("GameDistribution waits no more than 60 seconds for activation and cancellation issues no SDK call", async () => {
+test("GameDistribution request deadline bounds activation waiting and cancellation issues no SDK call", async () => {
   const h = makeHarness("gamedistribution");
   const calls = [];
   h.windowObject.gdsdk = { showAd: (...args) => calls.push(args) };
@@ -872,7 +912,7 @@ test("GameDistribution waits no more than 60 seconds for activation and cancella
 
   const second = h.manager.request(0);
   assert.ok(second > first);
-  h.clock.advance(59999);
+  h.clock.advance(4999);
   assert.equal(h.manager.poll(second), 1);
   h.clock.advance(1);
   assert.equal(h.manager.poll(second), 4);
@@ -880,8 +920,196 @@ test("GameDistribution waits no more than 60 seconds for activation and cancella
   assert.equal(h.manager.gameplayBlocked(), 0);
   assert.equal(
     h.calls.diagnostics.at(-1),
-    "No mouse or touch selection was made before the ad request expired.",
+    "The ad did not become available before the host deadline.",
   );
+});
+
+test("GameDistribution loading progress promotes state once and uses a fixed 30-second deadline", async () => {
+  const h = makeHarness("gamedistribution");
+  const result = deferred();
+  h.windowObject.gdsdk = { showAd: () => result.promise };
+  const handle = h.manager.request(1);
+  h.emitVendorEvent("AD_METADATA");
+  assert.equal(h.manager.poll(handle), 1, "progress without an issued request is ignored");
+  h.emitVendorEvent("SDK_READY");
+  await readyAfterMicrotasks(h.manager);
+  activateGameDistributionGesture(h);
+
+  h.emitVendorEvent("AD_METADATA");
+  assert.equal(h.manager.poll(handle), 6);
+  assert.equal(h.manager.gameplayBlocked(), 1);
+  assert.equal(h.calls.audio.at(-1), false, "loading does not pause audio before playback starts");
+  h.clock.advance(15000);
+  h.emitVendorEvent("LOADED");
+  h.emitVendorEvent("AD_SDK_MANAGER_READY");
+  h.clock.advance(14999);
+  assert.equal(h.manager.poll(handle), 6);
+  h.clock.advance(1);
+  assert.equal(h.manager.poll(handle), 4);
+  assert.equal(h.manager.gameplayBlocked(), 0);
+  h.clock.advance(1);
+  h.emitVendorEvent("AD_METADATA");
+  assert.equal(h.manager.poll(handle), 4, "stale or repeated progress cannot resurrect a terminal request");
+
+  h.emitVendorEvent("SDK_GAME_PAUSE");
+  assert.equal(h.manager.poll(handle), 4);
+  assert.equal(h.calls.diagnostics.at(-1), "", "a late actual start clears the stale deadline diagnostic");
+  h.emitVendorEvent("SDK_REWARDED_WATCH_COMPLETE");
+  assert.equal(h.manager.takeReward(handle), 0, "a late actual start cannot restore abandoned reward proof");
+  assert.equal(h.manager.gameplayBlocked(), 1, "a late physical start still pauses gameplay");
+  assert.equal(h.calls.audio.at(-1), true, "audio follows the late actual start");
+  assert.equal(h.manager.request(0), -1, "the late ad keeps the provider slot reserved");
+  h.emitVendorEvent("SDK_GAME_START");
+  assert.equal(h.manager.gameplayBlocked(), 0);
+  assert.equal(h.calls.audio.at(-1), false);
+  assert.equal(h.manager.request(0), -1, "the provider promise still owns the physical slot");
+  result.resolve();
+  await flushPromises();
+  assert.equal(h.manager.poll(handle), 4);
+  assert.ok(h.manager.request(0) > handle);
+});
+
+test("GameDistribution loading events without a live public request are ignored", async () => {
+  const h = makeHarness("gamedistribution");
+  for (const event of ["AD_METADATA", "LOADED", "AD_SDK_MANAGER_READY"]) {
+    assert.doesNotThrow(() => h.emitVendorEvent(event));
+  }
+  assert.equal(h.manager.gameplayBlocked(), 0);
+  h.manager.dispose();
+});
+
+test("GameDistribution actual playback clears the loading deadline and waits for terminal evidence", async () => {
+  const h = makeHarness("gamedistribution");
+  const result = deferred();
+  h.windowObject.gdsdk = { showAd: () => result.promise };
+  const handle = h.manager.request(0);
+  h.emitVendorEvent("SDK_READY");
+  await readyAfterMicrotasks(h.manager);
+  activateGameDistributionGesture(h);
+  h.emitVendorEvent("AD_METADATA");
+  assert.equal(h.manager.poll(handle), 6);
+  h.clock.advance(29999);
+  assert.equal(h.manager.poll(handle), 6);
+  h.emitVendorEvent("SDK_GAME_PAUSE");
+  assert.equal(h.manager.poll(handle), 2);
+  assert.equal(h.calls.audio.at(-1), true);
+  h.clock.advance(30001);
+  assert.equal(h.manager.poll(handle), 2, "actual playback has no load deadline");
+  assert.equal(h.manager.gameplayBlocked(), 1);
+  assert.equal(h.calls.audio.at(-1), true);
+  h.emitVendorEvent("SDK_GAME_START");
+  result.resolve();
+  await flushPromises();
+  assert.equal(h.manager.poll(handle), 3);
+  assert.equal(h.manager.gameplayBlocked(), 0);
+  assert.equal(h.calls.audio.at(-1), false);
+});
+
+test("GameDistribution global resume without a matching pause does not settle a loading request", async () => {
+  const h = makeHarness("gamedistribution");
+  const result = deferred();
+  h.windowObject.gdsdk = { showAd: () => result.promise };
+  const handle = h.manager.request(0);
+  h.emitVendorEvent("SDK_READY");
+  await readyAfterMicrotasks(h.manager);
+  activateGameDistributionGesture(h);
+  h.emitVendorEvent("AD_METADATA");
+  assert.equal(h.manager.poll(handle), 6);
+
+  h.emitVendorEvent("SDK_GAME_START");
+  h.emitVendorEvent("SDK_GAME_START");
+  assert.equal(h.manager.poll(handle), 6, "global resume without a preceding pause is not terminal evidence");
+  assert.equal(h.manager.gameplayBlocked(), 1);
+  assert.equal(h.manager.request(0), -1, "the unresolved provider call retains its slot");
+
+  h.clock.advance(29999);
+  assert.equal(h.manager.poll(handle), 6);
+  h.clock.advance(1);
+  assert.equal(h.manager.poll(handle), 4, "the fixed loading deadline still expires the request");
+  assert.equal(h.manager.gameplayBlocked(), 0);
+  assert.equal(h.manager.request(0), -1, "the issued physical call remains reserved after public timeout");
+  h.emitVendorEvent("AD_SDK_CANCELED");
+  assert.ok(h.manager.request(0) > handle, "documented cancellation retires the physical reservation");
+  result.resolve();
+  await flushPromises();
+  h.manager.dispose();
+});
+
+test("GameDistribution no-fill and provider errors resume immediately without rewarding", async () => {
+  for (const terminal of ["AD_ERROR", "SDK_ERROR", "AD_SDK_CANCELED"]) {
+    const h = makeHarness("gamedistribution");
+    const result = deferred();
+    h.windowObject.gdsdk = { showAd: () => result.promise };
+    const handle = h.manager.request(1);
+    h.emitVendorEvent("SDK_READY");
+    await readyAfterMicrotasks(h.manager);
+    activateGameDistributionGesture(h);
+    h.emitVendorEvent("AD_METADATA");
+    assert.equal(h.manager.poll(handle), 6);
+    h.emitVendorEvent(terminal);
+    assert.equal(h.manager.poll(handle), 4, `${terminal} should fail a request with no playback`);
+    assert.equal(h.manager.gameplayBlocked(), 0, `${terminal} should resume gameplay immediately`);
+    assert.equal(h.manager.takeReward(handle), 0);
+    assert.ok(h.manager.request(0) > handle, `${terminal} should release the physical reservation`);
+    result.resolve();
+    await flushPromises();
+    assert.equal(h.manager.poll(handle), 4);
+    h.manager.dispose();
+  }
+});
+
+test("GameDistribution terminal errors preserve prior reward proof exactly once", async () => {
+  for (const terminal of ["AD_ERROR", "SDK_ERROR"]) {
+    const h = makeHarness("gamedistribution");
+    const result = deferred();
+    h.windowObject.gdsdk = { showAd: () => result.promise };
+    const handle = h.manager.request(1);
+    h.emitVendorEvent("SDK_READY");
+    await readyAfterMicrotasks(h.manager);
+    activateGameDistributionGesture(h);
+    h.emitVendorEvent("AD_METADATA");
+    assert.equal(h.manager.poll(handle), 6);
+
+    h.emitVendorEvent("SDK_REWARDED_WATCH_COMPLETE");
+    h.emitVendorEvent(terminal);
+    assert.equal(h.manager.poll(handle), 4, `${terminal} should fail the public request`);
+    assert.equal(h.manager.gameplayBlocked(), 0, `${terminal} should resume gameplay immediately`);
+    assert.equal(h.manager.takeReward(handle), 1, `${terminal} must preserve previously verified proof`);
+    assert.equal(h.manager.takeReward(handle), 0, `${terminal} proof remains single-use`);
+
+    result.resolve();
+    await flushPromises();
+    assert.equal(h.manager.poll(handle), 4, "promise settlement cannot revive the failed request");
+    h.manager.dispose();
+  }
+});
+
+test("GameDistribution cancellation after playback preserves the SDK pause until SDK_GAME_START", async () => {
+  const h = makeHarness("gamedistribution");
+  const result = deferred();
+  h.windowObject.gdsdk = { showAd: () => result.promise };
+  const handle = h.manager.request(0);
+  h.emitVendorEvent("SDK_READY");
+  await readyAfterMicrotasks(h.manager);
+  activateGameDistributionGesture(h);
+  h.emitVendorEvent("AD_METADATA");
+  h.emitVendorEvent("SDK_GAME_PAUSE");
+  assert.equal(h.manager.poll(handle), 2);
+  assert.equal(h.manager.gameplayBlocked(), 1);
+  assert.equal(h.calls.audio.at(-1), true);
+
+  h.emitVendorEvent("AD_SDK_CANCELED");
+  assert.equal(h.manager.poll(handle), 3);
+  assert.equal(h.manager.gameplayBlocked(), 1, "IMA cancellation must not clear the SDK pause reason");
+  assert.equal(h.calls.audio.at(-1), true);
+  assert.equal(h.manager.request(0), -1);
+  h.emitVendorEvent("SDK_GAME_START");
+  assert.equal(h.manager.gameplayBlocked(), 0);
+  assert.equal(h.calls.audio.at(-1), false);
+  assert.ok(h.manager.request(0) > handle);
+  result.resolve();
+  await flushPromises();
+  h.manager.dispose();
 });
 
 test("release before GameDistribution SDK issue cancels its reservation and gesture closure", async () => {
@@ -1122,7 +1350,7 @@ test("GameDistribution ignores reward proof for midgame calls and abandons it on
     h.windowObject.GD_OPTIONS.onEvent({ name: "SDK_REWARDED_WATCH_COMPLETE" });
     if (cleanup === "release") h.manager.release(handle);
     else if (cleanup === "reset") h.manager.resetGuest();
-    else h.clock.advance(15000);
+    else h.clock.advance(5000);
     assert.equal(h.manager.takeReward(handle), 0, `${cleanup} abandons unconsumed proof`);
   }
 });

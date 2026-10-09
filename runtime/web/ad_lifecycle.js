@@ -8,6 +8,7 @@
     Finished: 3,
     Failed: 4,
     Unavailable: 5,
+    Loading: 6,
   });
   const AdKind = Object.freeze({ Midgame: 0, Rewarded: 1 });
   const LifecycleEvent = Object.freeze({
@@ -19,8 +20,8 @@
   const MAX_HANDLE = 0x7fffffff;
   const MAX_UNRELEASED_HANDLES = 16;
   const INIT_TIMEOUT_MS = 8000;
-  const NO_START_TIMEOUT_MS = 15000;
-  const GD_GESTURE_TIMEOUT_MS = 60000;
+  const UNKNOWN_TIMEOUT_MS = 5000;
+  const LOADING_TIMEOUT_MS = 30000;
   const MAX_PENDING_LIFECYCLE_EVENTS = 8;
 
   function createAdLifecycle(options = {}) {
@@ -47,7 +48,6 @@
     // GameDistribution reports reward completion globally without a request ID.
     // Keep only the latest issued rewarded call as the local attribution owner.
     let gameDistributionRewardCall = null;
-    let gestureTimer = null;
     let gestureCall = null;
     let lastBlocked = null;
     let lastAudioPaused = null;
@@ -81,7 +81,7 @@
       return Boolean(
         activeCall &&
           isPublicRecord(activeCall) &&
-          (activeCall.state === AdState.Requesting || activeCall.state === AdState.Playing),
+          (activeCall.state === AdState.Requesting || activeCall.state === AdState.Loading || activeCall.state === AdState.Playing),
       );
     }
 
@@ -170,14 +170,9 @@
       }
     }
 
-    function clearNoStartTimer(call) {
-      clearTimer(call.noStartTimer);
-      call.noStartTimer = null;
-    }
-
-    function clearGestureTimer() {
-      clearTimer(gestureTimer);
-      gestureTimer = null;
+    function clearAdDeadline(call) {
+      clearTimer(call.adDeadlineTimer);
+      call.adDeadlineTimer = null;
     }
 
     function updateGesture(visible, call) {
@@ -231,8 +226,7 @@
     function retireCall(call) {
       if (!call || call.physicalTerminal) return;
       call.physicalTerminal = true;
-      clearNoStartTimer(call);
-      clearGestureTimer();
+      clearAdDeadline(call);
       if (gestureCall === call) updateGesture(false, call);
       clearLocalPause(call);
       if (activeCall === call) activeCall = null;
@@ -241,7 +235,7 @@
 
     function cancelUnissuedCall(call) {
       if (!call || call.issued || call.physicalTerminal) return;
-      clearGestureTimer();
+      clearAdDeadline(call);
       if (gestureCall === call) updateGesture(false, call);
       call.physicalTerminal = true;
       if (activeCall === call) activeCall = null;
@@ -264,6 +258,15 @@
       retireCall(call);
     }
 
+    function failGameDistributionCall(call, message) {
+      if (!call || call.physicalTerminal) return;
+      // Reward completion is independent of GameDistribution's break result.
+      // A terminal error must not revoke proof already emitted by the SDK.
+      setPublicState(call, AdState.Failed);
+      if (message) diagnostic(message);
+      retireCall(call);
+    }
+
     function failIssuedUncertain(call, message) {
       if (!call || call.physicalTerminal) return;
       if (call.provider === "gamedistribution") {
@@ -276,7 +279,7 @@
       }
       setPublicState(call, AdState.Failed);
       if (message) diagnostic(message);
-      clearNoStartTimer(call);
+      clearAdDeadline(call);
       if (call.provider === "gamedistribution" && call.pauseSeen && call.resumeSeen) {
         maybeRetireGameDistribution(call);
       }
@@ -284,26 +287,49 @@
       // Keep its private reservation until documented terminal evidence or host disposal.
     }
 
-    function noStartExpired(call) {
-      call.noStartTimer = null;
+    function adDeadlineExpired(call) {
+      call.adDeadlineTimer = null;
       if (disposed || activeCall !== call || call.physicalTerminal || call.started) return;
       call.rewardAbandoned = true;
       call.rewardAvailable = false;
       if (gameDistributionRewardCall === call) gameDistributionRewardCall = null;
+      if (!call.issued) {
+        failBeforeIssue(call, AdState.Failed, "The ad did not become available before the host deadline.");
+        return;
+      }
       setPublicState(call, AdState.Failed);
       diagnostic("The ad did not start before the host deadline.");
       // The public token is terminal, but the issued provider call still owns the slot.
     }
 
-    function beginNoStartTimer(call) {
-      clearNoStartTimer(call);
-      call.noStartTimer = schedule(() => noStartExpired(call), NO_START_TIMEOUT_MS);
+    function beginAdDeadline(call, delay) {
+      clearAdDeadline(call);
+      call.adDeadlineTimer = schedule(() => adDeadlineExpired(call), delay);
+    }
+
+    function markGameDistributionLoading(call) {
+      if (
+        disposed ||
+        !call ||
+        activeCall !== call ||
+        call.provider !== "gamedistribution" ||
+        !call.issued ||
+        call.physicalTerminal ||
+        call.started ||
+        !isPublicRecord(call) ||
+        (call.state !== AdState.Requesting && call.state !== AdState.Loading)
+      ) return;
+      if (call.loadingProgressSeen) return;
+      call.loadingProgressSeen = true;
+      setPublicState(call, AdState.Loading);
+      beginAdDeadline(call, LOADING_TIMEOUT_MS);
     }
 
     function markActualStart(call, useLocalPause) {
       if (!call || call.physicalTerminal || call.started) return;
       call.started = true;
-      clearNoStartTimer(call);
+      clearAdDeadline(call);
+      diagnostic("");
       if (useLocalPause) {
         localPauseCall = call;
         syncHostState();
@@ -433,7 +459,27 @@
       }
       if (eventName === "SDK_ERROR") {
         if (!readySettled) settleReady(false, "GameDistribution SDK initialization failed.");
-        else diagnostic("GameDistribution reported an SDK error.");
+        else if (activeCall?.provider === "gamedistribution" && activeCall.issued && !activeCall.physicalTerminal) {
+          failGameDistributionCall(activeCall, "GameDistribution reported an SDK error.");
+        } else diagnostic("GameDistribution reported an SDK error.");
+        return;
+      }
+      if (eventName === "AD_METADATA" || eventName === "LOADED" || eventName === "AD_SDK_MANAGER_READY") {
+        markGameDistributionLoading(activeCall);
+        return;
+      }
+      if (eventName === "AD_ERROR") {
+        if (activeCall?.provider === "gamedistribution" && activeCall.issued && !activeCall.physicalTerminal) {
+          failGameDistributionCall(activeCall, "GameDistribution could not load this ad.");
+        } else diagnostic("GameDistribution reported an ad error.");
+        return;
+      }
+      if (eventName === "AD_SDK_CANCELED") {
+        const call = activeCall;
+        if (call?.provider === "gamedistribution" && call.issued && !call.physicalTerminal) {
+          if (call.started) markActualEnd(call, AdState.Finished);
+          else failIssuedCall(call, "GameDistribution canceled this ad before playback started.");
+        }
         return;
       }
       if (eventName === "SDK_GAME_PAUSE") {
@@ -487,7 +533,6 @@
       }
       call.issued = true;
       if (call.kind === AdKind.Rewarded) gameDistributionRewardCall = call;
-      beginNoStartTimer(call);
       if (gestureCall === call) updateGesture(false, call);
       try {
         const result = call.kind === AdKind.Rewarded ? sdk.showAd("rewarded") : sdk.showAd();
@@ -508,7 +553,6 @@
         return;
       }
       call.issued = true;
-      beginNoStartTimer(call);
       try {
         requestAd.call(sdk.ad, call.kind === AdKind.Midgame ? "midgame" : "rewarded", {
           adStarted: () => onCrazyGamesStart(call),
@@ -528,7 +572,6 @@
         return;
       }
       call.issued = true;
-      beginNoStartTimer(call);
       try {
         const result = method.call(sdk, () => onPokiStart(call));
         Promise.resolve(result).then(
@@ -547,7 +590,6 @@
         return;
       }
       call.issued = true;
-      beginNoStartTimer(call);
       try {
         sdk.showBanner();
       } catch (_error) {
@@ -560,12 +602,6 @@
       if (call.provider === "gamedistribution") {
         if (gestureCall === call) return;
         updateGesture(true, call);
-        clearGestureTimer();
-        gestureTimer = schedule(() => {
-          gestureTimer = null;
-          if (activeCall !== call || call.issued || call.physicalTerminal) return;
-          failBeforeIssue(call, AdState.Failed, "No mouse or touch selection was made before the ad request expired.");
-        }, GD_GESTURE_TIMEOUT_MS);
         return;
       }
       if (call.provider === "crazygames") issueCrazyGames(call);
@@ -720,10 +756,12 @@
         rewardAvailable: false,
         rewardConsumed: false,
         rewardAbandoned: false,
-        noStartTimer: null,
+        adDeadlineTimer: null,
+        loadingProgressSeen: false,
       };
       records.set(handle, call);
       activeCall = call;
+      beginAdDeadline(call, UNKNOWN_TIMEOUT_MS);
       syncHostState();
       if (readySettled && readyResult?.available) beginCall(call);
       return handle;
@@ -836,11 +874,9 @@
       const shouldResumeAudio = lastAudioPaused === true;
       disposed = true;
       clearTimer(readyTimer);
-      clearTimer(gestureTimer);
       readyTimer = null;
-      gestureTimer = null;
-      for (const call of records.values()) clearNoStartTimer(call);
-      if (activeCall) clearNoStartTimer(activeCall);
+      for (const call of records.values()) clearAdDeadline(call);
+      if (activeCall) clearAdDeadline(activeCall);
       activeCall = null;
       gameDistributionRewardCall = null;
       localPauseCall = null;

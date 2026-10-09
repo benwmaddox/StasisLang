@@ -1198,3 +1198,32 @@ Good: executable backend tests caught both reachability and text-layout mistakes
 Bad: an initially broad Wasm argument guard rejected existing numeric widening.
 Adjustment: validate the specific representation boundary before encoding and
 retain the established contextual encoder for numeric conversions.
+
+## 2026-10-09: bounded browser ad loading (#847)
+
+Accepted ad requests wait five seconds without loading evidence. Documented
+GameDistribution progress sets Loading=6 and starts a fixed 30-second budget;
+playback clears that budget. Existing state values are preserved. Explicit
+errors/cancellation settle promptly. A timed-out public request cannot regain
+reward eligibility, while late physical playback still owns the provider slot
+and pauses the game. Previously verified reward proof survives provider errors.
+
+Validation: deterministic host-clock tests cover both deadline boundaries,
+repeated progress, actual playback, cancellation, late callbacks, and reward
+proof. Fresh native JIT and linked AOT Loading fixtures pass. The generated
+mobile seam remains blocked by an existing non-ASCII-to-ASCII fixture expression.
+The fresh verified SDK browser sample receives Loading=6 and blocks simulation.
+Exact test receipts and final source identity are recorded in PR #928.
+
+Visual evidence: inspected Loading/Playing PNGs and browser.mp4 frames under
+`build/task847-web-ad-browser-acceptance/gamedistribution-noaudio-mouse-IMOiHC/`.
+They show gesture activation, frozen simulation while loading/playing, and
+resumed simulation on terminal outcomes; exact time budgets use host-clock tests.
+
+Theory gained: loading evidence, physical playback, and verified reward proof
+are separate signals. The browser sample and late-callback tests support keeping
+their ownership separate; additional providers should promote Loading only from
+documented progress events.
+Good: fresh browser evidence exposed a stale timeout message on late playback.
+Bad: the first provider-error implementation erased already verified proof.
+Adjustment: test reward evidence independently of request outcome and timing.
