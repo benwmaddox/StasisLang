@@ -40,7 +40,7 @@ struct PongState {
     score_font: i32;
     score_ascii: ascii[12];
     score_utf8: utf8[12];
-    game_over: i32;
+    game_over: bool;
 }
 
 global state: PongState;
@@ -69,7 +69,7 @@ function reset_match(): void {
     state.cpu.y = 144.0;
     state.player.score = 0;
     state.cpu.score = 0;
-    state.game_over = 0;
+    state.game_over = false;
     serve(1);
     refresh_scores();
 }
@@ -160,7 +160,7 @@ function check_score(): void {
         state.cpu.score += 1;
         refresh_scores();
         if (state.cpu.score >= WIN_SCORE) {
-            state.game_over = 1;
+            state.game_over = true;
         } else {
             serve(1);
         }
@@ -168,7 +168,7 @@ function check_score(): void {
         state.player.score += 1;
         refresh_scores();
         if (state.player.score >= WIN_SCORE) {
-            state.game_over = 1;
+            state.game_over = true;
         } else {
             serve(-1);
         }
@@ -177,7 +177,7 @@ function check_score(): void {
 
 function tick(): i32 {
     state.input_frame.refresh();
-    if (state.game_over != 0) {
+    if (state.game_over) {
         if (state.input_frame.keys[SCANCODE_SPACE] != 0
             || (state.input_frame.pointer_count > 0 && state.input_frame.pointers[0].went_down)) {
             reset_match();
@@ -200,7 +200,7 @@ function render(): i32 {
     state.player.score_text.draw(280.0, 24.0, 0.34, 0.91, 0.80, 1.0);
     state.cpu.score_text.draw(344.0, 24.0, 1.0, 0.75, 0.38, 1.0);
 
-    if (state.game_over != 0) {
+    if (state.game_over) {
         if (state.player.score >= WIN_SCORE) {
             state.score_font.draw_text("YOU WIN", 257.0, 150.0, 0.34, 0.91, 0.80, 1.0);
         } else {

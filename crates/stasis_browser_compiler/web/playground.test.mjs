@@ -49,6 +49,7 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
       assert.match(source, /ball: BallState;/);
       assert.match(source, /player: PaddleState;/);
       assert.match(source, /cpu: PaddleState;/);
+      assert.match(source, /game_over: bool;/);
       assert.doesNotMatch(source, /\b(?:ball_[xy]|ball_v[xy]|(?:player|cpu)_(?:y|score|score_text))\b/);
       assert.match(source, /const SCANCODE_UP: i32 = 82;/);
       assert.match(source, /const SCANCODE_DOWN: i32 = 81;/);

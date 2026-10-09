@@ -174,12 +174,17 @@ try {
   const starterScalar = (snapshot, name) => {
     const entry = starterCompilation.metadata.replayCompatibility.state_snapshot.entries.find(entry => entry.path === name);
     assert.ok(entry, `missing starter snapshot field ${name}`);
-    return Buffer.from(Object.values(snapshot.bytes)).readInt32LE(entry.offset);
+    const bytes = Buffer.from(Object.values(snapshot.bytes));
+    if (entry.storage_type === "bool") {
+      assert.equal(entry.element_bytes, 1, "Wasm snapshots store booleans as one byte");
+      return bytes.readUInt8(entry.offset) !== 0;
+    }
+    return bytes.readInt32LE(entry.offset);
   };
   assert.equal(starterScalar(starterMatch.finished, "state.cpu.score"), 5);
-  assert.equal(starterScalar(starterMatch.finished, "state.game_over"), 1);
+  assert.equal(starterScalar(starterMatch.finished, "state.game_over"), true);
   assert.equal(starterScalar(starterMatch.restarted, "state.cpu.score"), 0);
-  assert.equal(starterScalar(starterMatch.restarted, "state.game_over"), 0);
+  assert.equal(starterScalar(starterMatch.restarted, "state.game_over"), false);
   await screenshot("starter-pong-restarted");
   const editorDraft = 'global score: i32;\nfunction helper(value: i32): i32 { return value; }\nfunction main(): i32 { return hel';
   await evaluate(`(() => { const editor=window.STASIS_PLAYGROUND_EDITOR; editor.setFile("main.stasis",${JSON.stringify(editorDraft)}); editor.setEntry("main.stasis"); const area=document.getElementById("source-editor"); area.focus(); area.setSelectionRange(area.value.length,area.value.length); })()`);
