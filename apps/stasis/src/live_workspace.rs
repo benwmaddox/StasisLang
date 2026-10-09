@@ -28,6 +28,10 @@ use stasis_runner::live::{
     LiveRequest, LiveResponse, LiveResponseSendError, LiveRuntimeIdentity, LiveSessionServer,
     LiveSymbolTarget, ScratchWorkspace, MAX_LIVE_WATCHES,
 };
+use stasis_runner::supervised_live::{
+    MAX_SUPERVISED_LIVE_CAPTURE_BYTES, MAX_SUPERVISED_LIVE_CAPTURE_HEIGHT,
+    MAX_SUPERVISED_LIVE_CAPTURE_WIDTH,
+};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
 use std::io::Read;
@@ -64,6 +68,8 @@ pub struct LiveRunConfig {
     pub entry: PathBuf,
     pub output: PathBuf,
     pub window_title: Option<String>,
+    pub supervised_capture_root: Option<PathBuf>,
+    pub supervised_host: Option<stasis_dynload::SupervisedNetworkHostGuard>,
 }
 
 impl LiveRunConfig {
@@ -73,11 +79,26 @@ impl LiveRunConfig {
             entry,
             output,
             window_title: None,
+            supervised_capture_root: None,
+            supervised_host: None,
         }
     }
 
     pub fn with_window_title(mut self, window_title: impl Into<String>) -> Self {
         self.window_title = Some(window_title.into());
+        self
+    }
+
+    pub fn with_supervised_capture_root(mut self, capture_root: PathBuf) -> Self {
+        self.supervised_capture_root = Some(capture_root);
+        self
+    }
+
+    pub fn with_supervised_host(
+        mut self,
+        host: stasis_dynload::SupervisedNetworkHostGuard,
+    ) -> Self {
+        self.supervised_host = Some(host);
         self
     }
 }
@@ -227,6 +248,7 @@ pub(crate) struct LiveWorkspace {
     language_service: LanguageService,
     language_paths: BTreeSet<String>,
     input_override: Option<Vec<stasis_runner::live::LivePointerInput>>,
+    input_viewport: Option<(f32, f32)>,
 }
 
 impl Drop for LiveWorkspace {
@@ -246,6 +268,9 @@ impl Drop for LiveWorkspace {
             preparation.canceled.store(true, Ordering::Release);
             if let Some(worker) = preparation.worker.take() {
                 let _ = worker.join();
+            }
+            if self.config.supervised_capture_root.is_some() {
+                let _ = remove_capture_artifact(&preparation.path);
             }
         }
     }
@@ -297,6 +322,7 @@ impl LiveWorkspace {
             language_service,
             language_paths: BTreeSet::new(),
             input_override: None,
+            input_viewport: None,
         };
         workspace.refresh_completion(jit)?;
         Ok(workspace)
@@ -527,20 +553,42 @@ impl LiveWorkspace {
         if self.capture_preparation.is_some() {
             return Err("a live frame capture is already pending".to_string());
         }
-        let directory = self
-            .config
-            .project_root
-            .join(&self.config.output)
-            .join("gauntlet-captures");
-        fs::create_dir_all(&directory)
-            .map_err(|error| format!("failed creating live capture directory: {error}"))?;
-        let path = directory.join(format!("{artifact}.png"));
-        if path.exists() {
-            fs::remove_file(&path)
-                .map_err(|error| format!("failed replacing prior live capture: {error}"))?;
+        if self.config.supervised_capture_root.is_some() {
+            validate_supervised_capture_viewport(self.input_viewport)?;
         }
-        stasis_dynload::schedule_runtime_screenshot(&path)?;
-
+        let (directory, capture_limit) = match self.config.supervised_capture_root.as_deref() {
+            Some(root) => (
+                validate_supervised_capture_root(root)?,
+                u64::from(MAX_SUPERVISED_LIVE_CAPTURE_BYTES),
+            ),
+            None => {
+                let directory = self
+                    .config
+                    .project_root
+                    .join(&self.config.output)
+                    .join("gauntlet-captures");
+                fs::create_dir_all(&directory)
+                    .map_err(|error| format!("failed creating live capture directory: {error}"))?;
+                (directory, MAX_LIVE_CAPTURE_BYTES)
+            }
+        };
+        let path = directory.join(format!("{artifact}.png"));
+        match fs::symlink_metadata(&path) {
+            Ok(_) if self.config.supervised_capture_root.is_some() => {
+                return Err("live capture artifact already exists".to_string());
+            }
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                return Err("live capture destination is not a regular file".to_string());
+            }
+            Ok(_) => fs::remove_file(&path)
+                .map_err(|error| format!("failed replacing prior live capture: {error}"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed inspecting live capture destination: {error}"
+                ))
+            }
+        }
         let canceled = Arc::new(AtomicBool::new(false));
         let worker_canceled = Arc::clone(&canceled);
         let worker_path = path.clone();
@@ -552,10 +600,20 @@ impl LiveWorkspace {
                     &worker_path,
                     &worker_canceled,
                     Instant::now() + LIVE_CAPTURE_TIMEOUT,
+                    capture_limit,
                 );
                 let _ = sender.send(result);
             })
             .map_err(|error| format!("failed starting live capture verification: {error}"))?;
+        if let Err(error) = stasis_dynload::schedule_runtime_screenshot(&path) {
+            canceled.store(true, Ordering::Release);
+            let _ = worker.join();
+            return Err(if self.config.supervised_capture_root.is_some() {
+                with_capture_cleanup_result(&path, error)
+            } else {
+                error
+            });
+        }
         self.capture_preparation = Some(CapturePreparation {
             request_id,
             artifact,
@@ -593,27 +651,44 @@ impl LiveWorkspace {
             let _ = worker.join();
         }
         if !route_connected {
+            if self.config.supervised_capture_root.is_some() {
+                let _ = remove_capture_artifact(&preparation.path);
+            }
             return None;
         }
         if preparation.canceled.load(Ordering::Acquire) {
-            return Some(LiveResponse::failure(
-                preparation.request_id,
-                tick,
-                "live frame capture canceled",
-            ));
+            let message = if self.config.supervised_capture_root.is_some() {
+                with_capture_cleanup_result(
+                    &preparation.path,
+                    "live frame capture canceled".to_string(),
+                )
+            } else {
+                "live frame capture canceled".to_string()
+            };
+            return Some(LiveResponse::failure(preparation.request_id, tick, message));
         }
         let evidence = match result {
             Ok(evidence) => evidence,
             Err(error) => {
-                return Some(LiveResponse::failure(preparation.request_id, tick, error));
+                let message = if self.config.supervised_capture_root.is_some() {
+                    with_capture_cleanup_result(&preparation.path, error)
+                } else {
+                    error
+                };
+                return Some(LiveResponse::failure(preparation.request_id, tick, message));
             }
         };
         if self.runtime_identity() != preparation.runtime_identity {
-            return Some(LiveResponse::failure(
-                preparation.request_id,
-                tick,
-                "live runtime identity changed before the frame capture was verified",
-            ));
+            let message = if self.config.supervised_capture_root.is_some() {
+                with_capture_cleanup_result(
+                    &preparation.path,
+                    "live runtime identity changed before the frame capture was verified"
+                        .to_string(),
+                )
+            } else {
+                "live runtime identity changed before the frame capture was verified".to_string()
+            };
+            return Some(LiveResponse::failure(preparation.request_id, tick, message));
         }
         Some(
             LiveResponse::success(
@@ -639,6 +714,23 @@ impl LiveWorkspace {
         !self.paused || self.step_remaining > 0
     }
 
+    pub(crate) fn supervised_host(&self) -> Option<&stasis_dynload::SupervisedNetworkHostGuard> {
+        self.config.supervised_host.as_ref()
+    }
+
+    pub(crate) fn update_supervised_input_viewport(&mut self, width: f32, height: f32) {
+        self.input_viewport = if self.config.supervised_host.is_some()
+            && width.is_finite()
+            && height.is_finite()
+            && width > 0.0
+            && height > 0.0
+        {
+            Some((width, height))
+        } else {
+            None
+        };
+    }
+
     pub(crate) fn after_tick(&mut self) {
         if self.paused && self.step_remaining > 0 {
             self.step_remaining -= 1;
@@ -652,7 +744,7 @@ impl LiveWorkspace {
     }
 
     pub(crate) fn apply_input_override(
-        &self,
+        &mut self,
         host_i32: &mut [i32],
         host_f32: &mut [f32],
     ) -> Result<(), String> {
@@ -675,7 +767,19 @@ impl LiveWorkspace {
         let width = host_f32[F_LOGICAL_W];
         let height = host_f32[F_LOGICAL_H];
         if width <= 0.0 || height <= 0.0 {
+            if self.config.supervised_host.is_some() {
+                self.input_override = None;
+                return Ok(());
+            }
             return Err("live input requires a positive logical viewport".to_string());
+        }
+        let supervised_out_of_viewport = self.config.supervised_host.is_some()
+            && pointers
+                .iter()
+                .any(|pointer| pointer.x as f32 > width || pointer.y as f32 > height);
+        if supervised_out_of_viewport {
+            self.input_override = None;
+            return Ok(());
         }
         host_i32[I_COUNT] = pointers.len() as i32;
         host_i32[I_DROPPED] = 0;
@@ -990,6 +1094,9 @@ impl LiveWorkspace {
             }
             LiveCommand::SetInputState { pointers } => {
                 validate_live_pointers(&pointers)?;
+                if self.config.supervised_host.is_some() {
+                    validate_supervised_pointer_viewport(&pointers, self.input_viewport)?;
+                }
                 self.input_override = (!pointers.is_empty()).then_some(pointers);
                 Ok((
                     "input_state_set",
@@ -2380,10 +2487,45 @@ fn validate_capture_artifact(value: &str) -> Result<&str, String> {
     Ok(value)
 }
 
+fn validate_supervised_capture_viewport(viewport: Option<(f32, f32)>) -> Result<(), String> {
+    let Some((width, height)) = viewport else {
+        return Err("supervised live viewport is unavailable for capture".into());
+    };
+    if !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+        || width.ceil() > f32::from(MAX_SUPERVISED_LIVE_CAPTURE_WIDTH)
+        || height.ceil() > f32::from(MAX_SUPERVISED_LIVE_CAPTURE_HEIGHT)
+    {
+        return Err("supervised live capture viewport exceeds its dimension limit".into());
+    }
+    Ok(())
+}
+
+fn remove_capture_artifact(path: &Path) -> Result<(), &'static str> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("capture artifact cleanup failed"),
+        Ok(metadata) if metadata.is_file() || metadata.file_type().is_symlink() => {
+            fs::remove_file(path).map_err(|_| "capture artifact cleanup failed")
+        }
+        Ok(_) => Err("capture artifact cleanup failed"),
+    }
+}
+
+fn with_capture_cleanup_result(path: &Path, error: String) -> String {
+    match remove_capture_artifact(path) {
+        Ok(()) => error,
+        Err(cleanup_error) => format!("{error}; {cleanup_error}"),
+    }
+}
+
 fn wait_for_capture_png(
     path: &Path,
     canceled: &AtomicBool,
     deadline: Instant,
+    max_bytes: u64,
 ) -> Result<CaptureEvidence, String> {
     let mut last_error = None;
     loop {
@@ -2403,16 +2545,19 @@ fn wait_for_capture_png(
                 ),
             });
         }
-        match fs::metadata(path) {
-            Ok(metadata) if metadata.len() > MAX_LIVE_CAPTURE_BYTES => {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err("live capture destination is not a regular file".to_string());
+            }
+            Ok(metadata) if metadata.len() > max_bytes => {
                 return Err(format!(
-                    "live frame capture exceeds the {MAX_LIVE_CAPTURE_BYTES}-byte limit"
+                    "live frame capture exceeds the {max_bytes}-byte limit"
                 ));
             }
             Ok(metadata) if metadata.len() > 0 => {
-                match read_capture_candidate(path, metadata.len()) {
+                match read_capture_candidate(path, metadata.len(), max_bytes) {
                     Ok(bytes) if bytes.len() as u64 == metadata.len() => {
-                        match capture_png_evidence(&bytes) {
+                        match capture_png_evidence(&bytes, max_bytes) {
                             Ok(evidence) => {
                                 if canceled.load(Ordering::Acquire) {
                                     return Err("live frame capture canceled".to_string());
@@ -2441,25 +2586,34 @@ fn wait_for_capture_png(
     }
 }
 
-fn read_capture_candidate(path: &Path, expected_len: u64) -> Result<Vec<u8>, String> {
+fn read_capture_candidate(
+    path: &Path,
+    expected_len: u64,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    if expected_len > max_bytes {
+        return Err(format!(
+            "live frame capture exceeds the {max_bytes}-byte limit"
+        ));
+    }
     let file = fs::File::open(path).map_err(|error| format!("failed opening capture: {error}"))?;
-    let capacity = usize::try_from(expected_len.min(MAX_LIVE_CAPTURE_BYTES)).unwrap_or(0);
+    let capacity = usize::try_from(expected_len.min(max_bytes)).unwrap_or(0);
     let mut bytes = Vec::with_capacity(capacity);
-    file.take(MAX_LIVE_CAPTURE_BYTES + 1)
+    file.take(max_bytes + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("failed reading capture: {error}"))?;
-    if bytes.len() as u64 > MAX_LIVE_CAPTURE_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err(format!(
-            "live frame capture exceeds the {MAX_LIVE_CAPTURE_BYTES}-byte limit"
+            "live frame capture exceeds the {max_bytes}-byte limit"
         ));
     }
     Ok(bytes)
 }
 
-fn capture_png_evidence(bytes: &[u8]) -> Result<CaptureEvidence, String> {
-    if bytes.len() as u64 > MAX_LIVE_CAPTURE_BYTES {
+fn capture_png_evidence(bytes: &[u8], max_bytes: u64) -> Result<CaptureEvidence, String> {
+    if bytes.len() as u64 > max_bytes {
         return Err(format!(
-            "live frame capture exceeds the {MAX_LIVE_CAPTURE_BYTES}-byte limit"
+            "live frame capture exceeds the {max_bytes}-byte limit"
         ));
     }
     if bytes.len() < 24
@@ -2489,6 +2643,34 @@ fn capture_png_evidence(bytes: &[u8]) -> Result<CaptureEvidence, String> {
     })
 }
 
+fn validate_supervised_capture_root(root: &Path) -> Result<PathBuf, String> {
+    if !root.is_absolute() {
+        return Err("supervised capture root must be absolute".to_string());
+    }
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|_| "supervised capture root is unavailable".to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("supervised capture root is invalid".to_string());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Err("supervised capture root is invalid".to_string());
+        }
+    }
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| "supervised capture root is invalid".to_string())?;
+    let temp_root = std::env::temp_dir()
+        .canonicalize()
+        .map_err(|_| "supervised capture root is invalid".to_string())?;
+    if canonical_root == temp_root || !canonical_root.starts_with(temp_root) {
+        return Err("supervised capture root is invalid".to_string());
+    }
+    Ok(canonical_root)
+}
+
 fn validate_live_pointers(
     pointers: &[stasis_runner::live::LivePointerInput],
 ) -> Result<(), String> {
@@ -2509,6 +2691,25 @@ fn validate_live_pointers(
         if pointer.went_up && pointer.is_down {
             return Err("went_up requires is_down=false".to_string());
         }
+    }
+    Ok(())
+}
+
+fn validate_supervised_pointer_viewport(
+    pointers: &[stasis_runner::live::LivePointerInput],
+    viewport: Option<(f32, f32)>,
+) -> Result<(), String> {
+    if pointers.is_empty() {
+        return Ok(());
+    }
+    let Some((width, height)) = viewport else {
+        return Err("supervised live viewport is unavailable".into());
+    };
+    if pointers
+        .iter()
+        .any(|pointer| pointer.x as f32 > width || pointer.y as f32 > height)
+    {
+        return Err("supervised live pointer is outside the viewport".into());
     }
     Ok(())
 }
@@ -4191,6 +4392,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn supervised_live_input_is_rejected_outside_current_viewport() {
+        let pointer = |x, y| stasis_runner::live::LivePointerInput {
+            id: 0,
+            x,
+            y,
+            is_down: false,
+            went_down: false,
+            went_up: false,
+        };
+        assert!(
+            validate_supervised_pointer_viewport(&[pointer(640, 360)], Some((640.0, 360.0)))
+                .is_ok()
+        );
+        assert!(
+            validate_supervised_pointer_viewport(&[pointer(641, 360)], Some((640.0, 360.0)))
+                .is_err()
+        );
+        assert!(
+            validate_supervised_pointer_viewport(&[pointer(641, 361)], Some((800.0, 600.0)))
+                .is_ok()
+        );
+        assert!(
+            validate_supervised_pointer_viewport(&[pointer(641, 361)], Some((640.0, 360.0)))
+                .is_err()
+        );
+        assert!(validate_supervised_pointer_viewport(&[pointer(0, 0)], None).is_err());
+        assert!(validate_supervised_pointer_viewport(&[], None).is_ok());
+    }
+
+    #[test]
+    fn supervised_capture_viewport_is_checked_before_capture_scheduling() {
+        assert!(validate_supervised_capture_viewport(Some((640.0, 360.0))).is_ok());
+        assert!(validate_supervised_capture_viewport(Some((1920.0, 1080.0))).is_ok());
+        assert!(validate_supervised_capture_viewport(Some((1920.1, 1080.0))).is_err());
+        assert!(validate_supervised_capture_viewport(Some((1920.0, 1080.1))).is_err());
+        assert!(validate_supervised_capture_viewport(Some((f32::NAN, 360.0))).is_err());
+        assert!(validate_supervised_capture_viewport(None).is_err());
+    }
+
+    #[test]
+    fn failed_supervised_capture_cleanup_only_removes_the_fixed_file() {
+        let root = std::env::temp_dir().join(format!(
+            "stasis-supervised-capture-cleanup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("current time")
+                .as_nanos()
+        ));
+        fs::create_dir(&root).expect("create temporary capture root");
+        let artifact = root.join("supervised-capture-00.png");
+        fs::write(&artifact, b"partial PNG").expect("write partial capture");
+        assert!(remove_capture_artifact(&artifact).is_ok());
+        assert!(!artifact.exists());
+
+        let directory = root.join("unexpected-directory");
+        fs::create_dir(&directory).expect("create unexpected directory");
+        assert!(remove_capture_artifact(&directory).is_err());
+        assert!(directory.is_dir());
+        fs::remove_dir(&directory).expect("remove temporary directory");
+        fs::remove_dir(&root).expect("remove temporary capture root");
+    }
+
     fn test_capture_png() -> Vec<u8> {
         let mut bytes = Vec::new();
         image::codecs::png::PngEncoder::new(&mut bytes)
@@ -4201,9 +4466,9 @@ mod tests {
 
     #[test]
     fn capture_completion_requires_a_decodable_png() {
-        assert!(capture_png_evidence(b"not a PNG").is_err());
+        assert!(capture_png_evidence(b"not a PNG", MAX_LIVE_CAPTURE_BYTES).is_err());
         let png = test_capture_png();
-        let evidence = capture_png_evidence(&png).expect("PNG evidence");
+        let evidence = capture_png_evidence(&png, MAX_LIVE_CAPTURE_BYTES).expect("PNG evidence");
         assert_eq!(evidence.byte_length, png.len() as u64);
         assert_eq!((evidence.width, evidence.height), (1, 1));
         assert_eq!(evidence.sha256, format!("{:x}", Sha256::digest(&png)));
@@ -4221,18 +4486,22 @@ mod tests {
         ));
         let canceled = AtomicBool::new(true);
         assert_eq!(
-            wait_for_capture_png(&missing, &canceled, Instant::now()).expect_err("canceled"),
+            wait_for_capture_png(&missing, &canceled, Instant::now(), MAX_LIVE_CAPTURE_BYTES)
+                .expect_err("canceled"),
             "live frame capture canceled"
         );
         canceled.store(false, Ordering::Release);
-        assert!(wait_for_capture_png(&missing, &canceled, Instant::now())
-            .expect_err("deadline")
-            .contains("did not complete within 5 seconds"));
+        assert!(
+            wait_for_capture_png(&missing, &canceled, Instant::now(), MAX_LIVE_CAPTURE_BYTES)
+                .expect_err("deadline")
+                .contains("did not complete within 5 seconds")
+        );
         fs::write(&missing, test_capture_png()).expect("expired PNG");
         assert!(wait_for_capture_png(
             &missing,
             &canceled,
-            Instant::now() - Duration::from_millis(1)
+            Instant::now() - Duration::from_millis(1),
+            MAX_LIVE_CAPTURE_BYTES,
         )
         .expect_err("expired valid PNG")
         .contains("did not complete within 5 seconds"));
@@ -4299,7 +4568,7 @@ mod tests {
             .expect("reserve routed request");
         let wire_request = workspace.server.drain(1).pop().expect("wire request");
         let png = test_capture_png();
-        let evidence = capture_png_evidence(&png).expect("evidence");
+        let evidence = capture_png_evidence(&png, MAX_LIVE_CAPTURE_BYTES).expect("evidence");
         let expected_identity = install_capture_result(
             &mut workspace,
             wire_request.request_id,
@@ -4341,7 +4610,10 @@ mod tests {
             wire_request.request_id,
             root.join("drifted.png"),
             false,
-            Ok(capture_png_evidence(&test_capture_png()).expect("evidence")),
+            Ok(
+                capture_png_evidence(&test_capture_png(), MAX_LIVE_CAPTURE_BYTES)
+                    .expect("evidence"),
+            ),
         );
         workspace.host_entry_revision = workspace.host_entry_revision.saturating_add(1);
 

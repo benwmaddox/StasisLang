@@ -2,5 +2,6 @@
 #![cfg_attr(not(debug_assertions), deny(warnings))]
 
 pub mod live;
+pub mod supervised_live;
 pub mod swap;
 pub use stasis_assets as assets;

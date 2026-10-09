@@ -47,6 +47,27 @@ class NightlyNetworkSupportContractTests(unittest.TestCase):
         self.assertIn('-Toolchain "$validationRoot/stasis.exe"', self.workflow)
         self.assertIn('-Supervisor "$validationRoot/stasis-network-supervise.exe"', self.workflow)
 
+    def test_windows_source_supervision_builds_a_matching_native_runtime(self):
+        workflow = (ROOT / ".github/workflows/network-browser-acceptance.yml").read_text(encoding="utf-8")
+        job = workflow.split("  windows-production-supervision:", 1)[1].split("  windows-browser-guest:", 1)[0]
+        self.assertIn("STASIS_RELEASE_ID: ci-network-supervision-${{ github.run_id }}", job)
+        self.assertIn("STASIS_SOURCE_COMMIT: ${{ github.sha }}", job)
+        self.assertIn("name: Compute matching supervision toolchain fingerprint", job)
+        self.assertIn("name: Build matching supervision graphics runtime and runner", job)
+        self.assertIn("-DSTASIS_BUILD_FINGERPRINT=\"$env:STASIS_BUILD_FINGERPRINT\"", job)
+        self.assertIn("stasis_graphics stasis_runner", job)
+        for variable in (
+            "STASIS_RUNTIME_DLL_PATH",
+            "STASIS_RUNTIME_LIBRARY_PATH",
+            "STASIS_RUNTIME_RUNNER_PATH",
+        ):
+            with self.subTest(variable=variable):
+                self.assertIn(f'"{variable}=$', job)
+        self.assertLess(
+            job.index("Build matching supervision graphics runtime and runner"),
+            job.index("Test packaged authority and external socket peer"),
+        )
+
     def test_windows_archive_ships_matching_desktop_network_support(self):
         self.assertIn("name: Build desktop network support (windows)", self.workflow)
         self.assertIn("RUSTFLAGS: -C target-feature=+crt-static", self.workflow)

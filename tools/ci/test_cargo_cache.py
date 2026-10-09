@@ -1,9 +1,12 @@
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from tools import cargo_cache
+from tools.ci import verify_staged_live_ttt_fixtures
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -53,9 +56,119 @@ class CargoCacheTests(unittest.TestCase):
 
         self.assertEqual(hook.count("$cargoPolicy run -- cargo"), 1)
         self.assertIn("cargo run --quiet -p stasis -- format", hook)
+        self.assertIn("verify_staged_live_ttt_fixtures.py", hook)
+        self.assertIn("Where-Object { $_ -notin $frozenStasis }", hook)
+        self.assertIn('$env:VCToolsInstallDir', hook)
+        self.assertIn('bin\\Hostx64\\x64', hook)
+        self.assertIn('Test-Path -LiteralPath $msvcLinkExe -PathType Leaf', hook)
+        self.assertIn('$env:PATH = "$msvcLinkDirectory;$env:PATH"', hook)
+        self.assertLess(
+            hook.index('$env:PATH = "$msvcLinkDirectory;$env:PATH"'),
+            hook.index('& python $cargoPolicy run -- cargo'),
+        )
+        self.assertLess(
+            hook.index("verify_staged_live_ttt_fixtures.py"),
+            hook.index("git diff --cached --name-only"),
+        )
         self.assertNotIn("cargo test", hook)
         self.assertNotIn("staged_repository_stasis_sources_are_formatted", hook)
         self.assertNotIn("& cargo ", hook)
+
+    def test_staged_fixture_pin_accepts_only_exact_provenance_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            self._initialize_fixture_index(repo)
+
+            validated = verify_staged_live_ttt_fixtures.verify_staged_fixtures(repo)
+
+            self.assertEqual(validated, list(verify_staged_live_ttt_fixtures.SOURCE_HASHES))
+
+    def test_staged_fixture_change_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            self._initialize_fixture_index(repo)
+            source = next(iter(verify_staged_live_ttt_fixtures.SOURCE_HASHES))
+            source_path = repo / Path(source)
+            source_path.write_bytes(source_path.read_bytes() + b"\r\n")
+            self._git(repo, "add", source)
+
+            with self.assertRaisesRegex(
+                verify_staged_live_ttt_fixtures.VerificationError,
+                "staged fixture bytes differ",
+            ):
+                verify_staged_live_ttt_fixtures.verify_staged_fixtures(repo)
+
+    def test_staged_provenance_change_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            self._initialize_fixture_index(repo)
+            manifest_path = repo / verify_staged_live_ttt_fixtures.MANIFEST_PATH
+            manifest_path.write_bytes(manifest_path.read_bytes().replace(b"cb43e41a", b"00000000"))
+            self._git(repo, "add", verify_staged_live_ttt_fixtures.MANIFEST_PATH)
+
+            with self.assertRaisesRegex(
+                verify_staged_live_ttt_fixtures.VerificationError,
+                "manifest differs from the trusted pin",
+            ):
+                verify_staged_live_ttt_fixtures.verify_staged_fixtures(repo)
+
+    def test_staged_fixture_attribute_change_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            self._initialize_fixture_index(repo)
+            attributes_path = repo / verify_staged_live_ttt_fixtures.ATTRIBUTES_PATH
+            attributes_path.write_bytes(attributes_path.read_bytes().replace(b"-text", b"text", 1))
+            self._git(repo, "add", verify_staged_live_ttt_fixtures.ATTRIBUTES_PATH)
+
+            with self.assertRaisesRegex(
+                verify_staged_live_ttt_fixtures.VerificationError,
+                "attributes differ from the trusted pin",
+            ):
+                verify_staged_live_ttt_fixtures.verify_staged_fixtures(repo)
+
+    def test_staged_rename_of_pinned_fixture_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            self._initialize_fixture_index(repo)
+            self._git(repo, "commit", "-m", "fixture baseline")
+            source = next(iter(verify_staged_live_ttt_fixtures.SOURCE_HASHES))
+            destination = source.removesuffix("protocol.stasis") + "renamed_protocol.stasis"
+            self._git(repo, "mv", source, destination)
+            default_rename_paths = subprocess.run(
+                ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z"],
+                cwd=repo,
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout.split(b"\0")
+            self.assertEqual(
+                {path.decode("utf-8") for path in default_rename_paths if path},
+                {destination},
+            )
+
+            with self.assertRaises(verify_staged_live_ttt_fixtures.VerificationError):
+                verify_staged_live_ttt_fixtures.verify_staged_fixtures(repo)
+
+    @staticmethod
+    def _git(repo: Path, *args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True, stdout=subprocess.PIPE)
+
+    @classmethod
+    def _initialize_fixture_index(cls, repo: Path) -> None:
+        cls._git(repo, "init", "-q")
+        cls._git(repo, "config", "user.email", "codex-test@example.invalid")
+        cls._git(repo, "config", "user.name", "Codex Test")
+        cls._git(repo, "config", "core.autocrlf", "false")
+        fixture_paths = [
+            verify_staged_live_ttt_fixtures.MANIFEST_PATH,
+            verify_staged_live_ttt_fixtures.ATTRIBUTES_PATH,
+            *verify_staged_live_ttt_fixtures.SOURCE_HASHES,
+        ]
+        for relative in fixture_paths:
+            source = ROOT / Path(relative)
+            destination = repo / Path(relative)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+        cls._git(repo, "add", "--", *fixture_paths)
 
     def test_shared_target_is_owned_by_common_repository(self) -> None:
         common_git_dir = Path("/repo/.git")

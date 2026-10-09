@@ -1,0 +1,636 @@
+// Semantic network frame. The future native/WASM adapter serializes these
+// words in network byte order; this module is not a socket or byte codec. The
+// rolling checksum detects corruption/desync only, never authenticates data.
+const NETWORK_PROTOCOL_VERSION: i32 = 1;
+const NETWORK_FRAME_MAGIC: i32 = 1347241030;
+const NETWORK_MAX_PAYLOAD_WORDS: i32 = 8;
+const NETWORK_MAX_SEATS: i32 = 8;
+const NETWORK_FRAME_WORD_COUNT: i32 = 21;
+
+enum NetworkFrameKind {
+    Hello,
+    Command,
+    TurnInput,
+    Snapshot,
+    Ack,
+    Error,
+}
+
+enum NetworkFrameResult {
+    FrameValid,
+    FrameMagicRejected,
+    FrameVersionRejected,
+    FrameLengthRejected,
+    FramePayloadRejected,
+    FrameChecksumRejected,
+    FrameKindRejected,
+    FrameFieldRejected,
+}
+
+struct NetworkFrame {
+    magic: i32;
+    protocol_version: i32;
+    kind: NetworkFrameKind;
+    session_epoch: i32;
+    sender_seat: i32;
+    sender_sequence: i32;
+    ack: i32;
+    simulation_turn: i32;
+    payload_count: i32;
+    payload_words: i32[8];
+    authoritative_revision: i32;
+    authoritative_hash: i32;
+    checksum: i32;
+    word_count: i32;
+}
+
+global network_frame: NetworkFrame;
+global network_decoded_frame: NetworkFrame;
+global network_wire_words: i32[21];
+global network_wire_word_count: i32;
+
+function network_kind_word(kind: NetworkFrameKind): i32 {
+    if (kind == NetworkFrameKind.Hello) {
+        return 0;
+    }
+    if (kind == NetworkFrameKind.Command) {
+        return 1;
+    }
+    if (kind == NetworkFrameKind.TurnInput) {
+        return 2;
+    }
+    if (kind == NetworkFrameKind.Snapshot) {
+        return 3;
+    }
+    if (kind == NetworkFrameKind.Ack) {
+        return 4;
+    }
+    return 5;
+}
+
+function network_word_kind(word: i32): NetworkFrameKind {
+    if (word == 1) {
+        return NetworkFrameKind.Command;
+    }
+    if (word == 2) {
+        return NetworkFrameKind.TurnInput;
+    }
+    if (word == 3) {
+        return NetworkFrameKind.Snapshot;
+    }
+    if (word == 4) {
+        return NetworkFrameKind.Ack;
+    }
+    if (word == 5) {
+        return NetworkFrameKind.Error;
+    }
+    return NetworkFrameKind.Hello;
+}
+
+function network_word_kind_valid(word: i32): bool {
+    return word >= 0 && word <= 5;
+}
+
+function network_frame_reset(): void {
+    network_frame.magic = NETWORK_FRAME_MAGIC;
+    network_frame.protocol_version = NETWORK_PROTOCOL_VERSION;
+    network_frame.kind = NetworkFrameKind.Hello;
+    network_frame.session_epoch = 0;
+    network_frame.sender_seat = -1;
+    network_frame.sender_sequence = 0;
+    network_frame.ack = 0;
+    network_frame.simulation_turn = 0;
+    network_frame.payload_count = 0;
+    for (let index: i32 = 0; index < NETWORK_MAX_PAYLOAD_WORDS; index += 1) {
+        network_frame.payload_words[index] = 0;
+    }
+    network_frame.authoritative_revision = 0;
+    network_frame.authoritative_hash = 0;
+    network_frame.checksum = 0;
+    network_frame.word_count = NETWORK_FRAME_WORD_COUNT;
+    network_wire_word_count = 0;
+}
+
+function network_frame_set_payload(index: i32, value: i32): bool {
+    if (index < 0 || index >= NETWORK_MAX_PAYLOAD_WORDS) {
+        return false;
+    }
+    network_frame.payload_words[index] = value;
+    if (network_frame.payload_count <= index) {
+        network_frame.payload_count = index + 1;
+    }
+    network_frame.checksum = network_frame_checksum_current();
+    return true;
+}
+
+function network_frame_checksum_current(): i32 {
+    let checksum: i32 = 23;
+    checksum = checksum * 31 + network_frame.magic;
+    checksum = checksum * 31 + network_frame.protocol_version;
+    checksum = checksum * 31 + network_kind_word(network_frame.kind);
+    checksum = checksum * 31 + network_frame.session_epoch;
+    checksum = checksum * 31 + network_frame.sender_seat;
+    checksum = checksum * 31 + network_frame.sender_sequence;
+    checksum = checksum * 31 + network_frame.ack;
+    checksum = checksum * 31 + network_frame.simulation_turn;
+    checksum = checksum * 31 + network_frame.payload_count;
+    for (let index: i32 = 0; index < NETWORK_MAX_PAYLOAD_WORDS; index += 1) {
+        checksum = checksum * 31 + network_frame.payload_words[index];
+    }
+    checksum = checksum * 31 + network_frame.authoritative_revision;
+    checksum = checksum * 31 + network_frame.authoritative_hash;
+    checksum = checksum * 31 + network_frame.word_count;
+    return checksum;
+}
+
+function network_decoded_checksum(): i32 {
+    let checksum: i32 = 23;
+    checksum = checksum * 31 + network_decoded_frame.magic;
+    checksum = checksum * 31 + network_decoded_frame.protocol_version;
+    checksum = checksum * 31 + network_kind_word(network_decoded_frame.kind);
+    checksum = checksum * 31 + network_decoded_frame.session_epoch;
+    checksum = checksum * 31 + network_decoded_frame.sender_seat;
+    checksum = checksum * 31 + network_decoded_frame.sender_sequence;
+    checksum = checksum * 31 + network_decoded_frame.ack;
+    checksum = checksum * 31 + network_decoded_frame.simulation_turn;
+    checksum = checksum * 31 + network_decoded_frame.payload_count;
+    for (let index: i32 = 0; index < NETWORK_MAX_PAYLOAD_WORDS; index += 1) {
+        checksum = checksum * 31 + network_decoded_frame.payload_words[index];
+    }
+    checksum = checksum * 31 + network_decoded_frame.authoritative_revision;
+    checksum = checksum * 31 + network_decoded_frame.authoritative_hash;
+    checksum = checksum * 31 + network_decoded_frame.word_count;
+    return checksum;
+}
+
+function network_frame_build(): NetworkFrameResult {
+    if (network_frame.payload_count < 0 || network_frame.payload_count > NETWORK_MAX_PAYLOAD_WORDS) {
+        return NetworkFrameResult.FramePayloadRejected;
+    }
+    if (
+        network_frame.session_epoch < 0
+        || network_frame.sender_seat < -1
+        || network_frame.sender_seat >= NETWORK_MAX_SEATS
+        || network_frame.sender_sequence < 0
+        || network_frame.ack < 0
+        || network_frame.simulation_turn < 0
+        || network_frame.authoritative_revision < 0
+    ) {
+        return NetworkFrameResult.FrameFieldRejected;
+    }
+    for (let index: i32 = network_frame.payload_count; index < NETWORK_MAX_PAYLOAD_WORDS; index += 1) {
+        if (network_frame.payload_words[index] != 0) {
+            return NetworkFrameResult.FramePayloadRejected;
+        }
+    }
+    network_frame.magic = NETWORK_FRAME_MAGIC;
+    network_frame.protocol_version = NETWORK_PROTOCOL_VERSION;
+    network_frame.word_count = NETWORK_FRAME_WORD_COUNT;
+    network_frame.checksum = network_frame_checksum_current();
+    return NetworkFrameResult.FrameValid;
+}
+
+function network_frame_validate_current(): NetworkFrameResult {
+    if (network_frame.magic != NETWORK_FRAME_MAGIC) {
+        return NetworkFrameResult.FrameMagicRejected;
+    }
+    if (network_frame.protocol_version != NETWORK_PROTOCOL_VERSION) {
+        return NetworkFrameResult.FrameVersionRejected;
+    }
+    if (network_frame.word_count != NETWORK_FRAME_WORD_COUNT) {
+        return NetworkFrameResult.FrameLengthRejected;
+    }
+    if (network_frame.payload_count < 0 || network_frame.payload_count > NETWORK_MAX_PAYLOAD_WORDS) {
+        return NetworkFrameResult.FramePayloadRejected;
+    }
+    if (
+        network_frame.session_epoch < 0
+        || network_frame.sender_seat < -1
+        || network_frame.sender_seat >= NETWORK_MAX_SEATS
+        || network_frame.sender_sequence < 0
+        || network_frame.ack < 0
+        || network_frame.simulation_turn < 0
+        || network_frame.authoritative_revision < 0
+    ) {
+        return NetworkFrameResult.FrameFieldRejected;
+    }
+    for (let index: i32 = network_frame.payload_count; index < NETWORK_MAX_PAYLOAD_WORDS; index += 1) {
+        if (network_frame.payload_words[index] != 0) {
+            return NetworkFrameResult.FramePayloadRejected;
+        }
+    }
+    if (network_frame.checksum != network_frame_checksum_current()) {
+        return NetworkFrameResult.FrameChecksumRejected;
+    }
+    return NetworkFrameResult.FrameValid;
+}
+
+function network_frame_validate(): NetworkFrameResult {
+    return network_frame_validate_current();
+}
+
+function network_frame_encode(): NetworkFrameResult {
+    let result: NetworkFrameResult = network_frame_validate_current();
+    if (result != NetworkFrameResult.FrameValid) {
+        network_wire_word_count = 0;
+        return result;
+    }
+    network_wire_words[0] = network_frame.magic;
+    network_wire_words[1] = network_frame.protocol_version;
+    network_wire_words[2] = network_kind_word(network_frame.kind);
+    network_wire_words[3] = network_frame.session_epoch;
+    network_wire_words[4] = network_frame.sender_seat;
+    network_wire_words[5] = network_frame.sender_sequence;
+    network_wire_words[6] = network_frame.ack;
+    network_wire_words[7] = network_frame.simulation_turn;
+    network_wire_words[8] = network_frame.payload_count;
+    for (let index: i32 = 0; index < NETWORK_MAX_PAYLOAD_WORDS; index += 1) {
+        network_wire_words[9 + index] = network_frame.payload_words[index];
+    }
+    network_wire_words[17] = network_frame.authoritative_revision;
+    network_wire_words[18] = network_frame.authoritative_hash;
+    network_wire_words[19] = network_frame.checksum;
+    network_wire_words[20] = network_frame.word_count;
+    network_wire_word_count = NETWORK_FRAME_WORD_COUNT;
+    return NetworkFrameResult.FrameValid;
+}
+
+function network_frame_decode(): NetworkFrameResult {
+    if (network_wire_word_count != NETWORK_FRAME_WORD_COUNT) {
+        return NetworkFrameResult.FrameLengthRejected;
+    }
+    network_decoded_frame.magic = network_wire_words[0];
+    network_decoded_frame.protocol_version = network_wire_words[1];
+    if (!network_word_kind_valid(network_wire_words[2])) {
+        return NetworkFrameResult.FrameKindRejected;
+    }
+    network_decoded_frame.kind = network_word_kind(network_wire_words[2]);
+    network_decoded_frame.session_epoch = network_wire_words[3];
+    network_decoded_frame.sender_seat = network_wire_words[4];
+    network_decoded_frame.sender_sequence = network_wire_words[5];
+    network_decoded_frame.ack = network_wire_words[6];
+    network_decoded_frame.simulation_turn = network_wire_words[7];
+    network_decoded_frame.payload_count = network_wire_words[8];
+    for (let index: i32 = 0; index < NETWORK_MAX_PAYLOAD_WORDS; index += 1) {
+        network_decoded_frame.payload_words[index] = network_wire_words[9 + index];
+    }
+    network_decoded_frame.authoritative_revision = network_wire_words[17];
+    network_decoded_frame.authoritative_hash = network_wire_words[18];
+    network_decoded_frame.checksum = network_wire_words[19];
+    network_decoded_frame.word_count = network_wire_words[20];
+    if (network_decoded_frame.magic != NETWORK_FRAME_MAGIC) {
+        return NetworkFrameResult.FrameMagicRejected;
+    }
+    if (network_decoded_frame.protocol_version != NETWORK_PROTOCOL_VERSION) {
+        return NetworkFrameResult.FrameVersionRejected;
+    }
+    if (network_decoded_frame.word_count != NETWORK_FRAME_WORD_COUNT) {
+        return NetworkFrameResult.FrameLengthRejected;
+    }
+    if (network_decoded_frame.payload_count < 0 || network_decoded_frame.payload_count > NETWORK_MAX_PAYLOAD_WORDS) {
+        return NetworkFrameResult.FramePayloadRejected;
+    }
+    if (
+        network_decoded_frame.session_epoch < 0
+        || network_decoded_frame.sender_seat < -1
+        || network_decoded_frame.sender_seat >= NETWORK_MAX_SEATS
+        || network_decoded_frame.sender_sequence < 0
+        || network_decoded_frame.ack < 0
+        || network_decoded_frame.simulation_turn < 0
+        || network_decoded_frame.authoritative_revision < 0
+    ) {
+        return NetworkFrameResult.FrameFieldRejected;
+    }
+    for (let index: i32 = network_decoded_frame.payload_count; index < NETWORK_MAX_PAYLOAD_WORDS; index += 1) {
+        if (network_decoded_frame.payload_words[index] != 0) {
+            return NetworkFrameResult.FramePayloadRejected;
+        }
+    }
+    if (network_decoded_frame.checksum != network_decoded_checksum()) {
+        return NetworkFrameResult.FrameChecksumRejected;
+    }
+    return NetworkFrameResult.FrameValid;
+}
+
+// Versioned envelope seam for the native adapter. The legacy NetworkFrame
+// above remains stable while adapters migrate to this envelope in phases.
+const NETWORK_ENVELOPE_VERSION: i32 = 1;
+const NETWORK_ENVELOPE_MAGIC: i32 = 1296389189;
+const NETWORK_ENVELOPE_MAX_PAYLOAD_WORDS: i32 = 16;
+const NETWORK_ENVELOPE_WORD_COUNT: i32 = 36;
+
+enum NetworkEnvelopeKind {
+    EnvelopeHello,
+    EnvelopeJoin,
+    EnvelopeCommand,
+    EnvelopeAck,
+    EnvelopeSnapshotChunk,
+    EnvelopeHash,
+    EnvelopePing,
+    EnvelopeError,
+}
+
+enum NetworkEnvelopeResult {
+    EnvelopeValid,
+    EnvelopeMagicRejected,
+    EnvelopeVersionRejected,
+    EnvelopeLengthRejected,
+    EnvelopeKindRejected,
+    EnvelopeBoundsRejected,
+    EnvelopeFieldRejected,
+    EnvelopeChecksumRejected,
+}
+
+struct NetworkEnvelope {
+    magic: i32;
+    version: i32;
+    kind: NetworkEnvelopeKind;
+    game_id: i32;
+    pack_id: i32;
+    rules_version: i32;
+    snapshot_version: i32;
+    session_epoch: i32;
+    connection_handle: i32;
+    seat_handle: i32;
+    sequence: i32;
+    ack: i32;
+    simulation_turn: i32;
+    payload_count: i32;
+    chunk_index: i32;
+    chunk_count: i32;
+    authoritative_revision: i32;
+    authoritative_hash: i32;
+    payload_words: i32[16];
+    checksum: i32;
+    word_count: i32;
+}
+
+global network_envelope: NetworkEnvelope;
+global network_decoded_envelope: NetworkEnvelope;
+global network_envelope_wire_words: i32[36];
+global network_envelope_wire_word_count: i32;
+
+function network_envelope_kind_word(kind: NetworkEnvelopeKind): i32 {
+    if (kind == NetworkEnvelopeKind.EnvelopeHello) {
+        return 0;
+    }
+    if (kind == NetworkEnvelopeKind.EnvelopeJoin) {
+        return 1;
+    }
+    if (kind == NetworkEnvelopeKind.EnvelopeCommand) {
+        return 2;
+    }
+    if (kind == NetworkEnvelopeKind.EnvelopeAck) {
+        return 3;
+    }
+    if (kind == NetworkEnvelopeKind.EnvelopeSnapshotChunk) {
+        return 4;
+    }
+    if (kind == NetworkEnvelopeKind.EnvelopeHash) {
+        return 5;
+    }
+    if (kind == NetworkEnvelopeKind.EnvelopePing) {
+        return 6;
+    }
+    return 7;
+}
+
+function network_envelope_kind_valid(word: i32): bool {
+    return word >= 0 && word <= 7;
+}
+
+function network_envelope_word_kind(word: i32): NetworkEnvelopeKind {
+    if (word == 1) {
+        return NetworkEnvelopeKind.EnvelopeJoin;
+    }
+    if (word == 2) {
+        return NetworkEnvelopeKind.EnvelopeCommand;
+    }
+    if (word == 3) {
+        return NetworkEnvelopeKind.EnvelopeAck;
+    }
+    if (word == 4) {
+        return NetworkEnvelopeKind.EnvelopeSnapshotChunk;
+    }
+    if (word == 5) {
+        return NetworkEnvelopeKind.EnvelopeHash;
+    }
+    if (word == 6) {
+        return NetworkEnvelopeKind.EnvelopePing;
+    }
+    if (word == 7) {
+        return NetworkEnvelopeKind.EnvelopeError;
+    }
+    return NetworkEnvelopeKind.EnvelopeHello;
+}
+
+function network_envelope_checksum_current(): i32 {
+    let checksum: i32 = 29;
+    checksum = checksum * 31 + network_envelope.magic;
+    checksum = checksum * 31 + network_envelope.version;
+    checksum = checksum * 31 + network_envelope_kind_word(network_envelope.kind);
+    checksum = checksum * 31 + network_envelope.game_id;
+    checksum = checksum * 31 + network_envelope.pack_id;
+    checksum = checksum * 31 + network_envelope.rules_version;
+    checksum = checksum * 31 + network_envelope.snapshot_version;
+    checksum = checksum * 31 + network_envelope.session_epoch;
+    checksum = checksum * 31 + network_envelope.connection_handle;
+    checksum = checksum * 31 + network_envelope.seat_handle;
+    checksum = checksum * 31 + network_envelope.sequence;
+    checksum = checksum * 31 + network_envelope.ack;
+    checksum = checksum * 31 + network_envelope.simulation_turn;
+    checksum = checksum * 31 + network_envelope.payload_count;
+    checksum = checksum * 31 + network_envelope.chunk_index;
+    checksum = checksum * 31 + network_envelope.chunk_count;
+    checksum = checksum * 31 + network_envelope.authoritative_revision;
+    checksum = checksum * 31 + network_envelope.authoritative_hash;
+    for (let index: i32 = 0; index < NETWORK_ENVELOPE_MAX_PAYLOAD_WORDS; index += 1) {
+        checksum = checksum * 31 + network_envelope.payload_words[index];
+    }
+    checksum = checksum * 31 + network_envelope.word_count;
+    return checksum;
+}
+
+function network_decoded_envelope_checksum(): i32 {
+    let checksum: i32 = 29;
+    checksum = checksum * 31 + network_decoded_envelope.magic;
+    checksum = checksum * 31 + network_decoded_envelope.version;
+    checksum = checksum * 31 + network_envelope_kind_word(network_decoded_envelope.kind);
+    checksum = checksum * 31 + network_decoded_envelope.game_id;
+    checksum = checksum * 31 + network_decoded_envelope.pack_id;
+    checksum = checksum * 31 + network_decoded_envelope.rules_version;
+    checksum = checksum * 31 + network_decoded_envelope.snapshot_version;
+    checksum = checksum * 31 + network_decoded_envelope.session_epoch;
+    checksum = checksum * 31 + network_decoded_envelope.connection_handle;
+    checksum = checksum * 31 + network_decoded_envelope.seat_handle;
+    checksum = checksum * 31 + network_decoded_envelope.sequence;
+    checksum = checksum * 31 + network_decoded_envelope.ack;
+    checksum = checksum * 31 + network_decoded_envelope.simulation_turn;
+    checksum = checksum * 31 + network_decoded_envelope.payload_count;
+    checksum = checksum * 31 + network_decoded_envelope.chunk_index;
+    checksum = checksum * 31 + network_decoded_envelope.chunk_count;
+    checksum = checksum * 31 + network_decoded_envelope.authoritative_revision;
+    checksum = checksum * 31 + network_decoded_envelope.authoritative_hash;
+    for (let index: i32 = 0; index < NETWORK_ENVELOPE_MAX_PAYLOAD_WORDS; index += 1) {
+        checksum = checksum * 31 + network_decoded_envelope.payload_words[index];
+    }
+    checksum = checksum * 31 + network_decoded_envelope.word_count;
+    return checksum;
+}
+
+function network_envelope_reset(): void {
+    network_envelope.magic = NETWORK_ENVELOPE_MAGIC;
+    network_envelope.version = NETWORK_ENVELOPE_VERSION;
+    network_envelope.kind = NetworkEnvelopeKind.EnvelopeHello;
+    network_envelope.game_id = 0;
+    network_envelope.pack_id = 0;
+    network_envelope.rules_version = 0;
+    network_envelope.snapshot_version = 0;
+    network_envelope.session_epoch = 0;
+    network_envelope.connection_handle = 0;
+    network_envelope.seat_handle = -1;
+    network_envelope.sequence = 0;
+    network_envelope.ack = 0;
+    network_envelope.simulation_turn = 0;
+    network_envelope.payload_count = 0;
+    network_envelope.chunk_index = 0;
+    network_envelope.chunk_count = 0;
+    network_envelope.authoritative_revision = 0;
+    network_envelope.authoritative_hash = 0;
+    network_envelope.checksum = 0;
+    network_envelope.word_count = NETWORK_ENVELOPE_WORD_COUNT;
+    for (let index: i32 = 0; index < NETWORK_ENVELOPE_MAX_PAYLOAD_WORDS; index += 1) {
+        network_envelope.payload_words[index] = 0;
+    }
+    network_envelope_wire_word_count = 0;
+}
+
+function network_envelope_build(): NetworkEnvelopeResult {
+    if (network_envelope.payload_count < 0 || network_envelope.payload_count > NETWORK_ENVELOPE_MAX_PAYLOAD_WORDS) {
+        return NetworkEnvelopeResult.EnvelopeBoundsRejected;
+    }
+    if (
+        network_envelope.game_id < 0
+        || network_envelope.pack_id < 0
+        || network_envelope.rules_version < 0
+        || network_envelope.snapshot_version < 0
+        || network_envelope.session_epoch < 0
+        || network_envelope.connection_handle < 0
+        || network_envelope.seat_handle < -1
+        || network_envelope.seat_handle >= NETWORK_MAX_SEATS
+        || network_envelope.sequence < 0
+        || network_envelope.ack < 0
+        || network_envelope.simulation_turn < 0
+        || network_envelope.chunk_index < 0
+        || network_envelope.chunk_count < 0
+        || network_envelope.authoritative_revision < 0
+    ) {
+        return NetworkEnvelopeResult.EnvelopeFieldRejected;
+    }
+    for (let index: i32 = network_envelope.payload_count; index < NETWORK_ENVELOPE_MAX_PAYLOAD_WORDS; index += 1) {
+        if (network_envelope.payload_words[index] != 0) {
+            return NetworkEnvelopeResult.EnvelopeBoundsRejected;
+        }
+    }
+    network_envelope.magic = NETWORK_ENVELOPE_MAGIC;
+    network_envelope.version = NETWORK_ENVELOPE_VERSION;
+    network_envelope.word_count = NETWORK_ENVELOPE_WORD_COUNT;
+    network_envelope.checksum = network_envelope_checksum_current();
+    return NetworkEnvelopeResult.EnvelopeValid;
+}
+
+function network_envelope_encode(): NetworkEnvelopeResult {
+    let result: NetworkEnvelopeResult = network_envelope_build();
+    if (result != NetworkEnvelopeResult.EnvelopeValid) {
+        network_envelope_wire_word_count = 0;
+        return result;
+    }
+    network_envelope_wire_words[0] = network_envelope.magic;
+    network_envelope_wire_words[1] = network_envelope.version;
+    network_envelope_wire_words[2] = network_envelope_kind_word(network_envelope.kind);
+    network_envelope_wire_words[3] = network_envelope.game_id;
+    network_envelope_wire_words[4] = network_envelope.pack_id;
+    network_envelope_wire_words[5] = network_envelope.rules_version;
+    network_envelope_wire_words[6] = network_envelope.snapshot_version;
+    network_envelope_wire_words[7] = network_envelope.session_epoch;
+    network_envelope_wire_words[8] = network_envelope.connection_handle;
+    network_envelope_wire_words[9] = network_envelope.seat_handle;
+    network_envelope_wire_words[10] = network_envelope.sequence;
+    network_envelope_wire_words[11] = network_envelope.ack;
+    network_envelope_wire_words[12] = network_envelope.simulation_turn;
+    network_envelope_wire_words[13] = network_envelope.payload_count;
+    network_envelope_wire_words[14] = network_envelope.chunk_index;
+    network_envelope_wire_words[15] = network_envelope.chunk_count;
+    network_envelope_wire_words[16] = network_envelope.authoritative_revision;
+    network_envelope_wire_words[17] = network_envelope.authoritative_hash;
+    for (let index: i32 = 0; index < NETWORK_ENVELOPE_MAX_PAYLOAD_WORDS; index += 1) {
+        network_envelope_wire_words[18 + index] = network_envelope.payload_words[index];
+    }
+    network_envelope_wire_words[34] = network_envelope.checksum;
+    network_envelope_wire_words[35] = network_envelope.word_count;
+    network_envelope_wire_word_count = NETWORK_ENVELOPE_WORD_COUNT;
+    return NetworkEnvelopeResult.EnvelopeValid;
+}
+
+function network_envelope_decode(): NetworkEnvelopeResult {
+    if (network_envelope_wire_word_count != NETWORK_ENVELOPE_WORD_COUNT) {
+        return NetworkEnvelopeResult.EnvelopeLengthRejected;
+    }
+    network_decoded_envelope.magic = network_envelope_wire_words[0];
+    network_decoded_envelope.version = network_envelope_wire_words[1];
+    if (!network_envelope_kind_valid(network_envelope_wire_words[2])) {
+        return NetworkEnvelopeResult.EnvelopeKindRejected;
+    }
+    network_decoded_envelope.kind = network_envelope_word_kind(network_envelope_wire_words[2]);
+    network_decoded_envelope.game_id = network_envelope_wire_words[3];
+    network_decoded_envelope.pack_id = network_envelope_wire_words[4];
+    network_decoded_envelope.rules_version = network_envelope_wire_words[5];
+    network_decoded_envelope.snapshot_version = network_envelope_wire_words[6];
+    network_decoded_envelope.session_epoch = network_envelope_wire_words[7];
+    network_decoded_envelope.connection_handle = network_envelope_wire_words[8];
+    network_decoded_envelope.seat_handle = network_envelope_wire_words[9];
+    network_decoded_envelope.sequence = network_envelope_wire_words[10];
+    network_decoded_envelope.ack = network_envelope_wire_words[11];
+    network_decoded_envelope.simulation_turn = network_envelope_wire_words[12];
+    network_decoded_envelope.payload_count = network_envelope_wire_words[13];
+    network_decoded_envelope.chunk_index = network_envelope_wire_words[14];
+    network_decoded_envelope.chunk_count = network_envelope_wire_words[15];
+    network_decoded_envelope.authoritative_revision = network_envelope_wire_words[16];
+    network_decoded_envelope.authoritative_hash = network_envelope_wire_words[17];
+    for (let index: i32 = 0; index < NETWORK_ENVELOPE_MAX_PAYLOAD_WORDS; index += 1) {
+        network_decoded_envelope.payload_words[index] = network_envelope_wire_words[18 + index];
+    }
+    network_decoded_envelope.checksum = network_envelope_wire_words[34];
+    network_decoded_envelope.word_count = network_envelope_wire_words[35];
+    if (network_decoded_envelope.magic != NETWORK_ENVELOPE_MAGIC) {
+        return NetworkEnvelopeResult.EnvelopeMagicRejected;
+    }
+    if (network_decoded_envelope.version != NETWORK_ENVELOPE_VERSION) {
+        return NetworkEnvelopeResult.EnvelopeVersionRejected;
+    }
+    if (network_decoded_envelope.word_count != NETWORK_ENVELOPE_WORD_COUNT) {
+        return NetworkEnvelopeResult.EnvelopeLengthRejected;
+    }
+    if (network_decoded_envelope.payload_count < 0 || network_decoded_envelope.payload_count > NETWORK_ENVELOPE_MAX_PAYLOAD_WORDS) {
+        return NetworkEnvelopeResult.EnvelopeBoundsRejected;
+    }
+    if (
+        network_decoded_envelope.seat_handle < -1
+        || network_decoded_envelope.seat_handle >= NETWORK_MAX_SEATS
+        || network_decoded_envelope.session_epoch < 0
+        || network_decoded_envelope.sequence < 0
+        || network_decoded_envelope.chunk_index < 0
+        || network_decoded_envelope.chunk_count < 0
+    ) {
+        return NetworkEnvelopeResult.EnvelopeFieldRejected;
+    }
+    for (let index: i32 = network_decoded_envelope.payload_count; index < NETWORK_ENVELOPE_MAX_PAYLOAD_WORDS; index += 1) {
+        if (network_decoded_envelope.payload_words[index] != 0) {
+            return NetworkEnvelopeResult.EnvelopeBoundsRejected;
+        }
+    }
+    if (network_decoded_envelope.checksum != network_decoded_envelope_checksum()) {
+        return NetworkEnvelopeResult.EnvelopeChecksumRejected;
+    }
+    return NetworkEnvelopeResult.EnvelopeValid;
+}

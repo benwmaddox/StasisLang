@@ -1,0 +1,219 @@
+import "/src/protocol.stasis";
+
+enum TicTacToePhase {
+    Waiting,
+    Playing,
+    Won,
+    Draw,
+}
+
+struct TicTacToeState {
+    board: i32[9];
+    phase: TicTacToePhase;
+    current_seat: i32;
+    winner_seat: i32;
+    move_count: i32;
+}
+
+const TTT_SNAPSHOT_VERSION: i32 = 1;
+const TTT_SNAPSHOT_WORD_COUNT: i32 = 14;
+
+global ttt_snapshot_words: i32[14];
+global ttt_snapshot_word_count: i32;
+
+function ttt_snapshot_encode(): i32 {
+    ttt_snapshot_words[0] = TTT_SNAPSHOT_VERSION;
+    for (let cell: i32 = 0; cell < 9; cell += 1) {
+        ttt_snapshot_words[1 + cell] = tic_tac_toe.board[cell];
+    }
+    ttt_snapshot_words[10] = tic_tac_toe.current_seat;
+    ttt_snapshot_words[11] = tic_tac_toe.winner_seat;
+    ttt_snapshot_words[12] = tic_tac_toe.move_count;
+    if (tic_tac_toe.phase == TicTacToePhase.Playing) {
+        ttt_snapshot_words[13] = 0;
+    } else if (tic_tac_toe.phase == TicTacToePhase.Won) {
+        ttt_snapshot_words[13] = 1;
+    } else {
+        ttt_snapshot_words[13] = 2;
+    }
+    ttt_snapshot_word_count = TTT_SNAPSHOT_WORD_COUNT;
+    return ttt_snapshot_word_count;
+}
+
+function ttt_snapshot_decode(word_count: i32): bool {
+    if (word_count != TTT_SNAPSHOT_WORD_COUNT || ttt_snapshot_words[0] != TTT_SNAPSHOT_VERSION) {
+        return false;
+    }
+    for (let cell: i32 = 0; cell < 9; cell += 1) {
+        if (ttt_snapshot_words[1 + cell] < 0 || ttt_snapshot_words[1 + cell] > 2) {
+            return false;
+        }
+    }
+    if (
+        ttt_snapshot_words[10] < 0
+        || ttt_snapshot_words[10] > 1
+        || ttt_snapshot_words[11] < -1
+        || ttt_snapshot_words[11] > 1
+        || ttt_snapshot_words[12] < 0
+        || ttt_snapshot_words[12] > 9
+        || ttt_snapshot_words[13] < 0
+        || ttt_snapshot_words[13] > 2
+    ) {
+        return false;
+    }
+    for (let cell: i32 = 0; cell < 9; cell += 1) {
+        tic_tac_toe.board[cell] = ttt_snapshot_words[1 + cell];
+    }
+    tic_tac_toe.current_seat = ttt_snapshot_words[10];
+    tic_tac_toe.winner_seat = ttt_snapshot_words[11];
+    tic_tac_toe.move_count = ttt_snapshot_words[12];
+    if (ttt_snapshot_words[13] == 0) {
+        tic_tac_toe.phase = TicTacToePhase.Playing;
+    } else if (ttt_snapshot_words[13] == 1) {
+        tic_tac_toe.phase = TicTacToePhase.Won;
+    } else {
+        tic_tac_toe.phase = TicTacToePhase.Draw;
+    }
+    return true;
+}
+
+function ttt_snapshot_for_seat(seat_id: i32): i32 {
+    if (seat_id < 0 || seat_id >= MAX_SEATS) {
+        return 0;
+    }
+    return ttt_snapshot_encode();
+}
+
+function ttt_cell_value(cell: i32): i32 {
+    if (cell < 0 || cell >= 9) {
+        return -1;
+    }
+    return tic_tac_toe.board[cell];
+}
+
+// Shared visual rule: only cells that belong to the completed winning line
+// receive the winning token/cell treatment. This remains pure so the host
+// renderer and tests cannot alter authoritative state while selecting art.
+function ttt_cell_is_winning(cell: i32, mark: i32): bool {
+    if (cell < 0 || cell >= 9 || mark <= 0 || mark > 2) {
+        return false;
+    }
+    let row: i32 = cell / 3;
+    let column: i32 = cell % 3;
+    if (row == 0 && tic_tac_toe.board[0] == mark && tic_tac_toe.board[1] == mark && tic_tac_toe.board[2] == mark) {
+        return true;
+    }
+    if (row == 1 && tic_tac_toe.board[3] == mark && tic_tac_toe.board[4] == mark && tic_tac_toe.board[5] == mark) {
+        return true;
+    }
+    if (row == 2 && tic_tac_toe.board[6] == mark && tic_tac_toe.board[7] == mark && tic_tac_toe.board[8] == mark) {
+        return true;
+    }
+    if (column == 0 && tic_tac_toe.board[0] == mark && tic_tac_toe.board[3] == mark && tic_tac_toe.board[6] == mark) {
+        return true;
+    }
+    if (column == 1 && tic_tac_toe.board[1] == mark && tic_tac_toe.board[4] == mark && tic_tac_toe.board[7] == mark) {
+        return true;
+    }
+    if (column == 2 && tic_tac_toe.board[2] == mark && tic_tac_toe.board[5] == mark && tic_tac_toe.board[8] == mark) {
+        return true;
+    }
+    if (
+        (cell == 0 || cell == 4 || cell == 8)
+        && tic_tac_toe.board[0] == mark
+        && tic_tac_toe.board[4] == mark
+        && tic_tac_toe.board[8] == mark
+    ) {
+        return true;
+    }
+    return(cell == 2 || cell == 4 || cell == 6) && tic_tac_toe.board[2] == mark && tic_tac_toe.board[4] == mark && tic_tac_toe.board[6] == mark;
+}
+
+function ttt_local_turn(seat_id: i32): bool {
+    return tic_tac_toe.phase == TicTacToePhase.Playing && tic_tac_toe.current_seat == seat_id;
+}
+
+function ttt_cell_from_pointer(x: f32, y: f32): i32 {
+    if (x < 60.0 || x >= 330.0 || y < 60.0 || y >= 330.0) {
+        return -1;
+    }
+    let column: i32 = 0;
+    let row: i32 = 0;
+    if (x >= 240.0) {
+        column = 2;
+    } else if (x >= 150.0) {
+        column = 1;
+    }
+    if (y >= 240.0) {
+        row = 2;
+    } else if (y >= 150.0) {
+        row = 1;
+    }
+    return row * 3 + column;
+}
+
+function ttt_rematch_hit(x: f32, y: f32): bool {
+    return x >= 360.0 && x < 600.0 && y >= 150.0 && y < 270.0;
+}
+
+global tic_tac_toe: TicTacToeState;
+
+function ttt_reset(): void {
+    for (let cell: i32 = 0; cell < 9; cell += 1) {
+        tic_tac_toe.board[cell] = 0;
+    }
+    tic_tac_toe.phase = TicTacToePhase.Playing;
+    tic_tac_toe.current_seat = 0;
+    tic_tac_toe.winner_seat = -1;
+    tic_tac_toe.move_count = 0;
+}
+
+function ttt_has_line(mark: i32): bool {
+    return(tic_tac_toe.board[0] == mark && tic_tac_toe.board[1] == mark && tic_tac_toe.board[2] == mark) ||(
+        tic_tac_toe.board[3] == mark
+        && tic_tac_toe.board[4] == mark
+        && tic_tac_toe.board[5] == mark
+    ) ||(tic_tac_toe.board[6] == mark && tic_tac_toe.board[7] == mark && tic_tac_toe.board[8] == mark) ||(
+        tic_tac_toe.board[0] == mark
+        && tic_tac_toe.board[3] == mark
+        && tic_tac_toe.board[6] == mark
+    ) ||(tic_tac_toe.board[1] == mark && tic_tac_toe.board[4] == mark && tic_tac_toe.board[7] == mark) ||(
+        tic_tac_toe.board[2] == mark
+        && tic_tac_toe.board[5] == mark
+        && tic_tac_toe.board[8] == mark
+    ) ||(tic_tac_toe.board[0] == mark && tic_tac_toe.board[4] == mark && tic_tac_toe.board[8] == mark) ||(
+        tic_tac_toe.board[2] == mark
+        && tic_tac_toe.board[4] == mark
+        && tic_tac_toe.board[6] == mark
+    );
+}
+
+function ttt_apply_move(seat_id: i32, cell: i32): CommandResult {
+    if (seat_id < 0 || seat_id > 1) {
+        return CommandResult.CommandRejected;
+    }
+    if (tic_tac_toe.phase == TicTacToePhase.Won || tic_tac_toe.phase == TicTacToePhase.Draw) {
+        return CommandResult.GameFinishedRejected;
+    }
+    if (seat_id != tic_tac_toe.current_seat) {
+        return CommandResult.WrongTurnRejected;
+    }
+    if (cell < 0 || cell >= 9) {
+        return CommandResult.OutOfRangeRejected;
+    }
+    if (tic_tac_toe.board[cell] != 0) {
+        return CommandResult.OccupiedCellRejected;
+    }
+    let mark: i32 = seat_id + 1;
+    tic_tac_toe.board[cell] = mark;
+    tic_tac_toe.move_count += 1;
+    if (ttt_has_line(mark)) {
+        tic_tac_toe.phase = TicTacToePhase.Won;
+        tic_tac_toe.winner_seat = seat_id;
+    } else if (tic_tac_toe.move_count == 9) {
+        tic_tac_toe.phase = TicTacToePhase.Draw;
+    } else {
+        tic_tac_toe.current_seat = 1 - seat_id;
+    }
+    return CommandResult.Accepted;
+}

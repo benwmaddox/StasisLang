@@ -4000,7 +4000,6 @@ fn run_play_in_process_inner(
     if main_rc != 0 {
         return Err(format!("guest main() returned non-zero status {main_rc}"));
     }
-
     if let Some(player) = replay_player.as_ref() {
         player.initialize_with_metadata(
             &jit,
@@ -4055,6 +4054,20 @@ fn run_play_in_process_inner(
 
     let mut ticks_executed: u64 = 0;
     let mut frame_pacer = FramePacer::from_micros(tick_sleep_micros, Instant::now())?;
+    if let Some(live) = live
+        .as_mut()
+        .filter(|live| live.supervised_host().is_some())
+    {
+        gfx.host_get_frame(&mut host_i32, &mut host_f32)?;
+        live.update_supervised_input_viewport(
+            host_f32[HOST_F_LOGICAL_W],
+            host_f32[HOST_F_LOGICAL_H],
+        );
+    }
+    if let Some(host) = live.as_ref().and_then(|live| live.supervised_host()) {
+        host.publish_readiness()
+            .map_err(|_| "supervised live readiness publication failed".to_string())?;
+    }
     loop {
         if let Some(collector) = profile_collector.as_mut() {
             if collector.warmup_complete(ticks_executed) {
@@ -4073,7 +4086,15 @@ fn run_play_in_process_inner(
         if let Some(simulation) = audio_device_simulation.as_mut() {
             simulation.advance_to_tick(ticks_executed)?;
         }
+        if capture.is_some() {
+            stasis_dynload::set_recording_clock_frame(ticks_executed);
+        }
+        gfx.host_get_frame(&mut host_i32, &mut host_f32)?;
         if let Some(live) = live.as_mut() {
+            live.update_supervised_input_viewport(
+                host_f32[HOST_F_LOGICAL_W],
+                host_f32[HOST_F_LOGICAL_H],
+            );
             live.process_boundary(
                 ticks_executed,
                 &mut jit,
@@ -4325,10 +4346,6 @@ fn run_play_in_process_inner(
             );
         }
 
-        if capture.is_some() {
-            stasis_dynload::set_recording_clock_frame(ticks_executed);
-        }
-        gfx.host_get_frame(&mut host_i32, &mut host_f32)?;
         let next_tick = ticks_executed.saturating_add(1);
         if let Some(player) = replay_player.as_mut() {
             player.apply_next(next_tick, &mut host_i32, &mut host_f32)?;
@@ -4339,7 +4356,7 @@ fn run_play_in_process_inner(
             if let Some(timeline) = input_timeline.as_mut() {
                 apply_play_input_frame(timeline, next_tick, &mut host_i32, &mut host_f32)?;
             }
-            if let Some(live) = live.as_ref() {
+            if let Some(live) = live.as_mut() {
                 live.apply_input_override(&mut host_i32, &mut host_f32)?;
             }
         }

@@ -11,13 +11,17 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 name = "supervision_peer"
 path = "../../tests/fixtures/network_supervision/peer/src/main.rs"
 
+[[example]]
+name = "supervision_live_ttt_peer"
+path = "../../tests/fixtures/network_supervision/live_ttt/peer/src/main.rs"
+
 [[bin]]
 name = "stasis-network-supervise"
 path = "src/supervise_main.rs"
 required-features = ["supervision-cli"]
 
 [features]
-supervision-cli = []
+supervision-cli = ["dep:serde_json", "dep:stasis_runner"]
 
 [dependencies]
 sha2.workspace = true
@@ -26,6 +30,8 @@ thiserror.workspace = true
 tungstenite.workspace = true
 getrandom.workspace = true
 if-addrs = "0.13"
+serde_json = { workspace = true, optional = true }
+stasis_runner = { path = "../stasis_runner", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
@@ -33,6 +39,7 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_Security",
   "Win32_Storage_FileSystem",
   "Win32_System_JobObjects",
+  "Win32_System_IO",
   "Win32_System_Pipes",
   "Win32_System_Threading",
 ] }
