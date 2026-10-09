@@ -2632,7 +2632,7 @@ fn capture_initial_state(jit: &JitProcess) -> Result<InitialState, String> {
     validate_supported_state(jit)?;
     let mut values = Vec::new();
     let layout = jit.state_layout();
-    let excluded = replay_excluded_paths(&layout);
+    let excluded = replay_excluded_paths(jit, &layout)?;
     let mut scalars = layout.scalars;
     scalars.sort_by(|left, right| left.path.cmp(&right.path));
     for scalar in scalars {
@@ -2683,7 +2683,7 @@ fn capture_initial_state(jit: &JitProcess) -> Result<InitialState, String> {
 fn restore_initial_state(jit: &JitProcess, state: &InitialState) -> Result<(), String> {
     validate_supported_state(jit)?;
     let layout = jit.state_layout();
-    let excluded = replay_excluded_paths(&layout);
+    let excluded = replay_excluded_paths(jit, &layout)?;
     // Validate and decode the complete sparse payload before clearing any live
     // state. A malformed location or scalar type must leave the game untouched.
     let mut decoded_values = Vec::with_capacity(state.values.len());
@@ -2774,7 +2774,7 @@ fn restore_initial_state(jit: &JitProcess, state: &InitialState) -> Result<(), S
 pub fn simulation_state_hash(jit: &JitProcess) -> Result<String, String> {
     validate_supported_state(jit)?;
     let layout = jit.state_layout();
-    let excluded = replay_excluded_paths(&layout);
+    let excluded = replay_excluded_paths(jit, &layout)?;
     let mut hasher = Sha256::new();
     hasher.update(b"stasis.simulation-state.v1\0");
     let mut scalars = layout.scalars;
@@ -2833,7 +2833,7 @@ fn replay_field_element_count(
 
 fn validate_supported_state(jit: &JitProcess) -> Result<(), String> {
     let layout = jit.state_layout();
-    let excluded = replay_excluded_paths(&layout);
+    let excluded = replay_excluded_paths(jit, &layout)?;
     let unsupported = layout
         .opaque
         .into_iter()
@@ -2850,16 +2850,24 @@ fn validate_supported_state(jit: &JitProcess) -> Result<(), String> {
     }
 }
 
-fn replay_excluded_paths(layout: &StateLayout) -> HashSet<String> {
-    layout
+fn replay_excluded_paths(
+    jit: &JitProcess,
+    layout: &StateLayout,
+) -> Result<HashSet<String>, String> {
+    let snapshot = jit
+        .program_snapshot()
+        .ok_or_else(|| "record/replay compile produced no ProgramSnapshot".to_string())?;
+    Ok(layout
         .scalars
         .iter()
         .map(|value| value.path.as_str())
         .chain(layout.collections.iter().map(|value| value.path.as_str()))
         .chain(layout.opaque.iter().map(|value| value.path.as_str()))
-        .filter(|path| is_replay_host_or_presentation_path(layout, path))
+        .filter(|path| {
+            is_replay_host_or_presentation_path(snapshot.global_type_ids(), snapshot.types(), path)
+        })
         .map(str::to_owned)
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -3078,6 +3086,78 @@ mod tests {
             let decoded = decode_scalar(&encoded, value).expect("decode exact scalar bits");
             assert_eq!(encode_scalar(decoded), encoded);
         }
+    }
+
+    #[test]
+    fn replay_exclusions_use_canonical_type_origin_after_generic_expansion() {
+        let _global_guard = crate::jit_test_support::lock();
+        let mut jit = JitProcess::new();
+        let project_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .to_string_lossy()
+            .into_owned();
+        jit.set_project_root(project_root)
+            .expect("set repository project root");
+        jit.set_required_emit_roots(&[
+            "main".into(),
+            "tick".into(),
+            "render".into(),
+            "change_game_state".into(),
+        ]);
+        jit.upsert_file(
+            "main.stasis",
+            r#"
+import "src/stdlib/graphics.stasis";
+import "src/stdlib/host_frame.stasis";
+import "src/stdlib/rig2d.stasis";
+struct HostFrame { keep: i32; }
+struct GameState {
+    observed: host_frame.HostFrame;
+    user_frame: HostFrame;
+    writer: graphics.SpriteRunWriter;
+    score: i32;
+}
+global state: GameState;
+function main(): i32 {
+    state.observed.tick_index = 100;
+    state.user_frame.keep = 7;
+    state.score = 41;
+    return 0;
+}
+function tick(): i32 {
+    state.observed.tick_index = 200;
+    return 0;
+}
+function change_game_state(): i32 {
+    state.user_frame.keep = 8;
+    return 0;
+}
+function render(): i32 { return 0; }
+"#,
+        );
+        jit.compile().expect("compile replay exclusion fixture");
+        assert_eq!(jit.execute_i32_noarg_by_name("main"), Ok(0));
+
+        let layout = jit.state_layout();
+        let excluded = replay_excluded_paths(&jit, &layout).expect("derive replay exclusions");
+        assert!(excluded.contains("state.observed.tick_index"));
+        assert!(excluded.contains("state.writer.token"));
+        assert!(!excluded.contains("state.user_frame.keep"));
+        assert!(!excluded.contains("state.score"));
+
+        let before_host_update = simulation_state_hash(&jit).expect("hash initial game state");
+        assert_eq!(jit.execute_i32_noarg_by_name("tick"), Ok(0));
+        assert_eq!(
+            simulation_state_hash(&jit).expect("hash after host update"),
+            before_host_update,
+            "host observations must not affect the replay simulation hash"
+        );
+        assert_eq!(jit.execute_i32_noarg_by_name("change_game_state"), Ok(0));
+        assert_ne!(
+            simulation_state_hash(&jit).expect("hash after game update"),
+            before_host_update,
+            "same-named user game state must remain replay-visible"
+        );
     }
 
     fn compact_test_identity(i32_count: usize, f32_count: usize) -> CompactReplayIdentity {

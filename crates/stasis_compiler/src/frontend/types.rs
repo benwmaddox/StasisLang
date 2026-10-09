@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub type TypeId = u16;
 pub const TYPE_ID_VOID: TypeId = 0;
@@ -92,6 +92,15 @@ pub struct TypeInfo {
     pub name: String,
     pub category: TypeCategory,
     pub layout: TypeLayout,
+}
+
+/// Original declaration identity for a nominal type name rewritten by generic
+/// expansion. The emitted name remains the TypeTable key; this sidecar keeps
+/// source provenance available to consumers that classify semantic types.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SourceTypeOrigin {
+    pub(crate) path: String,
+    pub(crate) name: String,
 }
 
 /// Compiler-owned fixed-capacity collection applications.
@@ -209,6 +218,7 @@ pub struct TypeTable {
     types: Vec<TypeInfo>,
     type_keys: Vec<TypeKey>,
     by_key: HashMap<TypeKey, TypeId>,
+    source_type_origins: BTreeMap<String, SourceTypeOrigin>,
 }
 
 impl TypeTable {
@@ -217,6 +227,7 @@ impl TypeTable {
             types: Vec::new(),
             type_keys: Vec::new(),
             by_key: HashMap::new(),
+            source_type_origins: BTreeMap::new(),
         };
         table.intern_builtin("void", BuiltinType::Void, 0);
         table.intern_builtin("i32", BuiltinType::I32, 4);
@@ -476,6 +487,18 @@ impl TypeTable {
 
     pub fn type_info(&self, id: TypeId) -> Option<&TypeInfo> {
         self.types.get(id as usize)
+    }
+
+    pub(crate) fn replace_source_type_origins(
+        &mut self,
+        source_type_origins: BTreeMap<String, SourceTypeOrigin>,
+    ) {
+        self.source_type_origins = source_type_origins;
+    }
+
+    pub(crate) fn source_type_origin(&self, type_id: TypeId) -> Option<&SourceTypeOrigin> {
+        let type_name = &self.type_info(type_id)?.name;
+        self.source_type_origins.get(type_name)
     }
 
     pub fn indexed_element_type_id(&self, type_id: TypeId) -> Option<TypeId> {

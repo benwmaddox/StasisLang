@@ -3,8 +3,9 @@ use super::compile_analysis::{
     GlobalPathTypeMap, TypedCollectionInfoMap,
 };
 use crate::frontend::types::{
-    TypeCategory, TypeTable, TypedCollectionDescriptor, TypedCollectionKind, TYPE_ID_BOOL,
-    TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8,
+    SourceTypeOrigin, TypeCategory, TypeId, TypeTable, TypedCollectionDescriptor,
+    TypedCollectionKind, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16,
+    TYPE_ID_U32, TYPE_ID_U8,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -221,8 +222,17 @@ pub struct StateCapacityChangeReport {
     pub delta_bytes: i64,
 }
 
-/// Presentation inputs are host observations, even when games give HostFrame globals custom names.
-pub fn is_replay_host_or_presentation_path(layout: &StateLayout, path: &str) -> bool {
+/// Classify compiler-owned host/presentation paths using source declaration
+/// identity, including imported nominal types nested inside game state.
+///
+/// The classifier intentionally does not inspect emitted type names. Generic
+/// expansion may rewrite them, while the TypeTable sidecar retains each
+/// declaration's canonical source origin.
+pub fn is_replay_host_or_presentation_path(
+    global_path_types: &BTreeMap<String, TypeId>,
+    type_table: &TypeTable,
+    path: &str,
+) -> bool {
     if path == "host_i32"
         || path == "host_f32"
         || path.starts_with("host_i32.")
@@ -232,15 +242,42 @@ pub fn is_replay_host_or_presentation_path(layout: &StateLayout, path: &str) -> 
     {
         return true;
     }
-    layout.structs.iter().any(|structure| {
-        matches!(
-            structure.type_name.as_str(),
-            "HostFrame" | "SpriteRunWriter"
-        ) && (path == structure.path
-            || path
-                .strip_prefix(&structure.path)
-                .is_some_and(|suffix| suffix.starts_with('.')))
-    })
+
+    let mut prefix = String::new();
+    for segment in path.split('.') {
+        if !prefix.is_empty() {
+            prefix.push('.');
+        }
+        prefix.push_str(segment);
+        let Some(type_id) = global_path_types.get(&prefix) else {
+            continue;
+        };
+        let Some(origin) = type_table.source_type_origin(*type_id) else {
+            continue;
+        };
+        if is_canonical_host_or_presentation_origin(origin) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_canonical_host_or_presentation_origin(origin: &SourceTypeOrigin) -> bool {
+    match origin.name.as_str() {
+        "HostFrame" => {
+            let normalized = origin.path.replace('\\', "/");
+            let Some(parent) = normalized.strip_suffix("host_frame.stasis") else {
+                return false;
+            };
+            crate::frontend::module_graph::is_recognized_graphics_implementation_path(&format!(
+                "{parent}graphics.stasis"
+            ))
+        }
+        "SpriteRunWriter" => {
+            crate::frontend::module_graph::is_recognized_graphics_implementation_path(&origin.path)
+        }
+        _ => false,
+    }
 }
 
 pub fn state_layout_digest(layout: &StateLayout) -> Result<[u8; 32], String> {

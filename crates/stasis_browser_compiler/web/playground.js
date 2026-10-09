@@ -5,34 +5,195 @@ import {
   isCompletionContext, isCurrentEditorAnalysis,
 } from "./editor_view.mjs";
 
-const DEFAULT_SOURCE = `function @extern("web_begin_frame") web_begin_frame(red: i32, green: i32, blue: i32): void;
-function @extern("web_draw_rect") web_draw_rect(x: i32, y: i32, width: i32, height: i32, red: i32, green: i32, blue: i32): void;
-function @extern("web_input_axis") web_input_axis(): i32;
+const DEFAULT_SOURCE = `import "vendor/stasis/stdlib/graphics.stasis";
+import "vendor/stasis/stdlib/host_frame.stasis";
 
-global shape_x: i32;
+struct PongState {
+    input_frame: HostFrame;
+    ball_x: f32;
+    ball_y: f32;
+    ball_vx: f32;
+    ball_vy: f32;
+    player_y: f32;
+    cpu_y: f32;
+    player_score: i32;
+    cpu_score: i32;
+    game_over: i32;
+}
+
+global state: PongState;
+
+// HostFrame.keys uses SDL scancode slots.
+const SCANCODE_W: i32 = 26;
+const SCANCODE_S: i32 = 22;
+const SCANCODE_SPACE: i32 = 44;
+const SCANCODE_UP: i32 = 82;
+const SCANCODE_DOWN: i32 = 81;
+
+function serve(direction: i32): void {
+    state.ball_x = 320.0;
+    state.ball_y = 180.0;
+    state.ball_vx = 4.0;
+    state.ball_vy = 2.25;
+    if (direction < 0) {
+        state.ball_vx = 0.0 - state.ball_vx;
+    }
+}
 
 function main(): i32 {
-    shape_x = 288;
+    init_window(640, 360, "Stasis Pong");
+    state.player_y = 144.0;
+    state.cpu_y = 144.0;
+    state.player_score = 0;
+    state.cpu_score = 0;
+    state.game_over = 0;
+    serve(1);
     return 0;
 }
 
-function tick(): i32 {
-    shape_x += web_input_axis() * 3;
-    if (shape_x < 0) {
-        shape_x = 0;
+function draw_digit(value: i32, x: f32, y: f32, red: f32, green: f32, blue: f32): void {
+    if (value != 1 && value != 4) {
+        fill_rect(x + 4.0, y, 14.0, 3.0, red, green, blue, 1.0);
     }
-    if (shape_x > 608) {
-        shape_x = 608;
+    if (value == 0 || value == 1 || value == 2 || value == 3 || value == 4) {
+        fill_rect(x + 18.0, y + 3.0, 3.0, 10.0, red, green, blue, 1.0);
+    }
+    if (value == 0 || value == 1 || value == 3 || value == 4 || value == 5) {
+        fill_rect(x + 18.0, y + 16.0, 3.0, 10.0, red, green, blue, 1.0);
+    }
+    if (value == 0 || value == 2 || value == 3 || value == 5) {
+        fill_rect(x + 4.0, y + 27.0, 14.0, 3.0, red, green, blue, 1.0);
+    }
+    if (value == 0 || value == 2) {
+        fill_rect(x + 1.0, y + 16.0, 3.0, 10.0, red, green, blue, 1.0);
+    }
+    if (value == 0 || value == 4 || value == 5) {
+        fill_rect(x + 1.0, y + 3.0, 3.0, 10.0, red, green, blue, 1.0);
+    }
+    if (value == 2 || value == 3 || value == 4 || value == 5) {
+        fill_rect(x + 4.0, y + 13.0, 14.0, 3.0, red, green, blue, 1.0);
+    }
+}
+
+function tick(): i32 {
+    state.input_frame.refresh();
+    if (state.game_over != 0) {
+        if (state.input_frame.keys[SCANCODE_SPACE] != 0 || (state.input_frame.pointer_count > 0 && state.input_frame.pointers[0].went_down)) {
+            state.player_y = 144.0;
+            state.cpu_y = 144.0;
+            state.player_score = 0;
+            state.cpu_score = 0;
+            state.game_over = 0;
+            serve(1);
+        }
+        return 0;
+    }
+
+    if (state.input_frame.pointer_count > 0 && state.input_frame.pointers[0].is_down) {
+        state.player_y = state.input_frame.pointers[0].y_logical - 36.0;
+    } else if (state.input_frame.keys[SCANCODE_UP] != 0 || state.input_frame.keys[SCANCODE_W] != 0) {
+        state.player_y -= 5.0;
+    } else if (state.input_frame.keys[SCANCODE_DOWN] != 0 || state.input_frame.keys[SCANCODE_S] != 0) {
+        state.player_y += 5.0;
+    }
+    if (state.player_y < 20.0) {
+        state.player_y = 20.0;
+    }
+    if (state.player_y > 268.0) {
+        state.player_y = 268.0;
+    }
+
+    if (state.ball_y < state.cpu_y + 36.0) {
+        state.cpu_y -= 2.4;
+    } else if (state.ball_y > state.cpu_y + 36.0) {
+        state.cpu_y += 2.4;
+    }
+    if (state.cpu_y < 20.0) {
+        state.cpu_y = 20.0;
+    }
+    if (state.cpu_y > 268.0) {
+        state.cpu_y = 268.0;
+    }
+
+    state.ball_x += state.ball_vx;
+    state.ball_y += state.ball_vy;
+    if (state.ball_y < 18.0) {
+        state.ball_y = 18.0;
+        state.ball_vy = 0.0 - state.ball_vy;
+    }
+    if (state.ball_y > 342.0) {
+        state.ball_y = 342.0;
+        state.ball_vy = 0.0 - state.ball_vy;
+    }
+
+    if (state.ball_vx < 0.0 && state.ball_x <= 49.0 && state.ball_x >= 23.0 && state.ball_y + 7.0 >= state.player_y && state.ball_y - 7.0 <= state.player_y + 72.0) {
+        state.ball_x = 49.0;
+        state.ball_vx = 0.0 - state.ball_vx;
+        if (state.ball_y < state.player_y + 36.0) {
+            state.ball_vy -= 1.0;
+        } else if (state.ball_y > state.player_y + 36.0) {
+            state.ball_vy += 1.0;
+        }
+    }
+    if (state.ball_vx > 0.0 && state.ball_x >= 591.0 && state.ball_x <= 617.0 && state.ball_y + 7.0 >= state.cpu_y && state.ball_y - 7.0 <= state.cpu_y + 72.0) {
+        state.ball_x = 591.0;
+        state.ball_vx = 0.0 - state.ball_vx;
+        if (state.ball_y < state.cpu_y + 36.0) {
+            state.ball_vy -= 1.0;
+        } else if (state.ball_y > state.cpu_y + 36.0) {
+            state.ball_vy += 1.0;
+        }
+    }
+    if (state.ball_vy > 5.0) {
+        state.ball_vy = 5.0;
+    }
+    if (state.ball_vy < -5.0) {
+        state.ball_vy = -5.0;
+    }
+
+    if (state.ball_x < -8.0) {
+        state.cpu_score += 1;
+        if (state.cpu_score >= 5) {
+            state.game_over = 1;
+        } else {
+            serve(1);
+        }
+    } else if (state.ball_x > 648.0) {
+        state.player_score += 1;
+        if (state.player_score >= 5) {
+            state.game_over = 1;
+        } else {
+            serve(-1);
+        }
     }
     return 0;
 }
 
 function render(): i32 {
-    web_begin_frame(7, 18, 28);
-    web_draw_rect(0, 326, 640, 34, 19, 42, 50);
-    web_draw_rect(shape_x, 263, 32, 32, 236, 192, 102);
-    web_draw_rect(61, 296, 3, 30, 75, 177, 139);
-    web_draw_rect(545, 296, 3, 30, 75, 177, 139);
+    clear(0.04, 0.09, 0.11, 1.0);
+    fill_rect(0.0, 18.0, 640.0, 3.0, 0.20, 0.39, 0.40, 1.0);
+    fill_rect(0.0, 339.0, 640.0, 3.0, 0.20, 0.39, 0.40, 1.0);
+    fill_rect(318.0, 72.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
+    fill_rect(318.0, 108.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
+    fill_rect(318.0, 144.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
+    fill_rect(318.0, 180.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
+    fill_rect(318.0, 216.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
+    fill_rect(318.0, 252.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
+    fill_rect(318.0, 288.0, 4.0, 18.0, 0.17, 0.32, 0.32, 1.0);
+    fill_rect(30.0, state.player_y, 12.0, 72.0, 0.32, 0.88, 0.68, 1.0);
+    fill_rect(598.0, state.cpu_y, 12.0, 72.0, 0.94, 0.61, 0.45, 1.0);
+    fill_rect(state.ball_x - 7.0, state.ball_y - 7.0, 14.0, 14.0, 0.96, 0.85, 0.56, 1.0);
+    draw_digit(state.player_score, 283.0, 24.0, 0.32, 0.88, 0.68);
+    draw_digit(state.cpu_score, 336.0, 24.0, 0.94, 0.61, 0.45);
+    if (state.game_over != 0) {
+        if (state.player_score >= 5) {
+            fill_rect(244.0, 153.0, 152.0, 54.0, 0.10, 0.28, 0.22, 1.0);
+        } else {
+            fill_rect(244.0, 153.0, 152.0, 54.0, 0.32, 0.17, 0.15, 1.0);
+        }
+        fill_rect(267.0, 169.0, 106.0, 5.0, 0.96, 0.85, 0.56, 1.0);
+        fill_rect(287.0, 185.0, 66.0, 5.0, 0.96, 0.85, 0.56, 1.0);
+    }
     return 0;
 }
 `;
@@ -742,35 +903,57 @@ async function restartProject() {
 function createSpriteExample(path) {
   const escaped = JSON.stringify(path);
   return `import "vendor/stasis/stdlib/graphics.stasis";
+import "vendor/stasis/stdlib/host_frame.stasis";
 
-function @extern("web_input_axis") web_input_axis(): i32;
+struct SpriteExampleState {
+    input_frame: HostFrame;
+    sample_sprite: Sprite;
+    sprite_x: f32;
+    sprite_direction: f32;
+}
 
-global sample_sprite: Sprite;
-global sprite_x: i32;
+global state: SpriteExampleState;
+
+// HostFrame.keys uses SDL scancode slots.
+const SCANCODE_A: i32 = 4;
+const SCANCODE_D: i32 = 7;
+const SCANCODE_LEFT: i32 = 80;
+const SCANCODE_RIGHT: i32 = 79;
 
 function main(): i32 {
-    sprite_x = 272;
-    sample_sprite.load_sprite_from(${escaped}, 96, 96);
+    init_window(640, 360, "Stasis Asset Example");
+    state.sprite_x = 272.0;
+    state.sprite_direction = 1.0;
+    state.sample_sprite.load_sprite_from(${escaped}, 96, 96);
     return 0;
 }
 
 function tick(): i32 {
-    sprite_x += web_input_axis() * 3;
-    if (sprite_x < 0) {
-        sprite_x = 0;
+    state.input_frame.refresh();
+    if (state.input_frame.pointer_count > 0 && state.input_frame.pointers[0].is_down) {
+        state.sprite_x = state.input_frame.pointers[0].x_logical - 48.0;
+    } else if (state.input_frame.keys[SCANCODE_LEFT] != 0 || state.input_frame.keys[SCANCODE_A] != 0) {
+        state.sprite_x -= 3.0;
+    } else if (state.input_frame.keys[SCANCODE_RIGHT] != 0 || state.input_frame.keys[SCANCODE_D] != 0) {
+        state.sprite_x += 3.0;
+    } else {
+        state.sprite_x += state.sprite_direction * 2.0;
     }
-    if (sprite_x > 544) {
-        sprite_x = 544;
+    if (state.sprite_x < 0.0) {
+        state.sprite_x = 0.0;
+        state.sprite_direction = 1.0;
+    }
+    if (state.sprite_x > 544.0) {
+        state.sprite_x = 544.0;
+        state.sprite_direction = -1.0;
     }
     return 0;
 }
 
 function render(): i32 {
-    let draw_x: f32 = 0.0;
-    draw_x.from_i32(sprite_x);
     clear(0.04, 0.09, 0.11, 1.0);
     fill_rect(0.0, 292.0, 640.0, 68.0, 0.08, 0.18, 0.19, 1.0);
-    sample_sprite.draw(draw_x, 150.0, 255, 0);
+    state.sample_sprite.draw(state.sprite_x, 150.0, 255, 0);
     return 0;
 }
 `;

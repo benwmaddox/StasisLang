@@ -2,12 +2,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use stasis_compiler::frontend::lexer::{lex, lex_with_diagnostic, Token, TokenKind};
-use stasis_compiler::frontend::module_graph::{ModuleGraph, ModuleImport};
+use stasis_compiler::frontend::module_graph::{
+    workshop_file_exposure, ModuleGraph, ModuleImport, WorkshopExposure,
+};
 use stasis_compiler::frontend::parser::{
-    parse_local_declarations, parse_top_level_functions_with_diagnostic,
-    parse_top_level_type_layout, parse_typed_local_bindings, ParsedFunctionSignature,
-    ParsedGenericParameter, ParsedGenericParameterKind, ParsedLocalBinding, ParsedLocalDeclaration,
-    ParsedTypeLayout,
+    parse_local_declarations, parse_top_level_function_signatures_with_diagnostic,
+    parse_top_level_functions_with_diagnostic, parse_top_level_type_layout,
+    parse_typed_local_bindings, ParsedFunctionSignature, ParsedGenericParameter,
+    ParsedGenericParameterKind, ParsedLocalBinding, ParsedLocalDeclaration, ParsedTypeLayout,
 };
 
 pub(super) const MAX_EDITOR_JSON_BYTES: usize = 8 * 1024 * 1024;
@@ -42,6 +44,7 @@ pub(super) struct EditorCatalog {
 struct EditorFileCatalog {
     path: String,
     module_alias: String,
+    exposure: WorkshopExposure,
     imports: Vec<EditorImport>,
     functions: Vec<EditorFunction>,
     types: Vec<EditorType>,
@@ -414,6 +417,7 @@ fn file_catalog(
     EditorFileCatalog {
         path: file.path.clone(),
         module_alias,
+        exposure: workshop_file_exposure(&file.path),
         imports,
         functions,
         types,
@@ -598,14 +602,14 @@ fn source_for_parser(source: &str) -> String {
 }
 
 fn parse_functions_best_effort(source: &str) -> (Vec<ParsedFunctionSignature>, bool) {
-    match parse_top_level_functions_with_diagnostic(source) {
+    match parse_top_level_function_signatures_with_diagnostic(source) {
         Ok(functions) => return (functions, true),
         Err(_) => {}
     }
 
     let mut end = source.len();
     for _ in 0..64 {
-        let diagnostic = match parse_top_level_functions_with_diagnostic(&source[..end]) {
+        let diagnostic = match parse_top_level_function_signatures_with_diagnostic(&source[..end]) {
             Ok(functions) => return (functions, false),
             Err(diagnostic) => diagnostic,
         };
@@ -989,43 +993,55 @@ fn complete(
             resolve_receiver_type(catalog, active_path, draft, parts, cursor)
         {
             if let Some(definition) = find_type_identity(catalog, &receiver.identity) {
-                for member in &definition.members {
-                    if receiver.is_type && member.kind != "enum_variant" {
-                        continue;
+                if catalog
+                    .files
+                    .get(&definition.path)
+                    .is_some_and(|file| file.exposure.is_public())
+                {
+                    for member in &definition.members {
+                        if receiver.is_type && member.kind != "enum_variant" {
+                            continue;
+                        }
+                        insert_candidate(
+                            &mut candidates,
+                            CompletionCandidate {
+                                label: member.name.clone(),
+                                kind: member.kind,
+                                detail: member.type_name.as_ref().map_or_else(
+                                    || format!("{} {}", definition.name, member.kind),
+                                    |type_name| format!("{}: {type_name}", member.kind),
+                                ),
+                                signature: None,
+                            },
+                        );
                     }
-                    insert_candidate(
-                        &mut candidates,
-                        CompletionCandidate {
-                            label: member.name.clone(),
-                            kind: member.kind,
-                            detail: member.type_name.as_ref().map_or_else(
-                                || format!("{} {}", definition.name, member.kind),
-                                |type_name| format!("{}: {type_name}", member.kind),
-                            ),
-                            signature: None,
-                        },
-                    );
-                }
-                if !receiver.is_type {
-                    for (function_path, file) in &catalog.files {
-                        for function in &file.functions {
-                            let Some(owner) = function.receiver_type.as_deref() else {
-                                continue;
-                            };
-                            if resolve_type_reference(catalog, function_path, owner).as_ref()
-                                != Some(&receiver.identity)
-                            {
+                    if !receiver.is_type {
+                        for (function_path, file) in &catalog.files {
+                            if !file.exposure.is_public() {
                                 continue;
                             }
-                            insert_candidate(
-                                &mut candidates,
-                                CompletionCandidate {
-                                    label: function.parsed.name.clone(),
-                                    kind: "method",
-                                    detail: format!("method on {}", definition.name),
-                                    signature: Some(function.signature.clone()),
-                                },
-                            );
+                            for function in &file.functions {
+                                if is_internal_function(function) {
+                                    continue;
+                                }
+                                let Some(owner) = function.receiver_type.as_deref() else {
+                                    continue;
+                                };
+                                if resolve_type_reference(catalog, function_path, owner).as_ref()
+                                    != Some(&receiver.identity)
+                                {
+                                    continue;
+                                }
+                                insert_candidate(
+                                    &mut candidates,
+                                    CompletionCandidate {
+                                        label: function.parsed.name.clone(),
+                                        kind: "method",
+                                        detail: format!("method on {}", definition.name),
+                                        signature: Some(function.signature.clone()),
+                                    },
+                                );
+                            }
                         }
                     }
                 }
@@ -1098,8 +1114,11 @@ fn add_file_symbols(
     candidates: &mut BTreeMap<(String, &'static str), CompletionCandidate>,
     file: &EditorFileCatalog,
 ) {
+    if !file.exposure.is_public() {
+        return;
+    }
     for function in &file.functions {
-        if function.receiver_type.is_some() {
+        if function.receiver_type.is_some() || is_internal_function(function) {
             continue;
         }
         insert_candidate(
@@ -1136,6 +1155,14 @@ fn add_file_symbols(
     }
 }
 
+fn is_internal_function(function: &EditorFunction) -> bool {
+    function
+        .parsed
+        .annotations
+        .iter()
+        .any(|annotation| annotation.name == "internal")
+}
+
 fn insert_candidate(
     candidates: &mut BTreeMap<(String, &'static str), CompletionCandidate>,
     candidate: CompletionCandidate,
@@ -1149,11 +1176,11 @@ fn add_current_bindings(
     draft: &EditorDraft,
     cursor: usize,
 ) {
-    let Some(function) = draft
-        .functions
-        .iter()
-        .find(|function| function.body_range.start <= cursor && cursor <= function.body_range.end)
-    else {
+    let Some(function) = draft.functions.iter().find(|function| {
+        !function.body_range.is_empty()
+            && function.body_range.start <= cursor
+            && cursor <= function.body_range.end
+    }) else {
         return;
     };
     for parameter in &function.params {
@@ -1204,7 +1231,11 @@ fn resolve_receiver_type(
     let local_type = draft
         .functions
         .iter()
-        .find(|function| function.body_range.start <= cursor && cursor <= function.body_range.end)
+        .find(|function| {
+            !function.body_range.is_empty()
+                && function.body_range.start <= cursor
+                && cursor <= function.body_range.end
+        })
         .and_then(|function| {
             function
                 .params
@@ -1403,6 +1434,31 @@ mod tests {
         serde_json::from_slice(&output).expect("analysis JSON")
     }
 
+    fn canonical_playground_library_files() -> Vec<EditorSourceFile> {
+        vec![
+            file(
+                "vendor/stasis/stdlib/graphics.stasis",
+                include_str!("../../../src/stdlib/graphics.stasis"),
+            ),
+            file(
+                "vendor/stasis/stdlib/host_frame.stasis",
+                include_str!("../../../src/stdlib/host_frame.stasis"),
+            ),
+            file(
+                "vendor/stasis/stdlib/sdl_scancodes.stasis",
+                include_str!("../../../src/stdlib/sdl_scancodes.stasis"),
+            ),
+            file(
+                "vendor/stasis/stdlib/asset_tasks.stasis",
+                include_str!("../../../src/stdlib/asset_tasks.stasis"),
+            ),
+            file(
+                "vendor/stasis/stdlib/internal/gfx_cmd.stasis",
+                include_str!("../../../src/stdlib/internal/gfx_cmd.stasis"),
+            ),
+        ]
+    }
+
     #[test]
     fn lexical_tokens_include_comments_keywords_literals_and_utf16_ranges() {
         let source = "// λ comment\nfunction cafe(): i32 { return 12; }\n\"hé\"";
@@ -1536,6 +1592,231 @@ mod tests {
             result["replacementRange"]["end"],
             source[..cursor].encode_utf16().count()
         );
+    }
+
+    #[test]
+    fn prototype_parameters_are_not_current_bindings_after_declaration() {
+        let source = "function proto(value: i32): void;";
+        let result = analysis(
+            &request("src/main.stasis", source, Vec::new(), Some(source.len())),
+            None,
+        );
+        assert!(!result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| { item["label"] == "value" && item["kind"] == "parameter" }));
+    }
+
+    #[test]
+    fn canonical_playground_hints_use_stdlib_signatures_and_hide_internal_functions() {
+        let mut files = canonical_playground_library_files();
+        files.push(file(
+            "vendor/stasis/stdlib/internal/editor_visibility_test.stasis",
+            "struct EditorProbe { field: i32; }\nconst EDITOR_PROBE_VALUE: i32 = 1;\nfunction editor_probe(): i32 { return 1; }\n",
+        ));
+
+        let source = "function main(): i32 { return cle; }";
+        let cursor = source.find("cle").unwrap() + "cle".len();
+        let result = analysis(
+            &request("main.stasis", source, files.clone(), Some(cursor)),
+            None,
+        );
+        let clear = result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["label"] == "clear")
+            .expect("canonical graphics clear suggestion");
+        assert_eq!(
+            clear["signature"],
+            "clear(r: f32, g: f32, b: f32, a: f32): void"
+        );
+
+        let source = "function main(): i32 { return fill_; }";
+        let cursor = source.find("fill_").unwrap() + "fill_".len();
+        let result = analysis(
+            &request("main.stasis", source, files.clone(), Some(cursor)),
+            None,
+        );
+        let fill_rect = result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["label"] == "fill_rect")
+            .expect("canonical graphics rectangle suggestion");
+        assert_eq!(
+            fill_rect["signature"],
+            "fill_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void"
+        );
+
+        let source = "global sample_sprite: Sprite; function main(): i32 { sample_sprite.load_; }";
+        let cursor = source.find("sample_sprite.load_").unwrap() + "sample_sprite.load_".len();
+        let result = analysis(
+            &request("main.stasis", source, files.clone(), Some(cursor)),
+            None,
+        );
+        let load_sprite = result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["label"] == "load_sprite_from")
+            .expect("canonical sprite asset method suggestion");
+        assert_eq!(
+            load_sprite["signature"],
+            "load_sprite_from(path: string, width: i32, height: i32): bool"
+        );
+
+        let source = "global sheet: SpriteSheet; function main(): i32 { sheet. }";
+        let cursor = source.find("sheet.").unwrap() + "sheet.".len();
+        let result = analysis(
+            &request("main.stasis", source, files.clone(), Some(cursor)),
+            None,
+        );
+        let suggestions = result["completions"].as_array().unwrap();
+        let load_sheet = suggestions
+            .iter()
+            .find(|item| item["label"] == "load_sprite_sheet_from")
+            .expect("canonical sprite sheet method suggestion");
+        assert_eq!(
+            load_sheet["signature"],
+            "load_sprite_sheet_from(path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool"
+        );
+        assert!(!suggestions
+            .iter()
+            .any(|item| item["label"] == "load_sprite_sheet_asset_from"));
+
+        let source = "function main(): i32 { return gfx_cmd_; }";
+        let cursor = source.find("gfx_cmd_").unwrap() + "gfx_cmd_".len();
+        let result = analysis(
+            &request("main.stasis", source, files.clone(), Some(cursor)),
+            None,
+        );
+        let suggestions = result["completions"].as_array().unwrap();
+        assert!(!suggestions
+            .iter()
+            .any(|item| item["label"] == "gfx_cmd_clear"));
+        assert!(!suggestions
+            .iter()
+            .any(|item| item["label"] == "gfx_cmd_rect"));
+        assert!(!suggestions
+            .iter()
+            .any(|item| item["label"] == "gfx_cmd_submit"));
+        assert!(!suggestions
+            .iter()
+            .any(|item| item["label"] == "gfx_cmd_i32"));
+
+        let source = "function main(): i32 { return GFX_CMD_; }";
+        let cursor = source.find("GFX_CMD_").unwrap() + "GFX_CMD_".len();
+        let result = analysis(
+            &request("main.stasis", source, files.clone(), Some(cursor)),
+            None,
+        );
+        assert!(!result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "GFX_CMD_MAGIC"));
+
+        let source = "function main(): i32 { return editor_; }";
+        let cursor = source.find("editor_").unwrap() + "editor_".len();
+        let result = analysis(
+            &request("main.stasis", source, files.clone(), Some(cursor)),
+            None,
+        );
+        assert!(!result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "editor_probe"));
+
+        let source = "function main(): i32 { return EDITOR_; }";
+        let cursor = source.find("EDITOR_").unwrap() + "EDITOR_".len();
+        let result = analysis(
+            &request("main.stasis", source, files.clone(), Some(cursor)),
+            None,
+        );
+        assert!(!result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "EDITOR_PROBE_VALUE"));
+
+        let source = "global private_state: EditorProbe; function main(): i32 { private_state. }";
+        let cursor = source.find("private_state.").unwrap() + "private_state.".len();
+        let result = analysis(
+            &request("main.stasis", source, files.clone(), Some(cursor)),
+            None,
+        );
+        assert!(!result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "field"));
+
+        let source = "global frame: HostFrame; function main(): i32 { frame. }";
+        let cursor = source.find("frame.").unwrap() + "frame.".len();
+        let result = analysis(
+            &request("main.stasis", source, files.clone(), Some(cursor)),
+            None,
+        );
+        let suggestions = result["completions"].as_array().unwrap();
+        let refresh = suggestions
+            .iter()
+            .find(|item| item["label"] == "refresh")
+            .expect("HostFrame refresh method suggestion");
+        assert_eq!(refresh["signature"], "refresh(): void");
+        let keys = suggestions
+            .iter()
+            .find(|item| item["label"] == "keys")
+            .expect("HostFrame keyboard state field");
+        assert_eq!(keys["detail"], "field: i32[512]");
+        let pointers = suggestions
+            .iter()
+            .find(|item| item["label"] == "pointers")
+            .expect("HostFrame pointer state field");
+        assert_eq!(pointers["detail"], "field: HostPointerFrame[8]");
+        assert!(!suggestions.iter().any(|item| item["label"] == "copy_keys"));
+
+        let source = "global frame: HostFrame; function main(): i32 { frame.pointers. }";
+        let cursor = source.find("frame.pointers.").unwrap() + "frame.pointers.".len();
+        let result = analysis(
+            &request("main.stasis", source, files.clone(), Some(cursor)),
+            None,
+        );
+        let suggestions = result["completions"].as_array().unwrap();
+        let is_down = suggestions
+            .iter()
+            .find(|item| item["label"] == "is_down")
+            .expect("HostPointerFrame down state field");
+        assert_eq!(is_down["detail"], "field: bool");
+        let x_logical = suggestions
+            .iter()
+            .find(|item| item["label"] == "x_logical")
+            .expect("HostPointerFrame logical x field");
+        assert_eq!(x_logical["detail"], "field: f32");
+
+        let source = "function main(): i32 { Scancode. }";
+        let cursor = source.find("Scancode.").unwrap() + "Scancode.".len();
+        let result = analysis(
+            &request("main.stasis", source, files.clone(), Some(cursor)),
+            None,
+        );
+        let suggestions = result["completions"].as_array().unwrap();
+        assert!(suggestions.iter().any(|item| item["label"] == "Left"));
+        assert!(suggestions.iter().any(|item| item["label"] == "Right"));
+
+        let source = "function main(): i32 { return gfx_cmd_construction_; }";
+        let cursor = source.find("gfx_cmd_construction_").unwrap() + "gfx_cmd_construction_".len();
+        let result = analysis(
+            &request("main.stasis", source, files.clone(), Some(cursor)),
+            None,
+        );
+        assert!(!result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "gfx_cmd_construction_reset"));
     }
 
     #[test]

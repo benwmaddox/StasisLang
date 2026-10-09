@@ -12,6 +12,43 @@ use crate::{SourceDiagnostic, SourceDiagnosticCode, SourceDiagnosticEdit, Source
 pub const GENERATED_PROJECT_SETTINGS_PATH: &str =
     ".stasis/generated/__stasis_project_settings_v1.stasis";
 
+/// Discovery exposure for Workshop-facing compiler metadata.
+///
+/// This controls user-facing enumeration, not compilation or symbol access.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkshopExposure {
+    #[default]
+    Public,
+    Internal,
+}
+
+impl WorkshopExposure {
+    pub fn is_public(&self) -> bool {
+        *self == Self::Public
+    }
+}
+
+pub fn workshop_file_exposure(path: &str) -> WorkshopExposure {
+    let normalized = format!("/{}", path.replace('\\', "/").trim_start_matches('/'));
+    if normalized.contains("/stdlib/internal/") || normalized.contains("/stdlib/testing/") {
+        WorkshopExposure::Internal
+    } else {
+        WorkshopExposure::Public
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleImport {
     pub path: String,

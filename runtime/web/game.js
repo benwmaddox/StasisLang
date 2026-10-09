@@ -79,6 +79,13 @@
   let playgroundGeneration = 0;
   let playgroundPaused = false;
   let playgroundSteps = 0;
+  const PLAYGROUND_TICK_MS = 1000 / 60;
+  const PLAYGROUND_MAX_CATCH_UP_TICKS = 5;
+  const PLAYGROUND_RENDER_EARLY_TOLERANCE_MS = 1;
+  let playgroundClockLastTimestamp = null;
+  let playgroundClockAccumulator = 0;
+  let playgroundClockSimulationTimestamp = null;
+  let playgroundRenderDeadline = null;
   let playgroundRequestId = 0;
   let pendingPlaygroundSwap = null;
   const playgroundSnapshotScratch = new WeakMap();
@@ -3235,8 +3242,12 @@
   async function preparePlaygroundCandidate(request, requestId) {
     const metadata = request?.metadata;
     const expectedDigest = playgroundMetadata?.layoutDigest;
+    const activeSnapshotDescriptorKey = stablePlaygroundJson(playgroundMetadata?.replayCompatibility?.state_snapshot);
     if (!expectedDigest || request?.layoutDigest !== expectedDigest) {
       throw new Error("hot swap requires the active state's exact layout digest");
+    }
+    if (typeof activeSnapshotDescriptorKey !== "string") {
+      throw new Error("hot swap requires the active canonical state snapshot descriptor");
     }
     if (!request.config || stablePlaygroundJson(withoutPlaygroundAssets(request.config))
         !== stablePlaygroundJson(withoutPlaygroundAssets(metadata?.config))) {
@@ -3244,6 +3255,10 @@
     }
     const config = validatePlaygroundConfig(request.config);
     const { descriptor } = validatePlaygroundMetadata(metadata, config, expectedDigest, true);
+    const snapshotDescriptorKey = stablePlaygroundJson(descriptor);
+    if (snapshotDescriptorKey !== activeSnapshotDescriptorKey) {
+      throw new Error("hot swap changes the canonical state snapshot descriptor");
+    }
     if (playgroundRendererContract(config) !== playgroundRendererContract(game)) {
       throw new Error("hot swap changes a renderer ABI or allocation setting");
     }
@@ -3263,7 +3278,7 @@
     const candidate = result.instance || result;
     validatePlaygroundInstance(candidate, metadata, descriptor, true);
     const hostFunctions = buildHostFunctionMap(config, candidate.exports);
-    return { candidate, metadata, config, gate, hostFunctions, requestId };
+    return { candidate, metadata, config, gate, hostFunctions, requestId, snapshotDescriptorKey };
   }
   function queuePlaygroundSwap(request) {
     if (!playgroundEnabled) return Promise.reject(new Error("playground hot swap is unavailable"));
@@ -3291,6 +3306,12 @@
       if (pending.metadata.layoutDigest !== playgroundMetadata.layoutDigest) {
         throw new Error("active state layout changed while the candidate was compiling");
       }
+      const activeSnapshotDescriptorKey = stablePlaygroundJson(playgroundMetadata?.replayCompatibility?.state_snapshot);
+      const candidateSnapshotDescriptorKey = stablePlaygroundJson(pending.metadata?.replayCompatibility?.state_snapshot);
+      if (pending.snapshotDescriptorKey !== activeSnapshotDescriptorKey
+          || pending.snapshotDescriptorKey !== candidateSnapshotDescriptorKey) {
+        throw new Error("active or candidate canonical state snapshot descriptor changed while the candidate was compiling");
+      }
       const bytes = playgroundSnapshotBytes(instance, playgroundMetadata);
       restorePlaygroundSnapshot(pending.candidate, pending.metadata, bytes);
       pending.gate.mode = "hook";
@@ -3312,8 +3333,68 @@
       pending.reject(error);
     }
   }
+  function resetPlaygroundClock(timestamp = null) {
+    const baseline = Number.isFinite(timestamp) ? timestamp : null;
+    playgroundClockLastTimestamp = baseline;
+    playgroundClockAccumulator = 0;
+    playgroundRenderDeadline = null;
+    if (baseline !== null && playgroundClockSimulationTimestamp === null) {
+      playgroundClockSimulationTimestamp = baseline;
+    }
+  }
+  function takePlaygroundTickTimestamps(timestamp) {
+    const now = Number.isFinite(timestamp) ? timestamp : performance.now();
+    if (playgroundPaused) {
+      const hadSimulationTime = playgroundClockSimulationTimestamp !== null;
+      resetPlaygroundClock(now);
+      if (playgroundSteps === 0) return [];
+      if (!hadSimulationTime) playgroundClockSimulationTimestamp = now;
+      else playgroundClockSimulationTimestamp += PLAYGROUND_TICK_MS;
+      return [playgroundClockSimulationTimestamp];
+    }
+    if (playgroundClockLastTimestamp === null) {
+      const hadSimulationTime = playgroundClockSimulationTimestamp !== null;
+      resetPlaygroundClock(now);
+      if (!hadSimulationTime) return [now];
+      playgroundClockSimulationTimestamp += PLAYGROUND_TICK_MS;
+      return [playgroundClockSimulationTimestamp];
+    }
+
+    const elapsed = Math.max(0, now - playgroundClockLastTimestamp);
+    playgroundClockLastTimestamp = now;
+    const maxAccumulated = PLAYGROUND_TICK_MS * PLAYGROUND_MAX_CATCH_UP_TICKS;
+    playgroundClockAccumulator = Math.min(maxAccumulated, playgroundClockAccumulator + elapsed);
+    const tickCount = Math.min(
+      PLAYGROUND_MAX_CATCH_UP_TICKS,
+      Math.floor((playgroundClockAccumulator + 0.000001) / PLAYGROUND_TICK_MS),
+    );
+    if (tickCount === 0) return [];
+
+    playgroundClockAccumulator = Math.max(0, playgroundClockAccumulator - tickCount * PLAYGROUND_TICK_MS);
+    const tickTimestamps = [];
+    for (let index = 0; index < tickCount; index += 1) {
+      playgroundClockSimulationTimestamp += PLAYGROUND_TICK_MS;
+      tickTimestamps.push(playgroundClockSimulationTimestamp);
+    }
+    return tickTimestamps;
+  }
+  function shouldRenderPlayground(timestamp) {
+    const now = Number.isFinite(timestamp) ? timestamp : performance.now();
+    if (playgroundRenderDeadline === null) {
+      playgroundRenderDeadline = now + PLAYGROUND_TICK_MS;
+      return true;
+    }
+    if (now + PLAYGROUND_RENDER_EARLY_TOLERANCE_MS < playgroundRenderDeadline) return false;
+    const intervals = Math.max(
+      1,
+      Math.floor((now - playgroundRenderDeadline + PLAYGROUND_RENDER_EARLY_TOLERANCE_MS) / PLAYGROUND_TICK_MS) + 1,
+    );
+    playgroundRenderDeadline += intervals * PLAYGROUND_TICK_MS;
+    return true;
+  }
   function pausePlayground(value) {
     playgroundPaused = Boolean(value);
+    resetPlaygroundClock();
     if (!playgroundPaused) {
       playgroundSteps = 0;
       for (const resolve of playgroundStepWaiters.splice(0)) resolve({ stepped: false, generation: playgroundGeneration });
@@ -4738,7 +4819,7 @@
     i32[13] = hostDesktopDimension(globalThis.screen?.height, display.cssHeight);
     i32[14] = 4;
     i32[15] = (focused ? 2 : 0) | (document.hidden ? 4 : 0) | (resized ? 8 : 0);
-    i32[16] = 0;
+    i32[16] = playgroundEnabled && !replayController ? 60 : 0;
     i32[17] = focused;
     i32[18] = document.hidden ? 1 : 0;
     i32[19] = Math.floor(elapsedMs * 1000) | 0;
@@ -4867,6 +4948,7 @@
     if (playgroundEnabled) {
       commitPendingPlaygroundSwap();
       if (playgroundPaused && playgroundSteps === 0) {
+        resetPlaygroundClock(timestamp);
         requestAnimationFrame(frame);
         return;
       }
@@ -4874,40 +4956,62 @@
     if (!getGpuBatcher()) {
       // Context loss suspends publication. The restore event makes the same
       // visible WebGL2 renderer recreatable; there is no alternate backend.
+      if (playgroundEnabled) resetPlaygroundClock(timestamp);
+      requestAnimationFrame(frame);
+      return;
+    }
+    const playgroundTickTimestamps = playgroundEnabled && !replayController
+      ? takePlaygroundTickTimestamps(timestamp) : null;
+    const shouldRender = playgroundEnabled && !replayController
+      ? shouldRenderPlayground(timestamp) : true;
+    if (playgroundTickTimestamps && playgroundTickTimestamps.length === 0 && !shouldRender) {
       requestAnimationFrame(frame);
       return;
     }
     applyWindowRequest();
-    if (replayController) {
-      try {
-        const host = hostFrameViews();
-        replayController.applyHostFrame(replayTick, host.i32, host.f32);
-        document.body.dataset.hostTick = String(replayTick);
-      } catch (error) {
-        publishReplayFailure(error);
-        return;
-      }
-    } else {
-      writeHostFrame(timestamp);
-    }
-    const tickStart = performance.now();
-    try {
-      instance.exports.tick();
-      if (replayController) replayController.verifyTick(replayTick);
-    } catch (error) {
+    let tickMs = 0;
+    const tickTimestamps = playgroundTickTimestamps || [timestamp];
+    for (let index = 0; index < tickTimestamps.length; index += 1) {
+      if (playgroundTickTimestamps && index > 0) finishHostFrame();
       if (replayController) {
-        publishReplayFailure(error);
-        return;
+        try {
+          const host = hostFrameViews();
+          replayController.applyHostFrame(replayTick, host.i32, host.f32);
+          document.body.dataset.hostTick = String(replayTick);
+        } catch (error) {
+          publishReplayFailure(error);
+          return;
+        }
+      } else {
+        writeHostFrame(tickTimestamps[index]);
       }
-      if (playgroundEnabled) {
-        document.body.dataset.playgroundFrameError = String(error?.message || error).slice(0, 512);
-        completePlaygroundStep();
-        requestAnimationFrame(frame);
-        return;
+      const tickStart = performance.now();
+      try {
+        instance.exports.tick();
+        if (replayController) replayController.verifyTick(replayTick);
+      } catch (error) {
+        if (replayController) {
+          publishReplayFailure(error);
+          return;
+        }
+        if (playgroundEnabled) {
+          document.body.dataset.playgroundFrameError = String(error?.message || error).slice(0, 512);
+          completePlaygroundStep();
+          requestAnimationFrame(frame);
+          return;
+        }
+        throw error;
       }
-      throw error;
+      tickMs += performance.now() - tickStart;
     }
-    const tickMs = performance.now() - tickStart;
+    if (!shouldRender) {
+      if (tickTimestamps.length > 0) {
+        finishHostFrame();
+        completePlaygroundStep();
+      }
+      requestAnimationFrame(frame);
+      return;
+    }
     const wasmRenderStart = performance.now();
     const constructionReset = instance.exports.gfx_cmd_construction_reset;
     const constructionFinish = instance.exports.gfx_cmd_construction_finish;
@@ -4932,8 +5036,10 @@
       commands.length = 0;
       document.body.dataset.guestStopped = String(constructionResult);
       if (playgroundEnabled) {
-        finishHostFrame();
-        completePlaygroundStep();
+        if (tickTimestamps.length > 0) {
+          finishHostFrame();
+          completePlaygroundStep();
+        }
         requestAnimationFrame(frame);
       }
       return;
@@ -4961,7 +5067,7 @@
     } catch (error) {
       publishGpuError(error, "frame");
       document.body.dataset.backend = performanceBackend;
-      completePlaygroundStep();
+      if (tickTimestamps.length > 0) completePlaygroundStep();
       requestAnimationFrame(frame);
       return;
     }
@@ -5035,8 +5141,10 @@
     document.body.dataset.worstFrameWorkMs = worstFrameWork.toFixed(3);
     document.body.dataset.underBudget = String(underBudget);
     if (instance.exports.player_x) document.body.dataset.playerX = String(instance.exports.player_x.value);
-    finishHostFrame();
-    completePlaygroundStep();
+    if (tickTimestamps.length > 0) {
+      finishHostFrame();
+      completePlaygroundStep();
+    }
     if (replayController) {
       if (replayController.completed) {
         document.body.dataset.replayState = "complete";

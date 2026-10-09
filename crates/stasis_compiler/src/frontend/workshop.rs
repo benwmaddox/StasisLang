@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use crate::compiler::{source_workshop_items, Compiler};
 use crate::data_flow::CompilerLocalType;
 use crate::frontend::lexer::{lex, Token, TokenKind};
+pub use crate::frontend::module_graph::{workshop_file_exposure, WorkshopExposure};
 use crate::frontend::parser::{
     parse_local_declarations, parse_top_level_extern_functions, parse_top_level_functions,
     parse_top_level_type_layout, ParsedGenericParameter, ParsedGenericParameterKind,
@@ -319,43 +320,6 @@ fn split_workshop_generic_arguments(arguments: &str) -> Option<Vec<&str>> {
     }
     parts.push(part);
     Some(parts)
-}
-
-/// Discovery exposure for Workshop-facing compiler metadata.
-///
-/// This controls user-facing enumeration, not compilation or symbol access.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkshopExposure {
-    #[default]
-    Public,
-    Internal,
-}
-
-impl WorkshopExposure {
-    pub fn is_public(&self) -> bool {
-        *self == Self::Public
-    }
-}
-
-pub fn workshop_file_exposure(path: &str) -> WorkshopExposure {
-    let normalized = format!("/{}", path.replace('\\', "/").trim_start_matches('/'));
-    if normalized.contains("/stdlib/internal/") || normalized.contains("/stdlib/testing/") {
-        WorkshopExposure::Internal
-    } else {
-        WorkshopExposure::Public
-    }
 }
 
 pub fn workshop_declaration_exposure<'a>(

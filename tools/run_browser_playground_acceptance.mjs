@@ -102,6 +102,16 @@ try {
   await until(() => evaluate("Boolean(window.STASIS_PLAYGROUND_EDITOR)"), "editor API");
   await evaluate("window.STASIS_PLAYGROUND_EDITOR.ready");
   const readyBoundary = requests.length;
+  const starterCompilation = await evaluate(`(async () => {
+    const result = await window.STASIS_PLAYGROUND_EDITOR.compile();
+    return { byteLength: result.gameWasm.byteLength, metadata: result.metadata };
+  })()`);
+  assert.ok(starterCompilation.byteLength > 0, "the shipped starter must compile to Wasm");
+  assert.ok(!starterCompilation.metadata.imports.some(name => name.startsWith("web_")),
+    "the shipped starter must use canonical Stasis library APIs");
+  assert.ok(!starterCompilation.metadata.replayCompatibility.state_snapshot.entries
+    .some(entry => entry.path.startsWith("state.input_frame.")),
+  "hot swaps must preserve game state without restoring host input observations");
   await call("Page.startScreencast", { format: "png", maxWidth: 1440, maxHeight: viewportHeight, everyNthFrame: 3 });
   const editorDraft = 'global score: i32;\nfunction helper(value: i32): i32 { return value; }\nfunction main(): i32 { return hel';
   await evaluate(`(() => { const editor=window.STASIS_PLAYGROUND_EDITOR; editor.setFile("main.stasis",${JSON.stringify(editorDraft)}); editor.setEntry("main.stasis"); const area=document.getElementById("source-editor"); area.focus(); area.setSelectionRange(area.value.length,area.value.length); })()`);
@@ -271,7 +281,7 @@ function render(): i32 { clear(0.04, 0.07, 0.12, 1.0); draw_sprite(uploaded.spri
   await screenshot("exported-asset-game");
   assert.deepEqual(failures, []);
   const receipt = {schema:"stasis.browser_playground_acceptance.v1",siteRoot,browser:await call("Browser.getVersion"),
-    editorAnalysis,first,snapshots,rollback,overlappingSessions,assets:assetResult,export:{files:[...exportedFiles.keys()],byteLength:archiveBytes.length,state:exportedState},
+    starterCompilation,editorAnalysis,first,snapshots,rollback,overlappingSessions,assets:assetResult,export:{files:[...exportedFiles.keys()],byteLength:archiveBytes.length,state:exportedState},
     network:{readyBoundary,requestsAfterReady,requests},frames:frames.length,failures};
   await writeFile(path.join(evidence,"receipt.json"), `${JSON.stringify(receipt,null,2)}\n`);
   console.log(JSON.stringify({status:"passed",receipt:path.join(evidence,"receipt.json"),frames:frames.length,exportBytes:archiveBytes.length}));
