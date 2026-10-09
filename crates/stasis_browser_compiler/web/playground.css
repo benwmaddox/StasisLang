@@ -83,6 +83,7 @@ button { color: inherit; }
 .editor-completion-option { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; gap: .2rem .8rem; padding: .4rem .55rem; border: 0; border-radius: 3px; background: transparent; color: #d5ded8; text-align: left; cursor: pointer; }
 .editor-completion-option[aria-selected="true"] { background: #31413f; outline: 1px solid #718d81; }
 .editor-completion-label { overflow: hidden; font: 12px/1.4 "Cascadia Code", "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+#source-highlight, #source-editor, .editor-completion-label { font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; }
 .editor-completion-kind { color: #d1b977; font-size: .65rem; text-transform: uppercase; }
 .editor-completion-detail { grid-column: 1 / -1; overflow: hidden; color: #8fa19b; font-size: .66rem; text-overflow: ellipsis; white-space: nowrap; }
 .diagnostics { min-height: 37px; padding: .65rem 1rem; border-top: 1px solid #283236; color: #8b9997; font-size: .72rem; line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -110,6 +111,12 @@ kbd { margin-right: .12rem; padding: .1rem .28rem; border: 1px solid #39484a; bo
   .brand { min-width: 180px; }
   .toolbar-status { font-size: .72rem; }
   .button { padding: .45rem .65rem; }
+}
+
+@media (min-width: 761px) {
+  .workbench { grid-template-rows: minmax(0, 1fr); }
+  .sidebar { min-height: 0; overflow: auto; }
+  .sidebar > .sidebar-section, .sidebar > .sidebar-footer { flex: 0 0 auto; }
 }
 
 @media (max-width: 760px) {
