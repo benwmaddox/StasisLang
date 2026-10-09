@@ -1,8 +1,11 @@
 //! Bounded launcher for a packaged Stasis authority and one external peer.
 
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
+
+#[cfg(any(windows, test))]
+use std::path::Path;
 
 pub const PEER_PROTOCOL_LINE: &str = "stasis-network-supervision-v1";
 pub const MAX_BOUND: Duration = Duration::from_secs(900);
@@ -124,6 +127,7 @@ pub fn take_child_pipes() -> Result<ChildPipes, &'static str> {
     }
 }
 
+#[cfg(any(windows, test))]
 fn validate_capture_root(root: &Path) -> Result<(), &'static str> {
     if !root.is_absolute() {
         return Err("supervised live capture root is invalid");
@@ -143,7 +147,7 @@ fn validate_capture_root(root: &Path) -> Result<(), &'static str> {
     let temp_root = std::env::temp_dir()
         .canonicalize()
         .map_err(|_| "supervised live capture root is invalid")?;
-    if !canonical_root.starts_with(temp_root) {
+    if canonical_root == temp_root || !canonical_root.starts_with(temp_root) {
         return Err("supervised live capture root is invalid");
     }
     Ok(())
@@ -1414,6 +1418,8 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
 
     #[test]
     fn parses_bounded_contract_and_peer_args() {
@@ -1512,5 +1518,37 @@ mod tests {
             parse_args(["private-invite"].into_iter().map(str::to_string)),
             Err("missing option value".into())
         );
+    }
+
+    #[test]
+    fn capture_root_validation_accepts_temporary_directories_and_rejects_invalid_paths() {
+        assert_eq!(
+            validate_capture_root(Path::new("relative-capture-root")),
+            Err("supervised live capture root is invalid")
+        );
+        assert_eq!(
+            validate_capture_root(&std::env::temp_dir()),
+            Err("supervised live capture root is invalid")
+        );
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "stasis-capture-root-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).unwrap();
+        assert_eq!(validate_capture_root(&root), Ok(()));
+
+        let file = root.join("not-a-directory");
+        fs::write(&file, b"capture root test").unwrap();
+        assert_eq!(
+            validate_capture_root(&file),
+            Err("supervised live capture root is invalid")
+        );
+        fs::remove_file(file).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 }
