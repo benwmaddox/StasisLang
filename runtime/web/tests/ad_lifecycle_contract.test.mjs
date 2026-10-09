@@ -928,7 +928,7 @@ test("GameDistribution loading progress promotes state once and uses a fixed 30-
   const h = makeHarness("gamedistribution");
   const result = deferred();
   h.windowObject.gdsdk = { showAd: () => result.promise };
-  const handle = h.manager.request(0);
+  const handle = h.manager.request(1);
   h.emitVendorEvent("AD_METADATA");
   assert.equal(h.manager.poll(handle), 1, "progress without an issued request is ignored");
   h.emitVendorEvent("SDK_READY");
@@ -953,6 +953,9 @@ test("GameDistribution loading progress promotes state once and uses a fixed 30-
 
   h.emitVendorEvent("SDK_GAME_PAUSE");
   assert.equal(h.manager.poll(handle), 4);
+  assert.equal(h.calls.diagnostics.at(-1), "", "a late actual start clears the stale deadline diagnostic");
+  h.emitVendorEvent("SDK_REWARDED_WATCH_COMPLETE");
+  assert.equal(h.manager.takeReward(handle), 0, "a late actual start cannot restore abandoned reward proof");
   assert.equal(h.manager.gameplayBlocked(), 1, "a late physical start still pauses gameplay");
   assert.equal(h.calls.audio.at(-1), true, "audio follows the late actual start");
   assert.equal(h.manager.request(0), -1, "the late ad keeps the provider slot reserved");

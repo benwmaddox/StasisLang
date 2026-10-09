@@ -320,6 +320,7 @@
       if (!call || call.physicalTerminal || call.started) return;
       call.started = true;
       clearAdDeadline(call);
+      diagnostic("");
       if (useLocalPause) {
         localPauseCall = call;
         syncHostState();
