@@ -27,7 +27,7 @@ public class WorkshopDiagnosticSeamAcceptanceTest {
         assertFalse(render.contains("/internal/gfx_cmd.stasis"));
         String resource = WorkshopDiagnosticSeamAcceptance.missingResourceSource(source);
         assertTrue(resource.contains("function on_code_swap(): void {\n"
-                + "    state.opaque.load_sprite_from(\"assets/IT031_missing.svg\", 32, 32);\n"));
+                + "    state.opaque.load_from(\"assets/IT031_missing.svg\", 32, 32);\n"));
         assertFalse(resource.contains("extern"));
         assertFalse(resource.contains("gfx_load_sprite"));
         assertFalse(resource.contains("let missing: Sprite"));

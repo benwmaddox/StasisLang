@@ -1,0 +1,15 @@
+import "../src/feature_reference.stasis";
+
+test `generic capacity and queue stop at their bounds`(): bool {
+    scores.count = 0;
+    recent_scores.clear();
+    if (scores.capacity() != 4) {
+        return false;
+    }
+    for (let index: i32 = 0; index < 4; index += 1) {
+        if (!enqueue_score(index)) {
+            return false;
+        }
+    }
+    return recent_scores.count() == 4 && !enqueue_score(4);
+}

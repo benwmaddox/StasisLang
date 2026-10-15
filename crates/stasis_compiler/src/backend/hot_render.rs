@@ -1,14 +1,17 @@
 //! Compiler-owned hot-render metadata. The compiler publishes deterministic
 //! policy facts; rasterization, texture allocation, and fallback stay runtime-owned.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::backend::assets::SpriteRenderLoaderTargets;
 use crate::backend::compile_analysis::{ConstantValue, ConstantValueMap};
 use crate::compiler::{FunctionId, FunctionMeta};
-use crate::ir::hir::{eval_const_i64, AssignOp, AssignTarget, FunctionHIR, SimpleExpr, SimpleStmt};
+use crate::ir::hir::{
+    eval_const_i64, AssignOp, AssignTarget, FunctionHIR, ResolvedCallTarget, SimpleExpr, SimpleStmt,
+};
 
 pub const HOT_RENDER_METADATA_VERSION: u32 = 4;
 
@@ -134,14 +137,16 @@ struct ImageDecl {
 pub(crate) fn analyze_hot_render_images(
     functions: &[FunctionMeta],
     hirs: &BTreeMap<FunctionId, FunctionHIR>,
+    source_hirs: &BTreeMap<FunctionId, FunctionHIR>,
+    loader_targets: &SpriteRenderLoaderTargets,
     reachable: &BTreeSet<FunctionId>,
     collection_capacities: &BTreeMap<String, i32>,
     constants: &ConstantValueMap,
-) -> HotRenderAnalysis {
+) -> Result<HotRenderAnalysis, String> {
     let mut images = BTreeMap::<String, ImageDecl>::new();
     let mut loader_uncertainty = None;
     for function in functions.iter().filter(|f| reachable.contains(&f.id)) {
-        if let Some(hir) = hirs.get(&function.id) {
+        if let Some(hir) = source_hirs.get(&function.id) {
             let loader_env = function
                 .param_names
                 .iter()
@@ -151,6 +156,8 @@ pub(crate) fn analyze_hot_render_images(
                 &hir.statements,
                 constants,
                 &loader_env,
+                &loader_targets.sprites,
+                &loader_targets.sheets,
                 &mut images,
                 &mut loader_uncertainty,
             );
@@ -186,6 +193,7 @@ pub(crate) fn analyze_hot_render_images(
             &all_images,
             &mut stack,
             &mut causes,
+            loader_targets,
         );
         render_flow = render_flow.branch(root_flow);
     }
@@ -262,11 +270,11 @@ pub(crate) fn analyze_hot_render_images(
         .collect::<Vec<_>>();
     apply_profitability_policy(&mut records, &render_flow.transitions);
     let (transitions, transition_analysis) = publish_transitions(&render_flow);
-    HotRenderAnalysis {
+    Ok(HotRenderAnalysis {
         images: records,
         transitions,
         transition_analysis,
-    }
+    })
 }
 
 fn publish_transitions(
@@ -498,14 +506,24 @@ fn collect_image_decls(
     statements: &[SimpleStmt],
     constants: &ConstantValueMap,
     env: &BTreeMap<String, Option<String>>,
+    sprite_loaders: &HashSet<ResolvedCallTarget>,
+    sheet_loaders: &HashSet<ResolvedCallTarget>,
     out: &mut BTreeMap<String, ImageDecl>,
     loader_uncertainty: &mut Option<String>,
 ) {
-    visit_calls(statements, &mut |target, args| {
-        let loader = target.rsplit('.').next().unwrap_or(target);
-        if !matches!(loader, "load_sprite_from" | "load_sprite_sheet_from") {
+    visit_calls(statements, &mut |_target, args, resolved_target| {
+        let is_sprite_loader =
+            resolved_target.is_some_and(|resolved| sprite_loaders.contains(resolved));
+        let is_sheet_loader =
+            resolved_target.is_some_and(|resolved| sheet_loaders.contains(resolved));
+        if !is_sprite_loader && !is_sheet_loader {
             return;
         }
+        let loader = if is_sheet_loader {
+            "SpriteSheet.load_from"
+        } else {
+            "Sprite.load_from"
+        };
         let Some(receiver) = args.first() else {
             *loader_uncertainty = Some(format!("malformed {loader} call"));
             return;
@@ -515,13 +533,13 @@ fn collect_image_decls(
             return;
         };
         let path = args.get(1).and_then(|expr| const_string(expr, constants));
-        let (dimensions, sheet_geometry) = match loader {
-            "load_sprite_from" if args.len() == 4 => args
+        let (dimensions, sheet_geometry) = match (is_sprite_loader, is_sheet_loader, args.len()) {
+            (true, false, 4) => args
                 .get(2)
                 .and_then(|expr| const_i64(expr, constants))
                 .zip(args.get(3).and_then(|expr| const_i64(expr, constants)))
                 .map_or((None, None), |dimensions| (Some(dimensions), None)),
-            "load_sprite_sheet_from" if args.len() == 6 => {
+            (false, true, 6) => {
                 let geometry = args
                     .get(2)
                     .and_then(|expr| const_u32(expr, constants))
@@ -851,6 +869,7 @@ fn analyze_function(
     all_images: &BTreeSet<String>,
     stack: &mut BTreeSet<FunctionId>,
     causes: &mut BTreeMap<String, String>,
+    loader_targets: &SpriteRenderLoaderTargets,
 ) -> FlowSummary {
     if !stack.insert(function.id) {
         let mut unknown = FlowSummary::empty();
@@ -873,6 +892,7 @@ fn analyze_function(
                 all_images,
                 stack,
                 causes,
+                loader_targets,
             )
         });
     stack.remove(&function.id);
@@ -888,6 +908,7 @@ fn analyze_statements(
     all_images: &BTreeSet<String>,
     stack: &mut BTreeSet<FunctionId>,
     causes: &mut BTreeMap<String, String>,
+    loader_targets: &SpriteRenderLoaderTargets,
 ) -> FlowSummary {
     let mut out = FlowSummary::empty();
     for statement in statements {
@@ -899,7 +920,15 @@ fn analyze_statements(
                 ..
             } => {
                 let condition_flow = analyze_condition_calls(
-                    condition, hirs, by_name, capacities, env, all_images, stack, causes,
+                    condition,
+                    hirs,
+                    by_name,
+                    capacities,
+                    env,
+                    all_images,
+                    stack,
+                    causes,
+                    loader_targets,
                 );
                 let then_flow = analyze_statements(
                     then_statements,
@@ -910,13 +939,22 @@ fn analyze_statements(
                     all_images,
                     stack,
                     causes,
+                    loader_targets,
                 );
                 let else_flow =
                     else_statements
                         .as_deref()
                         .map_or_else(FlowSummary::empty, |body| {
                             analyze_statements(
-                                body, hirs, by_name, capacities, env, all_images, stack, causes,
+                                body,
+                                hirs,
+                                by_name,
+                                capacities,
+                                env,
+                                all_images,
+                                stack,
+                                causes,
+                                loader_targets,
                             )
                         });
                 condition_flow.sequential(then_flow.branch(else_flow))
@@ -928,13 +966,37 @@ fn analyze_statements(
                 body_statements,
             } => {
                 let init_flow = analyze_statement_calls(
-                    init, hirs, by_name, capacities, env, all_images, stack, causes,
+                    init,
+                    hirs,
+                    by_name,
+                    capacities,
+                    env,
+                    all_images,
+                    stack,
+                    causes,
+                    loader_targets,
                 );
                 let condition_flow = analyze_condition_calls(
-                    condition, hirs, by_name, capacities, env, all_images, stack, causes,
+                    condition,
+                    hirs,
+                    by_name,
+                    capacities,
+                    env,
+                    all_images,
+                    stack,
+                    causes,
+                    loader_targets,
                 );
                 let step_flow = analyze_statement_calls(
-                    step, hirs, by_name, capacities, env, all_images, stack, causes,
+                    step,
+                    hirs,
+                    by_name,
+                    capacities,
+                    env,
+                    all_images,
+                    stack,
+                    causes,
+                    loader_targets,
                 );
                 let body = analyze_statements(
                     body_statements,
@@ -945,6 +1007,7 @@ fn analyze_statements(
                     all_images,
                     stack,
                     causes,
+                    loader_targets,
                 );
                 match fixed_for_iterations(init, condition, step) {
                     LoopBound::Finite(iterations) => {
@@ -998,6 +1061,7 @@ fn analyze_statements(
                     all_images,
                     stack,
                     causes,
+                    loader_targets,
                 );
                 match capacities
                     .get(collection_path)
@@ -1013,7 +1077,15 @@ fn analyze_statements(
                 }
             }
             _ => analyze_statement_calls(
-                statement, hirs, by_name, capacities, env, all_images, stack, causes,
+                statement,
+                hirs,
+                by_name,
+                capacities,
+                env,
+                all_images,
+                stack,
+                causes,
+                loader_targets,
             ),
         };
         out = out.sequential(statement_flow);
@@ -1031,12 +1103,24 @@ fn analyze_statement_calls(
     all_images: &BTreeSet<String>,
     stack: &mut BTreeSet<FunctionId>,
     causes: &mut BTreeMap<String, String>,
+    loader_targets: &SpriteRenderLoaderTargets,
 ) -> FlowSummary {
     let mut out = FlowSummary::empty();
-    visit_stmt_exprs(statement, &mut |target, args| {
-        out = std::mem::replace(&mut out, FlowSummary::empty()).sequential(analyze_call(
-            target, args, hirs, by_name, capacities, env, all_images, stack, causes,
-        ));
+    visit_stmt_exprs(statement, &mut |target, args, resolved_target| {
+        out =
+            std::mem::replace(&mut out, FlowSummary::empty()).sequential(analyze_call_with_target(
+                target,
+                args,
+                hirs,
+                by_name,
+                capacities,
+                env,
+                all_images,
+                stack,
+                causes,
+                resolved_target,
+                loader_targets,
+            ));
     });
     out
 }
@@ -1051,17 +1135,30 @@ fn analyze_condition_calls(
     all_images: &BTreeSet<String>,
     stack: &mut BTreeSet<FunctionId>,
     causes: &mut BTreeMap<String, String>,
+    loader_targets: &SpriteRenderLoaderTargets,
 ) -> FlowSummary {
     let mut out = FlowSummary::empty();
-    visit_condition_exprs(condition, &mut |target, args| {
-        out = std::mem::replace(&mut out, FlowSummary::empty()).sequential(analyze_call(
-            target, args, hirs, by_name, capacities, env, all_images, stack, causes,
-        ));
+    visit_condition_exprs(condition, &mut |target, args, resolved_target| {
+        out =
+            std::mem::replace(&mut out, FlowSummary::empty()).sequential(analyze_call_with_target(
+                target,
+                args,
+                hirs,
+                by_name,
+                capacities,
+                env,
+                all_images,
+                stack,
+                causes,
+                resolved_target,
+                loader_targets,
+            ));
     });
     out
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn analyze_call(
     target: &str,
     args: &[SimpleExpr],
@@ -1073,7 +1170,68 @@ fn analyze_call(
     stack: &mut BTreeSet<FunctionId>,
     causes: &mut BTreeMap<String, String>,
 ) -> FlowSummary {
+    analyze_call_with_target(
+        target,
+        args,
+        hirs,
+        by_name,
+        capacities,
+        env,
+        all_images,
+        stack,
+        causes,
+        None,
+        &SpriteRenderLoaderTargets::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_call_with_target(
+    target: &str,
+    args: &[SimpleExpr],
+    hirs: &BTreeMap<FunctionId, FunctionHIR>,
+    by_name: &BTreeMap<(&str, usize), Vec<&FunctionMeta>>,
+    capacities: &BTreeMap<String, i32>,
+    env: &BTreeMap<String, IdentitySet>,
+    all_images: &BTreeSet<String>,
+    stack: &mut BTreeSet<FunctionId>,
+    causes: &mut BTreeMap<String, String>,
+    resolved_target: Option<&ResolvedCallTarget>,
+    loader_targets: &SpriteRenderLoaderTargets,
+) -> FlowSummary {
     let leaf_target = target.rsplit('.').next().unwrap_or(target);
+    if resolved_target.is_some_and(|resolved| {
+        loader_targets.sprites.contains(resolved) || loader_targets.sheets.contains(resolved)
+    }) {
+        return FlowSummary::empty();
+    }
+    if resolved_target.is_some_and(|resolved| loader_targets.sprite_draws.contains(resolved)) {
+        if leaf_target == "draw" {
+            return analyze_direct_render_receiver(leaf_target, args, env, all_images, causes);
+        }
+        return unknown_render_flow(
+            all_images,
+            causes,
+            &format!("resolved Sprite draw target has unexpected call name {leaf_target}"),
+        );
+    }
+    if resolved_target.is_some_and(|resolved| loader_targets.sheet_draws.contains(resolved)) {
+        if leaf_target == "draw_frame" {
+            return analyze_direct_render_receiver(leaf_target, args, env, all_images, causes);
+        }
+        return unknown_render_flow(
+            all_images,
+            causes,
+            &format!("resolved SpriteSheet draw target has unexpected call name {leaf_target}"),
+        );
+    }
+    if matches!(resolved_target, Some(ResolvedCallTarget::Extern(_))) {
+        return unknown_render_flow(
+            all_images,
+            causes,
+            &format!("unresolved call target {leaf_target} (external)"),
+        );
+    }
     if is_ordered_render_barrier(leaf_target) {
         return FlowSummary::barrier();
     }
@@ -1118,43 +1276,116 @@ fn analyze_call(
         };
         return unknown_render_flow(all_images, causes, &cause);
     };
-    if candidates.len() != 1 {
+    let exact_candidates = match resolved_target {
+        Some(ResolvedCallTarget::Function(function_id)) => candidates
+            .iter()
+            .copied()
+            .filter(|candidate| candidate.id == *function_id)
+            .collect::<Vec<_>>(),
+        Some(ResolvedCallTarget::Extern(_)) => unreachable!("extern returned above"),
+        None => candidates.clone(),
+    };
+    if exact_candidates.is_empty() {
+        return unknown_render_flow(
+            all_images,
+            causes,
+            &format!("selected function target {leaf_target} has no analyzable body"),
+        );
+    }
+    let distinct_first_parameter_types = exact_candidates
+        .iter()
+        .filter_map(|candidate| candidate.params.first())
+        .collect::<BTreeSet<_>>()
+        .len()
+        == exact_candidates.len();
+    if exact_candidates.len() > 1 && !distinct_first_parameter_types {
         return unknown_render_flow(
             all_images,
             causes,
             &format!("ambiguous render-reachable call target {leaf_target}"),
         );
     }
-    let callee = candidates[0];
-    let has_analyzable_body = hirs
-        .get(&callee.id)
-        .is_some_and(|hir| !hir.statements.is_empty());
-    if !has_analyzable_body
-        && (leaf_target == "draw"
-            || (has_graphics_effect(callee) && !is_known_nonrender_graphics_call(leaf_target)))
-    {
+    let mut candidate_flows = exact_candidates.iter().map(|callee| {
+        let has_analyzable_body = hirs
+            .get(&callee.id)
+            .is_some_and(|hir| !hir.statements.is_empty());
+        if !has_analyzable_body
+            && (leaf_target == "draw"
+                || (has_graphics_effect(callee) && !is_known_nonrender_graphics_call(leaf_target)))
+        {
+            return unknown_render_flow(
+                all_images,
+                causes,
+                &format!(
+                    "potentially rendering external call {leaf_target} has no analyzable body"
+                ),
+            );
+        }
+        let callee_env = callee
+            .param_names
+            .iter()
+            .zip(args)
+            .map(|(name, arg)| (name.clone(), resolve_identities(arg, env, all_images)))
+            .collect();
+        analyze_function(
+            callee,
+            hirs,
+            by_name,
+            capacities,
+            &callee_env,
+            all_images,
+            stack,
+            causes,
+            loader_targets,
+        )
+    });
+    let Some(first_flow) = candidate_flows.next() else {
         return unknown_render_flow(
             all_images,
             causes,
-            &format!("potentially rendering external call {leaf_target} has no analyzable body"),
+            &format!("no analyzable candidates for render-reachable call target {leaf_target}"),
         );
+    };
+    if candidate_flows.all(|flow| flow == first_flow) {
+        first_flow
+    } else {
+        unknown_render_flow(
+            all_images,
+            causes,
+            &format!("ambiguous render-reachable call target {leaf_target}"),
+        )
     }
-    let callee_env = callee
-        .param_names
-        .iter()
-        .zip(args)
-        .map(|(name, arg)| (name.clone(), resolve_identities(arg, env, all_images)))
-        .collect();
-    analyze_function(
-        callee,
-        hirs,
-        by_name,
-        capacities,
-        &callee_env,
-        all_images,
-        stack,
-        causes,
-    )
+}
+
+fn analyze_direct_render_receiver(
+    target: &str,
+    args: &[SimpleExpr],
+    env: &BTreeMap<String, IdentitySet>,
+    all_images: &BTreeSet<String>,
+    causes: &mut BTreeMap<String, String>,
+) -> FlowSummary {
+    let Some(receiver) = args.first() else {
+        return unknown_render_flow(
+            all_images,
+            causes,
+            &format!("dynamic render receiver in call to {target}"),
+        );
+    };
+    match resolve_identities(receiver, env, all_images) {
+        IdentitySet::Known(identities)
+            if !identities.is_empty() && identities.is_subset(all_images) =>
+        {
+            FlowSummary::draw(identities)
+        }
+        IdentitySet::Known(identities) if identities.is_disjoint(all_images) => {
+            FlowSummary::empty()
+        }
+        _ => unknown_render_flow(
+            all_images,
+            causes,
+            &format!("dynamic render receiver in call to {target}"),
+        ),
+    }
 }
 
 fn unknown_render_flow(
@@ -1206,7 +1437,6 @@ fn is_known_nonrender_graphics_call(target: &str) -> bool {
             | "gfx_release_font"
             | "gfx_font_status"
             | "measure_text"
-            | "load_sprite_from"
             | "load_sprite_sheet_asset_from"
             | "load_text_from"
             | "replace_text_from"
@@ -1345,7 +1575,10 @@ fn resolve_identities(
     }
 }
 
-fn visit_calls(statements: &[SimpleStmt], callback: &mut impl FnMut(&str, &[SimpleExpr])) {
+fn visit_calls(
+    statements: &[SimpleStmt],
+    callback: &mut impl FnMut(&str, &[SimpleExpr], Option<&ResolvedCallTarget>),
+) {
     for statement in statements {
         visit_stmt_exprs(statement, callback);
         if let SimpleStmt::If {
@@ -1370,7 +1603,10 @@ fn visit_calls(statements: &[SimpleStmt], callback: &mut impl FnMut(&str, &[Simp
     }
 }
 
-fn visit_stmt_exprs(statement: &SimpleStmt, callback: &mut impl FnMut(&str, &[SimpleExpr])) {
+fn visit_stmt_exprs(
+    statement: &SimpleStmt,
+    callback: &mut impl FnMut(&str, &[SimpleExpr], Option<&ResolvedCallTarget>),
+) {
     match statement {
         SimpleStmt::Let { expression, .. }
         | SimpleStmt::Expr(expression)
@@ -1389,7 +1625,10 @@ fn visit_stmt_exprs(statement: &SimpleStmt, callback: &mut impl FnMut(&str, &[Si
     }
 }
 
-fn visit_target_exprs(target: &AssignTarget, callback: &mut impl FnMut(&str, &[SimpleExpr])) {
+fn visit_target_exprs(
+    target: &AssignTarget,
+    callback: &mut impl FnMut(&str, &[SimpleExpr], Option<&ResolvedCallTarget>),
+) {
     if let AssignTarget::IndexedPath {
         index,
         nested_index,
@@ -1405,7 +1644,7 @@ fn visit_target_exprs(target: &AssignTarget, callback: &mut impl FnMut(&str, &[S
 
 fn visit_condition_exprs(
     condition: &crate::ir::hir::SimpleCondition,
-    callback: &mut impl FnMut(&str, &[SimpleExpr]),
+    callback: &mut impl FnMut(&str, &[SimpleExpr], Option<&ResolvedCallTarget>),
 ) {
     use crate::ir::hir::SimpleCondition;
     match condition {
@@ -1422,10 +1661,18 @@ fn visit_condition_exprs(
     }
 }
 
-fn visit_expr(expr: &SimpleExpr, callback: &mut impl FnMut(&str, &[SimpleExpr])) {
+fn visit_expr(
+    expr: &SimpleExpr,
+    callback: &mut impl FnMut(&str, &[SimpleExpr], Option<&ResolvedCallTarget>),
+) {
     match expr {
-        SimpleExpr::Call { target, args } => {
-            callback(target, args);
+        SimpleExpr::Call {
+            target,
+            args,
+            resolved_target,
+            ..
+        } => {
+            callback(target, args, resolved_target.as_ref());
             for arg in args {
                 visit_expr(arg, callback);
             }
@@ -1550,6 +1797,8 @@ mod tests {
                 SimpleExpr::Call {
                     target: "choose_sprite".to_string(),
                     args: Vec::new(),
+                    source_span: None,
+                    resolved_target: None,
                 },
                 SimpleExpr::Int(0),
             ],
@@ -1599,6 +1848,22 @@ mod tests {
         }
         let first = function(1);
         let second = function(2);
+        let single_candidate = BTreeMap::from([((&"paint"[..], 0), vec![&first])]);
+        let mut single_causes = BTreeMap::new();
+        let single = analyze_call(
+            "paint",
+            &[],
+            &BTreeMap::new(),
+            &single_candidate,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeSet::from(["hero".to_string()]),
+            &mut BTreeSet::new(),
+            &mut single_causes,
+        );
+        assert_eq!(single, FlowSummary::empty());
+        assert!(single_causes.is_empty());
+
         let mut by_name = BTreeMap::new();
         by_name.insert(("paint", 0), vec![&first, &second]);
         let mut causes: BTreeMap<String, String> = BTreeMap::new();
@@ -1615,6 +1880,338 @@ mod tests {
         );
         assert_eq!(out.counts.get("hero"), Some(&Bound::Unknown));
         assert!(causes["hero"].contains("ambiguous"));
+    }
+
+    #[test]
+    fn receiver_overloads_keep_equal_render_flows_and_reject_different_flows() {
+        fn function(id: u32) -> FunctionMeta {
+            let path = CanonicalSourcePath::project_relative("main.stasis").expect("path");
+            FunctionMeta {
+                id,
+                symbol_id: SymbolId::function(&path, "append", &id.to_string()),
+                storage_index: id,
+                name: "append".to_string(),
+                module_alias: String::new(),
+                name_hash: 0,
+                file_id: 0,
+                source_range: 0..0,
+                signature_range: 0..0,
+                signature_hash: u64::from(id),
+                body_hash: 0,
+                param_names: vec!["self".to_string(), "value".to_string()],
+                params: vec![
+                    u16::try_from(id + 10).expect("parameter id"),
+                    u16::try_from(id + 20).expect("parameter id"),
+                ],
+                return_type: 0,
+                inline: false,
+                host_export: None,
+                effect_contract: None,
+                requires_contract: None,
+                dependencies: Vec::new(),
+                dependents: Vec::new(),
+                call_sites: Vec::new(),
+                dirty: false,
+            }
+        }
+
+        let first = function(1);
+        let second = function(2);
+        let candidates = BTreeMap::from([((&"append"[..], 2), vec![&first, &second])]);
+        let arguments = [
+            SimpleExpr::Identifier("hero".to_string()),
+            SimpleExpr::Int(1),
+        ];
+        let images = BTreeSet::from(["hero".to_string()]);
+        let empty_hir = FunctionHIR {
+            statements: vec![SimpleStmt::Noop],
+            debug_statements: Vec::new(),
+        };
+        let same_hirs = BTreeMap::from([
+            (first.id, empty_hir.clone()),
+            (second.id, empty_hir.clone()),
+        ]);
+        let mut causes = BTreeMap::new();
+        let same = analyze_call(
+            "append",
+            &arguments,
+            &same_hirs,
+            &candidates,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &images,
+            &mut BTreeSet::new(),
+            &mut causes,
+        );
+        assert_eq!(same, FlowSummary::empty());
+        assert!(causes.is_empty());
+
+        let rendering_hir = FunctionHIR {
+            statements: vec![SimpleStmt::Expr(SimpleExpr::Call {
+                target: "draw".to_string(),
+                args: vec![
+                    SimpleExpr::Identifier("self".to_string()),
+                    SimpleExpr::Int(0),
+                ],
+                source_span: None,
+                resolved_target: None,
+            })],
+            debug_statements: Vec::new(),
+        };
+        let different_hirs = BTreeMap::from([(first.id, empty_hir), (second.id, rendering_hir)]);
+        causes.clear();
+        let different = analyze_call(
+            "append",
+            &arguments,
+            &different_hirs,
+            &candidates,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &images,
+            &mut BTreeSet::new(),
+            &mut causes,
+        );
+        assert_eq!(different.counts.get("hero"), Some(&Bound::Unknown));
+        assert!(causes["hero"].contains("ambiguous"));
+    }
+
+    #[test]
+    fn canonical_load_from_targets_preserve_sprite_and_sheet_identity() {
+        let sprite_loader = ResolvedCallTarget::Function(1001);
+        let sheet_loader = ResolvedCallTarget::Function(1002);
+        let custom_loader = ResolvedCallTarget::Function(1003);
+        let unrelated_external_loader =
+            ResolvedCallTarget::Extern(crate::ir::hir::ExternCallIdentity {
+                source_path: "custom.stasis".to_string(),
+                name: "load_from".to_string(),
+                symbol_candidates: vec!["custom_load_from".to_string()],
+                declared_params: vec!["i32".to_string(); 4],
+                declared_return_type: "bool".to_string(),
+            });
+        let sprite_loaders = HashSet::from([sprite_loader.clone()]);
+        let sheet_loaders = HashSet::from([sheet_loader.clone()]);
+        let statements = vec![
+            SimpleStmt::Expr(SimpleExpr::Call {
+                target: "load_from".to_string(),
+                args: vec![
+                    SimpleExpr::Identifier("sprite".to_string()),
+                    SimpleExpr::StringLiteral("assets/sprite.png".to_string()),
+                    SimpleExpr::Int(16),
+                    SimpleExpr::Int(24),
+                ],
+                source_span: None,
+                resolved_target: Some(sprite_loader),
+            }),
+            SimpleStmt::Expr(SimpleExpr::Call {
+                target: "load_from".to_string(),
+                args: vec![
+                    SimpleExpr::Identifier("sheet".to_string()),
+                    SimpleExpr::StringLiteral("assets/sheet.png".to_string()),
+                    SimpleExpr::Int(4),
+                    SimpleExpr::Int(2),
+                    SimpleExpr::Int(8),
+                    SimpleExpr::Int(12),
+                ],
+                source_span: None,
+                resolved_target: Some(sheet_loader),
+            }),
+            SimpleStmt::Expr(SimpleExpr::Call {
+                target: "load_from".to_string(),
+                args: vec![
+                    SimpleExpr::Identifier("custom".to_string()),
+                    SimpleExpr::StringLiteral("assets/not-a-sprite.png".to_string()),
+                    SimpleExpr::Int(16),
+                    SimpleExpr::Int(24),
+                ],
+                source_span: None,
+                resolved_target: Some(custom_loader),
+            }),
+            SimpleStmt::Expr(SimpleExpr::Call {
+                target: "load_from".to_string(),
+                args: vec![
+                    SimpleExpr::Identifier("external".to_string()),
+                    SimpleExpr::StringLiteral("assets/not-an-image.png".to_string()),
+                    SimpleExpr::Int(16),
+                    SimpleExpr::Int(24),
+                ],
+                source_span: None,
+                resolved_target: Some(unrelated_external_loader.clone()),
+            }),
+        ];
+        let mut images = BTreeMap::new();
+        let mut uncertainty = None;
+        collect_image_decls(
+            &statements,
+            &ConstantValueMap::new(),
+            &BTreeMap::new(),
+            &sprite_loaders,
+            &sheet_loaders,
+            &mut images,
+            &mut uncertainty,
+        );
+
+        assert!(uncertainty.is_none());
+        assert_eq!(
+            images.len(),
+            2,
+            "unrelated same-arity loaders are not images"
+        );
+        let sprite = images.get("sprite").expect("sprite identity");
+        assert_eq!(sprite.path, "assets/sprite.png");
+        assert_eq!((sprite.width, sprite.height), (16, 24));
+        assert_eq!(sprite.sheet_geometry, None);
+        let sheet = images.get("sheet").expect("sheet identity");
+        assert_eq!(sheet.path, "assets/sheet.png");
+        assert_eq!((sheet.width, sheet.height), (32, 24));
+        assert_eq!(sheet.sheet_geometry, Some((4, 2, 8, 12)));
+
+        let all_images = BTreeSet::from(["hero".to_string()]);
+        let mut causes = BTreeMap::new();
+        let external_flow = analyze_call_with_target(
+            "load_from",
+            &statements
+                .iter()
+                .find_map(|statement| match statement {
+                    SimpleStmt::Expr(SimpleExpr::Call {
+                        args,
+                        resolved_target: Some(ResolvedCallTarget::Extern(_)),
+                        ..
+                    }) => Some(args.as_slice()),
+                    _ => None,
+                })
+                .expect("unrelated external loader call"),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &all_images,
+            &mut BTreeSet::new(),
+            &mut causes,
+            Some(&unrelated_external_loader),
+            &SpriteRenderLoaderTargets::default(),
+        );
+        assert_eq!(external_flow.counts.get("hero"), Some(&Bound::Unknown));
+        assert!(causes["hero"].contains("unresolved call target load_from"));
+
+        let spoofed_nonrender_extern =
+            ResolvedCallTarget::Extern(crate::ir::hir::ExternCallIdentity {
+                source_path: "custom.stasis".to_string(),
+                name: "measure_text".to_string(),
+                symbol_candidates: vec!["custom_measure_text".to_string()],
+                declared_params: vec!["i32".to_string()],
+                declared_return_type: "i32".to_string(),
+            });
+        causes.clear();
+        let spoofed_flow = analyze_call_with_target(
+            "measure_text",
+            &[SimpleExpr::Int(1)],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &all_images,
+            &mut BTreeSet::new(),
+            &mut causes,
+            Some(&spoofed_nonrender_extern),
+            &SpriteRenderLoaderTargets::default(),
+        );
+        assert_eq!(spoofed_flow.counts.get("hero"), Some(&Bound::Unknown));
+        assert!(causes["hero"].contains("unresolved call target measure_text"));
+    }
+
+    #[test]
+    fn trusted_direct_sprite_and_sheet_extern_draws_count_exact_receivers() {
+        use crate::ir::hir::ExternCallIdentity;
+
+        let sprite_draw = ResolvedCallTarget::Extern(ExternCallIdentity {
+            source_path: "tests/stasis/hot_render.stasis".to_string(),
+            name: "draw".to_string(),
+            symbol_candidates: vec!["stasis_jit_sprite_draw".to_string()],
+            declared_params: vec![
+                "Sprite".to_string(),
+                "f32".to_string(),
+                "f32".to_string(),
+                "i32".to_string(),
+                "i32".to_string(),
+            ],
+            declared_return_type: "void".to_string(),
+        });
+        let sheet_draw = ResolvedCallTarget::Extern(ExternCallIdentity {
+            source_path: "tests/stasis/hot_render.stasis".to_string(),
+            name: "draw_frame".to_string(),
+            symbol_candidates: vec!["stasis_jit_sprite_draw_frame".to_string()],
+            declared_params: vec![
+                "SpriteSheet".to_string(),
+                "i32".to_string(),
+                "f32".to_string(),
+                "f32".to_string(),
+                "i32".to_string(),
+                "i32".to_string(),
+            ],
+            declared_return_type: "void".to_string(),
+        });
+        let targets = SpriteRenderLoaderTargets {
+            sprite_draws: HashSet::from([sprite_draw.clone()]),
+            sheet_draws: HashSet::from([sheet_draw.clone()]),
+            ..SpriteRenderLoaderTargets::default()
+        };
+        let images = BTreeSet::from(["hero".to_string()]);
+        let env = BTreeMap::from([
+            (
+                "sprite".to_string(),
+                IdentitySet::Known(BTreeSet::from(["hero".to_string()])),
+            ),
+            (
+                "sheet".to_string(),
+                IdentitySet::Known(BTreeSet::from(["hero".to_string()])),
+            ),
+        ]);
+
+        for (target_name, argument, resolved_target) in [
+            ("draw", "sprite", &sprite_draw),
+            ("draw_frame", "sheet", &sheet_draw),
+        ] {
+            let mut causes = BTreeMap::new();
+            let flow = analyze_call_with_target(
+                target_name,
+                &[SimpleExpr::Identifier(argument.to_string())],
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &env,
+                &images,
+                &mut BTreeSet::new(),
+                &mut causes,
+                Some(resolved_target),
+                &targets,
+            );
+            assert_eq!(flow.counts.get("hero"), Some(&Bound::Finite(1)));
+            assert!(causes.is_empty());
+        }
+
+        let spoofed_renderer = ResolvedCallTarget::Extern(ExternCallIdentity {
+            source_path: "custom.stasis".to_string(),
+            name: "custom_renderer".to_string(),
+            symbol_candidates: vec!["stasis_jit_font_status".to_string()],
+            declared_params: vec!["i32".to_string()],
+            declared_return_type: "i32".to_string(),
+        });
+        let mut causes = BTreeMap::new();
+        let flow = analyze_call_with_target(
+            "custom_renderer",
+            &[SimpleExpr::Int(0)],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &env,
+            &images,
+            &mut BTreeSet::new(),
+            &mut causes,
+            Some(&spoofed_renderer),
+            &targets,
+        );
+        assert_eq!(flow.counts.get("hero"), Some(&Bound::Unknown));
+        assert!(causes["hero"].contains("unresolved call target custom_renderer"));
     }
 
     #[test]

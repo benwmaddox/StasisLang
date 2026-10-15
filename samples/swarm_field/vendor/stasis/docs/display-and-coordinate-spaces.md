@@ -39,7 +39,11 @@ desktop it also initially requests a 360 x 720 window client size in native
 window units. A high-density drawable can have more physical pixels, and a
 maximized or fullscreen window can have a different native extent. Neither
 changes the logical canvas. Desktop maximization, mobile fullscreen, resize,
-and orientation are host presentation decisions. The repository's
+and orientation are host presentation decisions. A game that wants a responsive
+canvas can call `set_canvas_size(width, height)` after observing a new surface
+extent. This changes only the logical canvas; the host keeps the user's native
+window size and window mode, and reports the accepted logical and safe viewport
+on a following frame. The repository's
 `docs/display_metrics.md` describes host implementation details; that source
 file is outside the offline knowledge package.
 

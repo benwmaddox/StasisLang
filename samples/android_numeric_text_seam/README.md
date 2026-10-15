@@ -7,7 +7,7 @@ runner compares every case ID, status, and formatted value with
 `android_seam_expectations.json`.
 
 The sample seeds nonempty transactionality buffers with explicit ASCII bytes.
-Android packaged AOT currently observes literal-backed `ascii_copy` sources as
+Android packaged AOT currently observes literal-backed `copy` sources as
 empty in this global-buffer setup (MaddoxTasks #782). That setup limitation is
 separate from the numeric formatter exercised by the receipt.
 

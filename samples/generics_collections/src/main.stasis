@@ -429,11 +429,11 @@ function math_oracle_text_magnitudes(): bool {
         carry = carry * 10.0;
     }
     if (
-        ascii_from_f64_short(math_oracle_text_buffer, tiny, 2) != 9
+        from_f64_short(math_oracle_text_buffer, tiny, 2) != 9
         || !math_oracle_text_equals(math_oracle_text_buffer, "1.00e-300", 9)
-        || ascii_from_f64_short(math_oracle_text_buffer, large, 2) != 8
+        || from_f64_short(math_oracle_text_buffer, large, 2) != 8
         || !math_oracle_text_equals(math_oracle_text_buffer, "1.00e300", 8)
-        || ascii_from_f64_short(math_oracle_text_buffer, carry, 2) != 8
+        || from_f64_short(math_oracle_text_buffer, carry, 2) != 8
         || !math_oracle_text_equals(math_oracle_text_buffer, "1.00e301", 8)
     ) {
         return false;
@@ -444,16 +444,16 @@ function math_oracle_text_magnitudes(): bool {
 function math_oracle_text_capacity(): bool {
     let large: f64 = math_oracle_one_e300();
     if (
-        ascii_from_f64_short(math_oracle_text_exact, large, 2) != 8
+        from_f64_short(math_oracle_text_exact, large, 2) != 8
         || !math_oracle_text_equals(math_oracle_text_exact, "1.00e300", 8)
         || math_oracle_text_exact[8] != 0
     ) {
         return false;
     }
-    ascii_copy(math_oracle_text_short, "keep");
+    copy(math_oracle_text_short, "keep");
     math_oracle_text_short[7] = 83;
     if (
-        ascii_from_f64_short(math_oracle_text_short, large, 2) != -1
+        from_f64_short(math_oracle_text_short, large, 2) != -1
         || length(math_oracle_text_short) != 4
         || !math_oracle_text_equals(math_oracle_text_short, "keep", 4)
         || math_oracle_text_short[7] != 83
@@ -468,13 +468,13 @@ function math_oracle_text_specials(): bool {
     let nan: f64 = 0.0 / 0.0;
     let negative_zero: f64 = 0.0 /(0.0 - 1.0);
     if (
-        ascii_from_f64_short(math_oracle_text_buffer, infinity, 2) != 3
+        from_f64_short(math_oracle_text_buffer, infinity, 2) != 3
         || !math_oracle_text_equals(math_oracle_text_buffer, "inf", 3)
-        || ascii_from_f64_short(math_oracle_text_buffer, 0.0 - infinity, 2) != 4
+        || from_f64_short(math_oracle_text_buffer, 0.0 - infinity, 2) != 4
         || !math_oracle_text_equals(math_oracle_text_buffer, "-inf", 4)
-        || ascii_from_f64_short(math_oracle_text_buffer, nan, 2) != 3
+        || from_f64_short(math_oracle_text_buffer, nan, 2) != 3
         || !math_oracle_text_equals(math_oracle_text_buffer, "nan", 3)
-        || ascii_from_f64_short(math_oracle_text_buffer, negative_zero, 2) != 4
+        || from_f64_short(math_oracle_text_buffer, negative_zero, 2) != 4
         || !math_oracle_text_equals(math_oracle_text_buffer, "0.00", 4)
     ) {
         return false;
@@ -484,8 +484,8 @@ function math_oracle_text_specials(): bool {
 
 function math_oracle_text_append(): bool {
     let large: f64 = math_oracle_one_e300();
-    ascii_copy(math_oracle_text_buffer, "v=");
-    return ascii_append_f64_short(math_oracle_text_buffer, large, 2) == 10 && math_oracle_text_equals(math_oracle_text_buffer, "v=1.00e300", 10);
+    copy(math_oracle_text_buffer, "v=");
+    return append_f64_short(math_oracle_text_buffer, large, 2) == 10 && math_oracle_text_equals(math_oracle_text_buffer, "v=1.00e300", 10);
 }
 
 function math_oracle_extended_text(): bool {

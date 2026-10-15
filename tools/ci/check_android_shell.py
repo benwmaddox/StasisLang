@@ -1358,15 +1358,15 @@ def main() -> int:
     assert "import \"/vendor/stasis/stdlib/audio.stasis\"" not in audio_source
     assert '"assets/tone.mp3"' in audio_source
     assert '"assets/tone.wav"' in audio_source
-    assert "function @asset_path(path) load_audio(self: AudioAsset" in audio_source
+    assert "function @asset_path(path) load(self: AudioAsset" in audio_source
     assert "function play_once(self: AudioAsset" in audio_source
     assert "function open(self: AudioStream" in audio_source
     assert "function refresh(self: AudioStream" in audio_source
     assert "function push(self: AudioStream" in audio_source
     assert "global music_handle: i32" in audio_source
     assert "global effect_handle: i32" in audio_source
-    assert 'manifest_music_ready = music.load_audio("assets/tone.mp3")' in audio_source
-    assert 'manifest_effect_ready = effect.load_audio("assets/tone.wav")' in audio_source
+    assert 'manifest_music_ready = music.load("assets/tone.mp3")' in audio_source
+    assert 'manifest_effect_ready = effect.load("assets/tone.wav")' in audio_source
     assert "manifest_audio_update" in audio_source
     assert "music_voice.play(music, true, 0.18, 0.0)" in audio_source
     assert "effect.play_once(0.25, 0.0)" in audio_source

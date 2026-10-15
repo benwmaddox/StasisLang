@@ -391,7 +391,7 @@ const SPRITE_COUNT: i32 = 4096;
 global sprite: Sprite;
 function main(): i32 {
     init_window(640, 360, "GPU sprite benchmark");
-    if (!sprite.load_sprite_from("assets/smoke.svg", 4, 4)) {
+    if (!sprite.load_from("assets/smoke.svg", 4, 4)) {
         return 1;
     }
     return 0;
@@ -466,7 +466,7 @@ const SPRITE_COUNT: i32 = 2048;
 global sprite_sheet: SpriteSheet;
 function main(): i32 {
     init_window(640, 360, "GPU mixed-order benchmark");
-    if (!sprite_sheet.load_sprite_sheet_from("assets/smoke.svg", 2, 1, 2, 4)) {
+    if (!sprite_sheet.load_from("assets/smoke.svg", 2, 1, 2, 4)) {
         return 1;
     }
     return 0;

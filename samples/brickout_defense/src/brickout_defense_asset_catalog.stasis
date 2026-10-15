@@ -638,1870 +638,1870 @@ global brickout_defense_catalog_loader: BrickoutDefenseAssetLoader;
 
 function brickout_defense_catalog_request(index: i32): bool {
     if (index == 0) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/background_4x.png", 1320, 1100);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/background_4x.png", 1320, 1100);
     }
     if (index == 1) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/paddle.png", 133, 19);
+        return brickout_defense_catalog_loader.current.load("assets/original/paddle.png", 133, 19);
     }
     if (index == 2) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/buttons/store_wall_4x.png", 260, 260);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/buttons/store_wall_4x.png", 260, 260);
     }
     if (index == 3) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/buttons/store_standard_4x.png", 260, 260);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/buttons/store_standard_4x.png", 260, 260);
     }
     if (index == 4) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/buttons/store_rapid_4x.png", 260, 260);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/buttons/store_rapid_4x.png", 260, 260);
     }
     if (index == 5) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/buttons/store_healer_4x.png", 260, 260);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/buttons/store_healer_4x.png", 260, 260);
     }
     if (index == 6) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/buttons/store_sniper_4x.png", 260, 260);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/buttons/store_sniper_4x.png", 260, 260);
     }
     if (index == 7) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/buttons/store_rocket_4x.png", 260, 260);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/buttons/store_rocket_4x.png", 260, 260);
     }
     if (index == 8) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/store_gold.png", 65, 65);
+        return brickout_defense_catalog_loader.current.load("assets/original/store_gold.png", 65, 65);
     }
     if (index == 9) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/store_info.png", 201, 197);
+        return brickout_defense_catalog_loader.current.load("assets/original/store_info.png", 201, 197);
     }
     if (index == 10) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/button_upgrade.png", 80, 25);
+        return brickout_defense_catalog_loader.current.load("assets/original/button_upgrade.png", 80, 25);
     }
     if (index == 11) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/button_sell.png", 44, 26);
+        return brickout_defense_catalog_loader.current.load("assets/original/button_sell.png", 44, 26);
     }
     if (index == 12) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/button_cancel.png", 71, 26);
+        return brickout_defense_catalog_loader.current.load("assets/original/button_cancel.png", 71, 26);
     }
     if (index == 13) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/buttons/button_next_4x.png", 524, 260);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/buttons/button_next_4x.png", 524, 260);
     }
     if (index == 14) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/buttons/button_pause_4x.png", 260, 260);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/buttons/button_pause_4x.png", 260, 260);
     }
     if (index == 15) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/tower_selector.png", 34, 34);
+        return brickout_defense_catalog_loader.current.load("assets/original/tower_selector.png", 34, 34);
     }
     if (index == 16) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/placement/tower_placer_valid_4x.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/placement/tower_placer_valid_4x.png", 128, 128);
     }
     if (index == 17) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/placement/tower_placer_invalid_4x.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/placement/tower_placer_invalid_4x.png", 128, 128);
     }
     if (index == 18) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/range_ring.svg", 256, 256);
+        return brickout_defense_catalog_loader.current.load("assets/original/range_ring.svg", 256, 256);
     }
     if (index == 19) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/outline.svg", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/outline.svg", 128, 128);
     }
     if (index == 20) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/tower_ready.png", 4, 4);
+        return brickout_defense_catalog_loader.current.load("assets/original/tower_ready.png", 4, 4);
     }
     if (index == 21) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/projectile_standard.svg", 8, 8);
+        return brickout_defense_catalog_loader.current.load("assets/original/projectile_standard.svg", 8, 8);
     }
     if (index == 22) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/projectile_rapid.svg", 8, 8);
+        return brickout_defense_catalog_loader.current.load("assets/original/projectile_rapid.svg", 8, 8);
     }
     if (index == 23) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/projectile_sniper.svg", 8, 8);
+        return brickout_defense_catalog_loader.current.load("assets/original/projectile_sniper.svg", 8, 8);
     }
     if (index == 24) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/projectile_rocket.svg", 8, 8);
+        return brickout_defense_catalog_loader.current.load("assets/original/projectile_rocket.svg", 8, 8);
     }
     if (index == 25) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_00.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_00.png", 72, 72);
     }
     if (index == 26) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_01.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_01.png", 72, 72);
     }
     if (index == 27) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_02.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_02.png", 72, 72);
     }
     if (index == 28) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_03.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_03.png", 72, 72);
     }
     if (index == 29) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_04.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_04.png", 72, 72);
     }
     if (index == 30) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_05.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_05.png", 72, 72);
     }
     if (index == 31) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_06.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_06.png", 72, 72);
     }
     if (index == 32) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_07.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_07.png", 72, 72);
     }
     if (index == 33) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_08.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_08.png", 72, 72);
     }
     if (index == 34) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_09.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_09.png", 72, 72);
     }
     if (index == 35) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_10.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_10.png", 72, 72);
     }
     if (index == 36) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_11.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_11.png", 72, 72);
     }
     if (index == 37) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_12.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_12.png", 72, 72);
     }
     if (index == 38) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_13.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_13.png", 72, 72);
     }
     if (index == 39) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_14.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_14.png", 72, 72);
     }
     if (index == 40) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_15.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_15.png", 72, 72);
     }
     if (index == 41) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_16.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_16.png", 72, 72);
     }
     if (index == 42) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/standard/frame_17.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/standard/frame_17.png", 72, 72);
     }
     if (index == 43) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_00.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_00.png", 72, 72);
     }
     if (index == 44) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_01.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_01.png", 72, 72);
     }
     if (index == 45) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_02.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_02.png", 72, 72);
     }
     if (index == 46) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_03.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_03.png", 72, 72);
     }
     if (index == 47) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_04.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_04.png", 72, 72);
     }
     if (index == 48) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_05.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_05.png", 72, 72);
     }
     if (index == 49) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_06.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_06.png", 72, 72);
     }
     if (index == 50) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_07.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_07.png", 72, 72);
     }
     if (index == 51) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_08.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_08.png", 72, 72);
     }
     if (index == 52) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_09.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_09.png", 72, 72);
     }
     if (index == 53) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_10.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_10.png", 72, 72);
     }
     if (index == 54) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_11.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_11.png", 72, 72);
     }
     if (index == 55) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_12.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_12.png", 72, 72);
     }
     if (index == 56) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_13.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_13.png", 72, 72);
     }
     if (index == 57) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_14.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_14.png", 72, 72);
     }
     if (index == 58) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_15.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_15.png", 72, 72);
     }
     if (index == 59) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_16.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_16.png", 72, 72);
     }
     if (index == 60) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_17.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_17.png", 72, 72);
     }
     if (index == 61) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_18.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_18.png", 72, 72);
     }
     if (index == 62) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_19.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_19.png", 72, 72);
     }
     if (index == 63) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_20.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_20.png", 72, 72);
     }
     if (index == 64) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_21.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_21.png", 72, 72);
     }
     if (index == 65) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_22.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_22.png", 72, 72);
     }
     if (index == 66) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_23.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_23.png", 72, 72);
     }
     if (index == 67) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_24.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_24.png", 72, 72);
     }
     if (index == 68) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_25.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_25.png", 72, 72);
     }
     if (index == 69) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_26.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_26.png", 72, 72);
     }
     if (index == 70) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_27.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_27.png", 72, 72);
     }
     if (index == 71) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_28.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_28.png", 72, 72);
     }
     if (index == 72) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_29.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_29.png", 72, 72);
     }
     if (index == 73) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_30.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_30.png", 72, 72);
     }
     if (index == 74) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_31.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_31.png", 72, 72);
     }
     if (index == 75) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_32.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_32.png", 72, 72);
     }
     if (index == 76) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/curve/frame_33.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/curve/frame_33.png", 72, 72);
     }
     if (index == 77) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_00.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_00.png", 72, 72);
     }
     if (index == 78) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_01.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_01.png", 72, 72);
     }
     if (index == 79) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_02.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_02.png", 72, 72);
     }
     if (index == 80) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_03.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_03.png", 72, 72);
     }
     if (index == 81) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_04.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_04.png", 72, 72);
     }
     if (index == 82) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_05.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_05.png", 72, 72);
     }
     if (index == 83) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_06.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_06.png", 72, 72);
     }
     if (index == 84) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_07.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_07.png", 72, 72);
     }
     if (index == 85) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_08.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_08.png", 72, 72);
     }
     if (index == 86) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_09.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_09.png", 72, 72);
     }
     if (index == 87) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_10.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_10.png", 72, 72);
     }
     if (index == 88) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_11.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_11.png", 72, 72);
     }
     if (index == 89) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_12.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_12.png", 72, 72);
     }
     if (index == 90) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_13.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_13.png", 72, 72);
     }
     if (index == 91) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_14.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_14.png", 72, 72);
     }
     if (index == 92) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_15.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_15.png", 72, 72);
     }
     if (index == 93) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_16.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_16.png", 72, 72);
     }
     if (index == 94) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fast/frame_17.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fast/frame_17.png", 72, 72);
     }
     if (index == 95) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_00.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_00.png", 72, 72);
     }
     if (index == 96) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_01.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_01.png", 72, 72);
     }
     if (index == 97) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_02.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_02.png", 72, 72);
     }
     if (index == 98) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_03.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_03.png", 72, 72);
     }
     if (index == 99) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_04.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_04.png", 72, 72);
     }
     if (index == 100) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_05.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_05.png", 72, 72);
     }
     if (index == 101) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_06.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_06.png", 72, 72);
     }
     if (index == 102) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_07.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_07.png", 72, 72);
     }
     if (index == 103) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_08.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_08.png", 72, 72);
     }
     if (index == 104) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_09.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_09.png", 72, 72);
     }
     if (index == 105) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_10.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_10.png", 72, 72);
     }
     if (index == 106) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_11.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_11.png", 72, 72);
     }
     if (index == 107) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_12.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_12.png", 72, 72);
     }
     if (index == 108) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_13.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_13.png", 72, 72);
     }
     if (index == 109) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_14.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_14.png", 72, 72);
     }
     if (index == 110) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_15.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_15.png", 72, 72);
     }
     if (index == 111) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_16.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_16.png", 72, 72);
     }
     if (index == 112) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_17.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_17.png", 72, 72);
     }
     if (index == 113) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_18.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_18.png", 72, 72);
     }
     if (index == 114) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_19.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_19.png", 72, 72);
     }
     if (index == 115) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_20.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_20.png", 72, 72);
     }
     if (index == 116) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_21.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_21.png", 72, 72);
     }
     if (index == 117) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_22.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_22.png", 72, 72);
     }
     if (index == 118) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_23.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_23.png", 72, 72);
     }
     if (index == 119) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_24.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_24.png", 72, 72);
     }
     if (index == 120) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_25.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_25.png", 72, 72);
     }
     if (index == 121) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_26.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_26.png", 72, 72);
     }
     if (index == 122) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_27.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_27.png", 72, 72);
     }
     if (index == 123) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_28.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_28.png", 72, 72);
     }
     if (index == 124) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_29.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_29.png", 72, 72);
     }
     if (index == 125) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_30.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_30.png", 72, 72);
     }
     if (index == 126) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_31.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_31.png", 72, 72);
     }
     if (index == 127) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_32.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_32.png", 72, 72);
     }
     if (index == 128) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_33.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_33.png", 72, 72);
     }
     if (index == 129) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_34.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_34.png", 72, 72);
     }
     if (index == 130) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_35.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_35.png", 72, 72);
     }
     if (index == 131) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_36.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_36.png", 72, 72);
     }
     if (index == 132) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_37.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_37.png", 72, 72);
     }
     if (index == 133) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_38.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_38.png", 72, 72);
     }
     if (index == 134) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/fire/frame_39.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/fire/frame_39.png", 72, 72);
     }
     if (index == 135) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_00.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_00.png", 72, 72);
     }
     if (index == 136) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_01.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_01.png", 72, 72);
     }
     if (index == 137) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_02.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_02.png", 72, 72);
     }
     if (index == 138) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_03.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_03.png", 72, 72);
     }
     if (index == 139) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_04.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_04.png", 72, 72);
     }
     if (index == 140) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_05.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_05.png", 72, 72);
     }
     if (index == 141) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_06.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_06.png", 72, 72);
     }
     if (index == 142) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_07.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_07.png", 72, 72);
     }
     if (index == 143) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_08.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_08.png", 72, 72);
     }
     if (index == 144) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_09.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_09.png", 72, 72);
     }
     if (index == 145) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_10.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_10.png", 72, 72);
     }
     if (index == 146) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_11.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_11.png", 72, 72);
     }
     if (index == 147) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_12.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_12.png", 72, 72);
     }
     if (index == 148) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_13.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_13.png", 72, 72);
     }
     if (index == 149) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_14.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_14.png", 72, 72);
     }
     if (index == 150) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_15.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_15.png", 72, 72);
     }
     if (index == 151) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_16.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_16.png", 72, 72);
     }
     if (index == 152) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/slow/frame_17.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/slow/frame_17.png", 72, 72);
     }
     if (index == 153) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_00.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_00.png", 72, 72);
     }
     if (index == 154) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_01.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_01.png", 72, 72);
     }
     if (index == 155) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_02.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_02.png", 72, 72);
     }
     if (index == 156) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_03.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_03.png", 72, 72);
     }
     if (index == 157) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_04.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_04.png", 72, 72);
     }
     if (index == 158) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_05.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_05.png", 72, 72);
     }
     if (index == 159) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_06.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_06.png", 72, 72);
     }
     if (index == 160) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_07.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_07.png", 72, 72);
     }
     if (index == 161) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_08.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_08.png", 72, 72);
     }
     if (index == 162) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_09.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_09.png", 72, 72);
     }
     if (index == 163) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_10.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_10.png", 72, 72);
     }
     if (index == 164) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_11.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_11.png", 72, 72);
     }
     if (index == 165) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_12.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_12.png", 72, 72);
     }
     if (index == 166) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_13.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_13.png", 72, 72);
     }
     if (index == 167) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_14.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_14.png", 72, 72);
     }
     if (index == 168) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_15.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_15.png", 72, 72);
     }
     if (index == 169) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_16.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_16.png", 72, 72);
     }
     if (index == 170) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/splitter/frame_17.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/splitter/frame_17.png", 72, 72);
     }
     if (index == 171) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_00.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_00.png", 72, 72);
     }
     if (index == 172) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_01.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_01.png", 72, 72);
     }
     if (index == 173) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_02.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_02.png", 72, 72);
     }
     if (index == 174) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_03.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_03.png", 72, 72);
     }
     if (index == 175) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_04.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_04.png", 72, 72);
     }
     if (index == 176) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_05.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_05.png", 72, 72);
     }
     if (index == 177) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_06.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_06.png", 72, 72);
     }
     if (index == 178) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_07.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_07.png", 72, 72);
     }
     if (index == 179) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_08.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_08.png", 72, 72);
     }
     if (index == 180) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_09.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_09.png", 72, 72);
     }
     if (index == 181) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_10.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_10.png", 72, 72);
     }
     if (index == 182) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_11.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_11.png", 72, 72);
     }
     if (index == 183) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_12.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_12.png", 72, 72);
     }
     if (index == 184) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_13.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_13.png", 72, 72);
     }
     if (index == 185) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_14.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_14.png", 72, 72);
     }
     if (index == 186) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_15.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_15.png", 72, 72);
     }
     if (index == 187) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_16.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_16.png", 72, 72);
     }
     if (index == 188) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/swarm/frame_17.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/swarm/frame_17.png", 72, 72);
     }
     if (index == 189) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_00.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_00.png", 72, 72);
     }
     if (index == 190) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_01.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_01.png", 72, 72);
     }
     if (index == 191) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_02.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_02.png", 72, 72);
     }
     if (index == 192) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_03.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_03.png", 72, 72);
     }
     if (index == 193) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_04.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_04.png", 72, 72);
     }
     if (index == 194) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_05.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_05.png", 72, 72);
     }
     if (index == 195) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_06.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_06.png", 72, 72);
     }
     if (index == 196) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_07.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_07.png", 72, 72);
     }
     if (index == 197) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_08.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_08.png", 72, 72);
     }
     if (index == 198) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_09.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_09.png", 72, 72);
     }
     if (index == 199) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_10.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_10.png", 72, 72);
     }
     if (index == 200) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_11.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_11.png", 72, 72);
     }
     if (index == 201) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_12.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_12.png", 72, 72);
     }
     if (index == 202) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_13.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_13.png", 72, 72);
     }
     if (index == 203) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_14.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_14.png", 72, 72);
     }
     if (index == 204) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_15.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_15.png", 72, 72);
     }
     if (index == 205) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_16.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_16.png", 72, 72);
     }
     if (index == 206) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/balls/mover/frame_17.png", 72, 72);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/balls/mover/frame_17.png", 72, 72);
     }
     if (index == 207) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_00.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_00.png", 128, 128);
     }
     if (index == 208) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_01.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_01.png", 128, 128);
     }
     if (index == 209) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_02.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_02.png", 128, 128);
     }
     if (index == 210) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_03.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_03.png", 128, 128);
     }
     if (index == 211) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_04.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_04.png", 128, 128);
     }
     if (index == 212) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_05.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_05.png", 128, 128);
     }
     if (index == 213) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_06.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_06.png", 128, 128);
     }
     if (index == 214) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_07.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_07.png", 128, 128);
     }
     if (index == 215) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_08.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_08.png", 128, 128);
     }
     if (index == 216) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_09.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_09.png", 128, 128);
     }
     if (index == 217) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_10.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_10.png", 128, 128);
     }
     if (index == 218) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_11.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_11.png", 128, 128);
     }
     if (index == 219) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_12.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_12.png", 128, 128);
     }
     if (index == 220) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_13.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_13.png", 128, 128);
     }
     if (index == 221) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_14.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_14.png", 128, 128);
     }
     if (index == 222) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_15.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_15.png", 128, 128);
     }
     if (index == 223) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_16.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_16.png", 128, 128);
     }
     if (index == 224) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_17.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_17.png", 128, 128);
     }
     if (index == 225) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_18.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_18.png", 128, 128);
     }
     if (index == 226) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_19.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_19.png", 128, 128);
     }
     if (index == 227) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_20.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_20.png", 128, 128);
     }
     if (index == 228) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_21.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_21.png", 128, 128);
     }
     if (index == 229) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_22.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_22.png", 128, 128);
     }
     if (index == 230) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_23.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_23.png", 128, 128);
     }
     if (index == 231) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_24.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_24.png", 128, 128);
     }
     if (index == 232) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_25.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_25.png", 128, 128);
     }
     if (index == 233) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_26.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_26.png", 128, 128);
     }
     if (index == 234) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_27.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_27.png", 128, 128);
     }
     if (index == 235) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_28.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_28.png", 128, 128);
     }
     if (index == 236) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_29.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_29.png", 128, 128);
     }
     if (index == 237) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_30.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_30.png", 128, 128);
     }
     if (index == 238) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_31.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_31.png", 128, 128);
     }
     if (index == 239) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_32.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_32.png", 128, 128);
     }
     if (index == 240) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_33.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_33.png", 128, 128);
     }
     if (index == 241) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_34.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_34.png", 128, 128);
     }
     if (index == 242) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_35.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_35.png", 128, 128);
     }
     if (index == 243) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_36.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_36.png", 128, 128);
     }
     if (index == 244) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_37.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_37.png", 128, 128);
     }
     if (index == 245) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_38.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_38.png", 128, 128);
     }
     if (index == 246) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_39.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_39.png", 128, 128);
     }
     if (index == 247) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_40.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_40.png", 128, 128);
     }
     if (index == 248) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_41.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_41.png", 128, 128);
     }
     if (index == 249) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_42.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_42.png", 128, 128);
     }
     if (index == 250) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_43.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_43.png", 128, 128);
     }
     if (index == 251) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_44.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_44.png", 128, 128);
     }
     if (index == 252) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_45.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_45.png", 128, 128);
     }
     if (index == 253) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_46.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_46.png", 128, 128);
     }
     if (index == 254) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_47.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_47.png", 128, 128);
     }
     if (index == 255) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_48.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_48.png", 128, 128);
     }
     if (index == 256) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_49.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_49.png", 128, 128);
     }
     if (index == 257) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_50.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_50.png", 128, 128);
     }
     if (index == 258) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_51.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_51.png", 128, 128);
     }
     if (index == 259) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_52.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_52.png", 128, 128);
     }
     if (index == 260) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_53.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_53.png", 128, 128);
     }
     if (index == 261) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_54.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_54.png", 128, 128);
     }
     if (index == 262) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_55.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_55.png", 128, 128);
     }
     if (index == 263) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_56.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_56.png", 128, 128);
     }
     if (index == 264) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_57.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_57.png", 128, 128);
     }
     if (index == 265) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_58.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_58.png", 128, 128);
     }
     if (index == 266) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_59.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_59.png", 128, 128);
     }
     if (index == 267) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/standard/frame_60.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/standard/frame_60.png", 128, 128);
     }
     if (index == 268) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_00.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_00.png", 128, 128);
     }
     if (index == 269) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_01.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_01.png", 128, 128);
     }
     if (index == 270) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_02.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_02.png", 128, 128);
     }
     if (index == 271) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_03.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_03.png", 128, 128);
     }
     if (index == 272) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_04.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_04.png", 128, 128);
     }
     if (index == 273) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_05.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_05.png", 128, 128);
     }
     if (index == 274) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_06.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_06.png", 128, 128);
     }
     if (index == 275) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_07.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_07.png", 128, 128);
     }
     if (index == 276) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_08.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_08.png", 128, 128);
     }
     if (index == 277) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_09.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_09.png", 128, 128);
     }
     if (index == 278) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_10.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_10.png", 128, 128);
     }
     if (index == 279) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_11.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_11.png", 128, 128);
     }
     if (index == 280) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_12.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_12.png", 128, 128);
     }
     if (index == 281) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_13.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_13.png", 128, 128);
     }
     if (index == 282) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_14.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_14.png", 128, 128);
     }
     if (index == 283) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_15.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_15.png", 128, 128);
     }
     if (index == 284) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_16.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_16.png", 128, 128);
     }
     if (index == 285) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_17.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_17.png", 128, 128);
     }
     if (index == 286) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_18.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_18.png", 128, 128);
     }
     if (index == 287) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_19.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_19.png", 128, 128);
     }
     if (index == 288) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_20.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_20.png", 128, 128);
     }
     if (index == 289) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_21.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_21.png", 128, 128);
     }
     if (index == 290) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_22.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_22.png", 128, 128);
     }
     if (index == 291) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_23.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_23.png", 128, 128);
     }
     if (index == 292) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_24.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_24.png", 128, 128);
     }
     if (index == 293) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_25.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_25.png", 128, 128);
     }
     if (index == 294) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_26.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_26.png", 128, 128);
     }
     if (index == 295) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_27.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_27.png", 128, 128);
     }
     if (index == 296) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_28.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_28.png", 128, 128);
     }
     if (index == 297) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_29.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_29.png", 128, 128);
     }
     if (index == 298) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_30.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_30.png", 128, 128);
     }
     if (index == 299) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_31.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_31.png", 128, 128);
     }
     if (index == 300) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_32.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_32.png", 128, 128);
     }
     if (index == 301) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_33.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_33.png", 128, 128);
     }
     if (index == 302) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_34.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_34.png", 128, 128);
     }
     if (index == 303) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_35.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_35.png", 128, 128);
     }
     if (index == 304) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_36.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_36.png", 128, 128);
     }
     if (index == 305) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_37.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_37.png", 128, 128);
     }
     if (index == 306) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_38.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_38.png", 128, 128);
     }
     if (index == 307) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_39.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_39.png", 128, 128);
     }
     if (index == 308) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_40.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_40.png", 128, 128);
     }
     if (index == 309) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_41.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_41.png", 128, 128);
     }
     if (index == 310) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_42.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_42.png", 128, 128);
     }
     if (index == 311) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_43.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_43.png", 128, 128);
     }
     if (index == 312) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_44.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_44.png", 128, 128);
     }
     if (index == 313) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_45.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_45.png", 128, 128);
     }
     if (index == 314) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_46.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_46.png", 128, 128);
     }
     if (index == 315) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_47.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_47.png", 128, 128);
     }
     if (index == 316) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_48.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_48.png", 128, 128);
     }
     if (index == 317) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_49.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_49.png", 128, 128);
     }
     if (index == 318) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_50.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_50.png", 128, 128);
     }
     if (index == 319) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_51.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_51.png", 128, 128);
     }
     if (index == 320) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_52.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_52.png", 128, 128);
     }
     if (index == 321) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_53.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_53.png", 128, 128);
     }
     if (index == 322) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_54.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_54.png", 128, 128);
     }
     if (index == 323) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_55.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_55.png", 128, 128);
     }
     if (index == 324) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_56.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_56.png", 128, 128);
     }
     if (index == 325) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_57.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_57.png", 128, 128);
     }
     if (index == 326) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_58.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_58.png", 128, 128);
     }
     if (index == 327) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/gold/frame_59.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/gold/frame_59.png", 128, 128);
     }
     if (index == 328) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_00.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_00.png", 128, 128);
     }
     if (index == 329) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_01.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_01.png", 128, 128);
     }
     if (index == 330) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_02.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_02.png", 128, 128);
     }
     if (index == 331) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_03.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_03.png", 128, 128);
     }
     if (index == 332) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_04.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_04.png", 128, 128);
     }
     if (index == 333) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_05.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_05.png", 128, 128);
     }
     if (index == 334) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_06.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_06.png", 128, 128);
     }
     if (index == 335) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_07.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_07.png", 128, 128);
     }
     if (index == 336) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_08.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_08.png", 128, 128);
     }
     if (index == 337) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_09.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_09.png", 128, 128);
     }
     if (index == 338) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_10.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_10.png", 128, 128);
     }
     if (index == 339) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_11.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_11.png", 128, 128);
     }
     if (index == 340) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_12.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_12.png", 128, 128);
     }
     if (index == 341) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_13.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_13.png", 128, 128);
     }
     if (index == 342) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_14.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_14.png", 128, 128);
     }
     if (index == 343) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_15.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_15.png", 128, 128);
     }
     if (index == 344) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_16.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_16.png", 128, 128);
     }
     if (index == 345) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_17.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_17.png", 128, 128);
     }
     if (index == 346) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_18.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_18.png", 128, 128);
     }
     if (index == 347) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_19.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_19.png", 128, 128);
     }
     if (index == 348) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_20.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_20.png", 128, 128);
     }
     if (index == 349) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_21.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_21.png", 128, 128);
     }
     if (index == 350) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_22.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_22.png", 128, 128);
     }
     if (index == 351) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_23.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_23.png", 128, 128);
     }
     if (index == 352) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_24.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_24.png", 128, 128);
     }
     if (index == 353) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_25.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_25.png", 128, 128);
     }
     if (index == 354) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_26.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_26.png", 128, 128);
     }
     if (index == 355) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_27.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_27.png", 128, 128);
     }
     if (index == 356) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_28.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_28.png", 128, 128);
     }
     if (index == 357) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_29.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_29.png", 128, 128);
     }
     if (index == 358) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_30.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_30.png", 128, 128);
     }
     if (index == 359) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_31.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_31.png", 128, 128);
     }
     if (index == 360) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_32.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_32.png", 128, 128);
     }
     if (index == 361) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_33.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_33.png", 128, 128);
     }
     if (index == 362) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_34.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_34.png", 128, 128);
     }
     if (index == 363) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_35.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_35.png", 128, 128);
     }
     if (index == 364) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_36.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_36.png", 128, 128);
     }
     if (index == 365) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_37.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_37.png", 128, 128);
     }
     if (index == 366) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_38.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_38.png", 128, 128);
     }
     if (index == 367) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_39.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_39.png", 128, 128);
     }
     if (index == 368) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_40.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_40.png", 128, 128);
     }
     if (index == 369) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_41.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_41.png", 128, 128);
     }
     if (index == 370) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_42.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_42.png", 128, 128);
     }
     if (index == 371) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_43.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_43.png", 128, 128);
     }
     if (index == 372) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_44.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_44.png", 128, 128);
     }
     if (index == 373) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_45.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_45.png", 128, 128);
     }
     if (index == 374) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_46.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_46.png", 128, 128);
     }
     if (index == 375) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_47.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_47.png", 128, 128);
     }
     if (index == 376) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_48.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_48.png", 128, 128);
     }
     if (index == 377) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_49.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_49.png", 128, 128);
     }
     if (index == 378) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_50.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_50.png", 128, 128);
     }
     if (index == 379) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_51.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_51.png", 128, 128);
     }
     if (index == 380) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_52.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_52.png", 128, 128);
     }
     if (index == 381) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_53.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_53.png", 128, 128);
     }
     if (index == 382) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_54.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_54.png", 128, 128);
     }
     if (index == 383) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_55.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_55.png", 128, 128);
     }
     if (index == 384) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_56.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_56.png", 128, 128);
     }
     if (index == 385) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_57.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_57.png", 128, 128);
     }
     if (index == 386) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_58.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_58.png", 128, 128);
     }
     if (index == 387) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_59.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_59.png", 128, 128);
     }
     if (index == 388) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/wall/frame_60.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/wall/frame_60.png", 128, 128);
     }
     if (index == 389) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_00.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_00.png", 128, 128);
     }
     if (index == 390) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_01.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_01.png", 128, 128);
     }
     if (index == 391) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_02.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_02.png", 128, 128);
     }
     if (index == 392) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_03.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_03.png", 128, 128);
     }
     if (index == 393) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_04.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_04.png", 128, 128);
     }
     if (index == 394) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_05.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_05.png", 128, 128);
     }
     if (index == 395) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_06.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_06.png", 128, 128);
     }
     if (index == 396) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_07.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_07.png", 128, 128);
     }
     if (index == 397) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_08.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_08.png", 128, 128);
     }
     if (index == 398) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_09.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_09.png", 128, 128);
     }
     if (index == 399) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_10.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_10.png", 128, 128);
     }
     if (index == 400) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_11.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_11.png", 128, 128);
     }
     if (index == 401) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_12.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_12.png", 128, 128);
     }
     if (index == 402) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_13.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_13.png", 128, 128);
     }
     if (index == 403) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_14.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_14.png", 128, 128);
     }
     if (index == 404) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_15.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_15.png", 128, 128);
     }
     if (index == 405) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_16.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_16.png", 128, 128);
     }
     if (index == 406) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_17.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_17.png", 128, 128);
     }
     if (index == 407) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_18.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_18.png", 128, 128);
     }
     if (index == 408) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_19.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_19.png", 128, 128);
     }
     if (index == 409) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_20.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_20.png", 128, 128);
     }
     if (index == 410) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_21.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_21.png", 128, 128);
     }
     if (index == 411) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_22.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_22.png", 128, 128);
     }
     if (index == 412) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_23.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_23.png", 128, 128);
     }
     if (index == 413) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_24.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_24.png", 128, 128);
     }
     if (index == 414) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_25.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_25.png", 128, 128);
     }
     if (index == 415) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_26.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_26.png", 128, 128);
     }
     if (index == 416) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_27.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_27.png", 128, 128);
     }
     if (index == 417) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_28.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_28.png", 128, 128);
     }
     if (index == 418) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_29.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_29.png", 128, 128);
     }
     if (index == 419) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_30.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_30.png", 128, 128);
     }
     if (index == 420) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_31.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_31.png", 128, 128);
     }
     if (index == 421) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_32.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_32.png", 128, 128);
     }
     if (index == 422) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_33.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_33.png", 128, 128);
     }
     if (index == 423) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_34.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_34.png", 128, 128);
     }
     if (index == 424) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_35.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_35.png", 128, 128);
     }
     if (index == 425) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_36.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_36.png", 128, 128);
     }
     if (index == 426) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_37.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_37.png", 128, 128);
     }
     if (index == 427) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_38.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_38.png", 128, 128);
     }
     if (index == 428) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_39.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_39.png", 128, 128);
     }
     if (index == 429) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_40.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_40.png", 128, 128);
     }
     if (index == 430) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_41.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_41.png", 128, 128);
     }
     if (index == 431) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_42.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_42.png", 128, 128);
     }
     if (index == 432) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_43.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_43.png", 128, 128);
     }
     if (index == 433) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_44.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_44.png", 128, 128);
     }
     if (index == 434) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_45.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_45.png", 128, 128);
     }
     if (index == 435) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_46.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_46.png", 128, 128);
     }
     if (index == 436) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_47.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_47.png", 128, 128);
     }
     if (index == 437) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_48.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_48.png", 128, 128);
     }
     if (index == 438) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_49.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_49.png", 128, 128);
     }
     if (index == 439) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_50.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_50.png", 128, 128);
     }
     if (index == 440) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_51.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_51.png", 128, 128);
     }
     if (index == 441) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/healer/frame_52.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/healer/frame_52.png", 128, 128);
     }
     if (index == 442) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_00.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_00.png", 128, 128);
     }
     if (index == 443) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_01.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_01.png", 128, 128);
     }
     if (index == 444) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_02.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_02.png", 128, 128);
     }
     if (index == 445) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_03.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_03.png", 128, 128);
     }
     if (index == 446) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_04.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_04.png", 128, 128);
     }
     if (index == 447) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_05.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_05.png", 128, 128);
     }
     if (index == 448) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_06.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_06.png", 128, 128);
     }
     if (index == 449) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_07.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_07.png", 128, 128);
     }
     if (index == 450) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_08.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_08.png", 128, 128);
     }
     if (index == 451) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_09.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_09.png", 128, 128);
     }
     if (index == 452) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_10.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_10.png", 128, 128);
     }
     if (index == 453) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_11.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_11.png", 128, 128);
     }
     if (index == 454) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_12.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_12.png", 128, 128);
     }
     if (index == 455) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_13.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_13.png", 128, 128);
     }
     if (index == 456) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_14.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_14.png", 128, 128);
     }
     if (index == 457) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_15.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_15.png", 128, 128);
     }
     if (index == 458) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_16.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_16.png", 128, 128);
     }
     if (index == 459) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_17.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_17.png", 128, 128);
     }
     if (index == 460) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_18.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_18.png", 128, 128);
     }
     if (index == 461) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_19.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_19.png", 128, 128);
     }
     if (index == 462) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_20.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_20.png", 128, 128);
     }
     if (index == 463) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_21.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_21.png", 128, 128);
     }
     if (index == 464) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_22.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_22.png", 128, 128);
     }
     if (index == 465) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_23.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_23.png", 128, 128);
     }
     if (index == 466) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_24.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_24.png", 128, 128);
     }
     if (index == 467) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_25.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_25.png", 128, 128);
     }
     if (index == 468) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_26.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_26.png", 128, 128);
     }
     if (index == 469) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_27.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_27.png", 128, 128);
     }
     if (index == 470) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_28.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_28.png", 128, 128);
     }
     if (index == 471) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_29.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_29.png", 128, 128);
     }
     if (index == 472) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_30.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_30.png", 128, 128);
     }
     if (index == 473) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_31.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_31.png", 128, 128);
     }
     if (index == 474) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_32.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_32.png", 128, 128);
     }
     if (index == 475) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_33.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_33.png", 128, 128);
     }
     if (index == 476) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_34.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_34.png", 128, 128);
     }
     if (index == 477) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_35.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_35.png", 128, 128);
     }
     if (index == 478) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_36.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_36.png", 128, 128);
     }
     if (index == 479) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_37.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_37.png", 128, 128);
     }
     if (index == 480) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_38.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_38.png", 128, 128);
     }
     if (index == 481) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_39.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_39.png", 128, 128);
     }
     if (index == 482) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_40.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_40.png", 128, 128);
     }
     if (index == 483) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_41.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_41.png", 128, 128);
     }
     if (index == 484) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_42.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_42.png", 128, 128);
     }
     if (index == 485) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_43.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_43.png", 128, 128);
     }
     if (index == 486) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_44.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_44.png", 128, 128);
     }
     if (index == 487) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_45.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_45.png", 128, 128);
     }
     if (index == 488) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_46.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_46.png", 128, 128);
     }
     if (index == 489) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_47.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_47.png", 128, 128);
     }
     if (index == 490) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_48.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_48.png", 128, 128);
     }
     if (index == 491) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_49.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_49.png", 128, 128);
     }
     if (index == 492) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_50.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_50.png", 128, 128);
     }
     if (index == 493) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_51.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_51.png", 128, 128);
     }
     if (index == 494) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_52.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_52.png", 128, 128);
     }
     if (index == 495) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_53.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_53.png", 128, 128);
     }
     if (index == 496) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_54.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_54.png", 128, 128);
     }
     if (index == 497) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_55.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_55.png", 128, 128);
     }
     if (index == 498) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_56.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_56.png", 128, 128);
     }
     if (index == 499) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_57.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_57.png", 128, 128);
     }
     if (index == 500) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_58.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_58.png", 128, 128);
     }
     if (index == 501) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rocket/frame_59.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rocket/frame_59.png", 128, 128);
     }
     if (index == 502) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_00.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_00.png", 128, 128);
     }
     if (index == 503) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_01.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_01.png", 128, 128);
     }
     if (index == 504) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_02.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_02.png", 128, 128);
     }
     if (index == 505) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_03.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_03.png", 128, 128);
     }
     if (index == 506) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_04.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_04.png", 128, 128);
     }
     if (index == 507) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_05.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_05.png", 128, 128);
     }
     if (index == 508) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_06.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_06.png", 128, 128);
     }
     if (index == 509) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_07.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_07.png", 128, 128);
     }
     if (index == 510) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_08.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_08.png", 128, 128);
     }
     if (index == 511) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_09.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_09.png", 128, 128);
     }
     if (index == 512) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_10.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_10.png", 128, 128);
     }
     if (index == 513) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_11.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_11.png", 128, 128);
     }
     if (index == 514) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_12.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_12.png", 128, 128);
     }
     if (index == 515) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_13.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_13.png", 128, 128);
     }
     if (index == 516) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_14.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_14.png", 128, 128);
     }
     if (index == 517) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_15.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_15.png", 128, 128);
     }
     if (index == 518) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_16.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_16.png", 128, 128);
     }
     if (index == 519) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_17.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_17.png", 128, 128);
     }
     if (index == 520) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_18.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_18.png", 128, 128);
     }
     if (index == 521) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_19.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_19.png", 128, 128);
     }
     if (index == 522) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_20.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_20.png", 128, 128);
     }
     if (index == 523) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_21.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_21.png", 128, 128);
     }
     if (index == 524) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_22.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_22.png", 128, 128);
     }
     if (index == 525) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_23.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_23.png", 128, 128);
     }
     if (index == 526) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_24.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_24.png", 128, 128);
     }
     if (index == 527) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_25.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_25.png", 128, 128);
     }
     if (index == 528) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_26.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_26.png", 128, 128);
     }
     if (index == 529) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_27.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_27.png", 128, 128);
     }
     if (index == 530) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_28.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_28.png", 128, 128);
     }
     if (index == 531) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_29.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_29.png", 128, 128);
     }
     if (index == 532) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_30.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_30.png", 128, 128);
     }
     if (index == 533) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_31.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_31.png", 128, 128);
     }
     if (index == 534) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_32.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_32.png", 128, 128);
     }
     if (index == 535) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_33.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_33.png", 128, 128);
     }
     if (index == 536) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_34.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_34.png", 128, 128);
     }
     if (index == 537) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_35.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_35.png", 128, 128);
     }
     if (index == 538) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_36.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_36.png", 128, 128);
     }
     if (index == 539) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_37.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_37.png", 128, 128);
     }
     if (index == 540) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_38.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_38.png", 128, 128);
     }
     if (index == 541) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_39.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_39.png", 128, 128);
     }
     if (index == 542) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_40.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_40.png", 128, 128);
     }
     if (index == 543) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_41.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_41.png", 128, 128);
     }
     if (index == 544) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_42.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_42.png", 128, 128);
     }
     if (index == 545) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_43.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_43.png", 128, 128);
     }
     if (index == 546) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_44.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_44.png", 128, 128);
     }
     if (index == 547) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_45.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_45.png", 128, 128);
     }
     if (index == 548) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_46.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_46.png", 128, 128);
     }
     if (index == 549) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_47.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_47.png", 128, 128);
     }
     if (index == 550) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_48.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_48.png", 128, 128);
     }
     if (index == 551) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_49.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_49.png", 128, 128);
     }
     if (index == 552) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_50.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_50.png", 128, 128);
     }
     if (index == 553) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_51.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_51.png", 128, 128);
     }
     if (index == 554) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_52.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_52.png", 128, 128);
     }
     if (index == 555) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_53.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_53.png", 128, 128);
     }
     if (index == 556) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_54.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_54.png", 128, 128);
     }
     if (index == 557) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_55.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_55.png", 128, 128);
     }
     if (index == 558) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_56.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_56.png", 128, 128);
     }
     if (index == 559) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_57.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_57.png", 128, 128);
     }
     if (index == 560) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_58.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_58.png", 128, 128);
     }
     if (index == 561) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/rapid/frame_59.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/rapid/frame_59.png", 128, 128);
     }
     if (index == 562) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_00.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_00.png", 128, 128);
     }
     if (index == 563) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_01.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_01.png", 128, 128);
     }
     if (index == 564) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_02.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_02.png", 128, 128);
     }
     if (index == 565) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_03.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_03.png", 128, 128);
     }
     if (index == 566) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_04.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_04.png", 128, 128);
     }
     if (index == 567) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_05.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_05.png", 128, 128);
     }
     if (index == 568) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_06.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_06.png", 128, 128);
     }
     if (index == 569) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_07.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_07.png", 128, 128);
     }
     if (index == 570) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_08.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_08.png", 128, 128);
     }
     if (index == 571) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_09.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_09.png", 128, 128);
     }
     if (index == 572) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_10.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_10.png", 128, 128);
     }
     if (index == 573) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_11.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_11.png", 128, 128);
     }
     if (index == 574) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_12.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_12.png", 128, 128);
     }
     if (index == 575) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_13.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_13.png", 128, 128);
     }
     if (index == 576) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_14.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_14.png", 128, 128);
     }
     if (index == 577) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_15.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_15.png", 128, 128);
     }
     if (index == 578) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_16.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_16.png", 128, 128);
     }
     if (index == 579) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_17.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_17.png", 128, 128);
     }
     if (index == 580) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_18.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_18.png", 128, 128);
     }
     if (index == 581) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_19.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_19.png", 128, 128);
     }
     if (index == 582) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_20.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_20.png", 128, 128);
     }
     if (index == 583) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_21.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_21.png", 128, 128);
     }
     if (index == 584) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_22.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_22.png", 128, 128);
     }
     if (index == 585) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_23.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_23.png", 128, 128);
     }
     if (index == 586) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_24.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_24.png", 128, 128);
     }
     if (index == 587) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_25.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_25.png", 128, 128);
     }
     if (index == 588) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_26.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_26.png", 128, 128);
     }
     if (index == 589) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_27.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_27.png", 128, 128);
     }
     if (index == 590) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_28.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_28.png", 128, 128);
     }
     if (index == 591) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_29.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_29.png", 128, 128);
     }
     if (index == 592) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_30.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_30.png", 128, 128);
     }
     if (index == 593) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_31.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_31.png", 128, 128);
     }
     if (index == 594) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_32.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_32.png", 128, 128);
     }
     if (index == 595) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_33.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_33.png", 128, 128);
     }
     if (index == 596) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_34.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_34.png", 128, 128);
     }
     if (index == 597) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_35.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_35.png", 128, 128);
     }
     if (index == 598) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_36.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_36.png", 128, 128);
     }
     if (index == 599) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_37.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_37.png", 128, 128);
     }
     if (index == 600) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_38.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_38.png", 128, 128);
     }
     if (index == 601) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_39.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_39.png", 128, 128);
     }
     if (index == 602) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_40.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_40.png", 128, 128);
     }
     if (index == 603) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_41.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_41.png", 128, 128);
     }
     if (index == 604) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_42.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_42.png", 128, 128);
     }
     if (index == 605) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_43.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_43.png", 128, 128);
     }
     if (index == 606) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_44.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_44.png", 128, 128);
     }
     if (index == 607) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_45.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_45.png", 128, 128);
     }
     if (index == 608) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_46.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_46.png", 128, 128);
     }
     if (index == 609) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_47.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_47.png", 128, 128);
     }
     if (index == 610) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_48.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_48.png", 128, 128);
     }
     if (index == 611) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_49.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_49.png", 128, 128);
     }
     if (index == 612) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_50.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_50.png", 128, 128);
     }
     if (index == 613) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_51.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_51.png", 128, 128);
     }
     if (index == 614) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_52.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_52.png", 128, 128);
     }
     if (index == 615) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_53.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_53.png", 128, 128);
     }
     if (index == 616) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_54.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_54.png", 128, 128);
     }
     if (index == 617) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_55.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_55.png", 128, 128);
     }
     if (index == 618) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_56.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_56.png", 128, 128);
     }
     if (index == 619) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_57.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_57.png", 128, 128);
     }
     if (index == 620) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_58.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_58.png", 128, 128);
     }
     if (index == 621) {
-        return brickout_defense_catalog_loader.current.load_image("assets/original/generated_4x/animations/towers/sniper/frame_59.png", 128, 128);
+        return brickout_defense_catalog_loader.current.load("assets/original/generated_4x/animations/towers/sniper/frame_59.png", 128, 128);
     }
     return false;
 }

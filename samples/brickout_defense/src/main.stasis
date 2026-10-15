@@ -1789,12 +1789,12 @@ function original_finish_boot(): bool {
     }
     if (!original_audio_started) {
         if (
-            !original_audio_assets.music.load_audio("assets/original/audio/background_music.mp3")
-            || !original_audio_assets.sound_beep.load_audio("assets/original/audio/beep.mp3")
-            || !original_audio_assets.sound_collision.load_audio("assets/original/audio/curve_collision.mp3")
-            || !original_audio_assets.sound_hit.load_audio("assets/original/audio/flixel.mp3")
-            || !original_audio_assets.sound_lost_life.load_audio("assets/original/audio/lost_life.mp3")
-            || !original_audio_assets.sound_rocket.load_audio("assets/original/audio/rocket_explosion.mp3")
+            !original_audio_assets.music.load("assets/original/audio/background_music.mp3")
+            || !original_audio_assets.sound_beep.load("assets/original/audio/beep.mp3")
+            || !original_audio_assets.sound_collision.load("assets/original/audio/curve_collision.mp3")
+            || !original_audio_assets.sound_hit.load("assets/original/audio/flixel.mp3")
+            || !original_audio_assets.sound_lost_life.load("assets/original/audio/lost_life.mp3")
+            || !original_audio_assets.sound_rocket.load("assets/original/audio/rocket_explosion.mp3")
         ) {
             original_boot_failed = true;
             return false;

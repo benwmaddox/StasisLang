@@ -6962,16 +6962,17 @@ mod tests {
             "sprites.a.draw(0.0, 0.0, 255, 0); sprites.b.draw(0.0, 0.0, 255, 0); ".repeat(8);
         let source = format!(
             r#"
-struct Sprite {{ handle: i32; width: i32; height: i32; }}
+import "../../src/stdlib/graphics.stasis";
 global sprites {{ a: Sprite; b: Sprite; }}
-function load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool {{ return true; }}
-function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void {{ return; }}
-function main(): i32 {{ sprites.a.load_sprite_from("{path_a}", 256, 256); sprites.b.load_sprite_from("{path_b}", 256, 256); return 0; }}
+function main(): i32 {{ sprites.a.load_from("{path_a}", 256, 256); sprites.b.load_from("{path_b}", 256, 256); return 0; }}
 function render(): void {{ {draws} return; }}
 "#
         );
         let mut jit = JitProcess::new();
-        jit.upsert_file("hot_render_policy.stasis", source);
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        jit.set_project_root(repository_root.to_string_lossy())
+            .expect("set hot-render fixture project root");
+        jit.upsert_file("tests/stasis/hot_render_policy.stasis", source);
         jit.compile().expect("compile hot-render policy fixture");
         jit
     }

@@ -1,16 +1,22 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::backend::compile_analysis::ConstantValue;
+use crate::backend::compile_analysis::{ConstantValue, ResolvedExternCallSignature};
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::frontend::lexer::{lex, Token, TokenKind};
 use crate::frontend::parser::{
     parse_local_declarations, parse_string_literal_text, parse_top_level_extern_functions,
-    parse_top_level_functions, ParsedFunctionAnnotationArgumentKind, ParsedLocalDeclaration,
+    parse_top_level_functions, ParsedFunctionAnnotation, ParsedFunctionAnnotationArgumentKind,
+    ParsedLocalDeclaration, ParsedParam,
+};
+use crate::frontend::types::{TypeCategory, TypeId, TypeTable, TYPE_ID_VOID};
+use crate::ir::hir::{
+    AssignTarget, ExternCallIdentity, FunctionHIR, ResolvedCallTarget, SimpleCondition, SimpleExpr,
+    SimpleStmt,
 };
 
 const ASSET_ANNOTATION: &str = "asset_path";
@@ -19,6 +25,25 @@ const ASSET_ANNOTATION: &str = "asset_path";
 struct AssetLoader {
     parameter_count: usize,
     path_parameter: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum AssetCallee {
+    Function(FunctionId),
+    Extern(ExternCallIdentity),
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AssetLoaderCatalog {
+    by_callee: BTreeMap<AssetCallee, Vec<AssetLoader>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SpriteRenderLoaderTargets {
+    pub(crate) sprites: HashSet<ResolvedCallTarget>,
+    pub(crate) sheets: HashSet<ResolvedCallTarget>,
+    pub(crate) sprite_draws: HashSet<ResolvedCallTarget>,
+    pub(crate) sheet_draws: HashSet<ResolvedCallTarget>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -66,10 +91,11 @@ pub struct AssetValidationResult {
 pub(crate) fn discover_asset_references(
     files: &[SourceFile],
     functions: &[FunctionMeta],
+    source_function_hirs: &BTreeMap<FunctionId, FunctionHIR>,
+    loaders: &AssetLoaderCatalog,
     reachable: &BTreeSet<FunctionId>,
     constants: &BTreeMap<String, ConstantValue>,
 ) -> Result<Vec<AssetReference>, String> {
-    let loaders = collect_asset_loaders(files)?;
     let local_declarations = files
         .iter()
         .map(|file| {
@@ -104,6 +130,7 @@ pub(crate) fn discover_asset_references(
             &function.name,
             &function.param_names,
             &local_declarations[function.file_id as usize],
+            &resolved_asset_calls(function, source_function_hirs.get(&function.id)),
             &loaders,
             constants,
             &mut references,
@@ -121,65 +148,56 @@ pub(crate) fn discover_asset_references(
     Ok(references)
 }
 
-fn collect_asset_loaders(
+pub(crate) fn collect_asset_loaders(
     files: &[SourceFile],
-) -> Result<BTreeMap<String, Vec<AssetLoader>>, String> {
-    let mut loaders = BTreeMap::new();
-    for file in files {
+    functions: &[FunctionMeta],
+    extern_signatures: &[ResolvedExternCallSignature],
+) -> Result<AssetLoaderCatalog, String> {
+    let mut loaders = AssetLoaderCatalog::default();
+    for (file_id, file) in files.iter().enumerate() {
         for declaration in parse_top_level_extern_functions(&file.content).map_err(|error| {
             format!(
                 "failed parsing asset loader declarations in {}: {error}",
                 file.path
             )
         })? {
-            if let Some(index) = legacy_asset_parameter(&declaration.name) {
-                if declaration
-                    .params
-                    .get(index)
-                    .is_some_and(|parameter| parameter.type_name == "string")
-                {
-                    insert_loader(
-                        &mut loaders,
-                        &declaration.name,
-                        declaration.params.len(),
-                        index,
-                    );
-                }
+            let metadata = asset_loader_metadata(
+                &declaration.name,
+                &declaration.params,
+                &declaration.annotations,
+            )?;
+            if metadata.is_empty() {
+                continue;
             }
-            for annotation in declaration
-                .annotations
+            let function = functions.iter().find(|function| {
+                function.file_id as usize == file_id
+                    && function.name == declaration.name
+                    && function.signature_range.start as usize <= declaration.name_range.start
+                    && declaration.name_range.end <= function.signature_range.end as usize
+            });
+            let extern_callees = extern_signatures
                 .iter()
-                .filter(|annotation| annotation.name == ASSET_ANNOTATION)
-            {
-                if !annotation.has_parentheses || annotation.arguments.len() != 1 {
-                    return Err(format!(
-                        "@asset_path on '{}' must name exactly one path parameter",
-                        declaration.name
-                    ));
+                .filter(|signature| {
+                    signature.source_path == file.path
+                        && signature.source_start == declaration.name_range.start
+                        && signature.source_end == declaration.name_range.end
+                })
+                .map(|signature| AssetCallee::Extern(signature.identity.clone()))
+                .collect::<BTreeSet<_>>();
+            let mut callees = extern_callees;
+            if let Some(function) = function {
+                callees.insert(AssetCallee::Function(function.id));
+            }
+            if callees.is_empty() {
+                return Err(format!(
+                    "asset loader declaration '{}' in {} has no resolved callee identity",
+                    declaration.name, file.path
+                ));
+            }
+            for callee in callees {
+                for loader in &metadata {
+                    insert_loader(&mut loaders, callee.clone(), *loader);
                 }
-                let argument = &annotation.arguments[0];
-                if argument.kind != ParsedFunctionAnnotationArgumentKind::Identifier {
-                    return Err(format!(
-                        "@asset_path on '{}' must use a parameter name",
-                        declaration.name
-                    ));
-                }
-                let index = declaration
-                    .params
-                    .iter()
-                    .position(|parameter| parameter.name == argument.text)
-                    .ok_or_else(|| {
-                        format!(
-                            "@asset_path on '{}' names unknown parameter '{}'",
-                            declaration.name, argument.text
-                        )
-                    })?;
-                insert_loader(
-                    &mut loaders,
-                    &declaration.name,
-                    declaration.params.len(),
-                    index,
-                );
             }
         }
         for declaration in parse_top_level_functions(&file.content).map_err(|error| {
@@ -188,80 +206,340 @@ fn collect_asset_loaders(
                 file.path
             )
         })? {
-            if let Some(index) = legacy_asset_parameter(&declaration.name) {
-                if declaration
-                    .params
-                    .get(index)
-                    .is_some_and(|parameter| parameter.type_name == "string")
-                {
-                    insert_loader(
-                        &mut loaders,
-                        &declaration.name,
-                        declaration.params.len(),
-                        index,
-                    );
-                }
+            let metadata = asset_loader_metadata(
+                &declaration.name,
+                &declaration.params,
+                &declaration.annotations,
+            )?;
+            if metadata.is_empty() {
+                continue;
             }
-            for annotation in declaration
-                .annotations
-                .iter()
-                .filter(|annotation| annotation.name == ASSET_ANNOTATION)
-            {
-                if !annotation.has_parentheses || annotation.arguments.len() != 1 {
-                    return Err(format!(
-                        "@asset_path on '{}' must name exactly one path parameter",
-                        declaration.name
-                    ));
-                }
-                let argument = &annotation.arguments[0];
-                if argument.kind != ParsedFunctionAnnotationArgumentKind::Identifier {
-                    return Err(format!(
-                        "@asset_path on '{}' must use a parameter name",
-                        declaration.name
-                    ));
-                }
-                let index = declaration
-                    .params
-                    .iter()
-                    .position(|parameter| parameter.name == argument.text)
-                    .ok_or_else(|| {
-                        format!(
-                            "@asset_path on '{}' names unknown parameter '{}'",
-                            declaration.name, argument.text
-                        )
-                    })?;
-                insert_loader(
-                    &mut loaders,
-                    &declaration.name,
-                    declaration.params.len(),
-                    index,
-                );
+            let function = functions.iter().find(|function| {
+                function.file_id as usize == file_id
+                    && function.name == declaration.name
+                    && function.signature_range.start as usize == declaration.signature_range.start
+                    && function.signature_range.end as usize == declaration.signature_range.end
+            });
+            let Some(function) = function else {
+                return Err(format!(
+                    "asset loader function '{}' in {} has no indexed function identity",
+                    declaration.name, file.path
+                ));
+            };
+            for loader in metadata {
+                insert_loader(&mut loaders, AssetCallee::Function(function.id), loader);
             }
         }
     }
     Ok(loaders)
 }
 
-fn insert_loader(
-    loaders: &mut BTreeMap<String, Vec<AssetLoader>>,
+fn asset_loader_metadata(
     name: &str,
-    parameter_count: usize,
-    path_parameter: usize,
-) {
-    let entries = loaders.entry(name.to_string()).or_default();
-    entries.push(AssetLoader {
-        parameter_count,
-        path_parameter,
-    });
+    params: &[ParsedParam],
+    annotations: &[ParsedFunctionAnnotation],
+) -> Result<Vec<AssetLoader>, String> {
+    let mut loaders = Vec::new();
+    if let Some(index) = legacy_asset_parameter(name) {
+        if params
+            .get(index)
+            .is_some_and(|parameter| parameter.type_name == "string")
+        {
+            loaders.push(AssetLoader {
+                parameter_count: params.len(),
+                path_parameter: index,
+            });
+        }
+    }
+    for annotation in annotations
+        .iter()
+        .filter(|annotation| annotation.name == ASSET_ANNOTATION)
+    {
+        if !annotation.has_parentheses || annotation.arguments.len() != 1 {
+            return Err(format!(
+                "@asset_path on '{name}' must name exactly one path parameter"
+            ));
+        }
+        let argument = &annotation.arguments[0];
+        if argument.kind != ParsedFunctionAnnotationArgumentKind::Identifier {
+            return Err(format!("@asset_path on '{name}' must use a parameter name"));
+        }
+        let index = params
+            .iter()
+            .position(|parameter| parameter.name == argument.text)
+            .ok_or_else(|| {
+                format!(
+                    "@asset_path on '{name}' names unknown parameter '{}'",
+                    argument.text
+                )
+            })?;
+        loaders.push(AssetLoader {
+            parameter_count: params.len(),
+            path_parameter: index,
+        });
+    }
+    loaders.sort();
+    loaders.dedup();
+    Ok(loaders)
+}
+
+fn insert_loader(loaders: &mut AssetLoaderCatalog, callee: AssetCallee, loader: AssetLoader) {
+    let entries = loaders.by_callee.entry(callee).or_default();
+    entries.push(loader);
     entries.sort();
     entries.dedup();
+}
+
+pub(crate) fn sprite_render_loader_targets(
+    catalog: &AssetLoaderCatalog,
+    files: &[SourceFile],
+    functions: &[FunctionMeta],
+    types: &TypeTable,
+    extern_signatures: &[ResolvedExternCallSignature],
+) -> Result<SpriteRenderLoaderTargets, String> {
+    let mut targets = SpriteRenderLoaderTargets::default();
+
+    for (callee, loaders) in &catalog.by_callee {
+        let params = match callee {
+            AssetCallee::Function(function_id) => functions
+                .iter()
+                .find(|function| function.id == *function_id)
+                .map(|function| function.params.as_slice()),
+            AssetCallee::Extern(identity) => extern_signatures
+                .iter()
+                .find(|signature| signature.identity == *identity)
+                .map(|signature| signature.params.as_slice()),
+        };
+        let Some(params) = params else {
+            continue;
+        };
+        let valid_loader = loaders
+            .iter()
+            .any(|loader| loader.path_parameter == 1 && loader.parameter_count == params.len());
+        if !valid_loader || params.is_empty() {
+            continue;
+        }
+
+        let target = resolved_call_target(callee);
+        match params.len() {
+            4 if is_canonical_render_type(
+                types,
+                files,
+                params[0],
+                "Sprite",
+                "/asset_tasks.stasis",
+            ) || is_sprite_load_abi(types, &callee, extern_signatures, 4, "Sprite") =>
+            {
+                targets.sprites.insert(target);
+            }
+            6 if is_canonical_render_type(
+                types,
+                files,
+                params[0],
+                "SpriteSheet",
+                "/graphics.stasis",
+            ) || is_sprite_load_abi(types, &callee, extern_signatures, 6, "SpriteSheet") =>
+            {
+                targets.sheets.insert(target);
+            }
+            _ => {}
+        }
+    }
+
+    // Compiler tests and embedding callers may declare the stable host ABI
+    // directly, without importing the stdlib declaration carrying
+    // @asset_path. The exact symbol and full lane signature identify that seam.
+    for signature in extern_signatures {
+        let callee = AssetCallee::Extern(signature.identity.clone());
+        if is_sprite_load_abi(types, &callee, extern_signatures, 4, "Sprite") {
+            targets.sprites.insert(resolved_call_target(&callee));
+        }
+        if is_sprite_load_abi(types, &callee, extern_signatures, 6, "SpriteSheet") {
+            targets.sheets.insert(resolved_call_target(&callee));
+        }
+        if is_sprite_draw_abi(types, files, signature, "Sprite") {
+            targets
+                .sprite_draws
+                .insert(ResolvedCallTarget::Extern(signature.identity.clone()));
+        }
+        if is_sprite_draw_abi(types, files, signature, "SpriteSheet") {
+            targets
+                .sheet_draws
+                .insert(ResolvedCallTarget::Extern(signature.identity.clone()));
+        }
+    }
+
+    Ok(targets)
+}
+
+fn resolved_call_target(callee: &AssetCallee) -> ResolvedCallTarget {
+    match callee {
+        AssetCallee::Function(function_id) => ResolvedCallTarget::Function(*function_id),
+        AssetCallee::Extern(identity) => ResolvedCallTarget::Extern(identity.clone()),
+    }
+}
+
+fn is_sprite_load_abi(
+    types: &TypeTable,
+    callee: &AssetCallee,
+    extern_signatures: &[ResolvedExternCallSignature],
+    parameter_count: usize,
+    receiver_name: &str,
+) -> bool {
+    let AssetCallee::Extern(identity) = callee else {
+        return false;
+    };
+    let Some(string_type) = types.resolve("string") else {
+        return false;
+    };
+    let Some(i32_type) = types.resolve("i32") else {
+        return false;
+    };
+    let Some(bool_type) = types.resolve("bool") else {
+        return false;
+    };
+    let Some(signature) = extern_signatures.iter().find(|signature| {
+        signature.identity == *identity
+            && signature.symbol == "stasis_jit_sprite_load_from"
+            && signature.source_path == identity.source_path
+    }) else {
+        return false;
+    };
+    signature.params.len() == parameter_count
+        && signature.params.first().is_some_and(|receiver| {
+            types.type_info(*receiver).is_some_and(|info| {
+                info.category == TypeCategory::Named && info.name == receiver_name
+            })
+        })
+        && signature.params.get(1) == Some(&string_type)
+        && signature.params[2..].iter().all(|param| *param == i32_type)
+        && signature.return_type == bool_type
+}
+
+fn is_sprite_draw_abi(
+    types: &TypeTable,
+    files: &[SourceFile],
+    signature: &ResolvedExternCallSignature,
+    receiver_name: &str,
+) -> bool {
+    let (expected_name, expected_symbol, expected_path_suffix) = match receiver_name {
+        "Sprite" => ("draw", "stasis_jit_sprite_draw", "/graphics.stasis"),
+        "SpriteSheet" => (
+            "draw_frame",
+            "stasis_jit_sprite_draw_frame",
+            "/graphics.stasis",
+        ),
+        _ => return false,
+    };
+    if !signature.trusted_graphics_source
+        || signature.name != expected_name
+        || signature.identity.name != expected_name
+        || signature.identity.source_path != signature.source_path
+        || signature.symbol != expected_symbol
+        || !signature
+            .identity
+            .symbol_candidates
+            .iter()
+            .any(|candidate| candidate == &signature.symbol)
+        || signature.return_type != TYPE_ID_VOID
+    {
+        return false;
+    }
+
+    let Some(receiver_type) = signature.params.first().copied() else {
+        return false;
+    };
+    let Some(receiver_info) = types.type_info(receiver_type) else {
+        return false;
+    };
+    if receiver_info.category != TypeCategory::Named
+        || !is_trusted_render_receiver_type(
+            types,
+            files,
+            receiver_type,
+            receiver_name,
+            expected_path_suffix,
+            &signature.source_path,
+        )
+    {
+        return false;
+    }
+
+    let Some(f32_type) = types.resolve("f32") else {
+        return false;
+    };
+    let Some(i32_type) = types.resolve("i32") else {
+        return false;
+    };
+    let expected_params = if receiver_name == "Sprite" {
+        vec![receiver_type, f32_type, f32_type, i32_type, i32_type]
+    } else {
+        vec![
+            receiver_type,
+            i32_type,
+            f32_type,
+            f32_type,
+            i32_type,
+            i32_type,
+        ]
+    };
+    signature.params == expected_params
+}
+
+fn is_trusted_render_receiver_type(
+    types: &TypeTable,
+    files: &[SourceFile],
+    type_id: TypeId,
+    expected_name: &str,
+    expected_path_suffix: &str,
+    signature_source_path: &str,
+) -> bool {
+    if is_canonical_render_type(types, files, type_id, expected_name, expected_path_suffix) {
+        return true;
+    }
+
+    let Some(origin) = types.source_type_origin(type_id) else {
+        return false;
+    };
+    let normalize = |path: &str| path.replace('\\', "/");
+    origin.name == expected_name
+        && normalize(&origin.path) == normalize(signature_source_path)
+        && crate::frontend::module_graph::is_explicit_graphics_test_seam_path(signature_source_path)
+}
+
+fn is_canonical_render_type(
+    types: &TypeTable,
+    files: &[SourceFile],
+    type_id: TypeId,
+    expected_name: &str,
+    expected_path_suffix: &str,
+) -> bool {
+    let Some(origin) = types.source_type_origin(type_id) else {
+        return false;
+    };
+    if origin.name != expected_name
+        || !origin
+            .path
+            .replace('\\', "/")
+            .ends_with(expected_path_suffix)
+    {
+        return false;
+    }
+    files
+        .iter()
+        .find(|file| file.path == origin.path)
+        .is_some_and(|file| {
+            crate::frontend::module_graph::is_recognized_graphics_implementation_source(
+                &origin.path,
+                &file.content,
+            )
+        })
 }
 
 fn legacy_asset_parameter(name: &str) -> Option<usize> {
     match name {
         "audio_load_effect" | "audio_load_music" | "audio_load_wav" | "gfx_load_sprite"
         | "load_font" => Some(0),
-        "load_sprite_from" | "load_sprite_sheet_from" => Some(1),
         _ => None,
     }
 }
@@ -273,7 +551,8 @@ fn discover_function_references(
     function_name: &str,
     parameter_names: &[String],
     local_declarations: &[ParsedLocalDeclaration],
-    loaders: &BTreeMap<String, Vec<AssetLoader>>,
+    resolved_calls: &BTreeMap<(usize, usize), AssetCallee>,
+    loaders: &AssetLoaderCatalog,
     constants: &BTreeMap<String, ConstantValue>,
     out: &mut Vec<AssetReference>,
 ) -> Result<(), String> {
@@ -284,19 +563,22 @@ fn discover_function_references(
             continue;
         }
         let name = &body[token.start..token.end];
-        let Some(loader_signatures) = loaders.get(name) else {
+        let Some(callee) = resolved_calls.get(&(token.start, token.end)) else {
             continue;
         };
-        let receiver_call = index > 0
+        let Some(loader_signatures) = loaders.by_callee.get(callee) else {
+            continue;
+        };
+        let dotted_call = index > 0
             && token_text_is(body, tokens[index - 1], ".")
             && tokens
                 .get(index + 1)
                 .is_some_and(|next| next.kind == TokenKind::LParen);
-        let bare_call = !receiver_call
+        let bare_call = !dotted_call
             && tokens
                 .get(index + 1)
                 .is_some_and(|next| next.kind == TokenKind::LParen);
-        if !receiver_call && !bare_call {
+        if !dotted_call && !bare_call {
             continue;
         }
         let open = index + 1;
@@ -304,17 +586,16 @@ fn discover_function_references(
         let path_operands = loader_signatures
             .iter()
             .filter_map(|loader| {
-                if receiver_call {
-                    (loader.parameter_count == arguments.len() + 1).then(|| {
-                        if loader.path_parameter == 0 {
-                            PathOperand::Receiver
-                        } else {
-                            PathOperand::Argument(loader.path_parameter - 1)
-                        }
+                if dotted_call && loader.parameter_count == arguments.len() + 1 {
+                    Some(if loader.path_parameter == 0 {
+                        PathOperand::Receiver
+                    } else {
+                        PathOperand::Argument(loader.path_parameter - 1)
                     })
+                } else if loader.parameter_count == arguments.len() {
+                    Some(PathOperand::Argument(loader.path_parameter))
                 } else {
-                    (loader.parameter_count == arguments.len())
-                        .then_some(PathOperand::Argument(loader.path_parameter))
+                    None
                 }
             })
             .collect::<BTreeSet<_>>();
@@ -359,6 +640,169 @@ fn discover_function_references(
         });
     }
     Ok(())
+}
+
+fn resolved_asset_calls(
+    function: &FunctionMeta,
+    hir: Option<&FunctionHIR>,
+) -> BTreeMap<(usize, usize), AssetCallee> {
+    let mut calls = BTreeMap::new();
+    let Some(hir) = hir else {
+        return calls;
+    };
+    for statement in &hir.statements {
+        collect_calls_in_statement(statement, &mut calls);
+    }
+    // HIR call spans are relative to the cached function body. Validate that
+    // the span still indexes the same function range before the scanner uses it.
+    let body_len = function
+        .source_range
+        .end
+        .saturating_sub(function.source_range.start) as usize;
+    calls.retain(|(start, end), _| *start <= *end && *end <= body_len);
+    calls
+}
+
+fn collect_calls_in_statement(
+    statement: &SimpleStmt,
+    calls: &mut BTreeMap<(usize, usize), AssetCallee>,
+) {
+    match statement {
+        SimpleStmt::Let { expression, .. }
+        | SimpleStmt::Expr(expression)
+        | SimpleStmt::Return(expression) => collect_calls_in_expression(expression, calls),
+        SimpleStmt::Assign {
+            target, expression, ..
+        } => {
+            collect_calls_in_assignment_target(target, calls);
+            collect_calls_in_expression(expression, calls);
+        }
+        SimpleStmt::Convert { target, source, .. } => {
+            collect_calls_in_assignment_target(target, calls);
+            collect_calls_in_expression(source, calls);
+        }
+        SimpleStmt::If {
+            condition,
+            then_statements,
+            else_statements,
+        } => {
+            collect_calls_in_condition(condition, calls);
+            for statement in then_statements {
+                collect_calls_in_statement(statement, calls);
+            }
+            if let Some(statements) = else_statements {
+                for statement in statements {
+                    collect_calls_in_statement(statement, calls);
+                }
+            }
+        }
+        SimpleStmt::For {
+            init,
+            condition,
+            step,
+            body_statements,
+        } => {
+            collect_calls_in_statement(init, calls);
+            collect_calls_in_condition(condition, calls);
+            collect_calls_in_statement(step, calls);
+            for statement in body_statements {
+                collect_calls_in_statement(statement, calls);
+            }
+        }
+        SimpleStmt::Foreach {
+            body_statements, ..
+        } => {
+            for statement in body_statements {
+                collect_calls_in_statement(statement, calls);
+            }
+        }
+        SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
+    }
+}
+
+fn collect_calls_in_assignment_target(
+    target: &AssignTarget,
+    calls: &mut BTreeMap<(usize, usize), AssetCallee>,
+) {
+    if let AssignTarget::IndexedPath {
+        index,
+        nested_index,
+        ..
+    } = target
+    {
+        collect_calls_in_expression(index, calls);
+        if let Some(nested_index) = nested_index {
+            collect_calls_in_expression(nested_index, calls);
+        }
+    }
+}
+
+fn collect_calls_in_condition(
+    condition: &SimpleCondition,
+    calls: &mut BTreeMap<(usize, usize), AssetCallee>,
+) {
+    match condition {
+        SimpleCondition::Comparison { lhs, rhs, .. } => {
+            collect_calls_in_expression(lhs, calls);
+            collect_calls_in_expression(rhs, calls);
+        }
+        SimpleCondition::Expr(expression) => collect_calls_in_expression(expression, calls),
+        SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+            collect_calls_in_condition(lhs, calls);
+            collect_calls_in_condition(rhs, calls);
+        }
+        SimpleCondition::Not(inner) => collect_calls_in_condition(inner, calls),
+    }
+}
+
+fn collect_calls_in_expression(
+    expression: &SimpleExpr,
+    calls: &mut BTreeMap<(usize, usize), AssetCallee>,
+) {
+    match expression {
+        SimpleExpr::Condition(condition) => collect_calls_in_condition(condition, calls),
+        SimpleExpr::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } => {
+            collect_calls_in_expression(index, calls);
+            if let Some(nested_index) = nested_index {
+                collect_calls_in_expression(nested_index, calls);
+            }
+        }
+        SimpleExpr::Call {
+            args,
+            source_span,
+            resolved_target,
+            ..
+        } => {
+            if let (Some(source_span), Some(resolved_target)) = (source_span, resolved_target) {
+                let callee = match resolved_target {
+                    ResolvedCallTarget::Function(function) => AssetCallee::Function(*function),
+                    ResolvedCallTarget::Extern(identity) => AssetCallee::Extern(identity.clone()),
+                };
+                calls.insert(
+                    (source_span.start as usize, source_span.end as usize),
+                    callee,
+                );
+            }
+            for argument in args {
+                collect_calls_in_expression(argument, calls);
+            }
+        }
+        SimpleExpr::Unary { operand, .. } => collect_calls_in_expression(operand, calls),
+        SimpleExpr::Binary { lhs, rhs, .. } => {
+            collect_calls_in_expression(lhs, calls);
+            collect_calls_in_expression(rhs, calls);
+        }
+        SimpleExpr::DefaultValue(_)
+        | SimpleExpr::Int(_)
+        | SimpleExpr::Float(_)
+        | SimpleExpr::Bool(_)
+        | SimpleExpr::StringLiteral(_)
+        | SimpleExpr::Identifier(_) => {}
+    }
 }
 
 fn receiver_expression_range(
@@ -835,42 +1279,429 @@ mod tests {
     #[test]
     fn custom_loader_metadata_uses_the_named_parameter() {
         let source = "function @asset_path(file) @extern(\"custom_load\") custom_load(self: i32, file: string): i32;";
-        let files = vec![SourceFile {
-            path: "custom.stasis".into(),
-            content: source.into(),
-            original_content: source.into(),
-            hash: 0,
-            functions: Vec::new(),
-        }];
+        let declaration = parse_top_level_extern_functions(source)
+            .expect("parse external loader")
+            .remove(0);
         assert_eq!(
-            collect_asset_loaders(&files)
-                .expect("loader metadata")
-                .get("custom_load"),
-            Some(&vec![AssetLoader {
+            asset_loader_metadata(
+                &declaration.name,
+                &declaration.params,
+                &declaration.annotations,
+            )
+            .expect("loader metadata"),
+            vec![AssetLoader {
                 parameter_count: 2,
                 path_parameter: 1,
-            }])
+            }],
         );
     }
 
     #[test]
+    fn sprite_abi_requires_the_selected_physical_symbol() {
+        let mut types = TypeTable::new();
+        let sprite_type = types.resolve_or_intern("Sprite").expect("Sprite type");
+        let string_type = types.resolve_or_intern("string").expect("string type");
+        let i32_type = types.resolve("i32").expect("i32 type");
+        let bool_type = types.resolve("bool").expect("bool type");
+        let identity = ExternCallIdentity {
+            source_path: "game/graphics.stasis".to_string(),
+            name: "load_from".to_string(),
+            symbol_candidates: vec![
+                "custom_sprite_load_from".to_string(),
+                "stasis_jit_sprite_load_from".to_string(),
+            ],
+            declared_params: vec![
+                "Sprite".to_string(),
+                "string".to_string(),
+                "i32".to_string(),
+                "i32".to_string(),
+            ],
+            declared_return_type: "bool".to_string(),
+        };
+        let callee = AssetCallee::Extern(identity.clone());
+        let mut selected = ResolvedExternCallSignature {
+            identity: identity.clone(),
+            name: identity.name.clone(),
+            symbol: "custom_sprite_load_from".to_string(),
+            source_path: identity.source_path.clone(),
+            trusted_graphics_source: false,
+            source_start: 0,
+            source_end: 0,
+            params: vec![sprite_type, string_type, i32_type, i32_type],
+            return_type: bool_type,
+        };
+
+        assert!(!is_sprite_load_abi(
+            &types,
+            &callee,
+            std::slice::from_ref(&selected),
+            4,
+            "Sprite",
+        ));
+
+        selected.symbol = "stasis_jit_sprite_load_from".to_string();
+        assert!(is_sprite_load_abi(
+            &types,
+            &callee,
+            &[selected],
+            4,
+            "Sprite",
+        ));
+    }
+
+    #[test]
+    fn direct_draw_targets_require_trusted_source_exact_lanes_and_bound_symbols() {
+        use crate::frontend::types::SourceTypeOrigin;
+
+        let source_path = "tests/stasis/hot_render.stasis";
+        let mut types = TypeTable::new();
+        let sprite_type = types.resolve_or_intern("Sprite").expect("Sprite type");
+        let sheet_type = types
+            .resolve_or_intern("SpriteSheet")
+            .expect("SpriteSheet type");
+        let f32_type = types.resolve("f32").expect("f32 type");
+        let i32_type = types.resolve("i32").expect("i32 type");
+        types.replace_source_type_origins(BTreeMap::from([
+            (
+                "Sprite".to_string(),
+                SourceTypeOrigin {
+                    path: source_path.to_string(),
+                    name: "Sprite".to_string(),
+                },
+            ),
+            (
+                "SpriteSheet".to_string(),
+                SourceTypeOrigin {
+                    path: source_path.to_string(),
+                    name: "SpriteSheet".to_string(),
+                },
+            ),
+        ]));
+
+        let make_signature =
+            |name: &str, symbol: &str, declared_params: &[&str], params: Vec<TypeId>| {
+                let identity = ExternCallIdentity {
+                    source_path: source_path.to_string(),
+                    name: name.to_string(),
+                    symbol_candidates: vec![symbol.to_string()],
+                    declared_params: declared_params
+                        .iter()
+                        .map(|param| param.to_string())
+                        .collect(),
+                    declared_return_type: "void".to_string(),
+                };
+                ResolvedExternCallSignature {
+                    identity,
+                    name: name.to_string(),
+                    symbol: symbol.to_string(),
+                    source_path: source_path.to_string(),
+                    trusted_graphics_source: true,
+                    source_start: 0,
+                    source_end: name.len(),
+                    params,
+                    return_type: TYPE_ID_VOID,
+                }
+            };
+        let sprite_draw = make_signature(
+            "draw",
+            "stasis_jit_sprite_draw",
+            &["Sprite", "f32", "f32", "i32", "i32"],
+            vec![sprite_type, f32_type, f32_type, i32_type, i32_type],
+        );
+        let sheet_draw = make_signature(
+            "draw_frame",
+            "stasis_jit_sprite_draw_frame",
+            &["SpriteSheet", "i32", "f32", "f32", "i32", "i32"],
+            vec![sheet_type, i32_type, f32_type, f32_type, i32_type, i32_type],
+        );
+        let mut wrong_selected_symbol = sprite_draw.clone();
+        wrong_selected_symbol.identity.symbol_candidates = vec![
+            "custom_sprite_draw".to_string(),
+            "stasis_jit_sprite_draw".to_string(),
+        ];
+        wrong_selected_symbol.symbol = "custom_sprite_draw".to_string();
+        let mut untrusted_declaration = sprite_draw.clone();
+        untrusted_declaration.trusted_graphics_source = false;
+        let mut wrong_lane = sprite_draw.clone();
+        wrong_lane.params[1] = i32_type;
+        wrong_lane.identity.declared_params[1] = "i32".to_string();
+
+        let signatures = vec![
+            sprite_draw.clone(),
+            sheet_draw.clone(),
+            wrong_selected_symbol,
+            untrusted_declaration,
+            wrong_lane,
+        ];
+        let targets = sprite_render_loader_targets(
+            &AssetLoaderCatalog::default(),
+            &[],
+            &[],
+            &types,
+            &signatures,
+        )
+        .expect("render target catalog");
+
+        assert!(targets
+            .sprite_draws
+            .contains(&ResolvedCallTarget::Extern(sprite_draw.identity)));
+        assert!(targets
+            .sheet_draws
+            .contains(&ResolvedCallTarget::Extern(sheet_draw.identity)));
+        assert_eq!(targets.sprite_draws.len(), 1);
+        assert_eq!(targets.sheet_draws.len(), 1);
+    }
+
+    #[test]
     fn built_in_wrapper_metadata_uses_the_path_parameter() {
-        let source = "function load_sprite_sheet_from(self: i32, path: string, columns: i32): bool { return columns > 0; }";
-        let files = vec![SourceFile {
-            path: "custom.stasis".into(),
-            content: source.into(),
-            original_content: source.into(),
-            hash: 0,
-            functions: Vec::new(),
-        }];
-        assert_eq!(
-            collect_asset_loaders(&files)
+        let source = concat!(
+            "struct Sprite { handle: i32; width: i32; height: i32; }\n",
+            "struct SpriteSheet { handle: i32; }\n",
+            "function @asset_path(path) load_from(self: Sprite, path: string, width: i32, height: i32): bool { return width > 0 && height > 0; }\n",
+            "function @asset_path(path) load_from(self: SpriteSheet, path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool { return columns > 0 && rows > 0 && cell_width > 0 && cell_height > 0; }",
+        );
+        let declarations = parse_top_level_functions(source).expect("parse wrappers");
+        let metadata = declarations
+            .iter()
+            .map(|declaration| {
+                asset_loader_metadata(
+                    &declaration.name,
+                    &declaration.params,
+                    &declaration.annotations,
+                )
                 .expect("wrapper metadata")
-                .get("load_sprite_sheet_from"),
-            Some(&vec![AssetLoader {
-                parameter_count: 3,
-                path_parameter: 1,
-            }])
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            metadata,
+            vec![
+                vec![AssetLoader {
+                    parameter_count: 4,
+                    path_parameter: 1,
+                },],
+                vec![AssetLoader {
+                    parameter_count: 6,
+                    path_parameter: 1,
+                },],
+            ]
+        );
+    }
+
+    #[test]
+    fn resolved_load_from_overloads_exclude_unannotated_same_arity_calls() {
+        let source = r#"
+struct Sprite { loaded: bool; }
+struct SpriteSheet { loaded: bool; }
+struct Custom { loaded: bool; }
+function @asset_path(path) @extern("stasis_jit_sprite_load_from") load_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @asset_path(path) load_from(self: SpriteSheet, path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool {
+    return columns > 0 && rows > 0 && cell_width > 0 && cell_height > 0;
+}
+function load_from(self: Custom, path: string, width: i32, height: i32): bool {
+    return width > 0 && height > 0;
+}
+function path_for(width: i32): string { return "assets/nested.png"; }
+global sprite: Sprite;
+global sheet: SpriteSheet;
+global custom: Custom;
+global sprites: Sprite[1];
+function main(): i32 {
+    load_from(sprite, "assets/sprite.png", 32, 24);
+    sprite.load_from(path_for(32), 32, 24);
+    sheet.load_from("assets/sheet.png", 2, 2, 16, 16);
+    load_from(sheet, "assets/sheet_function.png", 2, 2, 16, 16);
+    sprites[0].load_from("assets/indexed.png", 32, 24);
+    load_from(custom, "assets/custom_function.png", 32, 24);
+    custom.load_from("assets/custom_receiver.png", 32, 24);
+    return 0;
+}
+"#;
+        let mut jit = JitProcess::new();
+        let path = "tests/stasis/assets/load_from_overloads.stasis";
+        jit.upsert_file(path, source);
+        jit.compile().expect("compile typed loader overloads");
+        let references = jit.program_snapshot().expect("snapshot").asset_references();
+
+        assert_eq!(references.len(), 5);
+        assert!(references
+            .iter()
+            .all(|reference| reference.api == "load_from"));
+        let sprite = references
+            .iter()
+            .find(|reference| reference.logical_path.as_deref() == Some("assets/sprite.png"))
+            .expect("function-form Sprite loader reference");
+        let sheet = references
+            .iter()
+            .find(|reference| reference.logical_path.as_deref() == Some("assets/sheet.png"))
+            .expect("receiver-form SpriteSheet loader reference");
+        let sheet_function = references
+            .iter()
+            .find(|reference| {
+                reference.logical_path.as_deref() == Some("assets/sheet_function.png")
+            })
+            .expect("function-form SpriteSheet loader reference");
+        let indexed = references
+            .iter()
+            .find(|reference| reference.logical_path.as_deref() == Some("assets/indexed.png"))
+            .expect("indexed Sprite receiver reference");
+        let nested = references
+            .iter()
+            .find(|reference| reference.logical_path.is_none())
+            .expect("nested dynamic path reference");
+        assert_eq!(sprite.logical_path.as_deref(), Some("assets/sprite.png"));
+        assert_eq!(sheet.logical_path.as_deref(), Some("assets/sheet.png"));
+        assert_eq!(
+            sheet_function.logical_path.as_deref(),
+            Some("assets/sheet_function.png")
+        );
+        assert_eq!(
+            &source[indexed.start..indexed.end],
+            "\"assets/indexed.png\""
+        );
+        assert_eq!(&source[nested.start..nested.end], "path_for(32)");
+        assert!(references.iter().all(|reference| {
+            !matches!(
+                reference.logical_path.as_deref(),
+                Some("assets/custom_function.png" | "assets/custom_receiver.png")
+            )
+        }));
+
+        let old_paths = references
+            .iter()
+            .map(|reference| reference.logical_path.clone())
+            .collect::<Vec<_>>();
+        let moved_source = format!(
+            "// shift the function body ranges while keeping the cached HIR bodies unchanged\nfunction earlier(): i32 {{ return 1; }}\n{source}"
+        );
+        jit.upsert_file(path, &moved_source);
+        jit.compile().expect("compile after source prefix movement");
+        let moved_references = jit
+            .program_snapshot()
+            .expect("moved snapshot")
+            .asset_references();
+        assert_eq!(
+            moved_references
+                .iter()
+                .map(|reference| reference.logical_path.clone())
+                .collect::<Vec<_>>(),
+            old_paths
+        );
+        assert!(moved_references.iter().all(|reference| {
+            let expression = &moved_source[reference.start..reference.end];
+            match reference.logical_path.as_deref() {
+                Some("assets/sprite.png") => expression == "\"assets/sprite.png\"",
+                Some("assets/sheet.png") => expression == "\"assets/sheet.png\"",
+                Some("assets/sheet_function.png") => expression == "\"assets/sheet_function.png\"",
+                Some("assets/indexed.png") => expression == "\"assets/indexed.png\"",
+                None => expression == "path_for(32)",
+                _ => false,
+            }
+        }));
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project_root = std::env::temp_dir().join(format!("stasis_sheet_asset_{stamp}"));
+        fs::create_dir_all(project_root.join("assets")).expect("asset directory");
+        fs::write(project_root.join("assets/sheet.png"), "sheet").expect("sheet asset");
+        let sheet_reference = moved_references
+            .iter()
+            .find(|reference| reference.logical_path.as_deref() == Some("assets/sheet.png"))
+            .expect("SpriteSheet package reference");
+        let packaged = validate_asset_references(
+            &project_root,
+            &[],
+            std::slice::from_ref(sheet_reference),
+            Some(&BTreeSet::from(["assets/sheet.png".to_string()])),
+            &BTreeSet::new(),
+        );
+        assert_eq!(packaged.references.len(), 1);
+        assert_eq!(packaged.references[0].project_path, "assets/sheet.png");
+        fs::remove_dir_all(project_root).ok();
+    }
+
+    #[test]
+    fn module_qualified_asset_call_uses_the_resolved_function_identity() {
+        let main = r#"
+import "asset_loader.stasis";
+global sprite: ModuleSprite;
+function main(): i32 {
+    asset_loader.load_from(sprite, "assets/module_sprite.png", 32, 24);
+    sprite.load_from("assets/receiver_sprite.png", 32, 24);
+    return 0;
+}
+"#;
+        let loader = r#"
+struct ModuleSprite { loaded: bool; }
+function @asset_path(path) @extern("stasis_jit_sprite_load_from") load_from(self: ModuleSprite, path: string, width: i32, height: i32): bool;
+"#;
+        let mut jit = JitProcess::new();
+        jit.upsert_file("tests/stasis/assets/module_main.stasis", main);
+        jit.upsert_file("tests/stasis/assets/asset_loader.stasis", loader);
+        jit.compile().expect("compile qualified asset calls");
+        let references = jit.program_snapshot().expect("snapshot").asset_references();
+
+        assert_eq!(references.len(), 2);
+        assert_eq!(
+            references
+                .iter()
+                .map(|reference| reference.logical_path.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("assets/module_sprite.png"),
+                Some("assets/receiver_sprite.png"),
+            ]
+        );
+    }
+
+    #[test]
+    fn inlined_loader_calls_keep_their_original_source_identity_and_range() {
+        let source_prefix = r#"
+struct Sprite { loaded: bool; }
+struct Custom { loaded: bool; }
+function @asset_path(path) @extern("stasis_jit_sprite_load_from") load_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function load_from(self: Custom, path: string, width: i32, height: i32): bool { return width > 0 && height > 0; }
+global sprite: Sprite;
+global custom: Custom;
+function @inline load_sprite(): bool { return sprite.load_from("assets/inline.png", 32, 24); }
+"#;
+        let wrapper_body_start = source_prefix
+            .find("function @inline load_sprite")
+            .and_then(|start| {
+                source_prefix[start..]
+                    .find('{')
+                    .map(|open| start + open + 1)
+            })
+            .expect("inline wrapper body");
+        let inlined_callee_start = source_prefix[wrapper_body_start..]
+            .find("load_from(")
+            .map(|start| wrapper_body_start + start)
+            .expect("annotated loader call");
+        let relative_callee_start = inlined_callee_start - wrapper_body_start;
+        let custom_callee_prefix = "custom.";
+        let padding = " ".repeat(relative_callee_start - custom_callee_prefix.len());
+        // This deliberate span collision catches callee-body coordinates being
+        // interpreted as a caller range after expression inlining.
+        let main = format!(
+            "function main(): i32 {{{padding}custom.load_from(\"assets/custom.png\", 32, 24); load_sprite(); return 0; }}\n"
+        );
+        let source = format!("{source_prefix}{main}");
+
+        let mut jit = JitProcess::new();
+        jit.upsert_file("tests/stasis/assets/inlined_loader.stasis", &source);
+        jit.compile().expect("compile inline loader fixture");
+        let references = jit.program_snapshot().expect("snapshot").asset_references();
+
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].api, "load_from");
+        assert_eq!(
+            references[0].logical_path.as_deref(),
+            Some("assets/inline.png")
+        );
+        assert_eq!(
+            &source[references[0].start..references[0].end],
+            "\"assets/inline.png\""
         );
     }
 
@@ -896,11 +1727,12 @@ function main(): i32 { return request_audio_load("assets/voice.mp3"); }
     }
 
     #[test]
-    fn snapshot_discovers_only_reachable_annotated_asset_calls() {
+    fn snapshot_discovers_reachable_annotated_and_legacy_asset_calls() {
         let source = r#"
 extern function @asset_path(path) load_font(path: string, size: i32): i32;
+extern function gfx_load_sprite(path: string, max_w: i32, max_h: i32): i32;
 const FONT_PATH: string = "assets/ui.ttf";
-function helper(): i32 { return FONT_PATH.load_font(16); }
+function helper(): i32 { return FONT_PATH.load_font(16) + gfx_load_sprite("assets/raw_sprite.png", 32, 32); }
 function unused(): i32 { return load_font("assets/unused.ttf", 16); }
 function main(): i32 { return helper(); }
 "#;
@@ -908,10 +1740,19 @@ function main(): i32 { return helper(); }
         jit.upsert_file("tests/stasis/assets/reachable.stasis", source);
         jit.compile().expect("compile asset fixture");
         let references = jit.program_snapshot().expect("snapshot").asset_references();
-        assert_eq!(references.len(), 1);
+        assert_eq!(references.len(), 2);
         assert_eq!(references[0].api, "load_font");
         assert_eq!(references[0].logical_path.as_deref(), Some("assets/ui.ttf"));
         assert_eq!(&source[references[0].start..references[0].end], "FONT_PATH");
+        assert_eq!(references[1].api, "gfx_load_sprite");
+        assert_eq!(
+            references[1].logical_path.as_deref(),
+            Some("assets/raw_sprite.png")
+        );
+        assert_eq!(
+            &source[references[1].start..references[1].end],
+            "\"assets/raw_sprite.png\""
+        );
 
         let mut aot = AotProcess::new();
         aot.upsert_file("tests/stasis/assets/reachable.stasis", source);
@@ -1066,7 +1907,7 @@ function main(): i32 {
         fs::write(root.join("assets/svg/hero.svg"), "svg").expect("asset");
         let references = vec![
             AssetReference {
-                api: "load_sprite_from".into(),
+                api: "load_from".into(),
                 source_path: root.join("src/main.stasis").to_string_lossy().into_owned(),
                 start: 10,
                 end: 20,

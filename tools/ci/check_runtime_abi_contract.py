@@ -920,7 +920,7 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
         ),
         MOBILE_PACKAGED_ASSETS_FIXTURE: (
             'import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";',
-            ".load_sprite_from(",
+            ".load_from(",
             ".load_text_from(",
             "measure_text(",
             "clear(",
@@ -958,8 +958,8 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
     mobile_packaged_fixture = without_c_comments(sources[MOBILE_PACKAGED_ASSETS_FIXTURE])
     public_audio_calls = (
         'import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";',
-        'seam_music.load_audio("assets/music.mp3")',
-        'seam_effect.load_audio("assets/effect.wav")',
+        'seam_music.load("assets/music.mp3")',
+        'seam_effect.load("assets/effect.wav")',
         "seam_direct_voice.play(",
         "seam_music_voice.play(",
         "seam_effect.play_once(",

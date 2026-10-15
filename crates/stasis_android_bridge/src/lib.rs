@@ -4736,7 +4736,7 @@ mod tests {
         clear_runtime_session_for_test();
         let (root, handle) = write_typed_sprite_project(
             "negative_sprite_handle",
-            "import \"/vendor/stasis/stdlib/graphics.stasis\";\nglobal TestHost { sprite: Sprite; }\nfunction main(): void { TestHost.sprite.load_sprite_from(\"assets/ball.svg\", 32, 32); }\nfunction tick(): void {}\n",
+            "import \"/vendor/stasis/stdlib/graphics.stasis\";\nglobal TestHost { sprite: Sprite; }\nfunction main(): void { TestHost.sprite.load_from(\"assets/ball.svg\", 32, 32); }\nfunction tick(): void {}\n",
         );
 
         run_android_workshop_tick(&root, Path::new("src/main.stasis"), default_tick_input())
@@ -4774,7 +4774,7 @@ struct State {
 global state: State;
 
 function main(): void {
-    if (state.sprite.load_sprite_from("assets/ball.svg", 32, 32)) {
+    if (state.sprite.load_from("assets/ball.svg", 32, 32)) {
         state.loaded = 1;
         state.initial_handle = state.sprite.sprite_ref;
         state.initial_width = state.sprite.width;
@@ -4895,7 +4895,7 @@ global state: State;
 
 function main(): void {
     state.phase = 0;
-    if (state.sprite.load_sprite_from("assets/ball.svg", 32, 32)) {
+    if (state.sprite.load_from("assets/ball.svg", 32, 32)) {
         state.loaded = 1;
     }
 }
@@ -4903,7 +4903,7 @@ function main(): void {
 function tick(): void {
     if (state.phase == 0) {
         state.sprite.release();
-        if (state.sprite.load_sprite_from("assets/ball.svg", 32, 32)) {
+        if (state.sprite.load_from("assets/ball.svg", 32, 32)) {
             state.reloaded = 1;
             state.reload_handle = state.sprite.sprite_ref;
             state.reload_width = state.sprite.width;
@@ -5362,7 +5362,7 @@ function tick(): void {}
         .expect("write duplicate source");
         fs::write(
             &main_path,
-            "import \"duplicate.stasis\";\nfunction main(): i32 { return tick(); }\nfunction tick(): i32 { return 7; }\n",
+            "import \"duplicate.stasis\";\nfunction main(): i32 { return duplicate.tick(); }\nfunction tick(): i32 { return 7; }\n",
         )
         .expect("import duplicate source");
 
@@ -7696,7 +7696,7 @@ global host_i32: i32[768];
 global host_f32: f32[64];
 function main(): void {}
 function tick(): void {}
-function render(): void { missing_sprite.load_sprite_from(\"assets/render_missing.svg\", 32, 32); }
+function render(): void { missing_sprite.load_from(\"assets/render_missing.svg\", 32, 32); }
 ",
         )
         .expect("write source");
@@ -7761,8 +7761,8 @@ global missing_sprite: Sprite;\n\
 global host_i32: i32[768];\n\
 global host_f32: f32[64];\n\
 function main(): void {}\n\
-function tick(): void { missing_sprite.load_sprite_from(\"assets/tick_missing.svg\", 32, 32); }\n\
-function render(): void { missing_sprite.load_sprite_from(\"assets/render_missing.svg\", 32, 32); }\n",
+function tick(): void { missing_sprite.load_from(\"assets/tick_missing.svg\", 32, 32); }\n\
+function render(): void { missing_sprite.load_from(\"assets/render_missing.svg\", 32, 32); }\n",
         )
         .expect("write source");
         let error =
@@ -7842,7 +7842,7 @@ function on_code_swap(): void {}\n";
             )
             .replace(
                 "function on_code_swap(): void {}",
-                "function on_code_swap(): void { missing_sprite.load_sprite_from(\"assets/IT031_missing.svg\", 32, 32); }",
+                "function on_code_swap(): void { missing_sprite.load_from(\"assets/IT031_missing.svg\", 32, 32); }",
             );
         fs::write(root.join("src/main.stasis"), edited).expect("hot reload source");
         compile_android_workshop_project(&root, Path::new("src/main.stasis"))

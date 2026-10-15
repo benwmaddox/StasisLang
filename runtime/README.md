@@ -187,7 +187,7 @@ code.
 Asynchronous asset tasks use one bounded 64-entry queue and one host worker. File access, image
 rasterization, and audio decoding happen off the frame thread. `asset_task_poll` performs only the
 required main-thread publication step (texture upload or mixer-table insertion). `ImageAsset` and
-`AudioAsset` exposes this as `load_audio()`, `ready()`, `failed()`, and `release()`. Playback uses
+`AudioAsset` exposes this as `load()`, `ready()`, `failed()`, and `release()`. Playback uses
 `AudioVoice.play()` for owned voices or `AudioAsset.play_once()` for fire-and-forget effects;
 their `AssetState` and opaque handles are driven by the host task. Games should release abandoned
 or superseded assets so their bounded task slots can be reused. The web host maps the same states

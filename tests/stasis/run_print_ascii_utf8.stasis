@@ -4,8 +4,8 @@ global ascii_msg: ascii[32];
 global utf8_msg: utf8[32];
 
 function main(): i32 {
-    ascii_copy(ascii_msg, "ASCII_MSG");
-    utf8_from_ascii(utf8_msg, "UTF8_MSG", 32);
+    copy(ascii_msg, "ASCII_MSG");
+    from_ascii(utf8_msg, "UTF8_MSG", 32);
 
     print(ascii_msg);
     print("|");

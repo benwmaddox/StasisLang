@@ -23,7 +23,7 @@ function main(): i32 {
     state.title_width = state.title.width;
     state.play.load_text_from(state.font, "PLAY");
     state.play_width = state.play.width;
-    state.button.load_sprite_from("../render_parity/assets/opaque.svg", 180, 56);
+    state.button.load_from("../render_parity/assets/opaque.svg", 180, 56);
     state.play_clicked = false;
     state.audit_emitted = false;
     if (state.font == 0 || state.title.handle == 0 || state.play.handle == 0 || !state.button.valid()) {

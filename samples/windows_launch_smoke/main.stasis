@@ -32,17 +32,17 @@ function smoke_write_sprite(sprite: Sprite, x: f32, y: f32): bool {
 }
 
 function main(): i32 {
-    ascii_clear(empty_literal_probe);
-    if (ascii_append(empty_literal_probe, "") != 0 || length(empty_literal_probe) != 0) {
+    clear(empty_literal_probe);
+    if (append(empty_literal_probe, "") != 0 || length(empty_literal_probe) != 0) {
         return 19;
     }
     if (!init_window(320, 180, "Stasis Windows launch smoke")) {
         return 20;
     }
-    if (!png_sprite.load_sprite_from("assets/smoke.png", 64, 64)) {
+    if (!png_sprite.load_from("assets/smoke.png", 64, 64)) {
         return 21;
     }
-    if (!svg_sprite.load_sprite_from("assets/smoke.svg", 64, 64)) {
+    if (!svg_sprite.load_from("assets/smoke.svg", 64, 64)) {
         return 22;
     }
     let font: i32 = load_font("/assets/smoke.ttf", 24);

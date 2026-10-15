@@ -1660,11 +1660,11 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|item| item["label"] == "load_sprite_from")
+            .find(|item| item["label"] == "load_from")
             .expect("canonical sprite asset method suggestion");
         assert_eq!(
             load_sprite["signature"],
-            "load_sprite_from(path: string, width: i32, height: i32): bool"
+            "load_from(path: string, width: i32, height: i32): bool"
         );
 
         let source = "global sheet: SpriteSheet; function main(): i32 { sheet. }";
@@ -1676,11 +1676,11 @@ mod tests {
         let suggestions = result["completions"].as_array().unwrap();
         let load_sheet = suggestions
             .iter()
-            .find(|item| item["label"] == "load_sprite_sheet_from")
+            .find(|item| item["label"] == "load_from")
             .expect("canonical sprite sheet method suggestion");
         assert_eq!(
             load_sheet["signature"],
-            "load_sprite_sheet_from(path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool"
+            "load_from(path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool"
         );
         assert!(!suggestions
             .iter()

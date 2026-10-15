@@ -17,15 +17,17 @@ use crate::backend::state_layout::{
     StateCollectionLayout, StateScalarLayout,
 };
 use crate::backend::ReachabilityPolicy;
-use crate::compiler::{CompileError, CompileReport, CompileResult, Compiler, FunctionMeta};
+use crate::compiler::{
+    CompileError, CompileReport, CompileResult, Compiler, FunctionId, FunctionMeta,
+};
 use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
     TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
 use crate::ir::hir::FunctionHIR;
 use crate::ir::hir::{
-    AssignOp, AssignTarget, ComparisonOp, ExprBinaryOp, ExprUnaryOp, SimpleCondition, SimpleExpr,
-    SimpleStmt,
+    AssignOp, AssignTarget, ComparisonOp, ExprBinaryOp, ExprUnaryOp, ExternCallIdentity,
+    ResolvedCallTarget, SimpleCondition, SimpleExpr, SimpleStmt,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -261,6 +263,9 @@ impl WasmProcess {
         let function_hirs = self
             .compiler
             .analysis_hirs_with_policy(&self.required_roots, self.reachability_policy)?;
+        let source_function_hirs = self
+            .compiler
+            .source_hirs_with_policy(&self.required_roots, self.reachability_policy)?;
         self.program_snapshot = Some(
             ProgramSnapshot::build(
                 self.reachability_policy,
@@ -272,6 +277,7 @@ impl WasmProcess {
                 self.compiler.data_flow_summaries_shared(),
                 &self.required_roots,
                 &function_hirs,
+                &source_function_hirs,
                 analysis,
                 self.project_configuration.clone(),
             )
@@ -285,6 +291,7 @@ impl WasmProcess {
 struct Signature {
     params: Vec<TypeId>,
     result: TypeId,
+    extern_identity: Option<ExternCallIdentity>,
 }
 
 type WasmImport = (String, String, Signature);
@@ -1092,19 +1099,28 @@ fn build_struct_collections(
 fn collect_imports(
     functions: &[(FunctionMeta, FunctionHIR)],
     analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
-) -> Result<(BTreeSet<String>, Vec<WasmImport>), String> {
+) -> Result<(BTreeSet<String>, BTreeSet<String>, Vec<WasmImport>), String> {
     let mut called = BTreeSet::new();
+    let mut resolved_call_names = BTreeSet::new();
+    let mut resolved_extern_calls = BTreeSet::new();
     for (_, hir) in functions {
-        collect_calls(&hir.statements, &mut called);
+        collect_calls(
+            &hir.statements,
+            &mut called,
+            &mut resolved_call_names,
+            &mut resolved_extern_calls,
+        );
     }
     let mut imports = Vec::new();
     for signature in &analysis.resolved_extern_signatures {
-        if !called.contains(&signature.name) {
+        let identity = signature.identity.clone();
+        if !called.contains(&signature.name) && !resolved_extern_calls.contains(&identity) {
             continue;
         }
         let value = Signature {
             params: signature.params.clone(),
             result: signature.return_type,
+            extern_identity: Some(identity),
         };
         validate_signature(&signature.name, &value)?;
         imports.push((signature.name.clone(), signature.symbol.clone(), value));
@@ -1117,6 +1133,7 @@ fn collect_imports(
                 Signature {
                     params: vec![TYPE_ID_F32],
                     result: TYPE_ID_F32,
+                    extern_identity: None,
                 },
             ));
         }
@@ -1129,12 +1146,13 @@ fn collect_imports(
                 Signature {
                     params: vec![TYPE_ID_I32],
                     result: TYPE_ID_VOID,
+                    extern_identity: None,
                 },
             ));
         }
     }
     imports.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok((called, imports))
+    Ok((called, resolved_call_names, imports))
 }
 
 fn encode_module(
@@ -1165,7 +1183,7 @@ fn encode_module(
             .push(index);
     }
 
-    let (called, imports) = collect_imports(functions, analysis)?;
+    let (called, resolved_call_names, imports) = collect_imports(functions, analysis)?;
 
     for (name, _, signature) in &imports {
         if signature.params.iter().any(|type_id| {
@@ -1195,6 +1213,9 @@ fn encode_module(
         .map(|(name, _, _)| name.clone())
         .collect::<BTreeSet<_>>();
     for target in &called {
+        if resolved_call_names.contains(target) {
+            continue;
+        }
         if !internal_by_name.contains_key(target)
             && !imported_names.contains(target)
             && !is_inline_intrinsic(target)
@@ -1211,6 +1232,7 @@ fn encode_module(
         let signature = Signature {
             params: function.params.clone(),
             result: function.return_type,
+            extern_identity: None,
         };
         validate_signature(&function.name, &signature)?;
         signatures.push(signature);
@@ -1351,6 +1373,21 @@ fn encode_module(
         .iter()
         .enumerate()
         .map(|(index, (name, _, _))| (name.clone(), index as u32))
+        .collect::<BTreeMap<_, _>>();
+    let resolved_extern_import_indices = imports
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, _, signature))| {
+            signature
+                .extern_identity
+                .as_ref()
+                .map(|identity| (identity.clone(), index as u32))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let resolved_function_indices = functions
+        .iter()
+        .enumerate()
+        .map(|(index, (function, _))| (function.id, imports.len() as u32 + index as u32))
         .collect::<BTreeMap<_, _>>();
     let mut internal_indices = BTreeMap::new();
     for (index, (function, _)) in functions.iter().enumerate() {
@@ -1544,8 +1581,10 @@ fn encode_module(
             &analysis.named_struct_field_types,
             types,
             &import_indices,
+            &resolved_extern_import_indices,
             &internal_indices,
             &internal_overloads,
+            &resolved_function_indices,
             &signatures,
         )?;
         uleb(body.len() as u32, &mut code_section);
@@ -2009,59 +2048,108 @@ fn encode_replay_state_restore(plan: &ReplayStateWritePlan) -> Result<Vec<u8>, S
     Ok(body)
 }
 
-fn collect_calls(statements: &[SimpleStmt], out: &mut BTreeSet<String>) {
-    fn expression(value: &SimpleExpr, out: &mut BTreeSet<String>) {
+fn collect_calls(
+    statements: &[SimpleStmt],
+    out: &mut BTreeSet<String>,
+    resolved_call_names: &mut BTreeSet<String>,
+    resolved_extern_calls: &mut BTreeSet<ExternCallIdentity>,
+) {
+    fn expression(
+        value: &SimpleExpr,
+        out: &mut BTreeSet<String>,
+        resolved_call_names: &mut BTreeSet<String>,
+        resolved_extern_calls: &mut BTreeSet<ExternCallIdentity>,
+    ) {
         match value {
-            SimpleExpr::Call { target, args } => {
+            SimpleExpr::Call {
+                target,
+                args,
+                resolved_target,
+                ..
+            } => {
                 out.insert(target.clone());
+                if resolved_target.is_some() {
+                    resolved_call_names.insert(target.clone());
+                }
+                if let Some(ResolvedCallTarget::Extern(identity)) = resolved_target {
+                    resolved_extern_calls.insert(identity.clone());
+                }
                 for arg in args {
-                    expression(arg, out);
+                    expression(arg, out, resolved_call_names, resolved_extern_calls);
                 }
             }
-            SimpleExpr::Unary { operand, .. } => expression(operand, out),
-            SimpleExpr::Binary { lhs, rhs, .. } => {
-                expression(lhs, out);
-                expression(rhs, out);
+            SimpleExpr::Unary { operand, .. } => {
+                expression(operand, out, resolved_call_names, resolved_extern_calls)
             }
-            SimpleExpr::Condition(condition) => condition_calls(condition, out),
+            SimpleExpr::Binary { lhs, rhs, .. } => {
+                expression(lhs, out, resolved_call_names, resolved_extern_calls);
+                expression(rhs, out, resolved_call_names, resolved_extern_calls);
+            }
+            SimpleExpr::Condition(condition) => {
+                condition_calls(condition, out, resolved_call_names, resolved_extern_calls)
+            }
             SimpleExpr::IndexedPath {
                 index,
                 nested_index,
                 ..
             } => {
-                expression(index, out);
+                expression(index, out, resolved_call_names, resolved_extern_calls);
                 if let Some(nested_index) = nested_index {
-                    expression(nested_index, out);
+                    expression(
+                        nested_index,
+                        out,
+                        resolved_call_names,
+                        resolved_extern_calls,
+                    );
                 }
             }
             _ => {}
         }
     }
-    fn condition_calls(value: &SimpleCondition, out: &mut BTreeSet<String>) {
+    fn condition_calls(
+        value: &SimpleCondition,
+        out: &mut BTreeSet<String>,
+        resolved_call_names: &mut BTreeSet<String>,
+        resolved_extern_calls: &mut BTreeSet<ExternCallIdentity>,
+    ) {
         match value {
             SimpleCondition::Comparison { lhs, rhs, .. } => {
-                expression(lhs, out);
-                expression(rhs, out);
+                expression(lhs, out, resolved_call_names, resolved_extern_calls);
+                expression(rhs, out, resolved_call_names, resolved_extern_calls);
             }
-            SimpleCondition::Expr(value) => expression(value, out),
+            SimpleCondition::Expr(value) => {
+                expression(value, out, resolved_call_names, resolved_extern_calls)
+            }
             SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
-                condition_calls(lhs, out);
-                condition_calls(rhs, out);
+                condition_calls(lhs, out, resolved_call_names, resolved_extern_calls);
+                condition_calls(rhs, out, resolved_call_names, resolved_extern_calls);
             }
-            SimpleCondition::Not(value) => condition_calls(value, out),
+            SimpleCondition::Not(value) => {
+                condition_calls(value, out, resolved_call_names, resolved_extern_calls)
+            }
         }
     }
 
-    fn target(value: &AssignTarget, out: &mut BTreeSet<String>) {
+    fn target(
+        value: &AssignTarget,
+        out: &mut BTreeSet<String>,
+        resolved_call_names: &mut BTreeSet<String>,
+        resolved_extern_calls: &mut BTreeSet<ExternCallIdentity>,
+    ) {
         if let AssignTarget::IndexedPath {
             index,
             nested_index,
             ..
         } = value
         {
-            expression(index, out);
+            expression(index, out, resolved_call_names, resolved_extern_calls);
             if let Some(nested_index) = nested_index {
-                expression(nested_index, out);
+                expression(
+                    nested_index,
+                    out,
+                    resolved_call_names,
+                    resolved_extern_calls,
+                );
             }
         }
     }
@@ -2071,32 +2159,49 @@ fn collect_calls(statements: &[SimpleStmt], out: &mut BTreeSet<String>) {
                 expression: value, ..
             }
             | SimpleStmt::Expr(value)
-            | SimpleStmt::Return(value) => expression(value, out),
+            | SimpleStmt::Return(value) => {
+                expression(value, out, resolved_call_names, resolved_extern_calls)
+            }
             SimpleStmt::Assign {
                 target: assign_target,
                 expression: value,
                 ..
             } => {
-                target(assign_target, out);
-                expression(value, out);
+                target(
+                    assign_target,
+                    out,
+                    resolved_call_names,
+                    resolved_extern_calls,
+                );
+                expression(value, out, resolved_call_names, resolved_extern_calls);
             }
             SimpleStmt::Convert {
                 target: assign_target,
                 source,
                 ..
             } => {
-                target(assign_target, out);
-                expression(source, out);
+                target(
+                    assign_target,
+                    out,
+                    resolved_call_names,
+                    resolved_extern_calls,
+                );
+                expression(source, out, resolved_call_names, resolved_extern_calls);
             }
             SimpleStmt::If {
                 condition,
                 then_statements,
                 else_statements,
             } => {
-                condition_calls(condition, out);
-                collect_calls(then_statements, out);
+                condition_calls(condition, out, resolved_call_names, resolved_extern_calls);
+                collect_calls(
+                    then_statements,
+                    out,
+                    resolved_call_names,
+                    resolved_extern_calls,
+                );
                 if let Some(values) = else_statements {
-                    collect_calls(values, out);
+                    collect_calls(values, out, resolved_call_names, resolved_extern_calls);
                 }
             }
             SimpleStmt::For {
@@ -2105,14 +2210,34 @@ fn collect_calls(statements: &[SimpleStmt], out: &mut BTreeSet<String>) {
                 step,
                 body_statements,
             } => {
-                collect_calls(std::slice::from_ref(init), out);
-                condition_calls(condition, out);
-                collect_calls(std::slice::from_ref(step), out);
-                collect_calls(body_statements, out);
+                collect_calls(
+                    std::slice::from_ref(init),
+                    out,
+                    resolved_call_names,
+                    resolved_extern_calls,
+                );
+                condition_calls(condition, out, resolved_call_names, resolved_extern_calls);
+                collect_calls(
+                    std::slice::from_ref(step),
+                    out,
+                    resolved_call_names,
+                    resolved_extern_calls,
+                );
+                collect_calls(
+                    body_statements,
+                    out,
+                    resolved_call_names,
+                    resolved_extern_calls,
+                );
             }
             SimpleStmt::Foreach {
                 body_statements, ..
-            } => collect_calls(body_statements, out),
+            } => collect_calls(
+                body_statements,
+                out,
+                resolved_call_names,
+                resolved_extern_calls,
+            ),
             SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
         }
     }
@@ -2132,8 +2257,10 @@ fn encode_function(
     named_structs: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
     types: &TypeTable,
     imports: &BTreeMap<String, u32>,
+    resolved_extern_import_indices: &BTreeMap<ExternCallIdentity, u32>,
     internals: &BTreeMap<String, u32>,
     internal_overloads: &BTreeMap<String, Vec<u32>>,
+    resolved_function_indices: &BTreeMap<FunctionId, u32>,
     signatures: &[Signature],
 ) -> Result<Vec<u8>, String> {
     crate::backend::compile_analysis::validate_owned_local_fixed_array_contract(hir, types)?;
@@ -2262,8 +2389,10 @@ fn encode_function(
         types,
         constants,
         imports,
+        resolved_extern_import_indices,
         internals,
         internal_overloads,
+        resolved_function_indices,
         signatures,
         scratch_index,
         return_type: function.return_type,
@@ -2436,8 +2565,10 @@ struct EncodeContext<'a> {
     types: &'a TypeTable,
     constants: &'a BTreeMap<String, ConstantValue>,
     imports: &'a BTreeMap<String, u32>,
+    resolved_extern_import_indices: &'a BTreeMap<ExternCallIdentity, u32>,
     internals: &'a BTreeMap<String, u32>,
     internal_overloads: &'a BTreeMap<String, Vec<u32>>,
+    resolved_function_indices: &'a BTreeMap<FunctionId, u32>,
     signatures: &'a [Signature],
     scratch_index: u32,
     return_type: TypeId,
@@ -5998,8 +6129,68 @@ fn resolve_call(
     target: &str,
     args: &[SimpleExpr],
     expected: Option<TypeId>,
+    resolved_target: Option<&ResolvedCallTarget>,
     context: &EncodeContext<'_>,
 ) -> Result<(u32, Vec<u8>), String> {
+    if let Some(resolved_target) = resolved_target {
+        let index = match resolved_target {
+            ResolvedCallTarget::Function(function_id) => context
+                .resolved_function_indices
+                .get(function_id)
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "resolved web call '{target}' references missing function id {function_id}"
+                    )
+                })?,
+            ResolvedCallTarget::Extern(identity) => context
+                .resolved_extern_import_indices
+                .get(identity)
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "resolved web call '{target}' references missing extern declaration '{}'",
+                        identity.name
+                    )
+                })?,
+        };
+        let signature = context
+            .signatures
+            .get(index as usize)
+            .ok_or_else(|| format!("missing web signature for resolved call '{target}'"))?;
+        if let ResolvedCallTarget::Extern(identity) = resolved_target {
+            if signature.extern_identity.as_ref() != Some(identity) {
+                return Err(format!(
+                    "resolved web extern '{target}' is not bound to its exact declaration"
+                ));
+            }
+        }
+        if args.len() != signature.params.len() {
+            return Err(format!(
+                "web call '{target}' expected {} arguments, found {}",
+                signature.params.len(),
+                args.len()
+            ));
+        }
+        if let Some(expected_type) = expected {
+            if !are_call_argument_and_param_compatible(
+                signature.result,
+                expected_type,
+                context.types,
+                context.named_structs,
+            ) {
+                return Err(format!(
+                    "resolved web call '{target}' returns type {}, incompatible with expected type {expected_type}",
+                    signature.result
+                ));
+            }
+        }
+        return Ok((
+            index,
+            encode_call_arguments(target, args, signature, context)?,
+        ));
+    }
+
     if let Some(index) = context
         .imports
         .get(target)
@@ -6546,11 +6737,17 @@ fn encode_expr_as(
                 Err(format!("unknown web value '{name}'"))
             }
         }
-        SimpleExpr::Call { target, args } => {
-            if is_inline_intrinsic(target) {
+        SimpleExpr::Call {
+            target,
+            args,
+            resolved_target,
+            ..
+        } => {
+            if resolved_target.is_none() && is_inline_intrinsic(target) {
                 return encode_inline_intrinsic(target, args, context, out);
             }
-            let (index, encoded_args) = resolve_call(target, args, expected, context)?;
+            let (index, encoded_args) =
+                resolve_call(target, args, expected, resolved_target.as_ref(), context)?;
             let signature = context
                 .signatures
                 .get(index as usize)
@@ -6890,8 +7087,14 @@ fn expression_returns_value(
     value: &SimpleExpr,
     context: &EncodeContext<'_>,
 ) -> Result<bool, String> {
-    if let SimpleExpr::Call { target, args } = value {
-        let (index, _) = resolve_call(target, args, None, context)?;
+    if let SimpleExpr::Call {
+        target,
+        args,
+        resolved_target,
+        ..
+    } = value
+    {
+        let (index, _) = resolve_call(target, args, None, resolved_target.as_ref(), context)?;
         return Ok(context.signatures[index as usize].result != TYPE_ID_VOID);
     }
     Ok(true)

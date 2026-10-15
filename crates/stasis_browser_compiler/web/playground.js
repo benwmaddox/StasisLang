@@ -763,7 +763,7 @@ function main(): i32 {
     init_window(640, 360, "Stasis Asset Example");
     state.sprite_x = 272.0;
     state.sprite_direction = 1.0;
-    state.sample_sprite.load_sprite_from(${escaped}, 96, 96);
+    state.sample_sprite.load_from(${escaped}, 96, 96);
     return 0;
 }
 

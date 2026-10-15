@@ -65,8 +65,8 @@ The admitted batch uses the asset APIs directly:
 
 ```stasis
 function start_content_batch(): void {
-    hero.load_image("assets/hero.svg", 64, 64);
-    music.load_audio("assets/music.wav");
+    hero.load("assets/hero.svg", 64, 64);
+    music.load("assets/music.wav");
 }
 ```
 

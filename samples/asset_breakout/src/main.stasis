@@ -187,13 +187,13 @@ function update_ball(): void {
 
 function request_current_asset(): void {
     if (loader.step == 0) {
-        loader.current.load_image("assets/arena_background.png", 640, 360);
+        loader.current.load("assets/arena_background.png", 640, 360);
     } else if (loader.step == 1) {
-        loader.current.load_image("assets/brick.svg", 78, 22);
+        loader.current.load("assets/brick.svg", 78, 22);
     } else if (loader.step == 2) {
-        loader.current.load_image("assets/paddle.svg", 96, 14);
+        loader.current.load("assets/paddle.svg", 96, 14);
     } else if (loader.step == 3) {
-        loader.current.load_image("assets/ball.svg", 12, 12);
+        loader.current.load("assets/ball.svg", 12, 12);
     }
 }
 

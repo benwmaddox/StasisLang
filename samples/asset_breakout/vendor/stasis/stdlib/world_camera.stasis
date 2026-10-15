@@ -50,7 +50,7 @@ function world_camera_clamp(value: f32, low: f32, high: f32): f32 {
     return value;
 }
 
-function world_camera_configure(
+function configure(
     self: WorldCamera,
     world_min_x: f32,
     world_min_y: f32,
@@ -86,7 +86,7 @@ function world_camera_configure(
     if (self.scale <= 0.0) {
         self.scale = 1.0;
     }
-    self.world_camera_follow(world_min_x, world_min_y);
+    self.follow(world_min_x, world_min_y);
 }
 
 function visible_world_width(self: WorldCamera): f32 {
@@ -97,7 +97,7 @@ function visible_world_height(self: WorldCamera): f32 {
     return self.viewport_h / self.scale;
 }
 
-function world_camera_follow(self: WorldCamera, world_x: f32, world_y: f32): void {
+function follow(self: WorldCamera, world_x: f32, world_y: f32): void {
     let span_x: f32 = self.visible_world_width();
     let span_y: f32 = self.visible_world_height();
     let world_w: f32 = self.world_max_x - self.world_min_x;
@@ -147,29 +147,29 @@ function visible_world_max_y(self: WorldCamera): f32 {
     return self.origin_y + self.visible_world_height();
 }
 
-function world_camera_clip_begin(self: WorldCamera): void {
+function clip_begin(self: WorldCamera): void {
     gfx_push_clip(self.viewport_x, self.viewport_y, self.viewport_w, self.viewport_h);
 }
 
-function world_camera_clip_end(self: WorldCamera): void {
+function clip_end(self: WorldCamera): void {
     gfx_pop_clip();
 }
 
-function world_camera_history_reset(self: WorldCameraHistory, world_x: f32, world_y: f32): void {
+function reset(self: WorldCameraHistory, world_x: f32, world_y: f32): void {
     self.previous_x = world_x;
     self.previous_y = world_y;
     self.current_x = world_x;
     self.current_y = world_y;
 }
 
-function world_camera_history_advance(self: WorldCameraHistory, world_x: f32, world_y: f32): void {
+function advance(self: WorldCameraHistory, world_x: f32, world_y: f32): void {
     self.previous_x = self.current_x;
     self.previous_y = self.current_y;
     self.current_x = world_x;
     self.current_y = world_y;
 }
 
-function world_camera_history_advance_or_teleport(self: WorldCameraHistory, world_x: f32, world_y: f32, teleport_distance: f32): void {
+function advance_or_teleport(self: WorldCameraHistory, world_x: f32, world_y: f32, teleport_distance: f32): void {
     let dx: f32 = world_x - self.current_x;
     let dy: f32 = world_y - self.current_y;
     let limit: f32 = teleport_distance;
@@ -177,10 +177,10 @@ function world_camera_history_advance_or_teleport(self: WorldCameraHistory, worl
         limit = 0.0;
     }
     if (dx > limit || dx < 0.0 - limit || dy > limit || dy < 0.0 - limit) {
-        self.world_camera_history_reset(world_x, world_y);
+        self.reset(world_x, world_y);
         return;
     }
-    self.world_camera_history_advance(world_x, world_y);
+    self.advance(world_x, world_y);
 }
 
 function interpolated_x(self: WorldCameraHistory, alpha: f32): f32 {
@@ -211,7 +211,7 @@ function world_camera_ceil_positive(value: f32): i32 {
     return whole;
 }
 
-function world_camera_tile_range_calculate(self: WorldTileRange, camera: WorldCamera, tile_world_size: f32, padding: i32): void {
+function calculate_for_camera(self: WorldTileRange, camera: WorldCamera, tile_world_size: f32, padding: i32): void {
     self.first_x = 0;
     self.first_y = 0;
     self.end_x = 0;

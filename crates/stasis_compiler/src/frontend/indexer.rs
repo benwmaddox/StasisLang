@@ -33,6 +33,8 @@ pub struct IndexedCallDependency {
     pub qualifier_span: Option<Range<u32>>,
     pub name: String,
     pub name_span: Range<u32>,
+    /// Whether the lowered call has arguments. Receiver-form calls count their implicit receiver.
+    pub has_arguments: bool,
 }
 
 /// Lightweight parser-owned declaration record for editor and CLI lookup.
@@ -300,6 +302,7 @@ fn collect_dependencies(body_text: &str) -> Result<Vec<IndexedCallDependency>, S
                 qualifier_span: Some(token.start as u32..token.end as u32),
                 name: body_text[method.start..method.end].to_string(),
                 name_span: method.start as u32..method.end as u32,
+                has_arguments: true,
             });
             continue;
         }
@@ -319,6 +322,7 @@ fn collect_dependencies(body_text: &str) -> Result<Vec<IndexedCallDependency>, S
                     qualifier_span: None,
                     name: identifier.to_string(),
                     name_span: token.start as u32..token.end as u32,
+                    has_arguments: true,
                 });
             }
             continue;
@@ -332,10 +336,17 @@ fn collect_dependencies(body_text: &str) -> Result<Vec<IndexedCallDependency>, S
                 qualifier_span: None,
                 name: identifier.to_string(),
                 name_span: token.start as u32..token.end as u32,
+                has_arguments: call_has_arguments(&tokens, index + 1),
             });
         }
     }
     Ok(dependencies)
+}
+
+fn call_has_arguments(tokens: &[crate::frontend::lexer::Token], open_paren_index: usize) -> bool {
+    tokens
+        .get(open_paren_index + 1)
+        .is_some_and(|token| token.kind != TokenKind::RParen)
 }
 
 fn is_call_keyword(identifier: &str) -> bool {
@@ -475,12 +486,14 @@ mod tests {
                     qualifier_span: None,
                     name: "helper".to_string(),
                     name_span: 9..15,
+                    has_arguments: false,
                 },
                 IndexedCallDependency {
                     qualifier: Some("math".to_string()),
                     qualifier_span: Some(20..24),
                     name: "value".to_string(),
                     name_span: 25..30,
+                    has_arguments: true,
                 },
             ]
         );
@@ -508,5 +521,38 @@ mod tests {
         );
         assert_eq!(main.dependencies[0].qualifier, None);
         assert_eq!(main.dependencies[1].qualifier.as_deref(), Some("current"));
+        assert!(main
+            .dependencies
+            .iter()
+            .all(|dependency| dependency.has_arguments));
+    }
+
+    #[test]
+    fn distinguishes_effective_receiver_arguments_from_empty_bare_calls() {
+        let mut types = TypeTable::new();
+        let source = concat!(
+            "function main(receiver: State, index: i32): i32 { ",
+            "receiver.reset(); state.items[index].reset(); reset(); reset(receiver); ",
+            "return 0; }\n"
+        );
+        let indexed = index_file(source, &mut types).expect("index");
+        let main = indexed
+            .iter()
+            .find(|function| function.name == "main")
+            .expect("main function");
+        assert_eq!(
+            main.dependencies
+                .iter()
+                .map(|dependency| dependency.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["reset", "reset", "reset", "reset"]
+        );
+        assert_eq!(
+            main.dependencies
+                .iter()
+                .map(|dependency| dependency.has_arguments)
+                .collect::<Vec<_>>(),
+            vec![true, true, false, true]
+        );
     }
 }

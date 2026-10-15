@@ -5,6 +5,8 @@
 // RIG2D_BONE_CAPACITY remains the documented 24-bone compatibility constant.
 // New callers should choose an explicit Rig2D<N> capacity.
 
+import "math.stasis";
+
 const RIG2D_BONE_CAPACITY: i32 = 24;
 
 struct RigBone2D {
@@ -175,4 +177,229 @@ function world_angle(self: Rig2D<N>, index: i32): f32 {
         return 0.0;
     }
     return self.bones[index].world_angle;
+}
+
+function rig2d_is_finite(value: f32): bool {
+    if (value != value) {
+        return false;
+    }
+    let infinity: f32 = 1.0 / 0.0;
+    return value != infinity && value != -infinity;
+}
+
+function rig2d_is_bounded(value: f32): bool {
+    return rig2d_is_finite(value) && value >= -360000.0 && value <= 360000.0;
+}
+
+function rig2d_distance(x: f32, y: f32): f32 {
+    let scale: f32 = math_abs(x);
+    if (math_abs(y) > scale) {
+        scale = math_abs(y);
+    }
+    if (scale == 0.0) {
+        return 0.0;
+    }
+    let scaled_x: f32 = x / scale;
+    let scaled_y: f32 = y / scale;
+    return scale * math_sqrt(scaled_x * scaled_x + scaled_y * scaled_y);
+}
+
+function rig2d_clamp_local_angle(angle: f32, lower: f32, upper: f32): f32 {
+    if (!rig2d_is_bounded(angle) || !rig2d_is_bounded(lower) || !rig2d_is_bounded(upper) || lower > upper || upper - lower > 360.0) {
+        return angle;
+    }
+    let midpoint: f32 =(lower + upper) / 2.0;
+    let turns: i32 = 0;
+    turns.from_f32(math_round((midpoint - angle) / 360.0));
+    let turns_f32: f32 = 0.0;
+    turns_f32.from_i32(turns);
+    let unwrapped: f32 = angle + turns_f32 * 360.0;
+    if (unwrapped < lower) {
+        return rig2d_wrap(lower);
+    }
+    if (unwrapped > upper) {
+        return rig2d_wrap(upper);
+    }
+    return rig2d_wrap(unwrapped);
+}
+
+// Solve the two-bone chain after a successful FK solve. The lower bone's
+// translation is the upper link; its local X axis is the virtual lower link.
+function solve_two_bone(
+    self: Rig2D<N>,
+    upper_index: i32,
+    lower_index: i32,
+    target_x: f32,
+    target_y: f32,
+    upper_length: f32,
+    lower_length: f32,
+    bend_sign: i32,
+    upper_min: f32,
+    upper_max: f32,
+    lower_min: f32,
+    lower_max: f32
+): bool {
+    if (self.count < 2 || self.count > N || upper_index < 0 || upper_index >= self.count || lower_index < 0 || lower_index >= self.count) {
+        return false;
+    }
+    if (upper_index == lower_index || self.bones[lower_index].parent != upper_index || bend_sign != -1 && bend_sign != 1) {
+        return false;
+    }
+    if (
+        !rig2d_is_bounded(target_x)
+        || !rig2d_is_bounded(target_y)
+        || !rig2d_is_finite(upper_length)
+        || !rig2d_is_finite(lower_length)
+        || upper_length <= 0.0
+        || lower_length <= 0.0
+        || upper_length > 360000.0
+        || lower_length > 360000.0
+    ) {
+        return false;
+    }
+    if (
+        !rig2d_is_bounded(upper_min)
+        || !rig2d_is_bounded(upper_max)
+        || !rig2d_is_bounded(lower_min)
+        || !rig2d_is_bounded(lower_max)
+        || upper_min > upper_max
+        || lower_min > lower_max
+        || upper_max - upper_min > 360.0
+        || lower_max - lower_min > 360.0
+    ) {
+        return false;
+    }
+
+    let i: i32 = 0;
+    for (i = 0; i < self.count; i = i + 1) {
+        let parent_index: i32 = self.bones[i].parent;
+        if (parent_index < -1 || parent_index >= i) {
+            return false;
+        }
+        if (
+            !rig2d_is_bounded(self.bones[i].local_x)
+            || !rig2d_is_bounded(self.bones[i].local_y)
+            || !rig2d_is_bounded(self.bones[i].local_angle)
+        ) {
+            return false;
+        }
+    }
+
+    let upper_parent: i32 = self.bones[upper_index].parent;
+    let upper_local_angle: f32 = self.bones[upper_index].local_angle;
+    let upper_world_x: f32 = self.bones[upper_index].world_x;
+    let upper_world_y: f32 = self.bones[upper_index].world_y;
+    let upper_world_angle: f32 = self.bones[upper_index].world_angle;
+    let lower_local_x: f32 = self.bones[lower_index].local_x;
+    let lower_local_y: f32 = self.bones[lower_index].local_y;
+    let lower_local_angle: f32 = self.bones[lower_index].local_angle;
+    let lower_world_x: f32 = self.bones[lower_index].world_x;
+    let lower_world_y: f32 = self.bones[lower_index].world_y;
+    if (
+        !rig2d_is_finite(upper_world_x)
+        || !rig2d_is_finite(upper_world_y)
+        || !rig2d_is_finite(upper_world_angle)
+        || !rig2d_is_finite(lower_world_x)
+        || !rig2d_is_finite(lower_world_y)
+    ) {
+        return false;
+    }
+
+    let offset_length: f32 = rig2d_distance(lower_local_x, lower_local_y);
+    let length_tolerance: f32 = upper_length * 0.00001;
+    if (!rig2d_is_finite(offset_length) || offset_length == 0.0 || math_abs(offset_length - upper_length) > length_tolerance) {
+        return false;
+    }
+
+    let parent_world_angle: f32 = 0.0;
+    if (upper_parent >= 0) {
+        parent_world_angle = self.bones[upper_parent].world_angle;
+    } else {
+        parent_world_angle = rig2d_wrap(upper_world_angle - upper_local_angle);
+    }
+    if (!rig2d_is_finite(parent_world_angle)) {
+        return false;
+    }
+
+    let offset_angle: f32 = math_atan2_degrees(lower_local_y, lower_local_x);
+    let delta_x: f32 = target_x - upper_world_x;
+    let delta_y: f32 = target_y - upper_world_y;
+    let target_distance: f32 = rig2d_distance(delta_x, delta_y);
+    if (!rig2d_is_finite(target_distance)) {
+        return false;
+    }
+
+    let target_direction: f32 = math_atan2_degrees(delta_y, delta_x);
+    if (target_distance == 0.0) {
+        target_direction = rig2d_wrap(upper_world_angle + offset_angle);
+    }
+    let minimum_reach: f32 = math_abs(upper_length - lower_length);
+    let maximum_reach: f32 = upper_length + lower_length;
+    let projected_distance: f32 = target_distance;
+    if (projected_distance < minimum_reach) {
+        projected_distance = minimum_reach;
+    }
+    if (projected_distance > maximum_reach) {
+        projected_distance = maximum_reach;
+    }
+
+    let desired_upper_world_angle: f32 = upper_world_angle;
+    if (target_distance != 0.0 || minimum_reach != 0.0) {
+        let law_scale: f32 = upper_length;
+        if (lower_length > law_scale) {
+            law_scale = lower_length;
+        }
+        if (projected_distance > law_scale) {
+            law_scale = projected_distance;
+        }
+        if (!rig2d_is_finite(law_scale) || law_scale <= 0.0) {
+            return false;
+        }
+        let scaled_distance: f32 = projected_distance / law_scale;
+        let scaled_upper_length: f32 = upper_length / law_scale;
+        let scaled_lower_length: f32 = lower_length / law_scale;
+        if (scaled_distance == 0.0 || scaled_upper_length == 0.0) {
+            return false;
+        }
+        let cosine: f32 =(scaled_distance * scaled_distance + scaled_upper_length * scaled_upper_length - scaled_lower_length * scaled_lower_length) /(
+            2.0 * scaled_distance * scaled_upper_length
+        );
+        if (!rig2d_is_finite(cosine)) {
+            return false;
+        }
+        let elbow_offset: f32 = math_acos_degrees(cosine);
+        let elbow_direction: f32 = target_direction + i32_to_f32(bend_sign) * elbow_offset;
+        desired_upper_world_angle = elbow_direction - offset_angle;
+    }
+
+    let desired_upper_local_angle: f32 = desired_upper_world_angle - parent_world_angle;
+    if (!rig2d_is_finite(desired_upper_local_angle)) {
+        return false;
+    }
+    let next_upper_angle: f32 = rig2d_clamp_local_angle(desired_upper_local_angle, upper_min, upper_max);
+    let next_upper_world_angle: f32 = rig2d_wrap(parent_world_angle + next_upper_angle);
+    let offset_cosine: f32 = rig2d_cos(next_upper_world_angle);
+    let offset_sine: f32 = rig2d_sin(next_upper_world_angle);
+    let elbow_x: f32 = upper_world_x + lower_local_x * offset_cosine - lower_local_y * offset_sine;
+    let elbow_y: f32 = upper_world_y + lower_local_x * offset_sine + lower_local_y * offset_cosine;
+    let projected_x: f32 = upper_world_x + projected_distance * rig2d_cos(target_direction);
+    let projected_y: f32 = upper_world_y + projected_distance * rig2d_sin(target_direction);
+    let lower_delta_x: f32 = projected_x - elbow_x;
+    let lower_delta_y: f32 = projected_y - elbow_y;
+    if (!rig2d_is_finite(projected_x) || !rig2d_is_finite(projected_y) || !rig2d_is_finite(lower_delta_x) || !rig2d_is_finite(lower_delta_y)) {
+        return false;
+    }
+    let desired_lower_world_angle: f32 = next_upper_world_angle + lower_local_angle;
+    if (lower_delta_x != 0.0 || lower_delta_y != 0.0) {
+        desired_lower_world_angle = math_atan2_degrees(lower_delta_y, lower_delta_x);
+    }
+    let desired_lower_local_angle: f32 = desired_lower_world_angle - next_upper_world_angle;
+    if (!rig2d_is_finite(elbow_x) || !rig2d_is_finite(elbow_y) || !rig2d_is_finite(desired_lower_local_angle)) {
+        return false;
+    }
+    let next_lower_angle: f32 = rig2d_clamp_local_angle(desired_lower_local_angle, lower_min, lower_max);
+
+    self.bones[upper_index].local_angle = next_upper_angle;
+    self.bones[lower_index].local_angle = next_lower_angle;
+    return true;
 }

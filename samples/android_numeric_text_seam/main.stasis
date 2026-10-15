@@ -27,29 +27,29 @@ function numeric_text_make_f32(mantissa: i32, exp2: i32, negative: bool): f32 {
 }
 
 function numeric_text_record(id: i32, status: i32, value: ascii[]): void {
-    ascii_append_i32(numeric_text_receipt, id);
-    ascii_push(numeric_text_receipt, to_u8_trunc(44));
-    ascii_append_i32(numeric_text_receipt, status);
-    ascii_push(numeric_text_receipt, to_u8_trunc(44));
-    ascii_append(numeric_text_receipt, value);
-    ascii_push(numeric_text_receipt, to_u8_trunc(59));
+    append_i32(numeric_text_receipt, id);
+    push(numeric_text_receipt, to_u8_trunc(44));
+    append_i32(numeric_text_receipt, status);
+    push(numeric_text_receipt, to_u8_trunc(44));
+    append(numeric_text_receipt, value);
+    push(numeric_text_receipt, to_u8_trunc(59));
 }
 
 function numeric_text_record_f32(id: i32, value: f32, decimals: i32): void {
-    let status: i32 = ascii_from_f32_fixed(numeric_text_scratch, value, decimals);
+    let status: i32 = from_f32_fixed(numeric_text_scratch, value, decimals);
     numeric_text_record(id, status, numeric_text_scratch);
 }
 
 function numeric_text_seed_keep(dst: ascii[]): void {
-    ascii_clear(dst);
-    ascii_push(dst, to_u8_trunc(107));
-    ascii_push(dst, to_u8_trunc(101));
-    ascii_push(dst, to_u8_trunc(101));
-    ascii_push(dst, to_u8_trunc(112));
+    clear(dst);
+    push(dst, to_u8_trunc(107));
+    push(dst, to_u8_trunc(101));
+    push(dst, to_u8_trunc(101));
+    push(dst, to_u8_trunc(112));
 }
 
 function numeric_text_build_receipt(): void {
-    ascii_copy(numeric_text_receipt, "");
+    copy(numeric_text_receipt, "");
     let id: i32 = 1;
     let decimals: i32 = 0;
     let min_subnormal: f32 = numeric_text_make_f32(1, -149, false);
@@ -97,44 +97,44 @@ function numeric_text_build_receipt(): void {
     id = id + 1;
 
     numeric_text_seed_keep(numeric_text_scratch);
-    numeric_text_record(id, ascii_from_f32_fixed(numeric_text_scratch, 0.0 / 0.0, 2), numeric_text_scratch);
+    numeric_text_record(id, from_f32_fixed(numeric_text_scratch, 0.0 / 0.0, 2), numeric_text_scratch);
     id = id + 1;
     numeric_text_seed_keep(numeric_text_scratch);
-    numeric_text_record(id, ascii_from_f32_fixed(numeric_text_scratch, 1.0 / 0.0, 2), numeric_text_scratch);
+    numeric_text_record(id, from_f32_fixed(numeric_text_scratch, 1.0 / 0.0, 2), numeric_text_scratch);
     id = id + 1;
     numeric_text_seed_keep(numeric_text_scratch);
-    numeric_text_record(id, ascii_from_f32_fixed(numeric_text_scratch, 0.0 - 1.0 / 0.0, 2), numeric_text_scratch);
+    numeric_text_record(id, from_f32_fixed(numeric_text_scratch, 0.0 - 1.0 / 0.0, 2), numeric_text_scratch);
     id = id + 1;
 
     let minimum: i32 = 0 - 2147483647 - 1;
-    numeric_text_record(id, ascii_from_i32(numeric_text_scratch, minimum), numeric_text_scratch);
+    numeric_text_record(id, from_i32(numeric_text_scratch, minimum), numeric_text_scratch);
     id = id + 1;
-    numeric_text_record(id, ascii_from_i32(numeric_text_scratch, 2147483647), numeric_text_scratch);
+    numeric_text_record(id, from_i32(numeric_text_scratch, 2147483647), numeric_text_scratch);
     id = id + 1;
-    ascii_clear(numeric_text_scratch);
-    ascii_push(numeric_text_scratch, to_u8_trunc(115));
-    ascii_push(numeric_text_scratch, to_u8_trunc(99));
-    ascii_push(numeric_text_scratch, to_u8_trunc(111));
-    ascii_push(numeric_text_scratch, to_u8_trunc(114));
-    ascii_push(numeric_text_scratch, to_u8_trunc(101));
-    ascii_push(numeric_text_scratch, to_u8_trunc(58));
-    numeric_text_record(id, ascii_append_i32(numeric_text_scratch, minimum), numeric_text_scratch);
+    clear(numeric_text_scratch);
+    push(numeric_text_scratch, to_u8_trunc(115));
+    push(numeric_text_scratch, to_u8_trunc(99));
+    push(numeric_text_scratch, to_u8_trunc(111));
+    push(numeric_text_scratch, to_u8_trunc(114));
+    push(numeric_text_scratch, to_u8_trunc(101));
+    push(numeric_text_scratch, to_u8_trunc(58));
+    numeric_text_record(id, append_i32(numeric_text_scratch, minimum), numeric_text_scratch);
     id = id + 1;
-    ascii_clear(numeric_text_scratch);
-    ascii_push(numeric_text_scratch, to_u8_trunc(52));
-    ascii_push(numeric_text_scratch, to_u8_trunc(50));
-    numeric_text_record(id, ascii_pad_left(numeric_text_scratch, 8, to_u8_trunc(48)), numeric_text_scratch);
+    clear(numeric_text_scratch);
+    push(numeric_text_scratch, to_u8_trunc(52));
+    push(numeric_text_scratch, to_u8_trunc(50));
+    numeric_text_record(id, pad_left(numeric_text_scratch, 8, to_u8_trunc(48)), numeric_text_scratch);
     id = id + 1;
 
-    numeric_text_record(id, ascii_from_i32(numeric_text_i32_exact, minimum), numeric_text_i32_exact);
+    numeric_text_record(id, from_i32(numeric_text_i32_exact, minimum), numeric_text_i32_exact);
     id = id + 1;
     numeric_text_seed_keep(numeric_text_i32_short);
-    numeric_text_record(id, ascii_from_i32(numeric_text_i32_short, minimum), numeric_text_i32_short);
+    numeric_text_record(id, from_i32(numeric_text_i32_short, minimum), numeric_text_i32_short);
     id = id + 1;
-    numeric_text_record(id, ascii_from_f32_fixed(numeric_text_f32_exact, 0.0 - maximum, 6), numeric_text_f32_exact);
+    numeric_text_record(id, from_f32_fixed(numeric_text_f32_exact, 0.0 - maximum, 6), numeric_text_f32_exact);
     id = id + 1;
     numeric_text_seed_keep(numeric_text_f32_short);
-    numeric_text_record(id, ascii_from_f32_fixed(numeric_text_f32_short, 0.0 - maximum, 6), numeric_text_f32_short);
+    numeric_text_record(id, from_f32_fixed(numeric_text_f32_short, 0.0 - maximum, 6), numeric_text_f32_short);
 }
 
 function main(): i32 {

@@ -6,8 +6,8 @@
   "output": "build",
   "vendor": {
     "stasis": {
-      "release_id": "nightly-20260923-344",
-      "sha256": "1c91faa3e6baac7f72faecd11da75c781d688be7f0e817f9ea23e16a44b29623",
+      "release_id": "development",
+      "sha256": "9248c6b1aad1d868abfd58516de721d643586854a5d42df6b2145b4f05ba1175",
       "hash_version": 2
     }
   },

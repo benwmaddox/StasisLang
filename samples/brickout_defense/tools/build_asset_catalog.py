@@ -105,7 +105,7 @@ def render_catalog_source(catalog: dict) -> str:
             f"    if (index == {row['id']}) {{"
         )
         lines.append(
-            f"        return brickout_defense_catalog_loader.current.load_image("
+            f"        return brickout_defense_catalog_loader.current.load("
             f"\"{row['path']}\", {row['width']}, {row['height']});"
         )
         lines.append("    }")

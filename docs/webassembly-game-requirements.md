@@ -434,7 +434,7 @@ Required work:
 
 - implement `AudioStream.open()`, `refresh()`, `push()`, and `close()` over
   browser audio, including its availability, format, queue, and underrun fields
-- implement `AudioAsset.load_audio()` and `AudioVoice`/`play_once()` playback
+- implement `AudioAsset.load()` and `AudioVoice`/`play_once()` playback
   over browser decoding and voice ownership
 - define buffering policy
 - define browser autoplay/unlock behavior

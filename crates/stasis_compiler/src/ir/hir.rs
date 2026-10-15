@@ -1,4 +1,23 @@
+use std::ops::Range;
+
 use crate::frontend::types::TypeId;
+use crate::identity::FnId;
+
+/// Stable identity of a source extern declaration before a backend selects one
+/// physical symbol from its compatibility candidates. This key uses canonical
+/// declared type spellings rather than `TypeId`s because each backend context
+/// can intern the same declaration types in a different order; resolved typed
+/// lanes remain on `ResolvedExternCallSignature` and backend signatures.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct ExternCallIdentity {
+    pub(crate) source_path: String,
+    pub(crate) name: String,
+    pub(crate) symbol_candidates: Vec<String>,
+    /// Canonical source-declared type spellings, independent of the order in
+    /// which a backend's TypeTable interns the same declarations.
+    pub(crate) declared_params: Vec<String>,
+    pub(crate) declared_return_type: String,
+}
 
 /// Backend-independent, parsed function body consumed by analysis and every code generator.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,6 +42,8 @@ pub(crate) enum SimpleStmt {
     Convert {
         target: AssignTarget,
         kind: ConversionKind,
+        /// Method-name span relative to the containing function body.
+        method_span: Range<u32>,
         source: SimpleExpr,
     },
     If {
@@ -185,6 +206,11 @@ pub(crate) enum SimpleExpr {
     Call {
         target: String,
         args: Vec<SimpleExpr>,
+        /// Exact name span relative to the containing function body.
+        /// Body-relative coordinates remain valid when cached bodies move in a file.
+        source_span: Option<Range<u32>>,
+        /// Canonical selected target after type-directed semantic validation.
+        resolved_target: Option<ResolvedCallTarget>,
     },
     Unary {
         op: ExprUnaryOp,
@@ -195,6 +221,12 @@ pub(crate) enum SimpleExpr {
         op: ExprBinaryOp,
         rhs: Box<SimpleExpr>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ResolvedCallTarget {
+    Function(FnId),
+    Extern(ExternCallIdentity),
 }
 
 impl SimpleExpr {

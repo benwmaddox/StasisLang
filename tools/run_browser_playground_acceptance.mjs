@@ -306,7 +306,7 @@ function @effects(counter) on_code_swap(): void { counter += 100; }
   const spriteSource = `import "vendor/stasis/stdlib/graphics.stasis";
 global uploaded: Sprite;
 global uploaded_svg: Sprite;
-function main(): i32 { uploaded.load_sprite_from("${assetResult.first.path}", 16, 16); uploaded_svg.load_sprite_from("${assetResult.second.path}", 24, 24); return 0; }
+function main(): i32 { uploaded.load_from("${assetResult.first.path}", 16, 16); uploaded_svg.load_from("${assetResult.second.path}", 24, 24); return 0; }
 function tick(): i32 { return 0; }
 function render(): i32 { clear(0.04, 0.07, 0.12, 1.0); draw_sprite(uploaded.sprite_ref, 100.0, 100.0, 128.0, 128.0, 0, 255); draw_sprite(uploaded_svg.sprite_ref, 280.0, 100.0, 128.0, 128.0, 0, 255); return 0; }
 `;

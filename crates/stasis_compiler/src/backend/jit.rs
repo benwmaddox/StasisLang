@@ -148,7 +148,7 @@ fn collect_expression_references(
                 collect_expression_references(nested_index, references, scopes);
             }
         }
-        SimpleExpr::Call { target, args } => {
+        SimpleExpr::Call { target, args, .. } => {
             references.calls.insert(target.clone());
             for argument in args {
                 collect_expression_references(argument, references, scopes);
@@ -906,6 +906,10 @@ impl JitProcess {
             .is_none_or(|snapshot| snapshot.source_revision() != snapshot_revision);
         if snapshot_miss {
             let function_hirs = self.compiler.analysis_hirs(&self.required_emit_roots)?;
+            let source_function_hirs = self.compiler.source_hirs_with_policy(
+                &self.required_emit_roots,
+                crate::backend::ReachabilityPolicy::Development,
+            )?;
             let extern_signatures = collect_supported_extern_call_signatures(
                 self.compiler.files(),
                 &mut analysis_type_table,
@@ -948,6 +952,7 @@ impl JitProcess {
                     self.compiler.data_flow_summaries_shared(),
                     &self.required_emit_roots,
                     &function_hirs,
+                    &source_function_hirs,
                     next_cache,
                     self.project_configuration.clone(),
                 )
@@ -8853,7 +8858,7 @@ test `boolean fail`(): bool { return false; }
             .join("jit_stdlib_ascii_copy_sample.stasis");
         process.upsert_file(
             sample_path.to_string_lossy().to_string(),
-            "import \"src/stdlib/stdlib.stasis\";\nglobal src_text: ascii[8];\nglobal dst_text: ascii[4];\nfunction main(): i32 {\n    src_text[0] = 65;\n    src_text[1] = 66;\n    src_text[2] = 67;\n    src_text[3] = 68;\n    src_text[4] = 69;\n    src_text[5] = 0;\n    ascii_set_len(src_text, 5);\n    ascii_copy(dst_text, src_text);\n    return length(dst_text) * 10 + dst_text[3];\n}\n",
+            "import \"src/stdlib/stdlib.stasis\";\nglobal src_text: ascii[8];\nglobal dst_text: ascii[4];\nfunction main(): i32 {\n    src_text[0] = 65;\n    src_text[1] = 66;\n    src_text[2] = 67;\n    src_text[3] = 68;\n    src_text[4] = 69;\n    src_text[5] = 0;\n    set_len(src_text, 5);\n    copy(dst_text, src_text);\n    return length(dst_text) * 10 + dst_text[3];\n}\n",
         );
         process.compile().expect("compile");
         let value = process
@@ -8879,7 +8884,7 @@ test `boolean fail`(): bool { return false; }
             .join("jit_stdlib_ascii_empty_literal_sample.stasis");
         process.upsert_file(
             sample_path.to_string_lossy().to_string(),
-            "import \"src/stdlib/stdlib.stasis\";\nglobal text: ascii[8];\nglobal copied: ascii[8];\nglobal converted: utf8[8];\nfunction main(): i32 {\n    ascii_clear(text);\n    if (ascii_append(text, \"\") != 0) { return 1; }\n    if (ascii_copy(copied, \"\") != 0) { return 2; }\n    if (length(copied) != 0) { return 3; }\n    if (ascii_cmp(\"\", \"\") != 0) { return 4; }\n    if (!ascii_starts_with(\"x\", \"\")) { return 5; }\n    if (ascii_find(\"\", \"\") != 0) { return 6; }\n    if (ascii_find_byte(\"\", 120) != -1) { return 7; }\n    if (ascii_find_last_byte(\"\", 120) != -1) { return 8; }\n    if (utf8_from_ascii(converted, \"\", 8) != 0) { return 9; }\n    if (length_bytes(converted) != 0) { return 10; }\n    ascii_append(text, \"%\");\n    return length(text) * 100 + text[0];\n}\n",
+            "import \"src/stdlib/stdlib.stasis\";\nglobal text: ascii[8];\nglobal copied: ascii[8];\nglobal converted: utf8[8];\nfunction main(): i32 {\n    clear(text);\n    if (append(text, \"\") != 0) { return 1; }\n    if (copy(copied, \"\") != 0) { return 2; }\n    if (length(copied) != 0) { return 3; }\n    if (cmp(\"\", \"\") != 0) { return 4; }\n    if (!starts_with(\"x\", \"\")) { return 5; }\n    if (find(\"\", \"\") != 0) { return 6; }\n    if (find_byte(\"\", 120) != -1) { return 7; }\n    if (find_last_byte(\"\", 120) != -1) { return 8; }\n    if (from_ascii(converted, \"\", 8) != 0) { return 9; }\n    if (length_bytes(converted) != 0) { return 10; }\n    append(text, \"%\");\n    return length(text) * 100 + text[0];\n}\n",
         );
         process.compile().expect("compile");
         let value = process
@@ -8999,7 +9004,7 @@ test `boolean fail`(): bool { return false; }
             .join("jit_stdlib_ascii_recount_sample.stasis");
         process.upsert_file(
             sample_path.to_string_lossy().to_string(),
-            "import \"src/stdlib/stdlib.stasis\";\nglobal text: ascii[4];\nfunction main(): i32 {\n    text[0] = 65;\n    text[1] = 66;\n    text[2] = 67;\n    text[3] = 68;\n    ascii_set_len(text, 0);\n    return ascii_recount(text);\n}\n",
+            "import \"src/stdlib/stdlib.stasis\";\nglobal text: ascii[4];\nfunction main(): i32 {\n    text[0] = 65;\n    text[1] = 66;\n    text[2] = 67;\n    text[3] = 68;\n    set_len(text, 0);\n    return recount(text);\n}\n",
         );
         process.compile().expect("compile");
         let value = process
@@ -9025,7 +9030,7 @@ test `boolean fail`(): bool { return false; }
             .join("jit_stdlib_utf8_from_ascii_capacity_sample.stasis");
         process.upsert_file(
             sample_path.to_string_lossy().to_string(),
-            "import \"src/stdlib/stdlib.stasis\";\nglobal src_text: ascii[8];\nglobal dst_text: utf8[4];\nfunction main(): i32 {\n    src_text[0] = 65;\n    src_text[1] = 66;\n    src_text[2] = 67;\n    src_text[3] = 68;\n    src_text[4] = 69;\n    src_text[5] = 0;\n    ascii_set_len(src_text, 5);\n    let written: i32 = utf8_from_ascii(dst_text, src_text, 99);\n    return written * 1000 + length_bytes(dst_text) * 100 + length_chars(dst_text) * 10 + dst_text[3];\n}\n",
+            "import \"src/stdlib/stdlib.stasis\";\nglobal src_text: ascii[8];\nglobal dst_text: utf8[4];\nfunction main(): i32 {\n    src_text[0] = 65;\n    src_text[1] = 66;\n    src_text[2] = 67;\n    src_text[3] = 68;\n    src_text[4] = 69;\n    src_text[5] = 0;\n    set_len(src_text, 5);\n    let written: i32 = from_ascii(dst_text, src_text, 99);\n    return written * 1000 + length_bytes(dst_text) * 100 + length_chars(dst_text) * 10 + dst_text[3];\n}\n",
         );
         process.compile().expect("compile");
         let value = process
@@ -9051,7 +9056,7 @@ test `boolean fail`(): bool { return false; }
             .join("jit_stdlib_ascii_set_len_clamp_sample.stasis");
         process.upsert_file(
             sample_path.to_string_lossy().to_string(),
-            "import \"src/stdlib/stdlib.stasis\";\nglobal text: ascii[4];\nfunction main(): i32 {\n    ascii_set_len(text, 99);\n    return length(text);\n}\n",
+            "import \"src/stdlib/stdlib.stasis\";\nglobal text: ascii[4];\nfunction main(): i32 {\n    set_len(text, 99);\n    return length(text);\n}\n",
         );
         process.compile().expect("compile");
         let value = process
@@ -9077,7 +9082,7 @@ test `boolean fail`(): bool { return false; }
             .join("jit_stdlib_utf8_set_len_clamp_sample.stasis");
         process.upsert_file(
             sample_path.to_string_lossy().to_string(),
-            "import \"src/stdlib/stdlib.stasis\";\nglobal text: utf8[4];\nfunction main(): i32 {\n    utf8_set_len_ascii(text, 99);\n    return length_bytes(text) * 10 + length_chars(text);\n}\n",
+            "import \"src/stdlib/stdlib.stasis\";\nglobal text: utf8[4];\nfunction main(): i32 {\n    set_len_ascii(text, 99);\n    return length_bytes(text) * 10 + length_chars(text);\n}\n",
         );
         process.compile().expect("compile");
         let value = process
@@ -9103,7 +9108,7 @@ test `boolean fail`(): bool { return false; }
             .join("jit_stdlib_utf8_from_ascii_src_cap_sample.stasis");
         process.upsert_file(
             sample_path.to_string_lossy().to_string(),
-            "import \"src/stdlib/stdlib.stasis\";\nglobal src_text: ascii[4];\nglobal dst_text: utf8[8];\nfunction main(): i32 {\n    src_text[0] = 65;\n    src_text[1] = 66;\n    src_text[2] = 67;\n    src_text[3] = 68;\n    ascii_set_len(src_text, 0);\n    let written: i32 = utf8_from_ascii(dst_text, src_text, 8);\n    return written * 100 + length_bytes(dst_text) * 10 + dst_text[4];\n}\n",
+            "import \"src/stdlib/stdlib.stasis\";\nglobal src_text: ascii[4];\nglobal dst_text: utf8[8];\nfunction main(): i32 {\n    src_text[0] = 65;\n    src_text[1] = 66;\n    src_text[2] = 67;\n    src_text[3] = 68;\n    set_len(src_text, 0);\n    let written: i32 = from_ascii(dst_text, src_text, 8);\n    return written * 100 + length_bytes(dst_text) * 10 + dst_text[4];\n}\n",
         );
         process.compile().expect("compile");
         let value = process

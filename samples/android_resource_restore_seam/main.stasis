@@ -12,13 +12,13 @@ function main(): i32 {
     init_window(640, 360, "Stasis Android Resource Restore");
     ticks = 0;
     seam_state_checksum = 2000;
-    if (!sprite.load_sprite_from("assets/resource_sprite.svg", 112, 112)) {
+    if (!sprite.load_from("assets/resource_sprite.svg", 112, 112)) {
         return 11;
     }
     // This distinct fallback asset has exactly one owner. Retain its typed
     // reference, then release that sole acquisition to make it stale without
     // forging an integer id.
-    if (!fallback_owner.load_sprite_from("assets/fallback_sprite.svg", 112, 112)) {
+    if (!fallback_owner.load_from("assets/fallback_sprite.svg", 112, 112)) {
         return 14;
     }
     fallback_ref = fallback_owner.reference();

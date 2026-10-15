@@ -4289,7 +4289,7 @@ fn canonical_generic_function_expression(
     canonical_type_identity_text(&rewrite_generic_identifiers(source, &environment))
 }
 
-fn canonical_type_identity_text(source: &str) -> String {
+pub(crate) fn canonical_type_identity_text(source: &str) -> String {
     source
         .chars()
         .filter(|character| !character.is_ascii_whitespace())

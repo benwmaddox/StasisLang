@@ -5,7 +5,7 @@ global tested_sprite_ref: SpriteRef;
 global tested_text: TextRun;
 
 test `resource restore retains named resource lanes`(): bool {
-    if (!tested_sprite_owner.load_sprite_from("assets/resource_sprite.svg", 112, 112)) {
+    if (!tested_sprite_owner.load_from("assets/resource_sprite.svg", 112, 112)) {
         return false;
     }
     tested_sprite_ref = tested_sprite_owner.reference();

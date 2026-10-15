@@ -16,7 +16,7 @@ global drawable_sprite: Sprite;
 global drawable_text: TextRun;
 
 function line_batch_public_probe(): i32 {
-    line_batch.reset_lines();
+    line_batch.reset();
     for (let i: i32 = 0; i < 512; i += 1) {
         if (!line_batch.append_line(i32_to_f32(i), 1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 0.4)) {
             return 20;
@@ -30,7 +30,7 @@ function line_batch_public_probe(): i32 {
 }
 
 function geometry_order_public_probe(): i32 {
-    line_batch.reset_lines();
+    line_batch.reset();
     for (let i: i32 = 0; i < 512; i += 1) {
         if (!line_batch.append_line(i32_to_f32(i), 1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 0.4)) {
             return 22;

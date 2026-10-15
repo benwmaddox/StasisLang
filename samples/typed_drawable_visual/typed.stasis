@@ -10,7 +10,7 @@ global state: VisualState;
 
 function main(): i32 {
     init_window(360, 240, "Typed Drawable Visual");
-    if (!state.sprite.load_sprite_from("../render_parity/assets/opaque.svg", 160, 96)) {
+    if (!state.sprite.load_from("../render_parity/assets/opaque.svg", 160, 96)) {
         return 1;
     }
     state.font = load_font("../render_parity/assets/parity.ttf", 28);

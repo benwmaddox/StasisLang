@@ -38,7 +38,8 @@ fn parse_simple_statements_with_debug_at(
             let let_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[let_start..semicolon].trim();
-            let statement = parse_let_statement(statement_text, type_table)?;
+            let statement_offset = inner_offset.saturating_add(slice_offset(inner, statement_text));
+            let statement = parse_let_statement_at(statement_text, type_table, statement_offset)?;
             statements.push(statement);
             debug_statements.push(debug_statement(inner_offset, let_start, Vec::new())?);
             cursor = semicolon + 1;
@@ -48,7 +49,8 @@ fn parse_simple_statements_with_debug_at(
             let return_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[return_start..semicolon].trim();
-            let statement = parse_return_statement(statement_text)?;
+            let statement_offset = inner_offset.saturating_add(slice_offset(inner, statement_text));
+            let statement = parse_return_statement_at(statement_text, statement_offset)?;
             statements.push(statement);
             debug_statements.push(debug_statement(inner_offset, return_start, Vec::new())?);
             cursor = semicolon + 1;
@@ -98,7 +100,8 @@ fn parse_simple_statements_with_debug_at(
             let start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[start..semicolon].trim();
-            let statement = parse_from_conversion_statement(statement_text)?;
+            let statement_offset = inner_offset.saturating_add(slice_offset(inner, statement_text));
+            let statement = parse_from_conversion_statement_at(statement_text, statement_offset)?;
             statements.push(statement);
             debug_statements.push(debug_statement(inner_offset, start, Vec::new())?);
             cursor = semicolon + 1;
@@ -108,7 +111,8 @@ fn parse_simple_statements_with_debug_at(
             let assignment_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[assignment_start..semicolon].trim();
-            let statement = parse_assignment_statement(statement_text)?;
+            let statement_offset = inner_offset.saturating_add(slice_offset(inner, statement_text));
+            let statement = parse_assignment_statement_at(statement_text, statement_offset)?;
             statements.push(statement);
             debug_statements.push(debug_statement(inner_offset, assignment_start, Vec::new())?);
             cursor = semicolon + 1;
@@ -118,7 +122,8 @@ fn parse_simple_statements_with_debug_at(
             let call_start = cursor;
             let semicolon = find_statement_terminator(inner, cursor)?;
             let statement_text = inner[call_start..semicolon].trim();
-            let statement = parse_call_statement(statement_text)?;
+            let statement_offset = inner_offset.saturating_add(slice_offset(inner, statement_text));
+            let statement = parse_call_statement_at(statement_text, statement_offset)?;
             statements.push(statement);
             debug_statements.push(debug_statement(inner_offset, call_start, Vec::new())?);
             cursor = semicolon + 1;
@@ -147,9 +152,22 @@ fn debug_statement(
     })
 }
 
+fn slice_offset(source: &str, slice: &str) -> usize {
+    (slice.as_ptr() as usize).saturating_sub(source.as_ptr() as usize)
+}
+
+#[cfg(test)]
 pub(crate) fn parse_let_statement(
     statement_text: &str,
     type_table: &mut TypeTable,
+) -> Result<SimpleStmt, String> {
+    parse_let_statement_at(statement_text, type_table, 0)
+}
+
+fn parse_let_statement_at(
+    statement_text: &str,
+    type_table: &mut TypeTable,
+    source_offset: usize,
 ) -> Result<SimpleStmt, String> {
     let after_let = statement_text
         .strip_prefix("let")
@@ -170,7 +188,10 @@ pub(crate) fn parse_let_statement(
                 )
             })?;
             let expression = if let Some(expression_text) = initializer {
-                parse_value_expression(expression_text)?
+                parse_value_expression_at(
+                    expression_text,
+                    source_offset.saturating_add(slice_offset(statement_text, expression_text)),
+                )?
             } else {
                 SimpleExpr::DefaultValue(resolved_type_id)
             };
@@ -185,7 +206,13 @@ pub(crate) fn parse_let_statement(
                     statement_text
                 ));
             }
-            (None, parse_value_expression(expression_text)?)
+            (
+                None,
+                parse_value_expression_at(
+                    expression_text,
+                    source_offset.saturating_add(slice_offset(statement_text, expression_text)),
+                )?,
+            )
         }
         _ => {
             return Err(format!(
@@ -231,9 +258,17 @@ pub(crate) fn split_type_annotation_and_initializer<'a>(
     Ok((type_name, None))
 }
 
+#[cfg(test)]
 pub(crate) fn parse_assignment_statement(statement_text: &str) -> Result<SimpleStmt, String> {
+    parse_assignment_statement_at(statement_text, 0)
+}
+
+fn parse_assignment_statement_at(
+    statement_text: &str,
+    source_offset: usize,
+) -> Result<SimpleStmt, String> {
     let mut cursor = skip_ascii_whitespace(statement_text, 0);
-    let (target, next) = parse_assignment_target(statement_text, cursor)?;
+    let (target, next) = parse_assignment_target_at(statement_text, cursor, source_offset)?;
     cursor = skip_ascii_whitespace(statement_text, next);
     let (op, op_width) = if statement_text
         .as_bytes()
@@ -288,13 +323,25 @@ pub(crate) fn parse_assignment_statement(statement_text: &str) -> Result<SimpleS
     Ok(SimpleStmt::Assign {
         target,
         op,
-        expression: parse_value_expression(expression_text)?,
+        expression: parse_value_expression_at(
+            expression_text,
+            source_offset.saturating_add(slice_offset(statement_text, expression_text)),
+        )?,
     })
 }
 
+#[cfg(test)]
 pub(crate) fn parse_assignment_target(
     source: &str,
     cursor: usize,
+) -> Result<(AssignTarget, usize), String> {
+    parse_assignment_target_at(source, cursor, 0)
+}
+
+fn parse_assignment_target_at(
+    source: &str,
+    cursor: usize,
+    source_offset: usize,
 ) -> Result<(AssignTarget, usize), String> {
     let (first, mut next) = parse_identifier(source, cursor)?;
     let mut collection_path = first.to_string();
@@ -349,7 +396,12 @@ pub(crate) fn parse_assignment_target(
                     snippet_from(source, next)
                 ));
             }
-            let expression = parse_simple_expression(index_text)?;
+            let expression = parse_simple_expression_at(
+                index_text,
+                source_offset
+                    .saturating_add(next + 1)
+                    .saturating_add(slice_offset(&source[next + 1..close], index_text)),
+            )?;
             if let Some(const_i64) = eval_const_i64(&expression) {
                 if const_i64 < 0 {
                     return Err(
@@ -384,7 +436,15 @@ pub(crate) fn parse_assignment_target(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn parse_from_conversion_statement(statement_text: &str) -> Result<SimpleStmt, String> {
+    parse_from_conversion_statement_at(statement_text, 0)
+}
+
+fn parse_from_conversion_statement_at(
+    statement_text: &str,
+    source_offset: usize,
+) -> Result<SimpleStmt, String> {
     let trimmed = statement_text.trim();
     let marker_i32 = ".from_i32(";
     let marker_f32 = ".from_f32(";
@@ -420,7 +480,19 @@ pub(crate) fn parse_from_conversion_statement(statement_text: &str) -> Result<Si
             statement_text
         ));
     }
-    let source = parse_simple_expression(arg_text)?;
+    let source = parse_simple_expression_at(
+        arg_text,
+        source_offset.saturating_add(slice_offset(statement_text, arg_text)),
+    )?;
+    let method_start = source_offset
+        .saturating_add(slice_offset(statement_text, trimmed))
+        .saturating_add(marker_pos + 1);
+    let method_end = method_start.saturating_add(marker.len().saturating_sub(2));
+    let method_span = u32::try_from(method_start)
+        .ok()
+        .zip(u32::try_from(method_end).ok())
+        .map(|(start, end)| start..end)
+        .ok_or_else(|| "conversion method source span exceeds supported range".to_string())?;
     let trailing = trimmed[close + 1..].trim();
     if !trailing.is_empty() {
         return Err(format!(
@@ -428,7 +500,11 @@ pub(crate) fn parse_from_conversion_statement(statement_text: &str) -> Result<Si
             statement_text
         ));
     }
-    let (target, next) = parse_assignment_target(target_text, 0)?;
+    let (target, next) = parse_assignment_target_at(
+        target_text,
+        0,
+        source_offset.saturating_add(slice_offset(statement_text, target_text)),
+    )?;
     if skip_ascii_whitespace(target_text, next) != target_text.len() {
         return Err(format!(
             "unsupported conversion target '{}' in statement '{}'",
@@ -438,12 +514,21 @@ pub(crate) fn parse_from_conversion_statement(statement_text: &str) -> Result<Si
     Ok(SimpleStmt::Convert {
         target,
         kind,
+        method_span,
         source,
     })
 }
 
+#[cfg(test)]
 pub(crate) fn parse_call_statement(statement_text: &str) -> Result<SimpleStmt, String> {
-    let expression = parse_value_expression(statement_text)?;
+    parse_call_statement_at(statement_text, 0)
+}
+
+fn parse_call_statement_at(
+    statement_text: &str,
+    source_offset: usize,
+) -> Result<SimpleStmt, String> {
+    let expression = parse_value_expression_at(statement_text, source_offset)?;
     if matches!(expression, SimpleExpr::Call { .. }) {
         Ok(SimpleStmt::Expr(expression))
     } else {
@@ -454,7 +539,15 @@ pub(crate) fn parse_call_statement(statement_text: &str) -> Result<SimpleStmt, S
     }
 }
 
+#[cfg(test)]
 pub(crate) fn parse_return_statement(statement_text: &str) -> Result<SimpleStmt, String> {
+    parse_return_statement_at(statement_text, 0)
+}
+
+fn parse_return_statement_at(
+    statement_text: &str,
+    source_offset: usize,
+) -> Result<SimpleStmt, String> {
     let after_return = statement_text
         .strip_prefix("return")
         .ok_or_else(|| format!("invalid return statement '{statement_text}'"))?;
@@ -462,7 +555,10 @@ pub(crate) fn parse_return_statement(statement_text: &str) -> Result<SimpleStmt,
     if expression_text.is_empty() {
         return Ok(SimpleStmt::ReturnVoid);
     }
-    Ok(SimpleStmt::Return(parse_value_expression(expression_text)?))
+    Ok(SimpleStmt::Return(parse_value_expression_at(
+        expression_text,
+        source_offset.saturating_add(slice_offset(statement_text, expression_text)),
+    )?))
 }
 
 pub(crate) fn parse_continue_statement(statement_text: &str) -> Result<SimpleStmt, String> {
@@ -487,11 +583,12 @@ fn parse_for_statement_at(
     let header_open = cursor - 1;
     let header_close = find_matching_delimiter(source, header_open, b'(', b')')
         .ok_or_else(|| "missing ')' for for-header".to_string())?;
-    let header = source[header_open + 1..header_close].trim();
-    let header_parts = split_for_header(header)?;
-    let init_text = header_parts[0].trim();
-    let condition_text = header_parts[1].trim();
-    let step_text = header_parts[2].trim();
+    let header = &source[header_open + 1..header_close];
+    let header_ranges = split_for_header_ranges(header)?;
+    let segment = |range: &std::ops::Range<usize>| header[range.clone()].trim();
+    let init_text = segment(&header_ranges[0]);
+    let condition_text = segment(&header_ranges[1]);
+    let step_text = segment(&header_ranges[2]);
     if init_text.is_empty() || condition_text.is_empty() || step_text.is_empty() {
         return Err(format!(
             "for header must include init, condition, and step: '{}'",
@@ -499,9 +596,26 @@ fn parse_for_statement_at(
         ));
     }
 
-    let init = parse_for_control_segment(init_text, type_table)?;
-    let condition = parse_simple_condition(condition_text)?;
-    let step = parse_for_control_segment(step_text, type_table)?;
+    let header_source_offset = source_offset.saturating_add(header_open + 1);
+    let expression_offset = |range: &std::ops::Range<usize>, expression: &str| {
+        header_source_offset
+            .saturating_add(range.start)
+            .saturating_add(slice_offset(&header[range.clone()], expression))
+    };
+    let init = parse_for_control_segment_at(
+        init_text,
+        type_table,
+        expression_offset(&header_ranges[0], init_text),
+    )?;
+    let condition = parse_simple_condition_at(
+        condition_text,
+        expression_offset(&header_ranges[1], condition_text),
+    )?;
+    let step = parse_for_control_segment_at(
+        step_text,
+        type_table,
+        expression_offset(&header_ranges[2], step_text),
+    )?;
 
     cursor = skip_ascii_whitespace_and_comments(source, header_close + 1);
     cursor = expect_byte(source, cursor, b'{', "'{' after for header")?;
@@ -529,27 +643,49 @@ fn parse_for_statement_at(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn parse_for_control_segment(
     segment_text: &str,
     type_table: &mut TypeTable,
+) -> Result<SimpleStmt, String> {
+    parse_for_control_segment_at(segment_text, type_table, 0)
+}
+
+fn parse_for_control_segment_at(
+    segment_text: &str,
+    type_table: &mut TypeTable,
+    source_offset: usize,
 ) -> Result<SimpleStmt, String> {
     let trimmed = segment_text.trim();
     if trimmed.is_empty() {
         return Ok(SimpleStmt::Noop);
     }
     if starts_with_keyword(trimmed, 0, "let") {
-        return parse_let_statement(trimmed, type_table);
+        return parse_let_statement_at(
+            trimmed,
+            type_table,
+            source_offset.saturating_add(slice_offset(segment_text, trimmed)),
+        );
     }
     if trimmed.contains(".from_i32(")
         || trimmed.contains(".from_f32(")
         || trimmed.contains(".from_f64(")
     {
-        return parse_from_conversion_statement(trimmed);
+        return parse_from_conversion_statement_at(
+            trimmed,
+            source_offset.saturating_add(slice_offset(segment_text, trimmed)),
+        );
     }
     if looks_like_assignment(trimmed, 0) {
-        return parse_assignment_statement(trimmed);
+        return parse_assignment_statement_at(
+            trimmed,
+            source_offset.saturating_add(slice_offset(segment_text, trimmed)),
+        );
     }
-    if let Ok(call_statement) = parse_call_statement(trimmed) {
+    if let Ok(call_statement) = parse_call_statement_at(
+        trimmed,
+        source_offset.saturating_add(slice_offset(segment_text, trimmed)),
+    ) {
         return Ok(call_statement);
     }
     Err(format!(
@@ -649,11 +785,17 @@ fn parse_if_statement_at(
     let condition_open = cursor - 1;
     let condition_close = find_matching_delimiter(source, condition_open, b'(', b')')
         .ok_or_else(|| "missing ')' for if condition".to_string())?;
-    let condition_text = source[condition_open + 1..condition_close].trim();
+    let condition_source = &source[condition_open + 1..condition_close];
+    let condition_text = condition_source.trim();
     if condition_text.is_empty() {
         return Err("if condition expression cannot be empty".to_string());
     }
-    let condition = parse_simple_condition(condition_text)?;
+    let condition = parse_simple_condition_at(
+        condition_text,
+        source_offset
+            .saturating_add(condition_open + 1)
+            .saturating_add(slice_offset(condition_source, condition_text)),
+    )?;
 
     cursor = skip_ascii_whitespace_and_comments(source, condition_close + 1);
     cursor = expect_byte(source, cursor, b'{', "'{' after if condition")?;
@@ -709,8 +851,20 @@ fn parse_if_statement_at(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn parse_simple_condition(condition_text: &str) -> Result<SimpleCondition, String> {
     Ok(parse_expression(condition_text.trim())?.into_condition())
+}
+
+fn parse_simple_condition_at(
+    condition_text: &str,
+    source_offset: usize,
+) -> Result<SimpleCondition, String> {
+    let leading = condition_text.len() - condition_text.trim_start().len();
+    Ok(
+        parse_expression_at(condition_text.trim(), source_offset.saturating_add(leading))?
+            .into_condition(),
+    )
 }
 
 pub(crate) fn skip_ascii_whitespace(source: &str, mut cursor: usize) -> usize {
@@ -851,8 +1005,14 @@ pub(crate) fn looks_like_call_statement(source: &str, cursor: usize) -> bool {
     matches!(expression, SimpleExpr::Call { .. })
 }
 
+#[cfg(test)]
 pub(crate) fn split_for_header(header: &str) -> Result<[String; 3], String> {
-    let mut parts: Vec<String> = Vec::new();
+    let ranges = split_for_header_ranges(header)?;
+    Ok(ranges.map(|range| header[range].to_string()))
+}
+
+fn split_for_header_ranges(header: &str) -> Result<[std::ops::Range<usize>; 3], String> {
+    let mut parts: Vec<std::ops::Range<usize>> = Vec::new();
     let bytes = header.as_bytes();
     let mut depth = 0i32;
     let mut segment_start = 0usize;
@@ -900,14 +1060,14 @@ pub(crate) fn split_for_header(header: &str) -> Result<[String; 3], String> {
             b'(' => depth += 1,
             b')' => depth -= 1,
             b';' if depth == 0 => {
-                parts.push(header[segment_start..index].to_string());
+                parts.push(segment_start..index);
                 segment_start = index + 1;
             }
             _ => {}
         }
         index += 1;
     }
-    parts.push(header[segment_start..].to_string());
+    parts.push(segment_start..header.len());
     if parts.len() != 3 {
         return Err(format!(
             "for header must contain exactly 3 segments separated by ';': '{}'",
@@ -1135,15 +1295,32 @@ pub(crate) fn snippet_from(source: &str, cursor: usize) -> String {
 }
 
 pub(crate) fn parse_simple_expression(expression: &str) -> Result<SimpleExpr, String> {
-    parse_expression(expression)?.into_value()
+    parse_simple_expression_at(expression, 0)
 }
 
+fn parse_simple_expression_at(
+    expression: &str,
+    source_offset: usize,
+) -> Result<SimpleExpr, String> {
+    parse_expression_at(expression, source_offset)?.into_value()
+}
+
+#[cfg(test)]
 pub(crate) fn parse_value_expression(expression: &str) -> Result<SimpleExpr, String> {
-    parse_expression(expression)?.into_expression()
+    parse_value_expression_at(expression, 0)
 }
 
+fn parse_value_expression_at(expression: &str, source_offset: usize) -> Result<SimpleExpr, String> {
+    parse_expression_at(expression, source_offset)?.into_expression()
+}
+
+#[cfg(test)]
 fn parse_expression(expression: &str) -> Result<ParsedExpression, String> {
-    let tokens = tokenize_simple_expression(expression)?;
+    parse_expression_at(expression, 0)
+}
+
+fn parse_expression_at(expression: &str, source_offset: usize) -> Result<ParsedExpression, String> {
+    let tokens = tokenize_simple_expression_at(expression, source_offset)?;
     let mut parser = ExprParser {
         tokens: &tokens,
         cursor: 0,
@@ -1214,7 +1391,10 @@ pub(crate) enum ExprToken {
     Int(i64),
     Float(f64),
     StringLiteral(String),
-    Identifier(String),
+    Identifier {
+        name: String,
+        source_span: std::ops::Range<u32>,
+    },
     Operator(ExprBinaryOp),
     Compare(ComparisonOp),
     LogicalNot,
@@ -1233,6 +1413,13 @@ pub(crate) enum ExprToken {
 }
 
 pub(crate) fn tokenize_simple_expression(expression: &str) -> Result<Vec<ExprToken>, String> {
+    tokenize_simple_expression_at(expression, 0)
+}
+
+fn tokenize_simple_expression_at(
+    expression: &str,
+    source_offset: usize,
+) -> Result<Vec<ExprToken>, String> {
     let bytes = expression.as_bytes();
     let mut tokens = Vec::new();
     let mut index = 0usize;
@@ -1297,7 +1484,7 @@ pub(crate) fn tokenize_simple_expression(expression: &str) -> Result<Vec<ExprTok
                             return Err(format!(
                                 "unsupported escape sequence '\\{}' in expression '{}'",
                                 escaped as char, expression
-                            ))
+                            ));
                         }
                     };
                     literal.push(decoded);
@@ -1364,7 +1551,13 @@ pub(crate) fn tokenize_simple_expression(expression: &str) -> Result<Vec<ExprTok
             {
                 index += 1;
             }
-            tokens.push(ExprToken::Identifier(expression[start..index].to_string()));
+            tokens.push(ExprToken::Identifier {
+                name: expression[start..index].to_string(),
+                source_span: u32::try_from(source_offset.saturating_add(start))
+                    .map_err(|_| "call source offset exceeds u32".to_string())?
+                    ..u32::try_from(source_offset.saturating_add(index))
+                        .map_err(|_| "call source offset exceeds u32".to_string())?,
+            });
             continue;
         }
         match byte {
@@ -1537,7 +1730,7 @@ impl ExprParser<'_> {
             ExprToken::StringLiteral(value) => {
                 Ok(ParsedExpression::Value(SimpleExpr::StringLiteral(value)))
             }
-            ExprToken::Identifier(name) => {
+            ExprToken::Identifier { name, source_span } => {
                 if name == "true" {
                     return Ok(ParsedExpression::Value(SimpleExpr::Bool(true)));
                 }
@@ -1564,6 +1757,8 @@ impl ExprParser<'_> {
                             Ok(ParsedExpression::Value(SimpleExpr::Call {
                                 target: name,
                                 args,
+                                source_span: Some(source_span),
+                                resolved_target: None,
                             }))
                         }
                         _ => Err("expected ')' after call arguments".to_string()),
@@ -1623,8 +1818,10 @@ impl ExprParser<'_> {
                             .to_string(),
                     );
                 }
-                if let Some(ExprToken::Identifier(method)) =
-                    self.tokens.get(self.cursor + 1).cloned()
+                if let Some(ExprToken::Identifier {
+                    name: method,
+                    source_span,
+                }) = self.tokens.get(self.cursor + 1).cloned()
                 {
                     let after_method = self.cursor + 2;
                     let call_open =
@@ -1678,13 +1875,16 @@ impl ExprParser<'_> {
                             Ok(SimpleExpr::Call {
                                 target: method,
                                 args,
+                                source_span: Some(source_span),
+                                resolved_target: None,
                             })
                         }
                         _ => Err("expected ')' after receiver call arguments".to_string()),
                     };
                 }
                 self.cursor += 1;
-                let Some(ExprToken::Identifier(segment)) = self.tokens.get(self.cursor).cloned()
+                let Some(ExprToken::Identifier { name: segment, .. }) =
+                    self.tokens.get(self.cursor).cloned()
                 else {
                     return Err("expected identifier after '.' in expression path".to_string());
                 };
@@ -1790,7 +1990,7 @@ impl ExprParser<'_> {
                 }
                 ExprToken::Comma if depth == 1 => {}
                 ExprToken::ColonColon => {
-                    return Err("nested explicit generic call is not a type argument".to_string())
+                    return Err("nested explicit generic call is not a type argument".to_string());
                 }
                 _ if depth == 1 => has_argument = true,
                 _ => {}
@@ -1817,6 +2017,39 @@ impl ExprParser<'_> {
 #[cfg(test)]
 mod expression_parser_tests {
     use super::*;
+
+    #[test]
+    fn conversion_statement_retains_body_relative_method_span() {
+        let statement = "  output.from_i32(42)";
+        let parsed =
+            parse_from_conversion_statement_at(statement, 20).expect("conversion statement parses");
+        let SimpleStmt::Convert { method_span, .. } = parsed else {
+            panic!("expected conversion statement");
+        };
+        let source = "  output.from_i32(42)";
+        assert_eq!(
+            &source[method_span.start as usize - 20..method_span.end as usize - 20],
+            "from_i32"
+        );
+    }
+
+    #[test]
+    fn test_only_parser_entrypoints_accept_their_supported_forms() {
+        let mut types = TypeTable::new();
+        assert!(parse_let_statement("let value: i32 = 42", &mut types).is_ok());
+        assert!(parse_assignment_statement("value = 42").is_ok());
+        assert!(parse_assignment_target("value.field", 0).is_ok());
+        assert!(parse_from_conversion_statement("output.from_i32(42)").is_ok());
+        assert!(parse_call_statement("dispatch()").is_ok());
+        assert!(parse_return_statement("return 42").is_ok());
+        assert!(parse_for_control_segment("i = 0", &mut types).is_ok());
+        assert_eq!(
+            split_for_header("i = 0; i < 1; i += 1")
+                .expect("three for-header segments")
+                .len(),
+            3
+        );
+    }
 
     #[test]
     fn parses_c_integer_operator_precedence() {

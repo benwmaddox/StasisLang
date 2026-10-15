@@ -7,7 +7,7 @@ global tested_runtime_text: utf8[16];
 test `invalid sprite replacement preserves receiver atomically`(): bool {
     tested_sprite.width = 16;
     tested_sprite.height = 16;
-    if (tested_sprite.load_sprite_from("assets/__typed_drawable_fixture.svg", 0, 48)) {
+    if (tested_sprite.load_from("assets/__typed_drawable_fixture.svg", 0, 48)) {
         return false;
     }
     return !tested_sprite.valid() && tested_sprite.width == 16 && tested_sprite.height == 16;
@@ -51,7 +51,7 @@ test `runtime utf8 text uses the cached text receiver contract`(): bool {
     tested_runtime_text[2] = 46;
     tested_runtime_text[3] = 57;
     tested_runtime_text[4] = 57;
-    utf8_set_len_ascii(tested_runtime_text, 5);
+    set_len_ascii(tested_runtime_text, 5);
 
     tested_text.font = 4;
     tested_text.handle = 12;

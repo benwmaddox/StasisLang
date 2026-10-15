@@ -42,19 +42,19 @@ test `score display wraps after two digits`(): bool {
     if (length(left_score_ascii) != 2 || left_score_text.byte_length != 2) {
         return false;
     }
-    if (ascii_get(left_score_ascii, 0) != 48 || ascii_get(left_score_ascii, 1) != 48) {
+    if (get(left_score_ascii, 0) != 48 || get(left_score_ascii, 1) != 48) {
         return false;
     }
     build_score_text(left_score_ascii, left_score_text, 7);
-    if (ascii_get(left_score_ascii, 0) != 48 || ascii_get(left_score_ascii, 1) != 55) {
+    if (get(left_score_ascii, 0) != 48 || get(left_score_ascii, 1) != 55) {
         return false;
     }
     build_score_text(left_score_ascii, left_score_text, 47);
-    if (ascii_get(left_score_ascii, 0) != 52 || ascii_get(left_score_ascii, 1) != 55) {
+    if (get(left_score_ascii, 0) != 52 || get(left_score_ascii, 1) != 55) {
         return false;
     }
     build_score_text(left_score_ascii, left_score_text, 100);
-    if (ascii_get(left_score_ascii, 0) != 48 || ascii_get(left_score_ascii, 1) != 48) {
+    if (get(left_score_ascii, 0) != 48 || get(left_score_ascii, 1) != 48) {
         return false;
     }
     return true;

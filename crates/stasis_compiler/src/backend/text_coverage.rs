@@ -404,7 +404,7 @@ impl Analyzer<'_> {
         stack: &mut Vec<FunctionId>,
     ) {
         match expression {
-            SimpleExpr::Call { target, args } => {
+            SimpleExpr::Call { target, args, .. } => {
                 for arg in args {
                     self.visit_expr(function_id, arg, env, stack);
                 }
@@ -534,7 +534,7 @@ impl Analyzer<'_> {
                     _ => None,
                 })
                 .unwrap_or_else(|| TextValue::unknown(format!("unproven text identifier {name}"))),
-            SimpleExpr::Call { target, args } => {
+            SimpleExpr::Call { target, args, .. } => {
                 let Some(signature) = self.resolve_call(target, args, env) else {
                     return TextValue::unknown(format!("unresolved helper {target}"));
                 };
@@ -646,7 +646,7 @@ impl Analyzer<'_> {
     fn eval_font(&self, expression: &SimpleExpr, env: &Environment) -> Option<Option<String>> {
         match expression {
             SimpleExpr::Identifier(name) => env.fonts.get(name).cloned(),
-            SimpleExpr::Call { target, args } => {
+            SimpleExpr::Call { target, args, .. } => {
                 let signature = self.resolve_call(target, args, env)?;
                 if !self.is_trusted_resolved_extern(signature)
                     || !matches!(
@@ -714,7 +714,7 @@ impl Analyzer<'_> {
                     Some(ConstantValue::Bool(_)) => Some(TYPE_ID_BOOL),
                     None => None,
                 }),
-            SimpleExpr::Call { target, args } => self
+            SimpleExpr::Call { target, args, .. } => self
                 .resolve_call(target, args, env)
                 .map(|signature| signature.return_type),
             SimpleExpr::Unary { operand, .. } => self.infer_type(operand, env),
@@ -780,7 +780,7 @@ impl Analyzer<'_> {
             return false;
         }
         match callee.name.as_str() {
-            "ascii_clear" => {
+            "clear" => {
                 if let Some(SimpleExpr::Identifier(dst)) = args.first() {
                     if self.analysis.global_path_types.contains_key(dst) {
                         env.globals.insert(dst.clone());
@@ -790,7 +790,7 @@ impl Analyzer<'_> {
                 }
                 true
             }
-            "ascii_push_i32" => {
+            "push_i32" => {
                 if let Some(SimpleExpr::Identifier(dst)) = args.first() {
                     if self.analysis.global_path_types.contains_key(dst) {
                         env.globals.insert(dst.clone());
@@ -804,7 +804,7 @@ impl Analyzer<'_> {
                 }
                 true
             }
-            "utf8_from_ascii" => {
+            "from_ascii" => {
                 if let (Some(SimpleExpr::Identifier(dst)), Some(SimpleExpr::Identifier(src))) =
                     (args.first(), args.get(1))
                 {

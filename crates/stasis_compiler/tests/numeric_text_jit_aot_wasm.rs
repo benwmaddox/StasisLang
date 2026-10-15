@@ -40,11 +40,11 @@ struct NumericTextState {
 }
 
 function numeric_from_i32(): i32 {
-    return ascii_from_i32(numeric_out, numeric_i32);
+    return from_i32(numeric_out, numeric_i32);
 }
 
 function numeric_from_f32(): i32 {
-    return ascii_from_f32_fixed(numeric_out, numeric_f32, numeric_decimals);
+    return from_f32_fixed(numeric_out, numeric_f32, numeric_decimals);
 }
 
 function numeric_utf8_receiver_i32(): i32 {
@@ -52,7 +52,7 @@ function numeric_utf8_receiver_i32(): i32 {
 }
 
 function numeric_utf8_function_i32(): i32 {
-    return utf8_from_i32(numeric_utf8_out, numeric_i32);
+    return from_i32(numeric_utf8_out, numeric_i32);
 }
 
 function numeric_utf8_exact_i32(): i32 {
@@ -84,31 +84,31 @@ function numeric_scalar_receiver_i32(): i32 {
 }
 
 function numeric_append_i32(): i32 {
-    return ascii_append_i32(numeric_out, numeric_i32);
+    return append_i32(numeric_out, numeric_i32);
 }
 
 function numeric_pad_left(): i32 {
-    return ascii_pad_left(numeric_out, numeric_width, numeric_fill);
+    return pad_left(numeric_out, numeric_width, numeric_fill);
 }
 
 function numeric_i32_exact_capacity(): i32 {
-    return ascii_from_i32(numeric_i32_exact, numeric_i32);
+    return from_i32(numeric_i32_exact, numeric_i32);
 }
 
 function numeric_i32_short_capacity(): i32 {
-    return ascii_from_i32(numeric_i32_short, numeric_i32);
+    return from_i32(numeric_i32_short, numeric_i32);
 }
 
 function numeric_f32_exact_capacity(): i32 {
-    return ascii_from_f32_fixed(numeric_f32_exact, numeric_f32, 6);
+    return from_f32_fixed(numeric_f32_exact, numeric_f32, 6);
 }
 
 function numeric_f32_short_capacity(): i32 {
-    return ascii_from_f32_fixed(numeric_f32_short, numeric_f32, 6);
+    return from_f32_fixed(numeric_f32_short, numeric_f32, 6);
 }
 
 function numeric_small_append(): i32 {
-    return ascii_append_i32(numeric_small, numeric_i32);
+    return append_i32(numeric_small, numeric_i32);
 }
 "#;
 
@@ -130,6 +130,44 @@ fn source_f32(value: f32) -> String {
         ((1 << 23) + fraction, exponent as i32 - 150)
     };
     format!("numeric_make_f32({mantissa}, {exp2}, {})", bits >> 31 != 0)
+}
+
+fn append_text_assertion(
+    source: &mut String,
+    destination: &str,
+    call: &str,
+    expected: &str,
+    failure: &mut usize,
+    utf8: bool,
+) {
+    source.push_str(&format!(
+        "    status = {call};\n    if (status != {}) {{ return {}; }}\n",
+        expected.len(),
+        *failure
+    ));
+    *failure += 1;
+    if utf8 {
+        source.push_str(&format!(
+            "    if ({destination}.length != {} || {destination}.char_length != {}) {{ return {}; }}\n",
+            expected.len(),
+            expected.len(),
+            *failure
+        ));
+        *failure += 1;
+    }
+    for (index, byte) in expected.bytes().enumerate() {
+        source.push_str(&format!(
+            "    if ({destination}[{index}] != {byte}) {{ return {}; }}\n",
+            *failure
+        ));
+        *failure += 1;
+    }
+    source.push_str(&format!(
+        "    if ({destination}[{}] != 0) {{ return {}; }}\n",
+        expected.len(),
+        *failure
+    ));
+    *failure += 1;
 }
 
 fn backend_selfcheck_source() -> String {
@@ -181,7 +219,7 @@ function main(): i32 {
             value.to_string()
         };
         source.push_str(&format!(
-            "    status = ascii_from_i32(numeric_backend_out, {expression});\n    if (status != {}) {{ return {failure}; }}\n",
+            "    status = from_i32(numeric_backend_out, {expression});\n    if (status != {}) {{ return {failure}; }}\n",
             expected.len()
         ));
         failure += 1;
@@ -215,6 +253,39 @@ function main(): i32 {
         ));
         failure += 1;
     }
+    for (destination, call, utf8) in [
+        (
+            "numeric_backend_out",
+            "numeric_backend_out.from_i32(42)",
+            false,
+        ),
+        (
+            "numeric_backend_utf8",
+            "from_i32(numeric_backend_utf8, 42)",
+            true,
+        ),
+        (
+            "numeric_backend_utf8",
+            "numeric_backend_utf8.from_i32(42)",
+            true,
+        ),
+    ] {
+        append_text_assertion(&mut source, destination, call, "42", &mut failure, utf8);
+    }
+    source.push_str("    copy(numeric_backend_out, \"42\");\n");
+    for call in [
+        "from_ascii(numeric_backend_utf8, numeric_backend_out, 64)",
+        "numeric_backend_utf8.from_ascii(numeric_backend_out, 64)",
+    ] {
+        append_text_assertion(
+            &mut source,
+            "numeric_backend_utf8",
+            call,
+            "42",
+            &mut failure,
+            true,
+        );
+    }
     let mut cases = vec![
         (0.0_f32, 0_u32),
         (-0.0, 6),
@@ -238,7 +309,7 @@ function main(): i32 {
     for (value, decimals) in cases {
         let expected = oracle_f32_fixed(value, decimals).expect("finite backend case");
         source.push_str(&format!(
-            "    status = ascii_from_f32_fixed(numeric_backend_out, {}, {decimals});\n    if (status != {}) {{ return {failure}; }}\n",
+            "    status = from_f32_fixed(numeric_backend_out, {}, {decimals});\n    if (status != {}) {{ return {failure}; }}\n",
             source_f32(value),
             expected.len()
         ));
@@ -256,11 +327,11 @@ function main(): i32 {
         failure += 1;
     }
     source.push_str(&format!(
-        "    ascii_copy(numeric_backend_out, \"keep\");\n    status = ascii_from_f32_fixed(numeric_backend_out, 1.0 / 0.0, 2);\n    if (status != -1 || numeric_backend_out[0] != 107 || numeric_backend_out[1] != 101 || numeric_backend_out[2] != 101 || numeric_backend_out[3] != 112 || numeric_backend_out[4] != 0) {{ return {failure}; }}\n"
+        "    copy(numeric_backend_out, \"keep\");\n    status = from_f32_fixed(numeric_backend_out, 1.0 / 0.0, 2);\n    if (status != -1 || numeric_backend_out[0] != 107 || numeric_backend_out[1] != 101 || numeric_backend_out[2] != 101 || numeric_backend_out[3] != 112 || numeric_backend_out[4] != 0) {{ return {failure}; }}\n"
     ));
     failure += 1;
     source.push_str(&format!(
-        "    status = ascii_from_f32_fixed(numeric_backend_out, 0.0 / 0.0, 2);\n    if (status != -1 || numeric_backend_out[0] != 107 || numeric_backend_out[1] != 101 || numeric_backend_out[2] != 101 || numeric_backend_out[3] != 112 || numeric_backend_out[4] != 0) {{ return {failure}; }}\n"
+        "    status = from_f32_fixed(numeric_backend_out, 0.0 / 0.0, 2);\n    if (status != -1 || numeric_backend_out[0] != 107 || numeric_backend_out[1] != 101 || numeric_backend_out[2] != 101 || numeric_backend_out[3] != 112 || numeric_backend_out[4] != 0) {{ return {failure}; }}\n"
     ));
     source.push_str("    return 0;\n}\n");
     source
@@ -643,7 +714,7 @@ fn utf8_integer_receiver_overloads_write_directly_and_preserve_rejections() {
     assert_eq!(
         process.execute_i32_noarg_by_name("numeric_utf8_function_i32"),
         Ok(2),
-        "function-form utf8_from_i32 remains available"
+        "function-form from_i32 remains available"
     );
     assert_eq!(collection_output(&process, "numeric_utf8_out"), b"42\0");
 }
