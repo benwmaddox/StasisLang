@@ -1301,15 +1301,22 @@ The full Nightly Release on merged PR #929 reached IT-021 and rejected the
 packaged-assets sample assigning `Sprite.reference(): SpriteRef` to an `i32`
 global. The strict compiler result check was correct. Migrated that global,
 its initialization and render validity test to `SpriteRef`/`SpriteRef.Invalid`,
-matching the desktop manifest asset seam. Native telemetry still reads the
-same i32 ABI lane; no compiler coercion or safety check changed.
+matching the desktop manifest asset seam. The separate Windows IT-015 fixture
+also now retains `SpriteRef`. Native telemetry still reads the same i32 ABI
+lane; no compiler coercion or safety check changed.
 
 Reproduced the exact `package-mobile --target android-x86_64 --out d
 --development-build` failure with a fresh copy of the sample and canonical
 stdlib. After the migration, that command passed and emitted the Android AOT
 objects and published binding manifest. Canonical Stasis formatting, diff
 checks, runtime ABI (981 comparisons) and host-runtime contract (1,167) passed.
-The full nightly device/packaged execution gate remains pending the follow-up.
+The exact Windows `cargo test -p stasis --test mobile_packaged_assets_seam --
+--test-threads=1 --nocapture` passed against the checked native SDL runtime,
+with the existing host signing identity required. It verified linked AOT,
+packaged image/font/audio content, native handles, offline mixing, and render
+trace. All 34 Windows ABI regression tests passed, including the updated
+fixture mutation oracle. The full nightly device/packaged execution gate
+remains pending the follow-up.
 
 Theory gained: a host's raw telemetry storage type does not define the source
 type of an opaque handle. The existing desktop seam demonstrates typed source
@@ -1321,3 +1328,35 @@ Adjustment: validate maintained packaged consumers, including their typed
 destinations and invalid sentinels, rather than only migrated call names.
 Visual evidence: not applicable to the three-line type/sentinel correction;
 Android device rendering assertions and capture remain a pending nightly gate.
+
+### #839 nightly follow-up: process-scoped Android bounds evidence
+
+Staged Android generics acceptance captured 2,758 all-buffer log lines, above
+the 2,500-line app-log budget. The target process emitted one correct SIGILL;
+most extra records came from unrelated Android/Google services. Bounds probes
+now identify the unique initialized/index PID and validate its complete records,
+including continuation lines, under the unchanged 2,500-line/1,000,000-byte
+limits. Raw device snapshots remain separate diagnostic artifacts. Existing
+receipt fields refer to the process slice with an explicit scope; raw paths
+and metrics are additive. Signal/index/PID identity, no post-trap frames,
+Java/abort rejection, process exit and no-restart checks remain mandatory.
+
+The focused Windows suite passed 76 tests; the final Linux focused and
+downstream batch passed 145 tests. Replaying both original failed-run captures
+passed: low PID 4242 had 414 process lines/64,768 bytes; high PID 4420 had 675
+process lines/104,107 bytes. Native records and their continuation lines are
+retained; no tail truncation or raised cap hides excess app output. The full
+merged-source nightly remains pending.
+
+Theory gained: a process-output budget must follow process identity rather
+than a shared device buffer. Raw capture and validated app evidence serve
+different purposes and need distinct paths and metrics.
+Good: archived logs distinguished a valid bounds trap from unrelated log noise.
+Bad: the old all-buffer line count treated other services as app behavior.
+Adjustment: scope complete records before applying app budgets and preserve
+the raw snapshot for diagnosis.
+Visual evidence: inspected the archived Android generics `stable-frame.png`
+under `D:/code/.automation-evidence/nightly-20261015-839-staged-android-evidence/`
+(`android/bundled/runtime/`); it shows the expected green rectangle and fitted
+dark viewport before the separate bounds probes. New device execution remains
+a pending full-nightly gate.
