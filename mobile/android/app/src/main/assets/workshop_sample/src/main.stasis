@@ -340,9 +340,9 @@ function pong_game_on_code_swap(): void {
 
 function main(): i32 {
     pong_game_main();
-    load_sprite_from(PongHost.ball_sprite, "assets/ball.svg", 32, 32);
-    load_sprite_from(PongHost.paddle_sprite, "assets/paddle.svg", 1, 1);
-    load_sprite_from(PongHost.center_sprite, "assets/center_line.svg", 1, 1);
+    load_from(PongHost.ball_sprite, "assets/ball.svg", 32, 32);
+    load_from(PongHost.paddle_sprite, "assets/paddle.svg", 1, 1);
+    load_from(PongHost.center_sprite, "assets/center_line.svg", 1, 1);
     pong_game_render();
     pong_host_render();
     return 0;

@@ -1,12 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Arc;
 
 use crate::backend::compile_analysis::{
-    collect_supported_call_signatures, resolve_call_signature, unambiguous_call_params,
-    CallSignatureMap, ResolvedExternCallSignature,
+    are_call_argument_and_param_compatible, build_extern_call_signature,
+    collect_supported_call_signatures, is_supported_call_lane_type, resolve_call_signature,
+    unambiguous_call_params, CallSignature, CallSignatureMap, ConstantValue,
 };
-use crate::compiler::{FunctionMeta, SourceFile};
+use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::frontend::body_parser::parse_simple_expression;
+use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::parser::{parse_top_level_extern_functions, parse_top_level_type_layout};
 use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TypedCollectionDescriptor, TypedCollectionKind, TYPE_ID_BOOL,
@@ -14,7 +17,7 @@ use crate::frontend::types::{
 };
 use crate::ir::hir::{
     eval_const_i64, AssignOp, AssignTarget, ComparisonOp, ConversionKind, ExprBinaryOp,
-    ExprUnaryOp, SimpleCondition, SimpleExpr, SimpleStmt,
+    ExprUnaryOp, ResolvedCallTarget, SimpleCondition, SimpleExpr, SimpleStmt,
 };
 
 mod effect_contracts;
@@ -280,18 +283,34 @@ fn merge_host_call_cost(target: &mut Option<u64>, value: Option<u64>) {
 struct AnalysisContext<'a> {
     globals: BTreeSet<String>,
     constants: BTreeMap<String, i64>,
+    constant_types: BTreeMap<String, TypeId>,
     view_parameters_by_function: BTreeMap<u32, BTreeSet<usize>>,
     fixed_parameter_capacities: BTreeMap<u32, BTreeMap<usize, u64>>,
     extern_functions: BTreeSet<String>,
+    external_function_sources: BTreeMap<String, BTreeSet<String>>,
     extern_effects: BTreeMap<String, Option<Vec<String>>>,
     internal_function_targets: BTreeMap<String, Vec<u32>>,
+    function_return_types: BTreeMap<FunctionId, TypeId>,
+    visible_paths: BTreeSet<String>,
+    caller_path: String,
+    graph: Option<&'a ModuleGraph>,
     collection_capacities: BTreeMap<String, u64>,
     path_types: BTreeMap<String, TypeId>,
     field_types: BTreeMap<TypeId, BTreeMap<String, TypeId>>,
     typed_collection_descriptors: BTreeMap<String, TypedCollectionDescriptor>,
     call_signatures: CallSignatureMap,
+    declared_extern_call_signatures: CallSignatureMap,
     fingerprint: u64,
     types: &'a TypeTable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VisibleCallTarget {
+    pub(crate) target: String,
+    pub(crate) function_id: FunctionId,
+    pub(crate) storage_index: u32,
+    pub(crate) params: Vec<TypeId>,
+    pub(crate) return_type: TypeId,
 }
 
 pub(crate) fn validate_program_semantics(
@@ -299,7 +318,8 @@ pub(crate) fn validate_program_semantics(
     functions: &[FunctionMeta],
     statements_by_id: &mut [Vec<SimpleStmt>],
     types: &TypeTable,
-    candidate_targets_by_function: &BTreeMap<u32, BTreeMap<String, Vec<String>>>,
+    graph: &ModuleGraph,
+    candidate_targets_by_function: &BTreeMap<u32, Arc<BTreeMap<String, Vec<VisibleCallTarget>>>>,
 ) -> Result<(), (u32, String)> {
     let mut semantic_types = types.clone();
     for function in functions {
@@ -327,8 +347,9 @@ pub(crate) fn validate_program_semantics(
             ));
         }
     }
-    let context = build_semantic_context(files, functions, &mut semantic_types)
+    let mut context = build_semantic_context(files, functions, &mut semantic_types, Some(graph))
         .map_err(|message| (0, message))?;
+    let empty_visible_targets = BTreeMap::new();
     for function in functions {
         let statements = statements_by_id
             .get_mut(function.storage_index as usize)
@@ -338,26 +359,691 @@ pub(crate) fn validate_program_semantics(
                     format!("function '{}' has no statement artifact", function.name),
                 )
             })?;
-        let mut local_types = function
+        let initial_local_types: BTreeMap<String, TypeId> = function
             .param_names
             .iter()
             .cloned()
             .zip(function.params.iter().copied())
             .collect();
+        let visible_targets = candidate_targets_by_function
+            .get(&function.storage_index)
+            .map(Arc::as_ref)
+            .unwrap_or(&empty_visible_targets);
+        context.caller_path = files[function.file_id as usize].path.clone();
+        context.visible_paths = graph.dependency_closure(&context.caller_path);
+        let mut call_resolution_types = initial_local_types.clone();
+        resolve_visible_calls_in_statements(
+            statements,
+            &context,
+            &mut call_resolution_types,
+            visible_targets,
+        )
+        .map_err(|message| (function.storage_index, message))?;
+        let mut local_types = initial_local_types;
         validate_statements(
             statements,
             function.return_type,
             &context,
             &mut local_types,
             0,
-            candidate_targets_by_function
-                .get(&function.storage_index)
-                .unwrap_or(&BTreeMap::new()),
+            visible_targets,
         )
         .map_err(|message| (function.storage_index, message))?;
     }
     validate_requires_contracts(files, functions, statements_by_id, &context)
         .map_err(|(storage_index, message)| (storage_index, message))?;
+    Ok(())
+}
+
+fn resolve_visible_calls_in_statements(
+    statements: &mut [SimpleStmt],
+    context: &AnalysisContext<'_>,
+    local_types: &mut BTreeMap<String, TypeId>,
+    visible_targets: &BTreeMap<String, Vec<VisibleCallTarget>>,
+) -> Result<(), String> {
+    for statement in statements {
+        match statement {
+            SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
+            SimpleStmt::Let {
+                name,
+                type_id,
+                expression,
+            } => {
+                resolve_visible_calls_in_expression(
+                    expression,
+                    context,
+                    local_types,
+                    visible_targets,
+                )?;
+                if let Some(type_id) = (*type_id)
+                    .or_else(|| expression_type(expression, context, local_types, &BTreeMap::new()))
+                {
+                    local_types.insert(name.clone(), type_id);
+                }
+            }
+            SimpleStmt::Assign {
+                target, expression, ..
+            } => {
+                resolve_visible_calls_in_expression(
+                    expression,
+                    context,
+                    local_types,
+                    visible_targets,
+                )?;
+                if let AssignTarget::IndexedPath {
+                    index,
+                    nested_index,
+                    ..
+                } = target
+                {
+                    resolve_visible_calls_in_expression(
+                        index,
+                        context,
+                        local_types,
+                        visible_targets,
+                    )?;
+                    if let Some(nested_index) = nested_index {
+                        resolve_visible_calls_in_expression(
+                            nested_index,
+                            context,
+                            local_types,
+                            visible_targets,
+                        )?;
+                    }
+                }
+            }
+            SimpleStmt::Convert { target, source, .. } => {
+                resolve_visible_calls_in_expression(source, context, local_types, visible_targets)?;
+                if let AssignTarget::IndexedPath {
+                    index,
+                    nested_index,
+                    ..
+                } = target
+                {
+                    resolve_visible_calls_in_expression(
+                        index,
+                        context,
+                        local_types,
+                        visible_targets,
+                    )?;
+                    if let Some(nested_index) = nested_index {
+                        resolve_visible_calls_in_expression(
+                            nested_index,
+                            context,
+                            local_types,
+                            visible_targets,
+                        )?;
+                    }
+                }
+            }
+            SimpleStmt::If {
+                condition,
+                then_statements,
+                else_statements,
+            } => {
+                resolve_visible_calls_in_condition(
+                    condition,
+                    context,
+                    local_types,
+                    visible_targets,
+                )?;
+                let mut then_types = local_types.clone();
+                resolve_visible_calls_in_statements(
+                    then_statements,
+                    context,
+                    &mut then_types,
+                    visible_targets,
+                )?;
+                if let Some(else_statements) = else_statements {
+                    let mut else_types = local_types.clone();
+                    resolve_visible_calls_in_statements(
+                        else_statements,
+                        context,
+                        &mut else_types,
+                        visible_targets,
+                    )?;
+                }
+            }
+            SimpleStmt::For {
+                init,
+                condition,
+                step,
+                body_statements,
+            } => {
+                let mut loop_types = local_types.clone();
+                resolve_visible_calls_in_statements(
+                    std::slice::from_mut(init.as_mut()),
+                    context,
+                    &mut loop_types,
+                    visible_targets,
+                )?;
+                resolve_visible_calls_in_condition(
+                    condition,
+                    context,
+                    &mut loop_types,
+                    visible_targets,
+                )?;
+                let mut body_types = loop_types.clone();
+                resolve_visible_calls_in_statements(
+                    body_statements,
+                    context,
+                    &mut body_types,
+                    visible_targets,
+                )?;
+                resolve_visible_calls_in_statements(
+                    std::slice::from_mut(step.as_mut()),
+                    context,
+                    &mut loop_types,
+                    visible_targets,
+                )?;
+            }
+            SimpleStmt::Foreach {
+                item_name,
+                index_name,
+                collection_path,
+                body_statements,
+            } => {
+                let mut body_types = local_types.clone();
+                if let Some(element_type) =
+                    path_type(collection_path, context, local_types, &BTreeMap::new())
+                        .and_then(|collection| context.types.indexed_element_type_id(collection))
+                {
+                    body_types.insert(item_name.clone(), element_type);
+                }
+                if let Some(index_name) = index_name {
+                    body_types.insert(index_name.clone(), TYPE_ID_I32);
+                }
+                resolve_visible_calls_in_statements(
+                    body_statements,
+                    context,
+                    &mut body_types,
+                    visible_targets,
+                )?;
+            }
+            SimpleStmt::Expr(expression) | SimpleStmt::Return(expression) => {
+                resolve_visible_calls_in_expression(
+                    expression,
+                    context,
+                    local_types,
+                    visible_targets,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_visible_calls_in_condition(
+    condition: &mut SimpleCondition,
+    context: &AnalysisContext<'_>,
+    local_types: &mut BTreeMap<String, TypeId>,
+    visible_targets: &BTreeMap<String, Vec<VisibleCallTarget>>,
+) -> Result<(), String> {
+    match condition {
+        SimpleCondition::Comparison { lhs, rhs, .. } => {
+            resolve_visible_calls_in_expression(lhs, context, local_types, visible_targets)?;
+            resolve_visible_calls_in_expression(rhs, context, local_types, visible_targets)?;
+        }
+        SimpleCondition::Expr(expression) => {
+            resolve_visible_calls_in_expression(expression, context, local_types, visible_targets)?;
+        }
+        SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
+            resolve_visible_calls_in_condition(lhs, context, local_types, visible_targets)?;
+            resolve_visible_calls_in_condition(rhs, context, local_types, visible_targets)?;
+        }
+        SimpleCondition::Not(inner) => {
+            resolve_visible_calls_in_condition(inner, context, local_types, visible_targets)?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticCallCandidate {
+    target: String,
+    resolved_target: ResolvedCallTarget,
+    params: Vec<TypeId>,
+}
+
+fn semantic_call_candidates(
+    name: &str,
+    internal_targets: &[VisibleCallTarget],
+    context: &AnalysisContext<'_>,
+    external_module_path: Option<&str>,
+) -> Vec<SemanticCallCandidate> {
+    let mut candidates = internal_targets
+        .iter()
+        .map(|candidate| SemanticCallCandidate {
+            target: candidate.target.clone(),
+            resolved_target: ResolvedCallTarget::Function(candidate.function_id),
+            params: candidate.params.clone(),
+        })
+        .collect::<Vec<_>>();
+    for signature in context
+        .declared_extern_call_signatures
+        .get(name)
+        .into_iter()
+        .flatten()
+        .filter(|signature| signature.function_id.is_none())
+    {
+        let Some(source_path) = signature.extern_source_path.as_deref() else {
+            continue;
+        };
+        if !extern_source_is_visible(context, source_path)
+            || external_module_path.is_some_and(|module_path| module_path != source_path)
+        {
+            continue;
+        }
+        let Some(identity) = signature.extern_identity.as_ref() else {
+            continue;
+        };
+        candidates.push(SemanticCallCandidate {
+            target: name.to_string(),
+            resolved_target: ResolvedCallTarget::Extern(identity.clone()),
+            params: signature.params.clone(),
+        });
+    }
+    let mut unique = Vec::new();
+    for candidate in candidates {
+        if !unique.iter().any(|existing: &SemanticCallCandidate| {
+            existing.resolved_target == candidate.resolved_target
+        }) {
+            unique.push(candidate);
+        }
+    }
+    unique
+}
+
+fn extern_source_is_visible(context: &AnalysisContext<'_>, source_path: &str) -> bool {
+    source_path == context.caller_path || context.visible_paths.contains(source_path)
+}
+
+fn matching_semantic_call_candidates(
+    candidates: &[SemanticCallCandidate],
+    args: &[SimpleExpr],
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Vec<SemanticCallCandidate> {
+    let inferred_matches = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.params.len() == args.len()
+                && args
+                    .iter()
+                    .zip(&candidate.params)
+                    .all(|(argument, parameter)| {
+                        semantic_expression_type(argument, context, local_types).is_some_and(
+                            |argument_type| {
+                                are_call_argument_and_param_compatible(
+                                    argument_type,
+                                    *parameter,
+                                    context.types,
+                                    &context.field_types,
+                                )
+                            },
+                        )
+                    })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !inferred_matches.is_empty() {
+        return inferred_matches;
+    }
+
+    // Contextual forms such as a lone `1.0` passed to an f64 parameter are
+    // considered only after ordinary inferred-type candidates. This keeps a
+    // computed f32 expression on its f32 overload when both f32 and f64
+    // overloads are visible, while preserving contextual typing when no
+    // inferred-type candidate exists.
+    candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.params.len() == args.len()
+                && args
+                    .iter()
+                    .zip(&candidate.params)
+                    .all(|(argument, parameter)| {
+                        semantic_expression_type_with_expected(
+                            argument,
+                            Some(*parameter),
+                            context,
+                            local_types,
+                        )
+                        .is_some_and(|argument_type| {
+                            are_call_argument_and_param_compatible(
+                                argument_type,
+                                *parameter,
+                                context.types,
+                                &context.field_types,
+                            )
+                        })
+                    })
+        })
+        .cloned()
+        .collect()
+}
+
+fn has_unresolved_semantic_argument(
+    candidates: &[SemanticCallCandidate],
+    args: &[SimpleExpr],
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> bool {
+    let arity_candidates = candidates
+        .iter()
+        .filter(|candidate| candidate.params.len() == args.len())
+        .collect::<Vec<_>>();
+    if arity_candidates.is_empty() {
+        return false;
+    }
+    args.iter().enumerate().any(|(index, argument)| {
+        !arity_candidates.iter().any(|candidate| {
+            semantic_expression_type_with_expected(
+                argument,
+                Some(candidate.params[index]),
+                context,
+                local_types,
+            )
+            .is_some()
+        })
+    })
+}
+
+fn namespace_alias_argument(
+    args: &[SimpleExpr],
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Option<(String, String)> {
+    let [SimpleExpr::Identifier(alias), ..] = args else {
+        return None;
+    };
+    // A value binding shadows an imported module alias in expression position.
+    // Otherwise `state.reset()` can be misread as `state.reset()` on a module
+    // when the receiver's type has no matching method.
+    if local_types.contains_key(alias)
+        || context.path_types.contains_key(alias)
+        || context.constant_types.contains_key(alias)
+        || context.globals.contains(alias)
+        || context.constants.contains_key(alias)
+    {
+        return None;
+    }
+    let graph = context.graph?;
+    let module_path = graph
+        .imported_alias_target(&context.caller_path, alias)?
+        .to_string();
+    Some((alias.clone(), module_path))
+}
+
+fn semantic_builtin_call_result(
+    target: &str,
+    args: &[SimpleExpr],
+    context: &AnalysisContext<'_>,
+    local_types: &BTreeMap<String, TypeId>,
+) -> Result<Option<TypeId>, String> {
+    if target.contains('.') {
+        return Ok(None);
+    }
+    let name = target.rsplit_once('.').map_or(target, |(_, name)| name);
+    let signature = match name {
+        "i32_to_f32" => Some((&[TYPE_ID_I32][..], TYPE_ID_F32)),
+        "f32_to_i32" | "f32_to_bits" => Some((&[TYPE_ID_F32][..], TYPE_ID_I32)),
+        "f32_sqrt" | "sin_fast" | "cos_fast" => Some((&[TYPE_ID_F32][..], TYPE_ID_F32)),
+        "fixed32_from_i32" | "fixed32_to_i32" => Some((&[TYPE_ID_I32][..], TYPE_ID_I32)),
+        "fixed32_mul" | "fixed32_div" | "fixed32_from_ratio" => {
+            Some((&[TYPE_ID_I32, TYPE_ID_I32][..], TYPE_ID_I32))
+        }
+        _ => None,
+    };
+    if let Some((params, return_type)) = signature {
+        if args.len() != params.len() {
+            return Err(format!(
+                "compiler intrinsic '{name}' expects {} argument(s), found {}",
+                params.len(),
+                args.len()
+            ));
+        }
+        for (index, (argument, expected)) in args.iter().zip(params).enumerate() {
+            let found =
+                semantic_expression_type(argument, context, local_types).ok_or_else(|| {
+                    format!(
+                        "compiler intrinsic '{name}' argument {} type could not be inferred",
+                        index + 1
+                    )
+                })?;
+            if found != *expected {
+                return Err(type_mismatch(
+                    &format!("compiler intrinsic '{name}' argument {}", index + 1),
+                    *expected,
+                    found,
+                    context.types,
+                ));
+            }
+        }
+        return Ok(Some(return_type));
+    }
+
+    if builtin_host_effect(name).is_some() {
+        if args.len() != 1 {
+            return Err(format!(
+                "host extern '{name}' expects exactly one argument, found {}",
+                args.len()
+            ));
+        }
+        let argument_type = semantic_expression_type(&args[0], context, local_types)
+            .ok_or_else(|| format!("host extern '{name}' argument type could not be inferred"))?;
+        if !context.types.is_i32_abi_compatible(argument_type) {
+            return Err(format!(
+                "host extern '{name}' requires i32-abi-compatible argument, found type {}",
+                argument_type
+            ));
+        }
+        return Ok(Some(TYPE_ID_VOID));
+    }
+    Ok(None)
+}
+
+fn resolve_visible_calls_in_expression(
+    expression: &mut SimpleExpr,
+    context: &AnalysisContext<'_>,
+    local_types: &mut BTreeMap<String, TypeId>,
+    visible_targets: &BTreeMap<String, Vec<VisibleCallTarget>>,
+) -> Result<(), String> {
+    match expression {
+        SimpleExpr::Condition(condition) => {
+            resolve_visible_calls_in_condition(condition, context, local_types, visible_targets)?;
+        }
+        SimpleExpr::IndexedPath {
+            index,
+            nested_index,
+            ..
+        } => {
+            resolve_visible_calls_in_expression(index, context, local_types, visible_targets)?;
+            if let Some(nested_index) = nested_index {
+                resolve_visible_calls_in_expression(
+                    nested_index,
+                    context,
+                    local_types,
+                    visible_targets,
+                )?;
+            }
+        }
+        SimpleExpr::Call {
+            target,
+            args,
+            resolved_target,
+            ..
+        } => {
+            for argument in args.iter_mut() {
+                resolve_visible_calls_in_expression(
+                    argument,
+                    context,
+                    local_types,
+                    visible_targets,
+                )?;
+            }
+            if resolved_target.is_some() {
+                return Ok(());
+            }
+            let name = target
+                .rsplit_once('.')
+                .map_or(target.as_str(), |(_, name)| name);
+            let namespace_alias = namespace_alias_argument(args, context, local_types);
+            if typed_collection_operation_for_call(target, args, context, local_types).is_some() {
+                return Ok(());
+            }
+            if namespace_alias.is_none() {
+                match semantic_builtin_call_result(target, args, context, local_types) {
+                    Ok(Some(_)) => return Ok(()),
+                    Ok(None) | Err(_) => {}
+                }
+            }
+            let internal_candidates = visible_targets.get(name).cloned().unwrap_or_default();
+            let receiver_candidates =
+                semantic_call_candidates(name, &internal_candidates, context, None);
+            let receiver_matches =
+                matching_semantic_call_candidates(&receiver_candidates, args, context, local_types);
+
+            let (selected, consume_namespace, unresolved_argument) =
+                if let Some((alias, module_path)) = namespace_alias.as_ref() {
+                    let namespace_targets = internal_candidates
+                        .iter()
+                        .filter(|candidate| candidate.target == format!("{alias}.{name}"))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let namespace_candidates = semantic_call_candidates(
+                        name,
+                        &namespace_targets,
+                        context,
+                        Some(module_path.as_str()),
+                    );
+                    let namespace_arguments = &args[1..];
+                    let namespace_matches = matching_semantic_call_candidates(
+                        &namespace_candidates,
+                        namespace_arguments,
+                        context,
+                        local_types,
+                    );
+                    let unresolved_namespace_argument = has_unresolved_semantic_argument(
+                        &namespace_candidates,
+                        namespace_arguments,
+                        context,
+                        local_types,
+                    );
+                    if !receiver_matches.is_empty() {
+                        (
+                            receiver_matches,
+                            false,
+                            has_unresolved_semantic_argument(
+                                &receiver_candidates,
+                                args,
+                                context,
+                                local_types,
+                            ),
+                        )
+                    } else {
+                        (namespace_matches, true, unresolved_namespace_argument)
+                    }
+                } else {
+                    let unresolved_argument = has_unresolved_semantic_argument(
+                        &receiver_candidates,
+                        args,
+                        context,
+                        local_types,
+                    );
+                    (receiver_matches, false, unresolved_argument)
+                };
+
+            if selected.is_empty() && unresolved_argument {
+                // Let the existing expression validator report the more
+                // specific error inside an argument whose type is unknown.
+                // For example, an array `.length` access must keep its
+                // removed-property diagnostic instead of becoming an
+                // overload-resolution error.
+                return Ok(());
+            }
+
+            match selected.as_slice() {
+                [candidate] => {
+                    *resolved_target = Some(candidate.resolved_target.clone());
+                    match &candidate.resolved_target {
+                        ResolvedCallTarget::Function(_) => *target = candidate.target.clone(),
+                        ResolvedCallTarget::Extern(_) => *target = name.to_string(),
+                    }
+                    if consume_namespace {
+                        args.remove(0);
+                    }
+                }
+                [] => {
+                    let has_visible_internal = if consume_namespace {
+                        internal_candidates.iter().any(|candidate| {
+                            namespace_alias.as_ref().is_some_and(|(alias, _)| {
+                                candidate.target == format!("{alias}.{name}")
+                            })
+                        })
+                    } else {
+                        !internal_candidates.is_empty()
+                    };
+                    let has_visible_external = context
+                        .external_function_sources
+                        .get(name)
+                        .is_some_and(|paths| {
+                            paths.iter().any(|path| {
+                                extern_source_is_visible(context, path)
+                                    && namespace_alias
+                                        .as_ref()
+                                        .is_none_or(|(_, module_path)| path == module_path)
+                            })
+                        });
+                    let has_any_external =
+                        context
+                            .external_function_sources
+                            .get(name)
+                            .is_some_and(|paths| {
+                                paths.iter().any(|path| {
+                                    namespace_alias
+                                        .as_ref()
+                                        .is_none_or(|(_, module_path)| path == module_path)
+                                })
+                            });
+                    let has_any_internal = context
+                        .internal_function_targets
+                        .get(name)
+                        .is_some_and(|targets| !targets.is_empty());
+                    let has_visible_target = has_visible_internal || has_visible_external;
+                    if !has_visible_target && (has_any_internal || has_any_external) {
+                        return Err(format!(
+                            "call '{name}' is not visible from '{}'; import its module",
+                            context.caller_path
+                        ));
+                    }
+                    if has_visible_target {
+                        return Err(format!(
+                            "no matching visible overload for call target '{name}'"
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "ambiguous visible overload for call target '{name}'"
+                    ));
+                }
+            }
+        }
+        SimpleExpr::Unary { operand, .. } => {
+            resolve_visible_calls_in_expression(operand, context, local_types, visible_targets)?;
+        }
+        SimpleExpr::Binary { lhs, rhs, .. } => {
+            resolve_visible_calls_in_expression(lhs, context, local_types, visible_targets)?;
+            resolve_visible_calls_in_expression(rhs, context, local_types, visible_targets)?;
+        }
+        SimpleExpr::DefaultValue(_)
+        | SimpleExpr::Int(_)
+        | SimpleExpr::Float(_)
+        | SimpleExpr::Bool(_)
+        | SimpleExpr::StringLiteral(_)
+        | SimpleExpr::Identifier(_) => {}
+    }
     Ok(())
 }
 
@@ -402,12 +1088,13 @@ fn validate_statements(
     context: &AnalysisContext<'_>,
     local_types: &mut BTreeMap<String, TypeId>,
     loop_depth: usize,
-    candidate_targets: &BTreeMap<String, Vec<String>>,
+    candidate_targets: &BTreeMap<String, Vec<VisibleCallTarget>>,
 ) -> Result<(), String> {
     for statement in statements {
         if let SimpleStmt::Convert {
             target,
             kind,
+            method_span,
             source,
         } = statement
         {
@@ -420,13 +1107,18 @@ fn validate_statements(
                     let mut matches = Vec::new();
                     for call_target in candidate_targets.get(method).into_iter().flatten() {
                         match resolve_call_signature(
-                            call_target,
+                            &call_target.target,
                             &argument_types,
                             &context.call_signatures,
                             context.types,
                             &context.field_types,
                         ) {
-                            Ok(_) => matches.push(call_target.clone()),
+                            Ok(signature)
+                                if signature.function_id == Some(call_target.storage_index) =>
+                            {
+                                matches.push(call_target.clone())
+                            }
+                            Ok(_) => {}
                             Err(error)
                                 if error.starts_with("ambiguous overload for call target") =>
                             {
@@ -440,8 +1132,12 @@ fn validate_statements(
                             let receiver = expression_for_assignment_target(target);
                             let arguments = vec![receiver, source.clone()];
                             *statement = SimpleStmt::Expr(SimpleExpr::Call {
-                                target: matched_target.clone(),
+                                target: matched_target.target.clone(),
                                 args: arguments,
+                                source_span: Some(method_span.clone()),
+                                resolved_target: Some(ResolvedCallTarget::Function(
+                                    matched_target.function_id,
+                                )),
                             });
                         }
                         [] => {}
@@ -546,6 +1242,7 @@ fn validate_statements(
                 target,
                 kind,
                 source,
+                ..
             } => {
                 validate_expression_access(source, context, local_types)?;
                 validate_assignment_target_access(target, context, local_types)?;
@@ -916,7 +1613,7 @@ fn parse_requires_proof(
             function.name, requirements[0]
         )
     })?;
-    let SimpleExpr::Call { target, args } = &expression else {
+    let SimpleExpr::Call { target, args, .. } = &expression else {
         return Err(format!(
             "function '{}' @requires must be a direct receiver can_* call, for example @requires(events.can_push())",
             function.name
@@ -1005,7 +1702,7 @@ fn validate_required_function_shape(
             ));
         }
     };
-    let SimpleExpr::Call { target, args } = action_expression else {
+    let SimpleExpr::Call { target, args, .. } = action_expression else {
         return Err(format!(
             "function '{}' with @requires must have exactly one direct collection action call",
             function.name
@@ -1475,7 +2172,7 @@ fn collect_internal_calls_in_expression(
                 );
             }
         }
-        SimpleExpr::Call { target, args } => {
+        SimpleExpr::Call { target, args, .. } => {
             if typed_collection_operation_for_call(target, args, context, local_types).is_none() {
                 if let Some(target_id) =
                     resolve_internal_call(target, args, context, local_types, aliases)
@@ -1919,7 +2616,7 @@ fn direct_positive_guard(
     context: &AnalysisContext<'_>,
     local_types: &BTreeMap<String, TypeId>,
 ) -> Result<Option<CollectionGuardProof>, String> {
-    let SimpleCondition::Expr(SimpleExpr::Call { target, args }) = condition else {
+    let SimpleCondition::Expr(SimpleExpr::Call { target, args, .. }) = condition else {
         return Ok(None);
     };
     let Some(operation) = typed_collection_operation_for_call(target, args, context, local_types)
@@ -1988,7 +2685,7 @@ fn validate_guarded_expression(
             }
             Ok(())
         }
-        SimpleExpr::Call { target, args } => {
+        SimpleExpr::Call { target, args, .. } => {
             if let Some(operation) =
                 typed_collection_operation_for_call(target, args, context, local_types)
             {
@@ -2165,12 +2862,19 @@ fn substitute_required_expression(
                 .as_ref()
                 .map(|index| Box::new(substitute_required_expression(index, substitutions))),
         },
-        SimpleExpr::Call { target, args } => SimpleExpr::Call {
+        SimpleExpr::Call {
+            target,
+            args,
+            source_span,
+            resolved_target,
+        } => SimpleExpr::Call {
             target: target.clone(),
             args: args
                 .iter()
                 .map(|argument| substitute_required_expression(argument, substitutions))
                 .collect(),
+            source_span: source_span.clone(),
+            resolved_target: resolved_target.clone(),
         },
         SimpleExpr::Binary { lhs, op, rhs } => SimpleExpr::Binary {
             lhs: Box::new(substitute_required_expression(lhs, substitutions)),
@@ -2264,11 +2968,6 @@ fn semantic_expression_type(
     context: &AnalysisContext<'_>,
     local_types: &BTreeMap<String, TypeId>,
 ) -> Option<TypeId> {
-    if let SimpleExpr::Identifier(name) = expression {
-        if context.constants.contains_key(name) {
-            return Some(TYPE_ID_I32);
-        }
-    }
     expression_type(expression, context, local_types, &BTreeMap::new())
 }
 
@@ -3040,7 +3739,9 @@ fn reject_array_length(
         })
     {
         let collection = path.strip_suffix(".length").unwrap_or(path);
-        return Err(format!("array property '{path}' is unavailable; use '{collection}.max_length' for declared capacity"));
+        return Err(format!(
+            "array property '{path}' is unavailable; use '{collection}.max_length' for declared capacity"
+        ));
     }
     Ok(())
 }
@@ -3210,7 +3911,7 @@ fn validate_expression_access_with_expected(
             }
             validate_property_access(path, context, local_types)
         }
-        SimpleExpr::Call { target, args } => {
+        SimpleExpr::Call { target, args, .. } => {
             if typed_collection_operation_for_call(target, args, context, local_types).is_some() {
                 for (index, argument) in args.iter().enumerate() {
                     if index == 0 && matches!(argument, SimpleExpr::Identifier(_)) {
@@ -3227,6 +3928,14 @@ fn validate_expression_access_with_expected(
             if validate_f32_math_intrinsic_signature(target, args, context, local_types)? {
                 return Ok(());
             }
+            match semantic_builtin_call_result(target, args, context, local_types) {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => {}
+                // Other compiler intrinsics and host calls retain their
+                // backend-owned diagnostics; the f32 math signatures above
+                // are validated here before reachability pruning.
+                Err(_) => return Ok(()),
+            }
             let bare_target = target
                 .rsplit_once('.')
                 .map_or(target.as_str(), |(_, name)| name);
@@ -3235,9 +3944,7 @@ fn validate_expression_access_with_expected(
                 || context.extern_functions.contains(target)
                 || context.extern_functions.contains(bare_target)
                 || context.internal_function_targets.contains_key(target)
-                || context.internal_function_targets.contains_key(bare_target)
-                || builtin_host_effect(target).is_some()
-                || is_pure_intrinsic(target);
+                || context.internal_function_targets.contains_key(bare_target);
             if known {
                 Ok(())
             } else {
@@ -3572,7 +4279,7 @@ pub(crate) fn build_function_data_flow_summaries(
         })
         .collect();
     let mut semantic_types = types.clone();
-    let context = build_semantic_context(files, functions, &mut semantic_types)?;
+    let context = build_semantic_context(files, functions, &mut semantic_types, None)?;
     let reuse_candidate = previous.len() == included_function_ids.len()
         && previous_context_fingerprint == context.fingerprint;
     let mut direct_by_id = Vec::with_capacity(functions.len());
@@ -3992,6 +4699,7 @@ fn hash_statement_shapes(statements: &[SimpleStmt], hasher: &mut DefaultHasher) 
                 target,
                 kind,
                 source,
+                ..
             } => {
                 format!("{target:?}|{kind:?}").hash(hasher);
                 hash_expression_shape(source, hasher);
@@ -4077,8 +4785,14 @@ fn hash_expression_shape(expression: &SimpleExpr, hasher: &mut DefaultHasher) {
                 hash_expression_shape(nested_index, hasher);
             }
         }
-        SimpleExpr::Call { target, args } => {
+        SimpleExpr::Call {
+            target,
+            args,
+            resolved_target,
+            ..
+        } => {
             target.hash(hasher);
+            resolved_target.hash(hasher);
             args.len().hash(hasher);
             for argument in args {
                 hash_expression_shape(argument, hasher);
@@ -4100,15 +4814,52 @@ fn build_semantic_context<'a>(
     files: &[SourceFile],
     functions: &'a [FunctionMeta],
     types: &'a mut TypeTable,
+    graph: Option<&'a ModuleGraph>,
 ) -> Result<AnalysisContext<'a>, String> {
-    let constants =
+    // Extern declarations are not indexed as FunctionMeta values, so their
+    // text-view parameter types may be the first occurrence of `string` in a
+    // program. Ensure these canonical IDs before semantic extern collection;
+    // JIT and AOT use the same UTF-8-then-ASCII setup before building backend
+    // signatures.
+    types.ensure_utf8_view_id()?;
+    types.ensure_ascii_view_id()?;
+    // Semantic call selection needs the same canonical type IDs as the
+    // declaration identity even for extern lanes that a backend later rejects
+    // (for example, an array view that is not part of the host-call ABI).
+    crate::backend::compile_analysis::collect_supported_extern_call_signatures(files, types)?;
+    let constant_values =
         crate::backend::compile_analysis::collect_top_level_constant_values(files, types)?;
-    let paths =
-        crate::backend::compile_analysis::collect_global_path_types(files, types, &constants)?;
+    let constant_types: BTreeMap<String, TypeId> = constant_values
+        .iter()
+        .map(|(name, value)| {
+            let type_id = match value {
+                ConstantValue::I32 { type_id, .. } | ConstantValue::String { type_id, .. } => {
+                    *type_id
+                }
+                ConstantValue::F32(_) => TYPE_ID_F32,
+                ConstantValue::F64(_) => TYPE_ID_F64,
+                ConstantValue::Bool(_) => TYPE_ID_BOOL,
+            };
+            (name.clone(), type_id)
+        })
+        .collect();
+    let paths = crate::backend::compile_analysis::collect_global_path_types(
+        files,
+        types,
+        &constant_values,
+    )?;
     let fields = crate::backend::compile_analysis::collect_named_struct_field_types(
-        files, types, &constants,
+        files,
+        types,
+        &constant_values,
     )?;
     let mut context = build_context(files, functions, types)?;
+    context.graph = graph;
+    let mut fingerprint_hasher = DefaultHasher::new();
+    context.fingerprint.hash(&mut fingerprint_hasher);
+    constant_types.hash(&mut fingerprint_hasher);
+    context.fingerprint = fingerprint_hasher.finish();
+    context.constant_types = constant_types;
     context.path_types.extend(paths);
     for (owner, fields) in fields {
         context.field_types.entry(owner).or_default().extend(fields);
@@ -4130,8 +4881,9 @@ fn build_context<'a>(
     let mut globals = BTreeSet::new();
     let mut constants = BTreeMap::new();
     let mut extern_functions = BTreeSet::new();
+    let mut external_function_sources = BTreeMap::<String, BTreeSet<String>>::new();
     let mut extern_effects = BTreeMap::new();
-    let mut resolved_externs = Vec::new();
+    let mut extern_call_signatures = Vec::new();
     let mut structs = BTreeMap::new();
     let mut global_types = Vec::new();
     for file in files {
@@ -4161,6 +4913,10 @@ fn build_context<'a>(
         if file.content.contains("extern") {
             for external in parse_top_level_extern_functions(&file.content)? {
                 extern_functions.insert(external.name.clone());
+                external_function_sources
+                    .entry(external.name.clone())
+                    .or_default()
+                    .insert(file.path.clone());
                 let mut effect_annotations = external
                     .annotations
                     .iter()
@@ -4204,25 +4960,28 @@ fn build_context<'a>(
                         ));
                     }
                 }
-                let params: Option<Vec<TypeId>> = external
+                let parsed_types_are_known = external
                     .params
                     .iter()
-                    .map(|parameter| types.resolve(&parameter.type_name))
-                    .collect();
-                if let (Some(params), Some(return_type)) =
-                    (params, types.resolve(&external.return_type_name))
-                {
-                    resolved_externs.push(ResolvedExternCallSignature {
-                        name: external.name,
-                        symbol: external.symbol_name,
-                        source_path: file.path.clone(),
-                        trusted_graphics_source: crate::frontend::module_graph::is_recognized_graphics_implementation_source(
+                    .all(|parameter| types.resolve(&parameter.type_name).is_some())
+                    && types.resolve(&external.return_type_name).is_some();
+                if parsed_types_are_known {
+                    // Reuse the backend's canonical declaration builder so
+                    // semantic HIR and emitted signatures share the same
+                    // normalized symbol candidates and typed declaration key.
+                    let mut signature =
+                        build_extern_call_signature(&mut descriptor_types, external.clone())?;
+                    signature.source_path = file.path.clone();
+                    signature.trusted_graphics_source =
+                        crate::frontend::module_graph::is_recognized_graphics_implementation_source(
                             &file.path,
                             &file.original_content,
-                        ) || crate::frontend::module_graph::is_explicit_graphics_test_seam_path(&file.path),
-                        params,
-                        return_type,
-                    });
+                        ) || crate::frontend::module_graph::is_explicit_graphics_test_seam_path(
+                            &file.path,
+                        );
+                    signature.source_start = external.name_range.start;
+                    signature.source_end = external.name_range.end;
+                    extern_call_signatures.push(signature);
                 }
             }
         }
@@ -4284,8 +5043,34 @@ fn build_context<'a>(
             Some((owner, fields))
         })
         .collect();
-    let mut call_signatures =
-        collect_supported_call_signatures(functions, &resolved_externs, types);
+    let mut call_signatures = collect_supported_call_signatures(functions, &[], types);
+    let mut declared_extern_call_signatures = CallSignatureMap::new();
+    for signature in &extern_call_signatures {
+        let candidate = CallSignature {
+            function_id: None,
+            extern_symbol: None,
+            extern_identity: Some(signature.identity()),
+            extern_source_path: Some(signature.source_path.clone()),
+            params: signature.params.clone(),
+            return_type: signature.return_type,
+        };
+        declared_extern_call_signatures
+            .entry(signature.name.clone())
+            .or_default()
+            .push(candidate.clone());
+        if is_supported_call_lane_type(signature.return_type, types, true)
+            && signature
+                .params
+                .iter()
+                .copied()
+                .all(|parameter| is_supported_call_lane_type(parameter, types, false))
+        {
+            call_signatures
+                .entry(signature.name.clone())
+                .or_default()
+                .push(candidate);
+        }
+    }
     for signatures in call_signatures.values_mut() {
         for signature in signatures {
             if let Some(function_id) = signature.function_id {
@@ -4297,7 +5082,9 @@ fn build_context<'a>(
         }
     }
     let mut internal_function_targets = BTreeMap::<String, Vec<u32>>::new();
+    let mut function_return_types = BTreeMap::new();
     for function in functions {
+        function_return_types.insert(function.id, function.return_type);
         internal_function_targets
             .entry(function.name.clone())
             .or_default()
@@ -4310,22 +5097,44 @@ fn build_context<'a>(
         }
     }
     let mut fingerprint_hasher = DefaultHasher::new();
-    format!("{structs:?}|{global_types:?}|{constants:?}|{resolved_externs:?}|{extern_effects:?}|{internal_function_targets:?}|{typed_collection_descriptors:?}")
+    let resolved_extern_semantics = extern_call_signatures
+        .iter()
+        .map(|signature| {
+            (
+                &signature.name,
+                &signature.symbol_candidates,
+                &signature.source_path,
+                &signature.declared_params,
+                &signature.declared_return_type,
+                signature.trusted_graphics_source,
+                &signature.params,
+                signature.return_type,
+            )
+        })
+        .collect::<Vec<_>>();
+    format!("{structs:?}|{global_types:?}|{constants:?}|{resolved_extern_semantics:?}|{extern_effects:?}|{internal_function_targets:?}|{typed_collection_descriptors:?}")
         .hash(&mut fingerprint_hasher);
     let fingerprint = fingerprint_hasher.finish();
     Ok(AnalysisContext {
         globals,
         constants,
+        constant_types: BTreeMap::new(),
         view_parameters_by_function,
         fixed_parameter_capacities,
         extern_functions,
+        external_function_sources,
         extern_effects,
         internal_function_targets,
+        function_return_types,
+        visible_paths: BTreeSet::new(),
+        caller_path: String::new(),
+        graph: None,
         collection_capacities,
         path_types,
         field_types,
         typed_collection_descriptors,
         call_signatures,
+        declared_extern_call_signatures,
         fingerprint,
         types,
     })
@@ -5117,7 +5926,7 @@ fn analyze_expression(
                 effects.insert_read(indexed_state_path(&path, suffix));
             }
         }
-        SimpleExpr::Call { target, args } => {
+        SimpleExpr::Call { target, args, .. } => {
             if analyze_typed_collection_operation(
                 target,
                 args,
@@ -5369,7 +6178,21 @@ fn expression_type(
         SimpleExpr::Float(_) => Some(TYPE_ID_F32),
         SimpleExpr::Bool(_) | SimpleExpr::Condition(_) => Some(TYPE_ID_BOOL),
         SimpleExpr::StringLiteral(_) => context.types.string_literal_type_id(),
-        SimpleExpr::Identifier(path) => path_type(path, context, local_types, aliases),
+        SimpleExpr::Identifier(path) => {
+            let root = root_name(path);
+            let has_lexical_or_global_root = local_types.contains_key(root)
+                || aliases.contains_key(root)
+                || context.path_types.contains_key(root);
+            if !has_lexical_or_global_root {
+                if let Some(type_id) = context.constant_types.get(path) {
+                    return Some(*type_id);
+                }
+                if context.constants.contains_key(path) {
+                    return Some(TYPE_ID_I32);
+                }
+            }
+            path_type(path, context, local_types, aliases)
+        }
         SimpleExpr::IndexedPath {
             collection_path,
             suffix,
@@ -5398,17 +6221,35 @@ fn expression_type(
                 Some(field_type)
             }
         }
-        SimpleExpr::Call { target, args } => {
+        SimpleExpr::Call {
+            target,
+            args,
+            resolved_target,
+            ..
+        } => {
+            match resolved_target {
+                Some(ResolvedCallTarget::Function(function_id)) => {
+                    return context.function_return_types.get(function_id).copied();
+                }
+                Some(ResolvedCallTarget::Extern(identity)) => {
+                    return context
+                        .declared_extern_call_signatures
+                        .get(&identity.name)?
+                        .iter()
+                        .find(|signature| signature.extern_identity.as_ref() == Some(identity))
+                        .map(|signature| signature.return_type);
+                }
+                None => {}
+            }
             if let Some(operation) =
                 typed_collection_operation_for_call(target, args, context, local_types)
             {
                 return Some(operation.return_type());
             }
-            match target.as_str() {
-                "i32_to_f32" | "f32_sqrt" | "sin_fast" | "cos_fast" => Some(TYPE_ID_F32),
-                "f32_to_i32" | "f32_to_bits" | "fixed32_from_i32" | "fixed32_to_i32"
-                | "fixed32_mul" | "fixed32_div" | "fixed32_from_ratio" => Some(TYPE_ID_I32),
-                _ => {
+            semantic_builtin_call_result(target, args, context, local_types)
+                .ok()
+                .flatten()
+                .or_else(|| {
                     let argument_types =
                         call_argument_types(target, args, context, local_types, aliases)?;
                     resolve_call_signature(
@@ -5420,8 +6261,7 @@ fn expression_type(
                     )
                     .ok()
                     .map(|signature| signature.return_type)
-                }
-            }
+                })
         }
         SimpleExpr::Unary { operand, .. } => {
             let operand_type = expression_type(operand, context, local_types, aliases)?;
@@ -6277,6 +7117,117 @@ mod tests {
         );
     }
 
+    #[test]
+    fn enum_variant_identifiers_keep_their_declared_type_during_call_matching() {
+        let source = "enum AdKind { Midgame, Rewarded, }".to_string();
+        let files = [SourceFile {
+            path: "ad_tasks.stasis".to_string(),
+            content: source.clone(),
+            original_content: source,
+            hash: 0,
+            functions: Vec::new(),
+        }];
+        let mut types = TypeTable::new();
+        let enum_type = types
+            .resolve_or_intern("AdKind")
+            .expect("nominal enum type");
+        let context = build_semantic_context(&files, &[], &mut types, None)
+            .expect("enum constants should be available to semantic analysis");
+        let local_types = BTreeMap::new();
+        let variant = crate::frontend::body_parser::parse_value_expression("AdKind.Midgame")
+            .expect("enum variant expression");
+
+        assert_eq!(
+            semantic_expression_type(&variant, &context, &local_types),
+            Some(enum_type)
+        );
+        assert_eq!(
+            semantic_expression_type_with_expected(
+                &variant,
+                Some(TYPE_ID_I32),
+                &context,
+                &local_types,
+            ),
+            Some(enum_type),
+            "an expected primitive type must not erase an enum variant's declared type"
+        );
+        let unknown = crate::frontend::body_parser::parse_value_expression("Unknown.Value")
+            .expect("identifier expression");
+        assert_eq!(
+            semantic_expression_type_with_expected(
+                &unknown,
+                Some(enum_type),
+                &context,
+                &local_types,
+            ),
+            None,
+            "an expected enum type must not invent a type for an unknown identifier"
+        );
+    }
+
+    #[test]
+    fn inferred_float_overload_wins_before_contextual_f64_widening() {
+        let types = TypeTable::new();
+        let context = build_context(&[], &[], &types).expect("empty semantic context");
+        let local_types = BTreeMap::from([
+            ("actual".to_string(), TYPE_ID_F32),
+            ("expected".to_string(), TYPE_ID_F32),
+        ]);
+        let parse = |source: &str| {
+            crate::frontend::body_parser::parse_simple_expression(source)
+                .unwrap_or_else(|error| panic!("parse {source}: {error}"))
+        };
+
+        let arithmetic = parse("actual - expected");
+        assert_eq!(
+            semantic_expression_type_with_expected(
+                &arithmetic,
+                Some(TYPE_ID_F64),
+                &context,
+                &local_types,
+            ),
+            Some(TYPE_ID_F64),
+            "general expected-type behavior remains available to assignments and returns"
+        );
+
+        let overloads = [
+            SemanticCallCandidate {
+                target: "math_abs".to_string(),
+                resolved_target: ResolvedCallTarget::Function(1),
+                params: vec![TYPE_ID_F32],
+            },
+            SemanticCallCandidate {
+                target: "math_abs".to_string(),
+                resolved_target: ResolvedCallTarget::Function(2),
+                params: vec![TYPE_ID_F64],
+            },
+        ];
+        let arithmetic_matches = matching_semantic_call_candidates(
+            &overloads,
+            std::slice::from_ref(&arithmetic),
+            &context,
+            &local_types,
+        );
+        assert_eq!(
+            arithmetic_matches
+                .iter()
+                .map(|candidate| candidate.params[0])
+                .collect::<Vec<_>>(),
+            vec![TYPE_ID_F32],
+            "an inferred f32 expression selects the exact f32 overload"
+        );
+
+        let literal = parse("1.0");
+        let f64_only = matching_semantic_call_candidates(
+            &overloads[1..],
+            std::slice::from_ref(&literal),
+            &context,
+            &local_types,
+        );
+        assert_eq!(f64_only.len(), 1);
+        assert_eq!(f64_only[0].params, vec![TYPE_ID_F64]);
+    }
+
     fn typed_pool_fixture(extra: &str) -> (TypeTable, Vec<SourceFile>) {
         let source = format!(
             "global actors: pool<i32, 2>;\nglobal queue: queue<i32, 2>;\nglobal floats: pool<f32, 2>;\n{extra}"
@@ -6481,6 +7432,8 @@ mod tests {
         SimpleExpr::Call {
             target: target.to_string(),
             args,
+            source_span: None,
+            resolved_target: None,
         }
     }
 
@@ -8407,6 +9360,7 @@ mod tests {
             )],
             &mut statements,
             &types,
+            &ModuleGraph::default(),
             &BTreeMap::new(),
         )
         .expect_err("typed collection parameter must be rejected")
@@ -8423,6 +9377,7 @@ mod tests {
             )],
             &mut statements,
             &types,
+            &ModuleGraph::default(),
             &BTreeMap::new(),
         )
         .expect_err("typed collection return must be rejected")

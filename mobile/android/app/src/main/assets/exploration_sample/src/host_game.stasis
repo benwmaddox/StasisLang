@@ -9,10 +9,10 @@ global ExplorationHostAssets {
 }
 
 function exploration_host_load_assets(): void {
-    load_sprite_from(ExplorationHostAssets.player, "assets/player.svg", 64, 64);
-    load_sprite_from(ExplorationHostAssets.sun, "assets/sun_keepsake.svg", 48, 48);
-    load_sprite_from(ExplorationHostAssets.moon, "assets/moon_keepsake.svg", 48, 48);
-    load_sprite_from(ExplorationHostAssets.destination, "assets/destination.svg", 32, 32);
+    load_from(ExplorationHostAssets.player, "assets/player.svg", 64, 64);
+    load_from(ExplorationHostAssets.sun, "assets/sun_keepsake.svg", 48, 48);
+    load_from(ExplorationHostAssets.moon, "assets/moon_keepsake.svg", 48, 48);
+    load_from(ExplorationHostAssets.destination, "assets/destination.svg", 32, 32);
 }
 
 function exploration_host_draw(): void {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::data_flow::{
     build_function_data_flow_summaries, compiler_local_types, validate_effect_contracts,
-    validate_program_semantics, CompilerLocalType, FunctionDataFlowSummary,
+    validate_program_semantics, CompilerLocalType, FunctionDataFlowSummary, VisibleCallTarget,
 };
 use crate::frontend::body_parser::parse_simple_statements_with_debug;
 use crate::frontend::indexer::{hash_text, index_file_with_diagnostic, IndexedCallDependency};
@@ -12,8 +12,8 @@ use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::types::{TypeId, TypeTable};
 use crate::identity::{overload_discriminator, FnId, SymbolId};
 use crate::ir::hir::{
-    AssignTarget, DebugStatement, FunctionHIR, ParsedSimpleStatements, SimpleCondition, SimpleExpr,
-    SimpleStmt,
+    AssignTarget, DebugStatement, FunctionHIR, ParsedSimpleStatements, ResolvedCallTarget,
+    SimpleCondition, SimpleExpr, SimpleStmt,
 };
 
 pub type FunctionId = FnId;
@@ -803,8 +803,47 @@ impl Compiler {
             let caller = self.functions[caller_index].id;
             let caller_path = &self.files[self.functions[caller_index].file_id as usize].path;
             for dependency in dependencies {
+                // Any call with effective arguments can be resolved from its
+                // receiver and argument types. Index every visible candidate
+                // so semantic selection can later prune this conservative set.
+                // This also covers `alias.method(...)`, whose first identifier
+                // can be either a namespace alias or a value receiver.
+                if dependency.has_arguments {
+                    let module_aliases = visible_module_aliases(
+                        &dependency.name,
+                        caller_path,
+                        &self.module_graph,
+                        &self.files,
+                        &self.functions,
+                        &self.module_resolution,
+                        None,
+                    );
+                    for module_alias in module_aliases {
+                        let callees = self
+                            .module_resolution
+                            .function_indices(&dependency.name)
+                            .iter()
+                            .map(|index| &self.functions[*index])
+                            .filter(|function| function.module_alias == module_alias)
+                            .map(|function| function.id)
+                            .collect::<Vec<_>>();
+                        for callee in callees {
+                            let base = self.functions[caller_index].source_range.start;
+                            self.functions[caller_index]
+                                .call_sites
+                                .push(FunctionCallSite {
+                                    callee,
+                                    source_range: base + dependency.name_span.start
+                                        ..base + dependency.name_span.end,
+                                });
+                            if caller != callee {
+                                unique_edges.insert((caller, callee));
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let resolution = match resolve_module_call(
-                    dependency.qualifier.as_deref(),
                     &dependency.name,
                     caller_path,
                     &self.module_graph,
@@ -973,18 +1012,6 @@ impl Compiler {
                         return Err(CompileError::Backend(message));
                     }
                 };
-                let mut validated = artifacts.statements.clone();
-                if let Err(message) = qualify_module_calls(
-                    &mut validated,
-                    &file.path,
-                    &self.module_graph,
-                    &self.files,
-                    &self.functions,
-                    &self.module_resolution,
-                    true,
-                ) {
-                    return Err(CompileError::Frontend(message));
-                }
                 artifacts
             };
             next_statement_cache.insert(key, artifacts.clone());
@@ -994,37 +1021,27 @@ impl Compiler {
             self.parsed_statement_ids.insert(*function_id);
         }
         self.statement_cache = next_statement_cache;
-        for function in self
-            .functions
-            .iter()
-            .filter(|function| self.parsed_statement_ids.contains(&function.id))
-        {
-            let file = &self.files[function.file_id as usize];
-            qualify_module_calls(
-                &mut self.parsed_statements[function.storage_index as usize],
-                &file.path,
-                &self.module_graph,
-                &self.files,
-                &self.functions,
-                &self.module_resolution,
-                false,
-            )
-            .map_err(CompileError::Frontend)?;
-        }
-        let conversion_targets = receiver_conversion_targets_by_function(
-            &self.files,
-            &self.functions,
-            &self.module_graph,
-            &self.module_resolution,
-        );
+        let call_targets =
+            visible_call_targets_by_function(&self.files, &self.functions, &self.module_graph);
         let semantic_validation_error = validate_program_semantics(
             &self.files,
             &self.functions,
             &mut self.parsed_statements,
             &self.types,
-            &conversion_targets,
+            &self.module_graph,
+            &call_targets,
         )
         .err();
+        if semantic_validation_error.is_none() {
+            for function in &mut self.functions {
+                let statements = self
+                    .parsed_statements
+                    .get(function.storage_index as usize)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                prune_call_sites_to_resolved_hir(function, statements);
+            }
+        }
         let analysis_statements = self.parsed_statements.clone();
         let (summaries, context_fingerprint) = build_function_data_flow_summaries(
             &self.files,
@@ -1351,9 +1368,6 @@ impl Compiler {
     }
 
     fn lower_function_to_hir(&mut self, function: &FunctionMeta) -> CompileResult<FunctionHIR> {
-        let file = self.files.get(function.file_id as usize).ok_or_else(|| {
-            CompileError::Invariant("function references missing file".to_string())
-        })?;
         let mut statements = self
             .parsed_statements
             .get(function.storage_index as usize)
@@ -1364,16 +1378,6 @@ impl Compiler {
                     function.name
                 ))
             })?;
-        qualify_module_calls(
-            &mut statements,
-            &file.path,
-            &self.module_graph,
-            &self.files,
-            &self.functions,
-            &self.module_resolution,
-            true,
-        )
-        .map_err(CompileError::Frontend)?;
         let mut inline_candidates = Vec::new();
         for candidate in self
             .functions
@@ -1398,26 +1402,7 @@ impl Compiler {
                 }
                 _ => continue,
             };
-            let candidate_file = self.files.get(candidate.file_id as usize).ok_or_else(|| {
-                CompileError::Invariant(format!(
-                    "inline function '{}' references missing file",
-                    candidate.name
-                ))
-            })?;
-            let mut qualified_body = vec![SimpleStmt::Return(expression.clone())];
-            qualify_module_calls(
-                &mut qualified_body,
-                &candidate_file.path,
-                &self.module_graph,
-                &self.files,
-                &self.functions,
-                &self.module_resolution,
-                true,
-            )
-            .map_err(CompileError::Frontend)?;
-            let SimpleStmt::Return(expression) = qualified_body.remove(0) else {
-                unreachable!("inline candidate shape was already checked")
-            };
+            let expression = expression.clone();
             let qualified_name = format!("{}.{}", candidate.module_alias, candidate.name);
             let has_same_arity_overload = self.functions.iter().any(|other| {
                 other.id != candidate.id
@@ -1484,6 +1469,61 @@ impl Compiler {
             .map(|function| {
                 self.lower_function_to_hir(function)
                     .map(|hir| (function.id, hir))
+            })
+            .collect()
+    }
+
+    /// Returns canonical source HIR for whole-program analyses that need
+    /// original call locations. Unlike `analysis_hirs_with_policy`, this does
+    /// not expand inline expressions, so body-relative spans stay owned by
+    /// the function whose source contains the call.
+    pub(crate) fn source_hirs_with_policy(
+        &self,
+        required_emit_roots: &[String],
+        policy: crate::backend::ReachabilityPolicy,
+    ) -> CompileResult<BTreeMap<FunctionId, FunctionHIR>> {
+        let reachable = crate::backend::reachability::compute_reachable_function_ids_with_policy(
+            &self.functions,
+            required_emit_roots,
+            policy,
+        );
+        self.functions
+            .iter()
+            .filter(|function| reachable.contains(&function.id))
+            .map(|function| {
+                if !self.parsed_statement_ids.contains(&function.id) {
+                    return Err(CompileError::Invariant(format!(
+                        "function '{}' has no canonical source HIR",
+                        function.name
+                    )));
+                }
+                let statements = self
+                    .parsed_statements
+                    .get(function.storage_index as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        CompileError::Invariant(format!(
+                            "function '{}' has no parsed statement artifact",
+                            function.name
+                        ))
+                    })?;
+                let debug_statements = self
+                    .parsed_debug_statements
+                    .get(function.storage_index as usize)
+                    .cloned()
+                    .ok_or_else(|| {
+                        CompileError::Invariant(format!(
+                            "function '{}' has no debug statement artifact",
+                            function.name
+                        ))
+                    })?;
+                Ok((
+                    function.id,
+                    FunctionHIR {
+                        statements,
+                        debug_statements,
+                    },
+                ))
             })
             .collect()
     }
@@ -2018,11 +2058,9 @@ enum ModuleCallResolutionError {
 
 struct ModuleCallResolution {
     module_alias: Option<String>,
-    consume_qualifier: bool,
 }
 
 fn resolve_module_call(
-    qualifier: Option<&str>,
     name: &str,
     caller_path: &str,
     graph: &ModuleGraph,
@@ -2030,27 +2068,31 @@ fn resolve_module_call(
     functions: &[FunctionMeta],
     resolution: &ModuleResolutionIndex,
 ) -> Result<ModuleCallResolution, ModuleCallResolutionError> {
-    if let Some(alias) = qualifier {
-        if graph.imported_alias_target(caller_path, alias).is_some() {
-            return Ok(ModuleCallResolution {
-                module_alias: Some(alias.to_string()),
-                consume_qualifier: true,
-            });
-        }
-    }
-
-    let modules = visible_module_aliases(name, caller_path, graph, files, functions, resolution);
+    // This prepass is only used for calls with no effective arguments. Filter
+    // by that known arity before declaring an imported-name collision; the
+    // semantic pass resolves calls whose visible name exists only at another
+    // arity and reports its normal no-match diagnostic.
+    let modules = visible_module_aliases(
+        name,
+        caller_path,
+        graph,
+        files,
+        functions,
+        resolution,
+        Some(0),
+    );
+    let visible_modules_at_any_arity =
+        visible_module_aliases(name, caller_path, graph, files, functions, resolution, None);
     match modules.len() {
-        0 if qualifier.is_none() && !resolution.function_indices(name).is_empty() => {
+        0 if !visible_modules_at_any_arity.is_empty() => {
+            Ok(ModuleCallResolution { module_alias: None })
+        }
+        0 if !resolution.function_indices(name).is_empty() => {
             Err(ModuleCallResolutionError::Inaccessible)
         }
-        0 => Ok(ModuleCallResolution {
-            module_alias: None,
-            consume_qualifier: false,
-        }),
+        0 => Ok(ModuleCallResolution { module_alias: None }),
         1 => Ok(ModuleCallResolution {
             module_alias: modules.into_iter().next(),
-            consume_qualifier: false,
         }),
         _ => Err(ModuleCallResolutionError::Ambiguous),
     }
@@ -2063,62 +2105,75 @@ fn visible_module_aliases(
     files: &[SourceFile],
     functions: &[FunctionMeta],
     resolution: &ModuleResolutionIndex,
+    required_arity: Option<usize>,
 ) -> BTreeSet<String> {
     let candidates = resolution.function_indices(name);
-    let local_modules: BTreeSet<String> = candidates
-        .iter()
-        .filter_map(|index| {
-            let function = &functions[*index];
-            (files[function.file_id as usize].path == caller_path)
-                .then(|| function.module_alias.clone())
-        })
-        .collect();
-    if !local_modules.is_empty() {
-        return local_modules;
-    }
-    let mut imported_paths = graph.dependency_closure(caller_path);
-    imported_paths.remove(caller_path);
+    let visible_paths = graph.dependency_closure(caller_path);
     candidates
         .iter()
         .filter_map(|index| {
             let function = &functions[*index];
-            imported_paths
+            if required_arity.is_some_and(|arity| function.params.len() != arity) {
+                return None;
+            }
+            visible_paths
                 .contains(&files[function.file_id as usize].path)
                 .then(|| function.module_alias.clone())
         })
         .collect()
 }
 
-fn receiver_conversion_targets_by_function(
+fn visible_call_targets_by_function(
     files: &[SourceFile],
     functions: &[FunctionMeta],
     graph: &ModuleGraph,
-    resolution: &ModuleResolutionIndex,
-) -> BTreeMap<u32, BTreeMap<String, Vec<String>>> {
-    let method_names = ["from_i32", "from_f32", "from_f64"];
+) -> BTreeMap<u32, Arc<BTreeMap<String, Vec<VisibleCallTarget>>>> {
+    let mut candidates_by_name = BTreeMap::<String, Vec<(String, VisibleCallTarget)>>::new();
+    for candidate in functions {
+        let method = candidate.name.clone();
+        candidates_by_name.entry(method.clone()).or_default().push((
+            files[candidate.file_id as usize].path.clone(),
+            VisibleCallTarget {
+                target: if candidate.module_alias.is_empty() {
+                    method
+                } else {
+                    format!("{}.{}", candidate.module_alias, candidate.name)
+                },
+                function_id: candidate.id,
+                storage_index: candidate.storage_index,
+                params: candidate.params.clone(),
+                return_type: candidate.return_type,
+            },
+        ));
+    }
+    for candidates in candidates_by_name.values_mut() {
+        candidates.sort_by_key(|(_, candidate)| (candidate.target.clone(), candidate.function_id));
+        candidates.dedup_by_key(|(_, candidate)| candidate.function_id);
+    }
+
     let mut targets_by_function = BTreeMap::new();
+    let mut visible_targets_by_path = BTreeMap::new();
     for caller in functions {
-        let caller_path = &files[caller.file_id as usize].path;
-        let mut methods = BTreeMap::new();
-        for method in method_names {
-            let modules =
-                visible_module_aliases(method, caller_path, graph, files, functions, resolution);
-            let targets = modules
-                .into_iter()
-                .map(|alias| {
-                    if alias.is_empty() {
-                        method.to_string()
-                    } else {
-                        format!("{alias}.{method}")
+        let caller_path = files[caller.file_id as usize].path.clone();
+        let methods = visible_targets_by_path
+            .entry(caller_path.clone())
+            .or_insert_with(|| {
+                let visible_paths = graph.dependency_closure(&caller_path);
+                let mut methods = BTreeMap::new();
+                for (method, candidates) in &candidates_by_name {
+                    let targets = candidates
+                        .iter()
+                        .filter(|(source_path, _)| visible_paths.contains(source_path))
+                        .map(|(_, candidate)| candidate.clone())
+                        .collect::<Vec<_>>();
+                    if !targets.is_empty() {
+                        methods.insert(method.clone(), targets);
                     }
-                })
-                .collect::<Vec<_>>();
-            if !targets.is_empty() {
-                methods.insert(method.to_string(), targets);
-            }
-        }
+                }
+                Arc::new(methods)
+            });
         if !methods.is_empty() {
-            targets_by_function.insert(caller.storage_index, methods);
+            targets_by_function.insert(caller.storage_index, Arc::clone(methods));
         }
     }
     targets_by_function
@@ -2141,355 +2196,121 @@ fn module_call_resolution_message(
     }
 }
 
-fn qualify_module_calls(
-    statements: &mut [SimpleStmt],
-    caller_path: &str,
-    graph: &ModuleGraph,
-    files: &[SourceFile],
-    functions: &[FunctionMeta],
-    resolution: &ModuleResolutionIndex,
-    qualify_bare_calls: bool,
-) -> Result<(), String> {
+fn prune_call_sites_to_resolved_hir(function: &mut FunctionMeta, statements: &[SimpleStmt]) {
     fn expression(
-        value: &mut SimpleExpr,
-        caller_path: &str,
-        graph: &ModuleGraph,
-        files: &[SourceFile],
-        functions: &[FunctionMeta],
-        resolution: &ModuleResolutionIndex,
-        qualify_bare_calls: bool,
-    ) -> Result<(), String> {
+        value: &SimpleExpr,
+        targets: &mut BTreeMap<(u32, u32), Option<ResolvedCallTarget>>,
+    ) {
         match value {
-            SimpleExpr::Condition(condition) => condition_value(
-                condition,
-                caller_path,
-                graph,
-                files,
-                functions,
-                resolution,
-                qualify_bare_calls,
-            ),
+            SimpleExpr::Call {
+                args,
+                source_span,
+                resolved_target,
+                ..
+            } => {
+                if let Some(span) = source_span {
+                    targets.insert((span.start, span.end), resolved_target.clone());
+                }
+                for argument in args {
+                    expression(argument, targets);
+                }
+            }
+            SimpleExpr::Condition(condition) => condition_value(condition, targets),
             SimpleExpr::IndexedPath {
                 index,
                 nested_index,
                 ..
             } => {
-                expression(
-                    index,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )?;
+                expression(index, targets);
                 if let Some(nested_index) = nested_index {
-                    expression(
-                        nested_index,
-                        caller_path,
-                        graph,
-                        files,
-                        functions,
-                        resolution,
-                        qualify_bare_calls,
-                    )?;
-                }
-                Ok(())
-            }
-            SimpleExpr::Call { target, args } => {
-                for argument in args.iter_mut() {
-                    expression(
-                        argument,
-                        caller_path,
-                        graph,
-                        files,
-                        functions,
-                        resolution,
-                        qualify_bare_calls,
-                    )?;
-                }
-                let qualifier = args.first().and_then(|argument| match argument {
-                    SimpleExpr::Identifier(alias) => Some(alias.as_str()),
-                    _ => None,
-                });
-                match resolve_module_call(
-                    qualifier,
-                    target,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                ) {
-                    Ok(resolution) => {
-                        if let Some(alias) = resolution
-                            .module_alias
-                            .filter(|_| qualify_bare_calls || resolution.consume_qualifier)
-                        {
-                            *target = format!("{alias}.{target}");
-                        }
-                        if resolution.consume_qualifier {
-                            args.remove(0);
-                        }
-                        Ok(())
-                    }
-                    Err(error) => Err(module_call_resolution_message(error, target, caller_path)),
+                    expression(nested_index, targets);
                 }
             }
-            SimpleExpr::Unary { operand, .. } => expression(
-                operand,
-                caller_path,
-                graph,
-                files,
-                functions,
-                resolution,
-                qualify_bare_calls,
-            ),
+            SimpleExpr::Unary { operand, .. } => expression(operand, targets),
             SimpleExpr::Binary { lhs, rhs, .. } => {
-                expression(
-                    lhs,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )?;
-                expression(
-                    rhs,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )
+                expression(lhs, targets);
+                expression(rhs, targets);
             }
             SimpleExpr::DefaultValue(_)
             | SimpleExpr::Int(_)
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
-            | SimpleExpr::Identifier(_) => Ok(()),
+            | SimpleExpr::Identifier(_) => {}
         }
     }
 
     fn condition_value(
-        condition: &mut SimpleCondition,
-        caller_path: &str,
-        graph: &ModuleGraph,
-        files: &[SourceFile],
-        functions: &[FunctionMeta],
-        resolution: &ModuleResolutionIndex,
-        qualify_bare_calls: bool,
-    ) -> Result<(), String> {
+        condition: &SimpleCondition,
+        targets: &mut BTreeMap<(u32, u32), Option<ResolvedCallTarget>>,
+    ) {
         match condition {
             SimpleCondition::Comparison { lhs, rhs, .. } => {
-                expression(
-                    lhs,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )?;
-                expression(
-                    rhs,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )
+                expression(lhs, targets);
+                expression(rhs, targets);
             }
-            SimpleCondition::Expr(value) => expression(
-                value,
-                caller_path,
-                graph,
-                files,
-                functions,
-                resolution,
-                qualify_bare_calls,
-            ),
+            SimpleCondition::Expr(value) => expression(value, targets),
             SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
-                condition_value(
-                    lhs,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )?;
-                condition_value(
-                    rhs,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )
+                condition_value(lhs, targets);
+                condition_value(rhs, targets);
             }
-            SimpleCondition::Not(inner) => condition_value(
-                inner,
-                caller_path,
-                graph,
-                files,
-                functions,
-                resolution,
-                qualify_bare_calls,
-            ),
+            SimpleCondition::Not(inner) => condition_value(inner, targets),
         }
     }
 
-    fn assign_target(
-        target: &mut AssignTarget,
-        caller_path: &str,
-        graph: &ModuleGraph,
-        files: &[SourceFile],
-        functions: &[FunctionMeta],
-        resolution: &ModuleResolutionIndex,
-        qualify_bare_calls: bool,
-    ) -> Result<(), String> {
+    fn target_expressions(
+        target: &AssignTarget,
+        targets: &mut BTreeMap<(u32, u32), Option<ResolvedCallTarget>>,
+    ) {
         if let AssignTarget::IndexedPath {
             index,
             nested_index,
             ..
         } = target
         {
-            expression(
-                index,
-                caller_path,
-                graph,
-                files,
-                functions,
-                resolution,
-                qualify_bare_calls,
-            )?;
+            expression(index, targets);
             if let Some(nested_index) = nested_index {
-                expression(
-                    nested_index,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )?;
+                expression(nested_index, targets);
             }
         }
-        Ok(())
     }
 
     fn statement(
-        value: &mut SimpleStmt,
-        caller_path: &str,
-        graph: &ModuleGraph,
-        files: &[SourceFile],
-        functions: &[FunctionMeta],
-        resolution: &ModuleResolutionIndex,
-        qualify_bare_calls: bool,
-    ) -> Result<(), String> {
+        value: &SimpleStmt,
+        targets: &mut BTreeMap<(u32, u32), Option<ResolvedCallTarget>>,
+    ) {
         match value {
             SimpleStmt::Let {
                 expression: value, ..
             }
             | SimpleStmt::Expr(value)
-            | SimpleStmt::Return(value) => expression(
-                value,
-                caller_path,
-                graph,
-                files,
-                functions,
-                resolution,
-                qualify_bare_calls,
-            ),
+            | SimpleStmt::Return(value) => expression(value, targets),
             SimpleStmt::Assign {
                 target,
                 expression: value,
                 ..
             } => {
-                assign_target(
-                    target,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )?;
-                expression(
-                    value,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )
+                target_expressions(target, targets);
+                expression(value, targets);
             }
             SimpleStmt::Convert { target, source, .. } => {
-                assign_target(
-                    target,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )?;
-                expression(
-                    source,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )
+                target_expressions(target, targets);
+                expression(source, targets);
             }
             SimpleStmt::If {
                 condition,
                 then_statements,
                 else_statements,
             } => {
-                condition_value(
-                    condition,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )?;
-                for nested in then_statements {
-                    statement(
-                        nested,
-                        caller_path,
-                        graph,
-                        files,
-                        functions,
-                        resolution,
-                        qualify_bare_calls,
-                    )?;
+                condition_value(condition, targets);
+                for statement_value in then_statements {
+                    statement(statement_value, targets);
                 }
-                if let Some(nested) = else_statements {
-                    for statement_value in nested {
-                        statement(
-                            statement_value,
-                            caller_path,
-                            graph,
-                            files,
-                            functions,
-                            resolution,
-                            qualify_bare_calls,
-                        )?;
+                if let Some(else_statements) = else_statements {
+                    for statement_value in else_statements {
+                        statement(statement_value, targets);
                     }
                 }
-                Ok(())
             }
             SimpleStmt::For {
                 init,
@@ -2497,78 +2318,49 @@ fn qualify_module_calls(
                 step,
                 body_statements,
             } => {
-                statement(
-                    init,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )?;
-                condition_value(
-                    condition,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )?;
-                statement(
-                    step,
-                    caller_path,
-                    graph,
-                    files,
-                    functions,
-                    resolution,
-                    qualify_bare_calls,
-                )?;
-                for nested in body_statements {
-                    statement(
-                        nested,
-                        caller_path,
-                        graph,
-                        files,
-                        functions,
-                        resolution,
-                        qualify_bare_calls,
-                    )?;
+                statement(init, targets);
+                condition_value(condition, targets);
+                statement(step, targets);
+                for statement_value in body_statements {
+                    statement(statement_value, targets);
                 }
-                Ok(())
             }
             SimpleStmt::Foreach {
                 body_statements, ..
             } => {
-                for nested in body_statements {
-                    statement(
-                        nested,
-                        caller_path,
-                        graph,
-                        files,
-                        functions,
-                        resolution,
-                        qualify_bare_calls,
-                    )?;
+                for statement_value in body_statements {
+                    statement(statement_value, targets);
                 }
-                Ok(())
             }
-            SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => Ok(()),
+            SimpleStmt::Noop | SimpleStmt::Continue | SimpleStmt::ReturnVoid => {}
         }
     }
 
+    let mut targets = BTreeMap::new();
     for statement_value in statements {
-        statement(
-            statement_value,
-            caller_path,
-            graph,
-            files,
-            functions,
-            resolution,
-            qualify_bare_calls,
-        )?;
+        statement(statement_value, &mut targets);
     }
-    Ok(())
+    function.call_sites.retain(|site| {
+        let Some(relative_start) = site
+            .source_range
+            .start
+            .checked_sub(function.source_range.start)
+        else {
+            return true;
+        };
+        let Some(relative_end) = site
+            .source_range
+            .end
+            .checked_sub(function.source_range.start)
+        else {
+            return true;
+        };
+        match targets.get(&(relative_start, relative_end)) {
+            Some(Some(ResolvedCallTarget::Function(selected))) => site.callee == *selected,
+            Some(Some(ResolvedCallTarget::Extern(_))) | Some(None) => false,
+            None => true,
+        }
+    });
 }
 
 fn compile_error_message(error: &CompileError) -> &str {
@@ -2596,18 +2388,68 @@ struct InlineExpressionCandidate {
     mandatory: bool,
 }
 
+fn selected_inline_candidate<'a>(
+    target: &str,
+    argument_count: usize,
+    resolved_target: Option<&ResolvedCallTarget>,
+    candidates: &'a [InlineExpressionCandidate],
+) -> Option<&'a InlineExpressionCandidate> {
+    match resolved_target {
+        Some(ResolvedCallTarget::Function(function_id)) => candidates.iter().find(|candidate| {
+            candidate.id == *function_id && candidate.param_names.len() == argument_count
+        }),
+        Some(ResolvedCallTarget::Extern(_)) => None,
+        None => {
+            let mut matches = candidates.iter().filter(|candidate| {
+                candidate.qualified_name == target
+                    && candidate.param_names.len() == argument_count
+                    && !candidate.has_same_arity_overload
+            });
+            let candidate = matches.next()?;
+            matches.next().is_none().then_some(candidate)
+        }
+    }
+}
+
+fn selected_mandatory_inline_call(
+    target: &str,
+    argument_count: usize,
+    resolved_target: Option<&ResolvedCallTarget>,
+    candidates: &[InlineExpressionCandidate],
+) -> bool {
+    match resolved_target {
+        Some(ResolvedCallTarget::Function(function_id)) => candidates.iter().any(|candidate| {
+            candidate.id == *function_id
+                && candidate.mandatory
+                && candidate.param_names.len() == argument_count
+        }),
+        Some(ResolvedCallTarget::Extern(_)) => false,
+        None => candidates.iter().any(|candidate| {
+            candidate.mandatory
+                && candidate.qualified_name == target
+                && candidate.param_names.len() == argument_count
+        }),
+    }
+}
+
 fn first_unexpanded_mandatory_call(
     statements: &[SimpleStmt],
     candidates: &[InlineExpressionCandidate],
 ) -> Option<String> {
     fn expression(value: &SimpleExpr, candidates: &[InlineExpressionCandidate]) -> Option<String> {
         match value {
-            SimpleExpr::Call { target, args } => {
-                if candidates.iter().any(|candidate| {
-                    candidate.mandatory
-                        && candidate.qualified_name == *target
-                        && candidate.param_names.len() == args.len()
-                }) {
+            SimpleExpr::Call {
+                target,
+                args,
+                resolved_target,
+                ..
+            } => {
+                if selected_mandatory_inline_call(
+                    target,
+                    args.len(),
+                    resolved_target.as_ref(),
+                    candidates,
+                ) {
                     return Some(target.clone());
                 }
                 args.iter()
@@ -2847,24 +2689,29 @@ fn inline_expression_calls(
                     expression(nested_index, candidates, caller_id, arguments, stack);
                 }
             }
-            SimpleExpr::Call { target, args } => {
+            SimpleExpr::Call {
+                target,
+                args,
+                resolved_target,
+                ..
+            } => {
                 for argument in args.iter_mut() {
                     expression(argument, candidates, caller_id, arguments, stack);
                 }
-                let matches = candidates
-                    .iter()
-                    .filter(|candidate| {
-                        candidate.qualified_name == *target
-                            && candidate.param_names.len() == args.len()
-                            && !candidate.has_same_arity_overload
-                            && candidate.id != caller_id
-                            && !stack.contains(&candidate.id)
-                    })
-                    .collect::<Vec<_>>();
-                if matches.len() != 1 || !args.iter().all(is_safe_argument) {
+                let Some(candidate) = selected_inline_candidate(
+                    target,
+                    args.len(),
+                    resolved_target.as_ref(),
+                    candidates,
+                ) else {
+                    return;
+                };
+                if candidate.id == caller_id
+                    || stack.contains(&candidate.id)
+                    || !args.iter().all(is_safe_argument)
+                {
                     return;
                 }
-                let candidate = matches[0];
                 let replacements = candidate
                     .param_names
                     .iter()
@@ -3049,6 +2896,51 @@ mod tests {
     }
 
     #[test]
+    fn inline_overloads_respect_the_selected_function_identity() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "sample.stasis",
+            concat!(
+                "struct Enemy { hp: i32; } struct Player { score: i32; } ",
+                "global enemy: Enemy; global player: Player; ",
+                "@inline function score(value: Enemy): i32 { return value.hp + 100; } ",
+                "function score(value: Player): i32 { return value.score; } ",
+                "function main(): i32 { let ordinary: i32 = score(player); return score(enemy); }",
+            ),
+        );
+        compiler
+            .check()
+            .expect("typed overload selection must govern optional inline expansion");
+
+        let player_type = compiler.types().resolve("Player").expect("Player type");
+        let ordinary = compiler
+            .functions()
+            .iter()
+            .find(|function| function.name == "score" && function.params == [player_type])
+            .expect("ordinary Player overload");
+        let ordinary_id = ordinary.id;
+        let main = function_by_name(&compiler, "main").clone();
+        let hir = compiler
+            .lower_function_to_hir(&main)
+            .expect("lower overload caller");
+
+        let [SimpleStmt::Let {
+            expression:
+                SimpleExpr::Call {
+                    target,
+                    resolved_target: Some(ResolvedCallTarget::Function(function_id)),
+                    ..
+                },
+            ..
+        }, SimpleStmt::Return(SimpleExpr::Binary { .. })] = hir.statements.as_slice()
+        else {
+            panic!("Player call should remain a call and Enemy call should inline");
+        };
+        assert!(target.ends_with(".score"));
+        assert_eq!(function_id, &ordinary_id);
+    }
+
+    #[test]
     fn inline_composes_indexed_argument_with_callee_field_suffix() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
@@ -3095,7 +2987,7 @@ mod tests {
         };
         assert!(matches!(
             &then_statements[0],
-            SimpleStmt::Expr(SimpleExpr::Call { target, args })
+            SimpleStmt::Expr(SimpleExpr::Call { target, args, .. })
                 if target == "push"
                     && matches!(&args[0], SimpleExpr::Identifier(path) if path == "events")
                     && matches!(&args[1], SimpleExpr::Int(7))
@@ -3310,7 +3202,7 @@ mod tests {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
             "sample.stasis",
-            "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper(); }\n",
+            "function helper(seed: f32): i32 { return 1; }\nfunction main(): i32 { return helper(1.0); }\n",
         );
 
         let index = compiler.index_pass().expect("index pass");
@@ -3445,7 +3337,7 @@ mod tests {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
             "sample.stasis",
-            "function helper(): i32 { return 1; }\nfunction main(): i32 { return helper(); }\n",
+            "function helper(seed: f32): i32 { return 1; }\nfunction main(): i32 { return helper(1.0); }\n",
         );
         compiler
             .compile_with(|_, _, _| Ok(()))
@@ -3453,7 +3345,7 @@ mod tests {
 
         compiler.upsert_file(
             "sample.stasis",
-            "function helper(x: i32): i32 { return x; }\nfunction main(): i32 { return helper(); }\n",
+            "function helper(seed: f64): i32 { return 1; }\nfunction main(): i32 { return helper(1.0); }\n",
         );
         let index = compiler.index_pass().expect("index pass");
         assert_eq!(index.signature_changed_functions, 1);
@@ -3588,7 +3480,7 @@ mod tests {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
             "sample.stasis",
-            "function helper(): i32 { return 1; }\nfunction left(): i32 { return helper(); }\nfunction right(): i32 { return helper(); }\n",
+            "function helper(seed: f32): i32 { return 1; }\nfunction left(): i32 { return helper(1.0); }\nfunction right(): i32 { return helper(1.0); }\n",
         );
         compiler
             .compile_with(|_, _, _| Ok(()))
@@ -3596,7 +3488,7 @@ mod tests {
 
         compiler.upsert_file(
             "sample.stasis",
-            "function helper(seed: i32): i32 { return seed; }\nfunction left(): i32 { return helper(); }\nfunction right(): i32 { return helper(); }\n",
+            "function helper(seed: f64): i32 { return 1; }\nfunction left(): i32 { return helper(1.0); }\nfunction right(): i32 { return helper(1.0); }\n",
         );
         let index = compiler.index_pass().expect("index pass");
         assert_eq!(index.signature_changed_functions, 1);
@@ -3634,7 +3526,7 @@ mod tests {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
             "sample.stasis",
-            "function leaf(): i32 { return 1; }\nfunction mid(): i32 { return leaf(); }\nfunction top(): i32 { return mid(); }\n",
+            "function leaf(seed: f32): i32 { return 1; }\nfunction mid(): i32 { return leaf(1.0); }\nfunction top(): i32 { return mid(); }\n",
         );
         compiler
             .compile_with(|_, _, _| Ok(()))
@@ -3642,7 +3534,7 @@ mod tests {
 
         compiler.upsert_file(
             "sample.stasis",
-            "function leaf(seed: i32): i32 { return seed; }\nfunction mid(): i32 { return leaf(); }\nfunction top(): i32 { return mid(); }\n",
+            "function leaf(seed: f64): i32 { return 1; }\nfunction mid(): i32 { return leaf(1.0); }\nfunction top(): i32 { return mid(); }\n",
         );
         let index = compiler.index_pass().expect("index pass");
         assert_eq!(index.signature_changed_functions, 1);
@@ -4203,7 +4095,10 @@ function @effects(allowed) tick(): void { clear(forbidden); }
             let mut compiler = Compiler::new();
             compiler.upsert_file("length.stasis", source);
             let error = compiler.check().expect_err("nested array length must fail");
-            assert!(format!("{error:?}").contains(".max_length' for declared capacity"), "{source}: {error:?}");
+            assert!(
+                format!("{error:?}").contains(".max_length' for declared capacity"),
+                "{source}: {error:?}"
+            );
         }
     }
 
@@ -4813,6 +4708,100 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
     }
 
     #[test]
+    fn zero_argument_local_call_ignores_imported_overload_with_other_arity() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            concat!(
+                "import \"draws.stasis\"; ",
+                "function draw_frame(): i32 { return 1; } ",
+                "function main(): i32 { return draw_frame(); }",
+            ),
+        );
+        compiler.upsert_file(
+            "draws.stasis",
+            "function draw_frame(self: i32, frame: i32, x: f32, y: f32, alpha: i32, rotation: i32): i32 { return frame; }",
+        );
+
+        compiler
+            .index_pass()
+            .expect("local zero-argument function is selected by arity");
+        let local = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "draw_frame"
+                    && compiler.files()[function.file_id as usize].path == "main.stasis"
+            })
+            .expect("local draw_frame declaration");
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "main"
+                    && compiler.files()[function.file_id as usize].path == "main.stasis"
+            })
+            .expect("main function");
+        let [SimpleStmt::Return(SimpleExpr::Call {
+            resolved_target: Some(ResolvedCallTarget::Function(selected)),
+            args,
+            ..
+        })] = compiler.parsed_statements[main.storage_index as usize].as_slice()
+        else {
+            panic!("bare zero-argument call should resolve to a function identity");
+        };
+        assert_eq!(*selected, local.id);
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn imported_zero_argument_call_ignores_same_name_at_other_arity() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            concat!(
+                "import \"zero.stasis\"; import \"one.stasis\"; ",
+                "function main(): i32 { return status(); }",
+            ),
+        );
+        compiler.upsert_file("zero.stasis", "function status(): i32 { return 1; }");
+        compiler.upsert_file(
+            "one.stasis",
+            "function status(value: i32): i32 { return value; }",
+        );
+
+        compiler
+            .index_pass()
+            .expect("the visible zero-argument declaration is unique");
+        let zero_argument = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "status"
+                    && compiler.files()[function.file_id as usize].path == "zero.stasis"
+            })
+            .expect("zero-argument status declaration");
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "main"
+                    && compiler.files()[function.file_id as usize].path == "main.stasis"
+            })
+            .expect("main function");
+        let [SimpleStmt::Return(SimpleExpr::Call {
+            resolved_target: Some(ResolvedCallTarget::Function(selected)),
+            args,
+            ..
+        })] = compiler.parsed_statements[main.storage_index as usize].as_slice()
+        else {
+            panic!("bare zero-argument call should resolve to a function identity");
+        };
+        assert_eq!(*selected, zero_argument.id);
+        assert!(args.is_empty());
+    }
+
+    #[test]
     fn loaded_module_alias_does_not_steal_an_ordinary_receiver_call() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
@@ -4870,6 +4859,405 @@ function tick(): i32 { choose(fixed32_mul(1, 2)); return 0; }
             .find(|function| function.name == "poll")
             .expect("poll method");
         assert_eq!(main.dependencies, vec![poll.id]);
+    }
+
+    #[test]
+    fn typed_receiver_and_function_calls_select_only_visible_imported_overloads() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            concat!(
+                "import \"left.stasis\"; import \"right.stasis\"; ",
+                "struct LeftState { value: i32; } struct RightState { value: i32; } ",
+                "function main(left: LeftState, right: RightState): i32 { ",
+                "return left.reset() + reset(right) + right.reset(); }",
+            ),
+        );
+        compiler.upsert_file(
+            "left.stasis",
+            "function reset(self: LeftState): i32 { return self.value; }",
+        );
+        compiler.upsert_file(
+            "right.stasis",
+            "function reset(self: RightState): i32 { return self.value; }",
+        );
+
+        compiler
+            .index_pass()
+            .expect("typed imported overloads should be resolved by receiver type");
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "main"
+                    && compiler.files()[function.file_id as usize].path == "main.stasis"
+            })
+            .expect("main function");
+        let [SimpleStmt::Return(SimpleExpr::Binary { lhs, rhs, .. })] =
+            compiler.parsed_statements[main.storage_index as usize].as_slice()
+        else {
+            panic!("main body should retain the receiver and function-form calls");
+        };
+        let (
+            SimpleExpr::Binary {
+                lhs: left,
+                rhs: explicit,
+                ..
+            },
+            SimpleExpr::Call {
+                target: right_function,
+                ..
+            },
+        ) = (lhs.as_ref(), rhs.as_ref())
+        else {
+            panic!("main expression should contain three calls");
+        };
+        assert!(matches!(
+            left.as_ref(),
+            SimpleExpr::Call { target, .. } if target == "left.reset"
+        ));
+        assert!(matches!(
+            explicit.as_ref(),
+            SimpleExpr::Call { target, .. } if target == "right.reset"
+        ));
+        assert_eq!(right_function, "right.reset");
+    }
+
+    #[test]
+    fn value_binding_with_imported_alias_name_stays_a_typed_receiver() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            concat!(
+                "import \"state.stasis\"; struct State { value: i32; } ",
+                "function main(state: State): i32 { return state.reset(); }",
+            ),
+        );
+        compiler.upsert_file(
+            "state.stasis",
+            concat!(
+                "function reset(): i32 { return 99; } ",
+                "function reset(self: State): i32 { return self.value; }",
+            ),
+        );
+
+        compiler
+            .index_pass()
+            .expect("local receiver binding must shadow the imported module alias");
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "main"
+                    && compiler.files()[function.file_id as usize].path == "main.stasis"
+            })
+            .expect("main function");
+        let receiver_reset = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "reset"
+                    && compiler.files()[function.file_id as usize].path == "state.stasis"
+                    && function.params.len() == 1
+            })
+            .expect("typed receiver overload");
+        assert_eq!(main.dependencies, vec![receiver_reset.id]);
+        assert!(matches!(
+            compiler.parsed_statements[main.storage_index as usize].as_slice(),
+            [SimpleStmt::Return(SimpleExpr::Call { target, .. })]
+                if target == "state.reset"
+        ));
+    }
+
+    #[test]
+    fn value_binding_cannot_be_consumed_as_imported_namespace_receiver() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            concat!(
+                "import \"state.stasis\"; ",
+                "function main(state: i32): i32 { return state.reset(); }",
+            ),
+        );
+        compiler.upsert_file("state.stasis", "function reset(): i32 { return 99; }");
+
+        let error = compiler
+            .index_pass()
+            .expect_err("a local receiver cannot be reinterpreted as a module alias");
+        assert!(format!("{error:?}").contains("no matching visible overload"));
+    }
+
+    #[test]
+    fn explicit_imported_extern_call_resolves_to_its_declaration_identity() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            concat!(
+                "import \"asset_loader.stasis\"; ",
+                "function main(): i32 { ",
+                "asset_loader.print_i32(17); return 0; }",
+            ),
+        );
+        compiler.upsert_file(
+            "asset_loader.stasis",
+            "extern function print_i32(value: i32): void;",
+        );
+
+        compiler
+            .index_pass()
+            .expect("qualified imported extern call should resolve by declaration identity");
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "main"
+                    && compiler.files()[function.file_id as usize].path == "main.stasis"
+            })
+            .expect("main function");
+        let [SimpleStmt::Expr(SimpleExpr::Call {
+            resolved_target: Some(ResolvedCallTarget::Extern(identity)),
+            args,
+            ..
+        }), SimpleStmt::Return(SimpleExpr::Int(0))] =
+            compiler.parsed_statements[main.storage_index as usize].as_slice()
+        else {
+            panic!("qualified extern call should preserve its selected declaration");
+        };
+        assert_eq!(identity.source_path, "asset_loader.stasis");
+        assert_eq!(identity.name, "print_i32");
+        assert_eq!(
+            identity.symbol_candidates,
+            ["print_i32", "stasis_print_i32", "stasis_jit_print_i32"]
+        );
+        assert_eq!(identity.declared_params, ["i32"]);
+        assert_eq!(identity.declared_return_type, "void");
+        assert_eq!(args.len(), 1, "namespace alias is consumed from the call");
+    }
+
+    #[test]
+    fn typed_receiver_resolution_preserves_nominal_enum_arguments() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            concat!(
+                "import \"ad_tasks.stasis\"; ",
+                "global mobile_ad_task: AdTask; ",
+                "function main(): i32 { mobile_ad_task.begin(AdKind.Midgame); return 0; }",
+            ),
+        );
+        compiler.upsert_file(
+            "ad_tasks.stasis",
+            concat!(
+                "enum AdKind { Midgame, Rewarded, } ",
+                "struct AdTask { handle: i32; } ",
+                "function begin(self: AdTask, kind: AdKind): i32 { return self.handle; }",
+            ),
+        );
+
+        compiler
+            .index_pass()
+            .expect("enum-valued receiver overload should resolve by declared type");
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "main"
+                    && compiler.files()[function.file_id as usize].path == "main.stasis"
+            })
+            .expect("main function");
+        let [SimpleStmt::Expr(SimpleExpr::Call {
+            target,
+            resolved_target: Some(ResolvedCallTarget::Function(selected)),
+            ..
+        }), SimpleStmt::Return(SimpleExpr::Int(0))] =
+            compiler.parsed_statements[main.storage_index as usize].as_slice()
+        else {
+            panic!("enum receiver call should retain its selected function identity");
+        };
+        assert_eq!(target, "ad_tasks.begin");
+        let begin = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "begin"
+                    && compiler.files()[function.file_id as usize].path == "ad_tasks.stasis"
+            })
+            .expect("imported begin overload");
+        assert_eq!(*selected, begin.id);
+        assert_eq!(main.dependencies, vec![begin.id]);
+    }
+
+    #[test]
+    fn receiver_conversions_keep_selected_overload_at_each_source_span() {
+        let mut compiler = Compiler::new();
+        let main_source = concat!(
+            "import \"left.stasis\"; import \"right.stasis\"; ",
+            "struct LeftOutput { value: i32; } struct RightOutput { value: i32; } ",
+            "function main(left: LeftOutput, right: RightOutput): i32 { ",
+            "left.from_i32(1); right.from_i32(2); return 0; }",
+        );
+        compiler.upsert_file("main.stasis", main_source);
+        compiler.upsert_file(
+            "left.stasis",
+            "function from_i32(self: LeftOutput, value: i32): i32 { return value; }",
+        );
+        compiler.upsert_file(
+            "right.stasis",
+            "function from_i32(self: RightOutput, value: i32): i32 { return value; }",
+        );
+
+        compiler
+            .index_pass()
+            .expect("both receiver conversions resolve by receiver type");
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "main"
+                    && compiler.files()[function.file_id as usize].path == "main.stasis"
+            })
+            .expect("main function");
+        let source = &compiler.files()[main.file_id as usize].content;
+        let left_target = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "from_i32"
+                    && compiler.files()[function.file_id as usize].path == "left.stasis"
+            })
+            .expect("left conversion");
+        let right_target = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "from_i32"
+                    && compiler.files()[function.file_id as usize].path == "right.stasis"
+            })
+            .expect("right conversion");
+        let selected = main
+            .call_sites
+            .iter()
+            .map(|site| {
+                let call_name =
+                    &source[site.source_range.start as usize..site.source_range.end as usize];
+                (call_name, site.source_range.start as usize, site.callee)
+            })
+            .filter(|(call_name, _, _)| *call_name == "from_i32")
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), 2);
+        let expected_left_start = source.find("left.from_i32").expect("left call") + 5;
+        let expected_right_start = source.find("right.from_i32").expect("right call") + 6;
+        assert!(selected.contains(&("from_i32", expected_left_start, left_target.id)));
+        assert!(selected.contains(&("from_i32", expected_right_start, right_target.id)));
+    }
+
+    #[test]
+    fn same_signature_imported_receiver_overloads_remain_ambiguous() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            concat!(
+                "import \"left.stasis\"; import \"right.stasis\"; ",
+                "struct State { value: i32; } ",
+                "function main(state: State): i32 { return state.reset(); }",
+            ),
+        );
+        compiler.upsert_file(
+            "left.stasis",
+            "function reset(self: State): i32 { return self.value; }",
+        );
+        compiler.upsert_file(
+            "right.stasis",
+            "function reset(self: State): i32 { return self.value; }",
+        );
+
+        let error = compiler
+            .index_pass()
+            .expect_err("identical imported receiver signatures are ambiguous");
+        assert!(format!("{error:?}").contains("ambiguous visible overload"));
+    }
+
+    #[test]
+    fn unimported_same_type_receiver_overload_cannot_capture_a_call() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            concat!(
+                "import \"visible.stasis\"; struct State { value: i32; } ",
+                "function main(state: State): i32 { return state.reset(); }",
+            ),
+        );
+        compiler.upsert_file(
+            "visible.stasis",
+            "function reset(self: State): i32 { return self.value; }",
+        );
+        compiler.upsert_file(
+            "hidden.stasis",
+            "function reset(self: State): i32 { return self.value + 1; }",
+        );
+
+        compiler
+            .index_pass()
+            .expect("unimported same-type functions cannot participate in dispatch");
+        let main = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "main"
+                    && compiler.files()[function.file_id as usize].path == "main.stasis"
+            })
+            .expect("main function");
+        let visible = compiler
+            .functions()
+            .iter()
+            .find(|function| {
+                function.name == "reset"
+                    && compiler.files()[function.file_id as usize].path == "visible.stasis"
+            })
+            .expect("visible overload");
+        assert_eq!(main.dependencies, vec![visible.id]);
+        assert!(matches!(
+            compiler.parsed_statements[main.storage_index as usize].as_slice(),
+            [SimpleStmt::Return(SimpleExpr::Call { target, .. })] if target == "visible.reset"
+        ));
+    }
+
+    #[test]
+    fn hidden_only_receiver_overload_is_not_visible() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "struct State { value: i32; } function main(state: State): i32 { return state.reset(); }",
+        );
+        compiler.upsert_file(
+            "hidden.stasis",
+            "function reset(self: State): i32 { return self.value; }",
+        );
+
+        let error = compiler
+            .index_pass()
+            .expect_err("an unimported receiver overload must not bind");
+        assert!(format!("{error:?}").contains("not visible"));
+    }
+
+    #[test]
+    fn typed_collection_receiver_operation_survives_hidden_same_name_function() {
+        let mut compiler = Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            concat!(
+                "struct State { values: queue<i32, 4>; } global state: State; ",
+                "function main(): i32 { state.values.clear(); return 0; }",
+            ),
+        );
+        compiler.upsert_file(
+            "hidden.stasis",
+            "function clear(self: i32): i32 { return self; }",
+        );
+
+        compiler
+            .index_pass()
+            .expect("typed collection intrinsic should resolve before hidden user functions");
     }
 
     #[test]

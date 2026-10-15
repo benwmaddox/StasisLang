@@ -13,6 +13,10 @@ function print(value: i32): void {
     print_int(value);
 }
 
+function print(value: ascii[]): void {
+    print_string(value);
+}
+
 function print(value: string): void {
     print_string(value);
 }
@@ -134,7 +138,7 @@ function length(s: ascii[]): i32 {
     return value;
 }
 
-function ascii_max_length(s: ascii[]): i32 {
+function max_length(s: ascii[]): i32 {
     let value: i32 = s.max_length;
     if (value < 0) {
         return 0;
@@ -142,8 +146,8 @@ function ascii_max_length(s: ascii[]): i32 {
     return value;
 }
 
-function ascii_scan_limit(s: ascii[]): i32 {
-    let max_len: i32 = ascii_max_length(s);
+function scan_limit(s: ascii[]): i32 {
+    let max_len: i32 = max_length(s);
     if (max_len > 0) {
         return max_len;
     }
@@ -155,7 +159,7 @@ function ascii_scan_limit(s: ascii[]): i32 {
     return known_len;
 }
 
-function ascii_set_len(s: ascii[], len: i32) {
+function set_len(s: ascii[], len: i32) {
     let value: i32 = len;
     if (value < 0) {
         value = 0;
@@ -167,47 +171,47 @@ function ascii_set_len(s: ascii[], len: i32) {
     s.length = value;
 }
 
-function ascii_is_empty(s: ascii[]): bool {
+function is_empty(s: ascii[]): bool {
     return length(s) == 0;
 }
 
-function ascii_get(s: ascii[], index: i32): u8 {
+function get(s: ascii[], index: i32): u8 {
     return s[index];
 }
 
-function ascii_set(s: ascii[], index: i32, b: u8) {
+function set(s: ascii[], index: i32, b: u8) {
     s[index] = b;
     if (b == 0) {
-        ascii_set_len(s, index);
+        set_len(s, index);
         return;
     }
     if (index >= length(s)) {
-        ascii_set_len(s, index + 1);
+        set_len(s, index + 1);
     }
 }
 
-function ascii_recount(s: ascii[]): i32 {
+function recount(s: ascii[]): i32 {
     let i: i32 = 0;
-    let limit: i32 = ascii_scan_limit(s);
+    let limit: i32 = scan_limit(s);
     for (i = 0; i < limit; i = i + 1) {
         if (s[i] == 0) {
-            ascii_set_len(s, i);
+            set_len(s, i);
             return i;
         }
     }
-    ascii_set_len(s, limit);
+    set_len(s, limit);
     return limit;
 }
 
-function ascii_clear(s: ascii[]) {
+function clear(s: ascii[]) {
     s[0] = 0;
-    ascii_set_len(s, 0);
+    set_len(s, 0);
 }
 
-function ascii_copy(dst: ascii[], src: ascii[]): i32 {
+function copy(dst: ascii[], src: ascii[]): i32 {
     let i: i32 = 0;
-    let dst_limit: i32 = ascii_scan_limit(dst);
-    let src_limit: i32 = ascii_scan_limit(src);
+    let dst_limit: i32 = scan_limit(dst);
+    let src_limit: i32 = scan_limit(src);
     let limit: i32 = src_limit;
     if (dst_limit < limit) {
         limit = dst_limit;
@@ -216,67 +220,67 @@ function ascii_copy(dst: ascii[], src: ascii[]): i32 {
         let b: u8 = src[i];
         dst[i] = b;
         if (b == 0) {
-            ascii_set_len(dst, i);
+            set_len(dst, i);
             return i;
         }
     }
     if (dst_limit > 0 && limit >= dst_limit) {
         dst[dst_limit - 1] = 0;
-        ascii_set_len(dst, dst_limit - 1);
+        set_len(dst, dst_limit - 1);
         return dst_limit - 1;
     }
     if (limit < dst_limit) {
         dst[limit] = 0;
-        ascii_set_len(dst, limit);
+        set_len(dst, limit);
         return limit;
     }
     return 0;
 }
 
-function ascii_append(dst: ascii[], src: ascii[]): i32 {
+function append(dst: ascii[], src: ascii[]): i32 {
     let base: i32 = length(dst);
     let i: i32 = 0;
-    let dst_limit: i32 = ascii_scan_limit(dst);
+    let dst_limit: i32 = scan_limit(dst);
     if (base < 0) {
         base = 0;
     }
     if (dst_limit <= 0 || base >= dst_limit) {
         return base;
     }
-    let src_limit: i32 = ascii_scan_limit(src);
+    let src_limit: i32 = scan_limit(src);
     let write_limit: i32 = dst_limit - base - 1;
     if (write_limit <= 0) {
         dst[base] = 0;
-        ascii_set_len(dst, base);
+        set_len(dst, base);
         return base;
     }
     for (i = 0; i < write_limit && i < src_limit; i = i + 1) {
         let b: u8 = src[i];
         if (b == 0) {
             dst[base + i] = 0;
-            ascii_set_len(dst, base + i);
+            set_len(dst, base + i);
             return base + i;
         }
         dst[base + i] = b;
     }
     dst[base + i] = 0;
-    ascii_set_len(dst, base + i);
+    set_len(dst, base + i);
     return base + i;
 }
 
-function ascii_push(dst: ascii[], b: u8): i32 {
+function push(dst: ascii[], b: u8): i32 {
     let base: i32 = length(dst);
     dst[base] = b;
     if (b == 0) {
-        ascii_set_len(dst, base);
+        set_len(dst, base);
         return base;
     }
     dst[base + 1] = 0;
-    ascii_set_len(dst, base + 1);
+    set_len(dst, base + 1);
     return base + 1;
 }
 
-function ascii_write_i32(dst: ascii[], value: i32, base: i32): i32 {
+function write_i32(dst: ascii[], value: i32, base: i32): i32 {
     let negative: bool = value < 0;
     let working: i32 = value;
     if (working > 0) {
@@ -298,7 +302,7 @@ function ascii_write_i32(dst: ascii[], value: i32, base: i32): i32 {
         sign_count = 1;
     }
     let result_length: i32 = base + sign_count + digit_count;
-    let capacity: i32 = ascii_max_length(dst);
+    let capacity: i32 = max_length(dst);
     if (base < 0 || result_length < base || capacity <= result_length) {
         return -1;
     }
@@ -320,27 +324,27 @@ function ascii_write_i32(dst: ascii[], value: i32, base: i32): i32 {
         divisor = divisor / 10;
     }
     dst[result_length] = 0;
-    ascii_set_len(dst, result_length);
+    set_len(dst, result_length);
     return result_length;
 }
 
 function from_i32(dst: ascii[], value: i32): i32 {
-    return ascii_write_i32(dst, value, 0);
+    return write_i32(dst, value, 0);
 }
 
 function @internal ascii_from_i32(dst: ascii[], value: i32): i32 {
     return from_i32(dst, value);
 }
 
-function ascii_append_i32(dst: ascii[], value: i32): i32 {
-    return ascii_write_i32(dst, value, length(dst));
+function append_i32(dst: ascii[], value: i32): i32 {
+    return write_i32(dst, value, length(dst));
 }
 
-function ascii_push_i32(dst: ascii[], value: i32): void {
-    ascii_append_i32(dst, value);
+function push_i32(dst: ascii[], value: i32): void {
+    append_i32(dst, value);
 }
 
-function ascii_write_f32_fixed(dst: ascii[], value: f32, decimals: i32, base: i32): i32 {
+function write_f32_fixed(dst: ascii[], value: f32, decimals: i32, base: i32): i32 {
     if (decimals < 0 || decimals > 6 || value != value) {
         return -1;
     }
@@ -482,7 +486,7 @@ function ascii_write_f32_fixed(dst: ascii[], value: f32, decimals: i32, base: i3
     }
     payload_length = payload_length + sign_count;
     let result_length: i32 = base + payload_length;
-    let capacity: i32 = ascii_max_length(dst);
+    let capacity: i32 = max_length(dst);
     if (base < 0 || result_length < base || capacity <= result_length) {
         return -1;
     }
@@ -524,24 +528,24 @@ function ascii_write_f32_fixed(dst: ascii[], value: f32, decimals: i32, base: i3
         }
     }
     dst[result_length] = 0;
-    ascii_set_len(dst, result_length);
+    set_len(dst, result_length);
     return result_length;
 }
 
-function ascii_from_f32_fixed(dst: ascii[], value: f32, decimals: i32): i32 {
-    return ascii_write_f32_fixed(dst, value, decimals, 0);
+function from_f32_fixed(dst: ascii[], value: f32, decimals: i32): i32 {
+    return write_f32_fixed(dst, value, decimals, 0);
 }
 
-function ascii_append_f32_fixed(dst: ascii[], value: f32, decimals: i32): i32 {
-    return ascii_write_f32_fixed(dst, value, decimals, length(dst));
+function append_f32_fixed(dst: ascii[], value: f32, decimals: i32): i32 {
+    return write_f32_fixed(dst, value, decimals, length(dst));
 }
 
-function ascii_write_f64_short(dst: ascii[], value: f64, decimals: i32, base: i32): i32 {
+function write_f64_short(dst: ascii[], value: f64, decimals: i32, base: i32): i32 {
     if (decimals < 0 || decimals > 6 || base < 0) {
         return -1;
     }
 
-    let capacity: i32 = ascii_max_length(dst);
+    let capacity: i32 = max_length(dst);
     if (value != value) {
         let result_length: i32 = base + 3;
         if (result_length < base || capacity <= result_length) {
@@ -551,7 +555,7 @@ function ascii_write_f64_short(dst: ascii[], value: f64, decimals: i32, base: i3
         dst[base + 1] = 97;
         dst[base + 2] = 110;
         dst[result_length] = 0;
-        ascii_set_len(dst, result_length);
+        set_len(dst, result_length);
         return result_length;
     }
 
@@ -575,7 +579,7 @@ function ascii_write_f64_short(dst: ascii[], value: f64, decimals: i32, base: i3
         dst[cursor + 1] = 110;
         dst[cursor + 2] = 102;
         dst[result_length] = 0;
-        ascii_set_len(dst, result_length);
+        set_len(dst, result_length);
         return result_length;
     }
 
@@ -756,19 +760,19 @@ function ascii_write_f64_short(dst: ascii[], value: f64, decimals: i32, base: i3
         }
     }
     dst[result_length] = 0;
-    ascii_set_len(dst, result_length);
+    set_len(dst, result_length);
     return result_length;
 }
 
-function ascii_from_f64_short(dst: ascii[], value: f64, decimals: i32): i32 {
-    return ascii_write_f64_short(dst, value, decimals, 0);
+function from_f64_short(dst: ascii[], value: f64, decimals: i32): i32 {
+    return write_f64_short(dst, value, decimals, 0);
 }
 
-function ascii_append_f64_short(dst: ascii[], value: f64, decimals: i32): i32 {
-    return ascii_write_f64_short(dst, value, decimals, length(dst));
+function append_f64_short(dst: ascii[], value: f64, decimals: i32): i32 {
+    return write_f64_short(dst, value, decimals, length(dst));
 }
 
-function ascii_pad_left(dst: ascii[], width: i32, fill: u8): i32 {
+function pad_left(dst: ascii[], width: i32, fill: u8): i32 {
     let current: i32 = length(dst);
     if (width < 0) {
         return -1;
@@ -777,7 +781,7 @@ function ascii_pad_left(dst: ascii[], width: i32, fill: u8): i32 {
         return current;
     }
     let fill_value: i32 = to_i32(fill);
-    let capacity: i32 = ascii_max_length(dst);
+    let capacity: i32 = max_length(dst);
     if (fill_value <= 0 || fill_value > 127 || capacity <= width) {
         return -1;
     }
@@ -790,14 +794,14 @@ function ascii_pad_left(dst: ascii[], width: i32, fill: u8): i32 {
         dst[i] = fill;
     }
     dst[width] = 0;
-    ascii_set_len(dst, width);
+    set_len(dst, width);
     return width;
 }
 
-function ascii_cmp(a: ascii[], b: ascii[]): i32 {
+function cmp(a: ascii[], b: ascii[]): i32 {
     let i: i32 = 0;
-    let a_limit: i32 = ascii_scan_limit(a);
-    let b_limit: i32 = ascii_scan_limit(b);
+    let a_limit: i32 = scan_limit(a);
+    let b_limit: i32 = scan_limit(b);
     let limit: i32 = a_limit;
     if (b_limit < limit) {
         limit = b_limit;
@@ -824,13 +828,13 @@ function ascii_cmp(a: ascii[], b: ascii[]): i32 {
     return 1;
 }
 
-function ascii_eq(a: ascii[], b: ascii[]): bool {
-    return ascii_cmp(a, b) == 0;
+function eq(a: ascii[], b: ascii[]): bool {
+    return cmp(a, b) == 0;
 }
 
-function ascii_find_byte(s: ascii[], b: u8): i32 {
+function find_byte(s: ascii[], b: u8): i32 {
     let i: i32 = 0;
-    let limit: i32 = ascii_scan_limit(s);
+    let limit: i32 = scan_limit(s);
     for (i = 0; i < limit; i = i + 1) {
         let cur: u8 = s[i];
         if (cur == b) {
@@ -843,10 +847,10 @@ function ascii_find_byte(s: ascii[], b: u8): i32 {
     return -1;
 }
 
-function ascii_find_last_byte(s: ascii[], b: u8): i32 {
+function find_last_byte(s: ascii[], b: u8): i32 {
     let i: i32 = 0;
     let last: i32 = -1;
-    let limit: i32 = ascii_scan_limit(s);
+    let limit: i32 = scan_limit(s);
     for (i = 0; i < limit; i = i + 1) {
         let cur: u8 = s[i];
         if (cur == b) {
@@ -859,9 +863,9 @@ function ascii_find_last_byte(s: ascii[], b: u8): i32 {
     return last;
 }
 
-function ascii_starts_with(s: ascii[], prefix: ascii[]): bool {
+function starts_with(s: ascii[], prefix: ascii[]): bool {
     let i: i32 = 0;
-    let limit: i32 = ascii_scan_limit(prefix);
+    let limit: i32 = scan_limit(prefix);
     for (i = 0; i < limit; i = i + 1) {
         let p: u8 = prefix[i];
         if (p == 0) {
@@ -878,7 +882,7 @@ function ascii_starts_with(s: ascii[], prefix: ascii[]): bool {
     return true;
 }
 
-function ascii_ends_with(s: ascii[], suffix: ascii[]): bool {
+function ends_with(s: ascii[], suffix: ascii[]): bool {
     let len_s: i32 = length(s);
     let len_suf: i32 = length(suffix);
     if (len_suf > len_s) {
@@ -894,7 +898,7 @@ function ascii_ends_with(s: ascii[], suffix: ascii[]): bool {
     return true;
 }
 
-function ascii_find(s: ascii[], needle: ascii[]): i32 {
+function find(s: ascii[], needle: ascii[]): i32 {
     let len_s: i32 = length(s);
     let len_n: i32 = length(needle);
     if (len_n == 0) {
@@ -921,8 +925,8 @@ function ascii_find(s: ascii[], needle: ascii[]): i32 {
     return -1;
 }
 
-function ascii_contains(s: ascii[], needle: ascii[]): bool {
-    return ascii_find(s, needle) >= 0;
+function contains(s: ascii[], needle: ascii[]): bool {
+    return find(s, needle) >= 0;
 }
 
 // UTF-8 string buffer helpers.
@@ -930,10 +934,10 @@ function ascii_contains(s: ascii[], needle: ascii[]): bool {
 // Layout (see `docs/spec.md`):
 // - `utf8[N]`: [byte_length: i32][max_length: i32][char_length: i32][data: u8[N]]
 //
-// Note: `utf8_set_len_ascii` assumes the payload contains only ASCII bytes, so
+// Note: `set_len_ascii` assumes the payload contains only ASCII bytes, so
 // `char_length == byte_length`.
 
-function utf8_max_length(s: utf8[]): i32 {
+function max_length(s: utf8[]): i32 {
     let value: i32 = s.max_length;
     if (value < 0) {
         return 0;
@@ -965,7 +969,7 @@ function length_chars(s: utf8[]): i32 {
     return value;
 }
 
-function utf8_set_byte_len(s: utf8[], len: i32): void {
+function set_byte_len(s: utf8[], len: i32): void {
     let value: i32 = len;
     if (value < 0) {
         value = 0;
@@ -977,7 +981,7 @@ function utf8_set_byte_len(s: utf8[], len: i32): void {
     s.length = value;
 }
 
-function utf8_set_char_len(s: utf8[], len: i32): void {
+function set_char_len(s: utf8[], len: i32): void {
     let value: i32 = len;
     if (value < 0) {
         value = 0;
@@ -989,14 +993,14 @@ function utf8_set_char_len(s: utf8[], len: i32): void {
     s.char_length = value;
 }
 
-function utf8_set_len_ascii(s: utf8[], len: i32): void {
-    utf8_set_byte_len(s, len);
-    utf8_set_char_len(s, len);
+function set_len_ascii(s: utf8[], len: i32): void {
+    set_byte_len(s, len);
+    set_char_len(s, len);
 }
 
-function utf8_clear_ascii(s: utf8[]): void {
+function clear_ascii(s: utf8[]): void {
     s[0] = 0;
-    utf8_set_len_ascii(s, 0);
+    set_len_ascii(s, 0);
 }
 
 function @internal utf8_write_i32(dst: utf8[], value: i32): i32 {
@@ -1021,7 +1025,7 @@ function @internal utf8_write_i32(dst: utf8[], value: i32): i32 {
         sign_count = 1;
     }
     let result_length: i32 = sign_count + digit_count;
-    let capacity: i32 = utf8_max_length(dst);
+    let capacity: i32 = max_length(dst);
     if (capacity <= result_length) {
         return -1;
     }
@@ -1043,7 +1047,7 @@ function @internal utf8_write_i32(dst: utf8[], value: i32): i32 {
         divisor = divisor / 10;
     }
     dst[result_length] = 0;
-    utf8_set_len_ascii(dst, result_length);
+    set_len_ascii(dst, result_length);
     return result_length;
 }
 
@@ -1057,7 +1061,7 @@ function @internal utf8_from_i32(dst: utf8[], value: i32): i32 {
 
 function from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32 {
     let bound: i32 = dst_max;
-    let cap: i32 = utf8_max_length(dst);
+    let cap: i32 = max_length(dst);
     if (cap > 0 && bound > cap) {
         bound = cap;
     }
@@ -1067,19 +1071,19 @@ function from_ascii(dst: utf8[], src: ascii[], dst_max: i32): i32 {
 
     let i: i32 = 0;
     let limit: i32 = bound - 1;
-    let src_limit: i32 = ascii_scan_limit(src);
+    let src_limit: i32 = scan_limit(src);
     for (i = 0; i < limit && i < src_limit; i = i + 1) {
         let b: u8 = src[i];
         if (b == 0) {
             dst[i] = 0;
-            utf8_set_len_ascii(dst, i);
+            set_len_ascii(dst, i);
             return i;
         }
         dst[i] = b;
     }
 
     dst[i] = 0;
-    utf8_set_len_ascii(dst, i);
+    set_len_ascii(dst, i);
     return i;
 }
 

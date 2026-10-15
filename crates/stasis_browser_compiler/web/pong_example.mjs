@@ -73,9 +73,9 @@ function reset_match(): void {
 
 function main(): i32 {
     init_window(640, 360, "Stasis Pong");
-    state.arena.load_sprite_from("assets/pong-arena.png", 640, 360);
-    state.paddle.load_sprite_from("assets/pong-paddle.png", 12, 72);
-    state.ball.sprite.load_sprite_from("assets/pong-ball.png", 16, 16);
+    state.arena.load_from("assets/pong-arena.png", 640, 360);
+    state.paddle.load_from("assets/pong-paddle.png", 12, 72);
+    state.ball.sprite.load_from("assets/pong-ball.png", 16, 16);
     state.score_font = load_font("assets/ui.ttf", 18);
     reset_match();
     return 0;

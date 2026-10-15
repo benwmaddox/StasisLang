@@ -77,6 +77,19 @@ function refresh(self: AudioStream): void {
     self.underruns = audio_get_underruns_raw();
 }
 
+/// Return the frames needed to fill the queue toward target_frames.
+/// Refreshes the observable queue level before computing the bounded deficit.
+function frames_wanted(self: AudioStream, target_frames: i32): i32 {
+    self.refresh();
+    if (!self.active || !self.available || target_frames <= 0) {
+        return 0;
+    }
+    if (self.queued_frames >= target_frames) {
+        return 0;
+    }
+    return target_frames - self.queued_frames;
+}
+
 function push(self: AudioStream, samples: f32[], frame_count: i32): i32 {
     if (!self.active || !self.available) {
         return 0;

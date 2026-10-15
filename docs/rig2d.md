@@ -142,7 +142,7 @@ global sheet: SpriteSheet;
 global writer: SpriteRunWriter;
 
 function main(): i32 {
-    if (!sheet.load_sprite_sheet_from("assets/sprite_sheet_2x2.png", 2, 2, 48, 48)) {
+    if (!sheet.load_from("assets/sprite_sheet_2x2.png", 2, 2, 48, 48)) {
         return 1;
     }
     courier_rig.clear();

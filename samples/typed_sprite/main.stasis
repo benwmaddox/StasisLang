@@ -12,7 +12,7 @@ global state: FixtureState;
 function main(): i32 {
     state.invalid_sprite.width = 8;
     state.invalid_sprite.height = 8;
-    if (state.invalid_sprite.load_sprite_from("assets/__typed_drawable_fixture.svg", 0, 92)) {
+    if (state.invalid_sprite.load_from("assets/__typed_drawable_fixture.svg", 0, 92)) {
         return 1;
     }
     if (state.invalid_sprite.valid()) {

@@ -169,27 +169,31 @@ for an explicit ASCII-to-UTF-8 copy. The destination type selects the matching
 `from_i32` overload; `ascii[]` and `utf8[]` are distinct types for arguments,
 typed lets, assignments, and returns. They are not implicitly compatible in
 either direction. Use `from_ascii` for ASCII-to-UTF-8 copies.
-The legacy function-form `ascii_from_i32` and `utf8_from_ascii` helpers remain
-as internal compatibility aliases for existing callers. `utf8_from_i32` is
-also available as a function-form convenience for UTF-8 callers.
+Use these same names as receiver methods, for example
+`ascii_value.from_i32(value)` or `utf8_value.from_ascii(ascii_value, limit)`.
+The action-only receiver API rename is source-breaking; the removed prefixed
+public names have no compatibility aliases. See
+[`receiver_api_migration.md`](receiver_api_migration.md) for the complete
+mapping. `ascii_from_i32`, `utf8_from_i32`, and `utf8_from_ascii` are internal
+implementation helpers and are not supported source aliases.
 
 The text-buffer helpers also provide:
 
-- `ascii_from_i32(dst, value)` replaces the logical contents with the complete
-  decimal `i32`; `ascii_append_i32` appends it. `ascii_push_i32` remains the
+- The `ascii[]` `from_i32(dst, value)` overload replaces the logical contents with the complete
+  decimal `i32`; `append_i32` appends it. `push_i32` remains the
   existing append helper; it delegates to checked append and ignores the
   rejection result.
-- `utf8_from_i32(dst, value)` replaces an `utf8[]` buffer with the decimal
+- The `utf8[]` `from_i32(dst, value)` overload replaces its buffer with the decimal
   `i32`. The emitted bytes are ASCII, so byte and character lengths are equal.
-- Both `from_i32` receiver overloads and their function-form aliases require
+- Both `from_i32` receiver overloads and their function-form calls require
   room for all characters plus a trailing NUL. On rejection they preserve the
   buffer payload and metadata.
-- `ascii_from_f32_fixed(dst, value, decimals)` and
-  `ascii_append_f32_fixed` accept every finite binary32 value and a precision
+- `from_f32_fixed(dst, value, decimals)` and
+  `append_f32_fixed` accept every finite binary32 value and a precision
   from `0` through `6`. They emit exactly that many fractional digits, round
   the exact binary32 value halfway away from zero, and normalize a negative
   result that rounds to zero to unsigned zero text.
-- `ascii_pad_left(dst, width, fill)` prepends an ASCII byte until the requested
+- `pad_left(dst, width, fill)` prepends an ASCII byte until the requested
   final character count is reached. A width no greater than the current length
   is a successful no-op.
 

@@ -144,7 +144,7 @@ function release(self: AudioAsset): void {
 }
 
 // Release is safe to call repeatedly. A Sprite is an owning value only when
-// it was populated by load_sprite_from; copied references do not acquire
+// it was populated by load_from; copied references do not acquire
 // another native reference.
 function release(self: Sprite): void {
     if (self.sprite_ref != SpriteRef.Invalid) {
@@ -155,7 +155,7 @@ function release(self: Sprite): void {
     self.height = 0;
 }
 
-function @asset_path(path) load_image(self: ImageAsset, path: string, width: i32, height: i32): bool {
+function @asset_path(path) load(self: ImageAsset, path: string, width: i32, height: i32): bool {
     reset_image(self);
     self.request = asset_request_sprite(path, width, height);
     self.width = width;
@@ -168,7 +168,7 @@ function @asset_path(path) load_image(self: ImageAsset, path: string, width: i32
     return true;
 }
 
-function @asset_path(path) load_audio(self: AudioAsset, path: string): bool {
+function @asset_path(path) load(self: AudioAsset, path: string): bool {
     reset_audio(self);
     self.request = asset_request_audio(path);
     if (self.request <= 0) {

@@ -22,7 +22,7 @@ The serialized result is one of:
 The bounded finite lattice accepts string literals, immutable top-level string
 constants, immutable local forwarding, and finite unions of helper returns and
 parameters. The compiler-owned decimal chain
-`ascii_clear -> ascii_push_i32 -> utf8_from_ascii` contributes `-` and `0`-`9`
+`clear -> push_i32 -> from_ascii` contributes `-` and `0`-`9`
 only when the complete chain and its buffers are resolved to the checked stdlib
 functions.
 

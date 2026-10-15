@@ -1,0 +1,22 @@
+enum PortalLifecycleEvent {
+    LoadingStarted,
+    LoadingFinished,
+    GameplayStarted,
+    GameplayStopped,
+}
+
+function @internal @effects(platform)@extern("stasis_jit_portal_lifecycle") portal_lifecycle_raw(event: i32): void;
+
+function notify_portal_lifecycle(event: PortalLifecycleEvent): void {
+    let event_code: i32 = 0;
+    if (event == PortalLifecycleEvent.LoadingStarted) {
+        event_code = 1;
+    } else if (event == PortalLifecycleEvent.LoadingFinished) {
+        event_code = 2;
+    } else if (event == PortalLifecycleEvent.GameplayStarted) {
+        event_code = 3;
+    } else if (event == PortalLifecycleEvent.GameplayStopped) {
+        event_code = 4;
+    }
+    portal_lifecycle_raw(event_code);
+}

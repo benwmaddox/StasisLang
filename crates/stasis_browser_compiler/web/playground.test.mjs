@@ -43,7 +43,7 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
       assert.match(source, /const SCANCODE_A: i32 = 4;/);
       assert.match(source, /const SCANCODE_D: i32 = 7;/);
       assert.match(source, /sample_sprite: Sprite;/);
-      assert.match(source, /sample_sprite\.load_sprite_from\(/);
+      assert.match(source, /sample_sprite\.load_from\(/);
       assert.match(source, /state\.sample_sprite\.draw\(state\.sprite_x,/);
     } else {
       assert.match(source, /ball: BallState;/);
@@ -60,9 +60,9 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
       assert.match(source, /input_frame\.keys\[SCANCODE_DOWN\]/);
       assert.match(source, /input_frame\.pointers\[0\]\.y_logical/);
       assert.match(source, /input_frame\.pointers\[0\]\.went_down/);
-      assert.match(source, /state\.arena\.load_sprite_from\("assets\/pong-arena\.png"/);
-      assert.match(source, /state\.paddle\.load_sprite_from\("assets\/pong-paddle\.png"/);
-      assert.match(source, /state\.ball\.sprite\.load_sprite_from\("assets\/pong-ball\.png"/);
+      assert.match(source, /state\.arena\.load_from\("assets\/pong-arena\.png"/);
+      assert.match(source, /state\.paddle\.load_from\("assets\/pong-paddle\.png"/);
+      assert.match(source, /state\.ball\.sprite\.load_from\("assets\/pong-ball\.png"/);
       assert.match(source, /load_font\("assets\/ui\.ttf", 18\)/);
       assert.match(source, /state\.score_utf8\.from_i32\(state\.player\.score\)/);
       assert.match(source, /state\.score_utf8\.from_i32\(state\.cpu\.score\)/);

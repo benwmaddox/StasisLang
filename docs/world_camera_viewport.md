@@ -4,8 +4,8 @@
 through a logical display rectangle. It is deliberately a presentation helper,
 not a simulation system. Gameplay positions, collision, scoring, snapshots,
 replay, and networking stay in world space. A renderer supplies a completed
-world position to `world_camera_follow`, converts coordinates, draws inside a
-balanced `world_camera_clip_begin` / `world_camera_clip_end` pair, and discards
+world position to `follow`, converts coordinates, draws inside a
+balanced `clip_begin` / `clip_end` pair, and discards
 the derived camera state.
 
 ## Camera contract

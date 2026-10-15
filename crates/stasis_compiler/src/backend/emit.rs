@@ -1,9 +1,10 @@
 use crate::backend::compile_analysis::{
-    fixed_array_lane_type_and_len, is_collection_handle_type, is_i32_abi_compatible_type,
-    is_i32_numeric_type, is_i32_scalar_lane_type, is_struct_view_type, resolve_call_signature,
-    unambiguous_call_params, validate_owned_local_fixed_array_contract, CallSignature,
-    CallSignatureMap, CollectionInfoMap, ConstantValue, ConstantValueMap, ExternImportKey,
-    ForeachCollectionInfo, GlobalPathTypeMap, NamedStructFieldTypeMap,
+    are_call_argument_and_param_compatible, fixed_array_lane_type_and_len,
+    is_collection_handle_type, is_i32_abi_compatible_type, is_i32_numeric_type,
+    is_i32_scalar_lane_type, is_struct_view_type, resolve_call_signature, unambiguous_call_params,
+    validate_owned_local_fixed_array_contract, CallSignature, CallSignatureMap, CollectionInfoMap,
+    ConstantValue, ConstantValueMap, ExternImportKey, ForeachCollectionInfo, GlobalPathTypeMap,
+    NamedStructFieldTypeMap,
 };
 pub(crate) use crate::backend::hash::{hash_global_path, hash_string_literal};
 use crate::compiler::{FunctionId, FunctionMeta};
@@ -14,7 +15,8 @@ use crate::frontend::types::{
 };
 use crate::ir::hir::{
     eval_const_i64, AssignOp, AssignTarget, ComparisonOp, ConversionKind, DebugStatement,
-    ExprBinaryOp, ExprUnaryOp, FunctionHIR, SimpleCondition, SimpleExpr, SimpleStmt,
+    ExprBinaryOp, ExprUnaryOp, FunctionHIR, ResolvedCallTarget, SimpleCondition, SimpleExpr,
+    SimpleStmt,
 };
 use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
@@ -3247,6 +3249,7 @@ pub(crate) fn emit_simple_statements(
                 target,
                 kind,
                 source,
+                ..
             } => {
                 let expected_source_type = match kind {
                     ConversionKind::FromI32 => Some(TYPE_ID_I32),
@@ -3394,7 +3397,33 @@ pub(crate) fn emit_simple_statements(
                 }
             }
             SimpleStmt::Expr(expression) => {
-                if let SimpleExpr::Call { target, args } = expression {
+                if let SimpleExpr::Call {
+                    target,
+                    args,
+                    resolved_target,
+                    ..
+                } = expression
+                {
+                    if let Some(resolved_target) = resolved_target {
+                        let _ = emit_resolved_call(
+                            builder,
+                            target,
+                            args,
+                            resolved_target,
+                            None,
+                            values_by_name,
+                            runtime_call_refs,
+                            internal_calls,
+                            call_signatures,
+                            type_table,
+                            global_path_types,
+                            constant_values,
+                            collection_infos,
+                            named_struct_field_types,
+                            foreach_bindings,
+                        )?;
+                        continue;
+                    }
                     let handled = emit_host_print_call_statement(
                         builder,
                         runtime_call_refs,
@@ -3753,8 +3782,14 @@ pub(crate) fn emit_simple_statements(
                 // Cranelift value bundle; it is consumed by one matching
                 // action in the then arm and never reaches the runtime ABI.
                 let incoming_guard_proofs = internal_calls.typed_collection_guard_proofs();
-                if let SimpleCondition::Expr(SimpleExpr::Call { target, args }) = condition {
-                    if target.starts_with("can_") {
+                if let SimpleCondition::Expr(SimpleExpr::Call {
+                    target,
+                    args,
+                    resolved_target,
+                    ..
+                }) = condition
+                {
+                    if resolved_target.is_none() && target.starts_with("can_") {
                         internal_calls.begin_typed_collection_guard_capture(target, args);
                     }
                 }
@@ -4699,7 +4734,7 @@ fn collect_call_targets_from_hir(hir: &FunctionHIR) -> BTreeSet<String> {
                     expression(nested_index, out);
                 }
             }
-            SimpleExpr::Call { target, args } => {
+            SimpleExpr::Call { target, args, .. } => {
                 out.insert(target.clone());
                 for argument in args {
                     expression(argument, out);
@@ -11194,6 +11229,183 @@ fn try_emit_typed_pool_call(
     }
 }
 
+fn call_signature_for_resolved_target<'a>(
+    target: &str,
+    resolved_target: &ResolvedCallTarget,
+    call_signatures: &'a CallSignatureMap,
+) -> Result<&'a CallSignature, String> {
+    let is_exact_target = |signature: &&CallSignature| match resolved_target {
+        ResolvedCallTarget::Function(function_id) => signature.function_id == Some(*function_id),
+        ResolvedCallTarget::Extern(identity) => {
+            signature.function_id.is_none() && signature.extern_identity.as_ref() == Some(identity)
+        }
+    };
+
+    // The target text is useful as a fast path, but source normalization can
+    // leave a resolved call keyed under a qualified spelling. Identity remains
+    // authoritative, so search the complete signature set if that fast path
+    // misses. Repeated aliases of one exact identity are equivalent here.
+    let candidates = call_signatures.get(target).or_else(|| {
+        target
+            .rsplit_once('.')
+            .and_then(|(_, leaf)| call_signatures.get(leaf))
+    });
+    if let Some(signature) = candidates
+        .into_iter()
+        .flatten()
+        .find(|signature| is_exact_target(signature))
+    {
+        return Ok(signature);
+    }
+    if let Some((_, leaf)) = target.rsplit_once('.') {
+        if let Some(signature) = call_signatures
+            .get(leaf)
+            .into_iter()
+            .flatten()
+            .find(|signature| is_exact_target(signature))
+        {
+            return Ok(signature);
+        }
+    }
+    call_signatures
+        .values()
+        .flatten()
+        .find(|signature| is_exact_target(signature))
+        .ok_or_else(|| {
+            format!("resolved call target '{target}' is missing its exact backend signature")
+        })
+}
+
+fn validate_resolved_call_arguments(
+    target: &str,
+    signature: &CallSignature,
+    arg_types: &[TypeId],
+    type_table: &TypeTable,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+) -> Result<(), String> {
+    if signature.params.len() != arg_types.len()
+        || !arg_types
+            .iter()
+            .zip(&signature.params)
+            .all(|(argument, parameter)| {
+                are_call_argument_and_param_compatible(
+                    *argument,
+                    *parameter,
+                    type_table,
+                    named_struct_field_types,
+                )
+            })
+    {
+        return Err(format!(
+            "resolved call target '{target}' with parameter types {:?} does not match emitted argument types {:?}",
+            signature.params, arg_types
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_resolved_call(
+    builder: &mut FunctionBuilder<'_>,
+    target: &str,
+    args: &[SimpleExpr],
+    resolved_target: &ResolvedCallTarget,
+    expected_type: Option<TypeId>,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<Option<ValueBinding>, String> {
+    let signature = call_signature_for_resolved_target(target, resolved_target, call_signatures)?;
+    if let Some(expected_type) = expected_type {
+        if !are_call_argument_and_param_compatible(
+            signature.return_type,
+            expected_type,
+            type_table,
+            named_struct_field_types,
+        ) {
+            return Err(format!(
+                "resolved call target '{target}' returns type {}, incompatible with expected type {expected_type}",
+                signature.return_type
+            ));
+        }
+    }
+    let mut arg_values = Vec::with_capacity(args.len());
+    let mut arg_types = Vec::with_capacity(args.len());
+    for (arg_index, arg) in args.iter().enumerate() {
+        if let Some(struct_view) = try_emit_struct_view_value(
+            builder,
+            arg,
+            values_by_name,
+            runtime_call_refs,
+            internal_calls,
+            call_signatures,
+            type_table,
+            global_path_types,
+            constant_values,
+            collection_infos,
+            named_struct_field_types,
+            foreach_bindings,
+        )? {
+            arg_values.push(struct_view.base);
+            arg_values.push(struct_view.index);
+            arg_values.push(struct_view.len);
+            arg_types.push(struct_view.type_id);
+            continue;
+        }
+        let binding = emit_simple_expression(
+            builder,
+            arg,
+            signature.params.get(arg_index).copied(),
+            values_by_name,
+            runtime_call_refs,
+            internal_calls,
+            call_signatures,
+            type_table,
+            global_path_types,
+            constant_values,
+            collection_infos,
+            named_struct_field_types,
+            foreach_bindings,
+        )?;
+        arg_values.push(binding.value);
+        arg_types.push(binding.type_id);
+    }
+    validate_resolved_call_arguments(
+        target,
+        signature,
+        &arg_types,
+        type_table,
+        named_struct_field_types,
+    )?;
+
+    let result = if signature.extern_symbol.is_some() {
+        emit_extern_call_for_signature(builder, runtime_call_refs, signature, &arg_values)?
+    } else {
+        emit_internal_call_for_signature(
+            builder,
+            runtime_call_refs,
+            internal_calls,
+            signature,
+            &arg_values,
+            &arg_types,
+            type_table,
+            named_struct_field_types,
+            target,
+        )?
+    };
+    Ok(result.map(|value| ValueBinding {
+        value,
+        type_id: signature.return_type,
+    }))
+}
+
 pub(crate) fn emit_simple_expression(
     builder: &mut FunctionBuilder<'_>,
     expression: &SimpleExpr,
@@ -11604,7 +11816,37 @@ pub(crate) fn emit_simple_expression(
                 bounds_proven,
             )
         }
-        SimpleExpr::Call { target, args } => {
+        SimpleExpr::Call {
+            target,
+            args,
+            resolved_target,
+            ..
+        } => {
+            if let Some(resolved_target) = resolved_target {
+                return emit_resolved_call(
+                    builder,
+                    target,
+                    args,
+                    resolved_target,
+                    expected_type,
+                    values_by_name,
+                    runtime_call_refs,
+                    internal_calls,
+                    call_signatures,
+                    type_table,
+                    global_path_types,
+                    constant_values,
+                    collection_infos,
+                    named_struct_field_types,
+                    foreach_bindings,
+                )?
+                .ok_or_else(|| {
+                    format!(
+                        "void call target '{}' cannot be used in value expression",
+                        target
+                    )
+                });
+            }
             if let Some(result) = try_emit_typed_pool_call(
                 builder,
                 target,

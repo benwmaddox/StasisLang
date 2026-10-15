@@ -779,7 +779,7 @@ fn visit_expr_with_environment(
                 );
             }
         }
-        SimpleExpr::Call { target, args } => {
+        SimpleExpr::Call { target, args, .. } => {
             for arg in args {
                 visit_expr_with_environment(arg, constants, environment, usage, calls);
             }
@@ -1092,7 +1092,7 @@ fn collection_origins(
                 .cloned()
                 .unwrap_or_default(),
         },
-        SimpleExpr::Call { target, args } => environment
+        SimpleExpr::Call { target, args, .. } => environment
             .call_returns
             .get(&(target.clone(), args.len()))
             .cloned()

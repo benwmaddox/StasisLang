@@ -231,6 +231,9 @@ impl AotProcess {
             let function_hirs = self
                 .compiler
                 .analysis_hirs_with_policy(&self.required_emit_roots, self.reachability_policy)?;
+            let source_function_hirs = self
+                .compiler
+                .source_hirs_with_policy(&self.required_emit_roots, self.reachability_policy)?;
             let next_cache = build_compile_analysis_cache(
                 self.compiler.files(),
                 self.compiler.functions(),
@@ -254,6 +257,7 @@ impl AotProcess {
                     self.compiler.data_flow_summaries_shared(),
                     &self.required_emit_roots,
                     &function_hirs,
+                    &source_function_hirs,
                     next_cache,
                     self.project_configuration.clone(),
                 )
@@ -2875,7 +2879,7 @@ mod tests {
             ("load_font", "stasis_jit_load_font"),
             ("gfx_font_status", "stasis_jit_font_status"),
             ("measure_text", "stasis_jit_measure_text"),
-            ("load_sprite_from", "stasis_jit_sprite_load_from"),
+            ("load_from", "stasis_jit_sprite_load_from"),
             ("load_text_from", "stasis_jit_text_run_load_from"),
             ("replace_text_from", "stasis_jit_text_run_replace_from"),
         ] {
@@ -6424,9 +6428,9 @@ function clear(r: f32, g: f32, b: f32, a: f32): void { return; }
             "tests/stasis/compiler/hot_render_manifest.stasis",
             r#"struct Sprite { handle: i32; width: i32; height: i32; }
 global hero: Sprite;
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_sprite_load_from") load_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void { return; }
-function main(): void { hero.load_sprite_from("assets/hero.png", 32, 24); }
+function main(): void { hero.load_from("assets/hero.png", 32, 24); }
 function tick(): void { return; }
 function render(): void { hero.draw(0.0, 0.0, 255, 0); hero.draw(1.0, 1.0, 255, 0); }
 function on_code_swap(): void { return; }

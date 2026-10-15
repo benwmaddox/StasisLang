@@ -21,7 +21,7 @@ global presentation: PresentationList;
 global render_mode: i32;
 global render_writer: SpriteRunWriter;
 function bounds_probe(): i32 {
-    presentation.reset_presentation();
+    presentation.reset();
     for (let i: i32 = 0; i < 256; i += 1) {
         if (!presentation.append_solid_rect(1.0, 2.0, 3.0, 4.0, 0.1, 0.2, 0.3, 0.4)) { return 10; }
     }
@@ -33,7 +33,7 @@ function bounds_probe(): i32 {
 }
 function main(): i32 {
     gfx_cmd_begin();
-    presentation.reset_presentation();
+    presentation.reset();
     if (!presentation.append_solid_rect(1.0, 2.0, 3.0, 4.0, 0.1, 0.2, 0.3, 0.4)) { return 1; }
     if (!presentation.append_sprite(SpriteRef.Probe, 5.0, 6.0, 7.0, 8.0, 9, 128)) { return 2; }
     if (!presentation.append_solid_rect(10.0, 11.0, 12.0, 13.0, 0.5, 0.6, 0.7, 0.8)) { return 3; }

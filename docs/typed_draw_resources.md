@@ -49,7 +49,7 @@ struct TextRun {
 Stasis receiver-form functions are the primary API. They mutate an existing global-backed struct view and avoid depending on temporary struct return materialization.
 
 ```stasis
-function load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function load_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
 function release(self: Sprite): void;
 
@@ -67,7 +67,7 @@ global state {
 }
 
 function main(): i32 {
-    if (!state.aura.load_sprite_from("assets/aura.svg", 136, 136)) { return 1; }
+    if (!state.aura.load_from("assets/aura.svg", 136, 136)) { return 1; }
     if (!state.title.load_text_from(title_font, "SELECT ASSAULT")) { return 1; }
     return 0;
 }
@@ -88,7 +88,7 @@ Receiver-scoped resolution distinguishes the two `draw` functions by parameter 0
 
 ## Loading invariants
 
-`load_sprite_from` must:
+`load_from` must:
 
 1. reject non-positive logical dimensions without calling the host;
 2. attempt the native load using the supplied logical dimensions;
@@ -144,7 +144,7 @@ The host remains responsible for rounding, caps, atlas placement, density-genera
 
 ## Host boundary and migration
 
-`load_sprite_from` and `load_text_from` are direct host-bound receiver functions. A struct view crosses the ABI as `(base, index, len)`, allowing the host to publish the handle and logical measurements transactionally into either a global struct or an array element. No raw loader, cache, measurement, release, or legacy draw wrapper is declared in Stasis source.
+`load_from` and `load_text_from` are direct host-bound receiver functions. A struct view crosses the ABI as `(base, index, len)`, allowing the host to publish the handle and logical measurements transactionally into either a global struct or an array element. No raw loader, cache, measurement, release, or legacy draw wrapper is declared in Stasis source.
 
 The native renderer's lower-level ABI remains an implementation detail used by the receiver host functions. Bundled samples and standard-library helpers use `Sprite` and `TextRun`; command-buffer primitives remain available to renderer-building code but are not resource-loading APIs.
 
@@ -220,7 +220,7 @@ Theory gained: a drawable's logical painted envelope belongs to the loaded resou
 
 ## Sprite sheets and deterministic clips
 
-`Sprite.draw` remains a full-texture draw. `SpriteSheet.load_sprite_sheet_from(path, columns, rows, cell_width, cell_height)` loads one asset transactionally and records a validated uniform grid; `draw_frame` selects a row-major cell while preserving its logical painted dimensions. `draw_frame_scaled` selects the same validated cell while accepting caller-selected width and height, keeping geometry customization in the stdlib without exposing UV command-buffer patching to game code. A manifest sprite may additionally declare `format.layout` with the same `columns` and `rows`; Stasis validates that the declared image dimensions divide evenly into those cells and preserves the metadata through preparation. Prepared PNG atlases resize whole cells before rebuilding the image, so `SpriteSheet.load_sprite_sheet_from` can continue to use exact cell dimensions. The sheet abstraction owns normalized source-region details, so ordinary game code cannot accidentally issue malformed UV commands.
+`Sprite.draw` remains a full-texture draw. `SpriteSheet.load_from(path, columns, rows, cell_width, cell_height)` loads one asset transactionally and records a validated uniform grid; `draw_frame` selects a row-major cell while preserving its logical painted dimensions. `draw_frame_scaled` selects the same validated cell while accepting caller-selected width and height, keeping geometry customization in the stdlib without exposing UV command-buffer patching to game code. A manifest sprite may additionally declare `format.layout` with the same `columns` and `rows`; Stasis validates that the declared image dimensions divide evenly into those cells and preserves the metadata through preparation. Prepared PNG atlases resize whole cells before rebuilding the image, so `SpriteSheet.load_from` can continue to use exact cell dimensions. The sheet abstraction owns normalized source-region details, so ordinary game code cannot accidentally issue malformed UV commands.
 
 `AnimationClip` is a pure helper for authored frame mappings. Its `first_frame`, `frame_count`, `ticks_per_frame`, and integer playback mode are data-driven; the standard constants are `ANIMATION_PLAYBACK_ONCE`, `ANIMATION_PLAYBACK_LOOP`, and `ANIMATION_PLAYBACK_PING_PONG`. `frame_at(elapsed_ticks)` clamps negative time and wraps or reflects deterministically, while `finished(elapsed_ticks)` reports completion for once-only clips. Games should bind frame mapping and timing from JSON; StasisLang owns UV sampling and playback mechanics.
 The executable reference is `samples/sprite_sheet_animation`. It loads one 2x2 PNG, draws all four row-major cells, and packages the single source image for both JIT and AOT builds. The fixture verifier and language tests are:

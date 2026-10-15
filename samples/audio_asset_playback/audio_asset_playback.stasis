@@ -16,7 +16,7 @@ function main(): i32 {
     if (audio_stream.sample_rate != 48000 || audio_stream.channels != 2) {
         return 4;
     }
-    if (!music.load_audio("assets/tone.mp3") || !effect.load_audio("assets/tone.wav")) {
+    if (!music.load("assets/tone.mp3") || !effect.load("assets/tone.wav")) {
         return 2;
     }
     ticks = 0;

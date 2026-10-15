@@ -21,7 +21,7 @@ global seam_direct_width: f32;
 global seam_cached_width: f32;
 
 function main(): i32 {
-    if (!seam_sprite.load_sprite_from("assets/sprite.png", 64, 64)) {
+    if (!seam_sprite.load_from("assets/sprite.png", 64, 64)) {
         return 21;
     }
     seam_sprite_handle = seam_sprite.reference();
@@ -38,7 +38,7 @@ function main(): i32 {
     if (seam_direct_width <= 0.0 || seam_cached_width <= 0.0) {
         return 24;
     }
-    if (!seam_music.load_audio("assets/music.mp3") || !seam_effect.load_audio("assets/effect.wav")) {
+    if (!seam_music.load("assets/music.mp3") || !seam_effect.load("assets/effect.wav")) {
         return 25;
     }
     return 0;

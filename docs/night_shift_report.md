@@ -1232,3 +1232,65 @@ documented progress events.
 Good: fresh browser evidence exposed a stale timeout message on late playback.
 Bad: the first provider-error implementation erased already verified proof.
 Adjustment: test reward evidence independently of request outcome and timing.
+
+## 2026-10-15: action-only receiver API migration (#839)
+
+Removed redundant receiver-family prefixes across the public standard library
+and migrated maintained samples, tests, documentation examples, editor and
+playground callers, and generated vendor snapshots. This is an intentional
+source-breaking rename with no permanent compatibility aliases; host extern
+symbols and ABI contracts remain stable. Calls now resolve from the typed
+receiver and selected declaration identity, including imported overloads.
+Sprite and SpriteSheet asset metadata stays attached to the selected loader,
+and render analysis treats only exact trusted draw and loader declarations as
+known behavior. The 48-entry mapping and real name collisions are recorded in
+`docs/receiver_api_migration.md`.
+
+Validation so far: all six maintained consumers passed using the fresh Windows
+CLI, with `stasis --workspace <path> check`:
+
+- `& 'D:\code\StasisLang\build\codex-cargo-target-windows\debug\stasis.exe' --workspace 'samples/asset_breakout' check`
+- `& 'D:\code\StasisLang\build\codex-cargo-target-windows\debug\stasis.exe' --workspace 'samples/brickout_defense' check`
+- `& 'D:\code\StasisLang\build\codex-cargo-target-windows\debug\stasis.exe' --workspace 'samples/generics_collections' check`
+- `& 'D:\code\StasisLang\build\codex-cargo-target-windows\debug\stasis.exe' --workspace 'samples/swarm_field' check`
+- `& 'D:\code\StasisLang\build\codex-cargo-target-windows\debug\stasis.exe' --workspace 'samples/ui_gallery' check`
+- `& 'D:\code\StasisLang\build\codex-cargo-target-windows\debug\stasis.exe' --workspace 'mobile/android/app/src/main/assets/workshop_sample' check`
+
+`python samples/brickout_defense/tools/build_asset_catalog.py` verified 738
+recovered files, 622 images, and 597 animation frames. The asset manifest
+verified with `python samples/brickout_defense/tools/build_asset_manifest.py`
+for 622 images, 3 preserved font masters, and 6 audio assets (631 entries).
+All six vendor snapshots report the same current hash:
+`9248c6b1aad1d868abfd58516de721d643586854a5d42df6b2145b4f05ba1175`.
+
+Validation also passed: the full nightly integration suite (59 tests across 18
+targets), web package suite (21 tests), Windows behavior suite (1), numeric-text
+JIT/AOT/Wasm (1), resolved-call JIT/AOT/Wasm dispatch (1), unrelated-enum
+backend rejection (1), and the focused text-array metadata regression (1). ABI
+and host-runtime contract audits passed 981 and 1,167 comparisons. The fresh
+Wasm bundle SHA-256 is
+`c0033d66687067cc0fe4c19ec225266eae26896ddbfa0848a41c184887aef391`.
+Chrome smoke and full acceptance passed with 137 captured frames, a 657,635-byte
+export, zero errors, and zero post-readiness requests. The final exact Linux
+core CI rerun passed 1,876 Rust tests across 48 suites and all seven architecture
+characterization commands. The full GitHub Nightly Release run is pending
+PR/merge.
+
+Theory gained: method spelling does not carry enough identity for overloaded
+APIs; the receiver type and selected declaration must stay available through
+analysis and backend dispatch. Extern declaration identity also cannot use
+TypeIds from a particular compiler context: stable keys use canonical declared
+type spellings, while each backend binds that declaration to its own typed ABI
+signature and selected physical symbol. Collection metadata should derive text
+array lanes from the canonical array model, where ASCII/UTF-8 index as `u8`,
+while preserving declared nominal identity and without changing ABI widening.
+Good: maintained consumer and backend tests caught stale names, asset identity
+loss, and contextual return-type mistakes.
+Bad: table-local TypeIds and bare receiver spellings each lost declaration
+identity in a different analysis stage.
+Adjustment: keep stable extern declaration keys separate from backend-bound
+typed signatures, and reuse canonical TypeTable array indexing for element
+metadata.
+Visual evidence: inspected current game-over, restarted, exported Pong, and
+exported-asset PNGs plus frames 1, 5, and 9 decoded from `browser.mp4` under
+`D:/code/.automation-evidence/nightly-20261015-task839-browser/`.

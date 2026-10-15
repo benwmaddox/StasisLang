@@ -28,8 +28,17 @@ Each page solves one system problem for one style of game.
 
 ## Focused references
 
+- [Language quick reference](language-quick-reference.md)
+- [Graphics and asset ownership](graphics-and-assets.md)
+- [Rig joints and sprite pivots](../rig2d.md)
+- [Project and CLI lifecycle](project-and-cli.md)
+- [Bounded collections and generics](bounded-collections.md)
+- [Storage and host services](storage-and-host-services.md)
+- [Record, replay, and captures](record-and-replay.md)
+- [Benchmarking ticks and functions](benchmarking.md)
 - [Focused behavioral tests](testing.md)
 - [Geometry and collision](geometry-and-collision.md)
+- [Scalar math](scalar-math.md)
 - [Display and coordinate spaces](display-and-coordinate-spaces.md)
 - [Loading screens around asset IO](loading-screens.md)
 - [Semantic edit and validation](semantic-edit-and-validation.md)

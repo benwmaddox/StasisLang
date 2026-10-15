@@ -23,7 +23,7 @@ function main(): i32 {
         return 11;
     }
     seam_sprite_handle = 0;
-    if (!seam_sprite.load_sprite_from("assets/asset_sprite.svg", 128, 128)) {
+    if (!seam_sprite.load_from("assets/asset_sprite.svg", 128, 128)) {
         return 12;
     }
     seam_sprite_handle = seam_sprite.reference();
@@ -43,7 +43,7 @@ function main(): i32 {
     if (seam_cached_text_width <= 0.0) {
         return 16;
     }
-    if (!seam_audio_asset.load_audio("assets/asset_tone.wav")) {
+    if (!seam_audio_asset.load("assets/asset_tone.wav")) {
         return 17;
     }
     seam_audio_samples[0] = 0.25;

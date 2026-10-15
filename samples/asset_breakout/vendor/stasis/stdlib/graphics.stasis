@@ -104,7 +104,7 @@ struct PresentationList {
     count: i32;
 }
 
-function reset_presentation(self: PresentationList): void {
+function reset(self: PresentationList): void {
     self.count = 0;
 }
 
@@ -199,7 +199,7 @@ struct LineBatch {
     count: i32;
 }
 
-function reset_lines(self: LineBatch): void {
+function reset(self: LineBatch): void {
     self.count = 0;
 }
 
@@ -331,12 +331,7 @@ function cancel(self: SpriteRunWriter): bool {
     return success;
 }
 
-function @effects(graphics)@asset_path(path)@extern("stasis_jit_sprite_load_from") load_sprite_from(
-    self: Sprite,
-    path: string,
-    width: i32,
-    height: i32
-): bool;
+function @effects(graphics)@asset_path(path)@extern("stasis_jit_sprite_load_from") load_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function @internal @effects(graphics)@extern("stasis_jit_sprite_load_from") load_sprite_sheet_asset_from(
     self: SpriteSheet,
     path: string,
@@ -387,7 +382,7 @@ function poll_reload(self: Sprite): bool {
     return gfx_poll_reload(self.sprite_ref);
 }
 
-function load_sprite_sheet_from(self: SpriteSheet, path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool {
+function @asset_path(path) load_from(self: SpriteSheet, path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool {
     if (columns <= 0 || rows <= 0 || cell_width <= 0 || cell_height <= 0) {
         return false;
     }
@@ -556,6 +551,10 @@ function set_maximized(enabled: i32): i32 {
 function set_maximized_canvas(width: i32, height: i32): i32 {
     host_request_maximized_canvas(width, height);
     return 0;
+}
+
+function set_canvas_size(width: i32, height: i32): void {
+    host_request_canvas(width, height);
 }
 
 function clear(r: f32, g: f32, b: f32, a: f32): void {

@@ -81,11 +81,11 @@ The current accuracy oracle uses these limits:
 
 ## Short f64 ASCII formatting
 
-`ascii_write_f64_short(dst, value, decimals, base)` writes at the supplied
+`write_f64_short(dst, value, decimals, base)` writes at the supplied
 destination offset and returns the new logical length, or `-1` on invalid
 arguments or insufficient capacity. `decimals` must be `0..6`. The
-`ascii_from_f64_short(dst, value, decimals)` wrapper starts at offset zero;
-`ascii_append_f64_short(dst, value, decimals)` appends at the current logical
+`from_f64_short(dst, value, decimals)` wrapper starts at offset zero;
+`append_f64_short(dst, value, decimals)` appends at the current logical
 length.
 
 The formatter selects notation from the absolute input magnitude: nonzero

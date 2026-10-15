@@ -14,13 +14,15 @@ use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TypedCollectionDescriptor, TYPE_ID_BOOL, TYPE_ID_F32,
     TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
-use crate::ir::hir::{FunctionHIR, SimpleCondition, SimpleExpr, SimpleStmt};
+use crate::ir::hir::{ExternCallIdentity, FunctionHIR, SimpleCondition, SimpleExpr, SimpleStmt};
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone)]
 pub(crate) struct CallSignature {
     pub(crate) function_id: Option<FunctionId>,
     pub(crate) extern_symbol: Option<String>,
+    pub(crate) extern_identity: Option<ExternCallIdentity>,
+    pub(crate) extern_source_path: Option<String>,
     pub(crate) params: Vec<TypeId>,
     pub(crate) return_type: TypeId,
 }
@@ -29,6 +31,8 @@ pub(crate) struct CallSignature {
 pub(crate) struct ExternCallSignature {
     pub(crate) name: String,
     pub(crate) symbol_candidates: Vec<String>,
+    pub(crate) declared_params: Vec<String>,
+    pub(crate) declared_return_type: String,
     pub(crate) params: Vec<TypeId>,
     pub(crate) return_type: TypeId,
     pub(crate) source_path: String,
@@ -37,12 +41,27 @@ pub(crate) struct ExternCallSignature {
     pub(crate) source_end: usize,
 }
 
+impl ExternCallSignature {
+    pub(crate) fn identity(&self) -> ExternCallIdentity {
+        ExternCallIdentity {
+            source_path: self.source_path.clone(),
+            name: self.name.clone(),
+            symbol_candidates: self.symbol_candidates.clone(),
+            declared_params: self.declared_params.clone(),
+            declared_return_type: self.declared_return_type.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedExternCallSignature {
+    pub(crate) identity: ExternCallIdentity,
     pub(crate) name: String,
     pub(crate) symbol: String,
     pub(crate) source_path: String,
     pub(crate) trusted_graphics_source: bool,
+    pub(crate) source_start: usize,
+    pub(crate) source_end: usize,
     pub(crate) params: Vec<TypeId>,
     pub(crate) return_type: TypeId,
 }
@@ -150,6 +169,8 @@ pub(crate) fn collect_supported_call_signatures(
             .push(CallSignature {
                 function_id: Some(function.id),
                 extern_symbol: None,
+                extern_identity: None,
+                extern_source_path: None,
                 params: function.params.clone(),
                 return_type: function.return_type,
             });
@@ -158,6 +179,8 @@ pub(crate) fn collect_supported_call_signatures(
             .push(CallSignature {
                 function_id: Some(function.id),
                 extern_symbol: None,
+                extern_identity: None,
+                extern_source_path: None,
                 params: function.params.clone(),
                 return_type: function.return_type,
             });
@@ -179,6 +202,8 @@ pub(crate) fn collect_supported_call_signatures(
             .push(CallSignature {
                 function_id: None,
                 extern_symbol: Some(signature.symbol.clone()),
+                extern_identity: Some(signature.identity.clone()),
+                extern_source_path: Some(signature.source_path.clone()),
                 params: signature.params.clone(),
                 return_type: signature.return_type,
             });
@@ -263,10 +288,13 @@ pub(crate) fn resolve_extern_call_signatures_with_index(
         };
         symbol_addresses.insert(symbol.clone(), address);
         resolved.push(ResolvedExternCallSignature {
+            identity: signature.identity(),
             name: signature.name.clone(),
             symbol,
             source_path: signature.source_path.clone(),
             trusted_graphics_source: signature.trusted_graphics_source,
+            source_start: signature.source_start,
+            source_end: signature.source_end,
             params: signature.params.clone(),
             return_type: signature.return_type,
         });
@@ -366,6 +394,15 @@ pub(crate) fn build_extern_call_signature(
     type_table: &mut TypeTable,
     declaration: ParsedExternFunctionDeclaration,
 ) -> Result<ExternCallSignature, String> {
+    let declared_params = declaration
+        .params
+        .iter()
+        .map(|parameter| {
+            crate::frontend::generics::canonical_type_identity_text(&parameter.type_name)
+        })
+        .collect();
+    let declared_return_type =
+        crate::frontend::generics::canonical_type_identity_text(&declaration.return_type_name);
     let mut params = Vec::with_capacity(declaration.params.len());
     for param in &declaration.params {
         let type_id = type_table.resolve_or_intern(&param.type_name)?;
@@ -381,6 +418,8 @@ pub(crate) fn build_extern_call_signature(
     Ok(ExternCallSignature {
         name: declaration.name,
         symbol_candidates: build_extern_symbol_candidates(symbol_name, declaration.explicit_symbol),
+        declared_params,
+        declared_return_type,
         params,
         return_type,
         source_path: String::new(),
@@ -714,13 +753,31 @@ pub(crate) fn compile_analysis_requires_reemit(
     previous: &CompileAnalysisCache,
     next: &CompileAnalysisCache,
 ) -> bool {
-    previous.resolved_extern_signatures != next.resolved_extern_signatures
-        || previous.extern_symbol_addresses != next.extern_symbol_addresses
+    !resolved_extern_signatures_have_same_semantics(
+        &previous.resolved_extern_signatures,
+        &next.resolved_extern_signatures,
+    ) || previous.extern_symbol_addresses != next.extern_symbol_addresses
         || previous.constant_values != next.constant_values
         || previous.global_path_types != next.global_path_types
         || previous.collection_infos != next.collection_infos
         || previous.typed_collection_descriptors != next.typed_collection_descriptors
         || previous.named_struct_field_types != next.named_struct_field_types
+}
+
+fn resolved_extern_signatures_have_same_semantics(
+    previous: &[ResolvedExternCallSignature],
+    next: &[ResolvedExternCallSignature],
+) -> bool {
+    previous.len() == next.len()
+        && previous.iter().zip(next).all(|(previous, next)| {
+            previous.identity == next.identity
+                && previous.name == next.name
+                && previous.symbol == next.symbol
+                && previous.source_path == next.source_path
+                && previous.trusted_graphics_source == next.trusted_graphics_source
+                && previous.params == next.params
+                && previous.return_type == next.return_type
+        })
 }
 
 pub(crate) fn select_emit_function_ids(
@@ -1531,7 +1588,17 @@ pub(crate) fn build_collection_info_for_element_type(
         });
     }
     if !struct_fields_by_name.contains_key(element_type_name) {
-        let element_type = type_table.resolve_or_intern(element_type_name)?;
+        // Derive the lane through TypeTable's canonical array model. Text
+        // arrays are represented by dedicated array keys whose indexed lane
+        // is u8, even though their source spelling (ascii/utf8) is not a
+        // scalar type. Resolving the bare spelling would invent a Named type.
+        let array_type =
+            type_table.resolve_or_intern(&format!("{}[1]", element_type_name.trim()))?;
+        let element_type = type_table
+            .indexed_element_type_id(array_type)
+            .ok_or_else(|| {
+                format!("collection element type '{element_type_name}' has no indexed lane")
+            })?;
         return Ok(ForeachCollectionInfo {
             len: 0,
             element_type: Some(element_type),
@@ -1814,13 +1881,70 @@ pub(crate) fn are_call_argument_and_param_compatible(
 mod tests {
     use super::*;
 
+    fn extern_identity(
+        name: &str,
+        symbol: &str,
+        source_path: &str,
+        declared_params: &[&str],
+        declared_return_type: &str,
+    ) -> ExternCallIdentity {
+        ExternCallIdentity {
+            source_path: source_path.to_string(),
+            name: name.to_string(),
+            symbol_candidates: vec![symbol.to_string()],
+            declared_params: declared_params
+                .iter()
+                .map(|param| param.to_string())
+                .collect(),
+            declared_return_type: declared_return_type.to_string(),
+        }
+    }
+
+    #[test]
+    fn extern_declaration_identity_ignores_type_table_intern_order() {
+        let declaration =
+            parse_top_level_extern_functions("extern function consume(values: i32[]): string;")
+                .expect("parse array-view extern")
+                .into_iter()
+                .next()
+                .expect("one extern declaration");
+
+        let mut earlier_types = TypeTable::new();
+        earlier_types
+            .resolve_or_intern("EarlierType")
+            .expect("intern preceding type");
+        let mut earlier = build_extern_call_signature(&mut earlier_types, declaration.clone())
+            .expect("build signature after another type was interned");
+        earlier.source_path = "api.stasis".to_string();
+
+        let mut later_types = TypeTable::new();
+        let mut later = build_extern_call_signature(&mut later_types, declaration)
+            .expect("build signature in a fresh type table");
+        later.source_path = "api.stasis".to_string();
+
+        assert_ne!(earlier.params, later.params);
+        assert_ne!(earlier.return_type, later.return_type);
+        assert_eq!(earlier.identity(), later.identity());
+        assert_eq!(earlier.identity().declared_params, ["i32[]"]);
+        assert_eq!(earlier.identity().declared_return_type, "string");
+    }
+
     #[test]
     fn resolved_graphics_externs_retain_and_validate_module_provenance() {
         let signature = ResolvedExternCallSignature {
+            identity: extern_identity(
+                "release_alias",
+                "stasis_jit_gfx_release_sprite",
+                "game/main.stasis",
+                &["i32"],
+                "void",
+            ),
             name: "release_alias".to_string(),
             symbol: "stasis_jit_gfx_release_sprite".to_string(),
             source_path: "game/main.stasis".to_string(),
             trusted_graphics_source: false,
+            source_start: 0,
+            source_end: 0,
             params: vec![TYPE_ID_I32],
             return_type: TYPE_ID_VOID,
         };
@@ -1833,6 +1957,47 @@ mod tests {
         canonical.trusted_graphics_source = true;
         validate_privileged_graphics_extern_provenance(&[canonical])
             .expect("compiler-owned graphics extern retains valid provenance");
+    }
+
+    #[test]
+    fn extern_source_ranges_do_not_change_semantic_signature_identity() {
+        let previous = ResolvedExternCallSignature {
+            identity: extern_identity(
+                "load_from",
+                "stasis_jit_sprite_load_from",
+                "stdlib/graphics.stasis",
+                &["i32"],
+                "void",
+            ),
+            name: "load_from".to_string(),
+            symbol: "stasis_jit_sprite_load_from".to_string(),
+            source_path: "stdlib/graphics.stasis".to_string(),
+            trusted_graphics_source: true,
+            source_start: 100,
+            source_end: 109,
+            params: vec![TYPE_ID_I32],
+            return_type: TYPE_ID_VOID,
+        };
+        let mut moved = previous.clone();
+        moved.source_start += 40;
+        moved.source_end += 40;
+        assert!(resolved_extern_signatures_have_same_semantics(
+            &[previous.clone()],
+            &[moved.clone()],
+        ));
+
+        let mut declaration_changed = moved.clone();
+        declaration_changed.identity.symbol_candidates = vec!["new_candidate".to_string()];
+        assert!(!resolved_extern_signatures_have_same_semantics(
+            &[previous.clone()],
+            &[declaration_changed],
+        ));
+
+        moved.symbol = "different_host_symbol".to_string();
+        assert!(!resolved_extern_signatures_have_same_semantics(
+            &[previous],
+            &[moved],
+        ));
     }
 
     #[test]
@@ -1871,12 +2036,16 @@ mod tests {
                 CallSignature {
                     function_id: Some(2),
                     extern_symbol: None,
+                    extern_identity: None,
+                    extern_source_path: None,
                     params: vec![utf8_view, TYPE_ID_I32],
                     return_type: TYPE_ID_I32,
                 },
                 CallSignature {
                     function_id: Some(1),
                     extern_symbol: None,
+                    extern_identity: None,
+                    extern_source_path: None,
                     params: vec![ascii_view, TYPE_ID_I32],
                     return_type: TYPE_ID_I32,
                 },
@@ -1916,12 +2085,16 @@ mod tests {
                 CallSignature {
                     function_id: Some(3),
                     extern_symbol: None,
+                    extern_identity: None,
+                    extern_source_path: None,
                     params: vec![ascii_view, TYPE_ID_U8],
                     return_type: TYPE_ID_I32,
                 },
                 CallSignature {
                     function_id: Some(4),
                     extern_symbol: None,
+                    extern_identity: None,
+                    extern_source_path: None,
                     params: vec![byte_view, TYPE_ID_I32],
                     return_type: TYPE_ID_I32,
                 },
@@ -1946,18 +2119,36 @@ mod tests {
             .expect("typed pool type");
         let signatures = vec![
             ResolvedExternCallSignature {
+                identity: extern_identity(
+                    "typed_param",
+                    "typed_param",
+                    "tests/typed.stasis",
+                    &["pool<i32, 2>"],
+                    "void",
+                ),
                 name: "typed_param".to_string(),
                 symbol: "typed_param".to_string(),
                 source_path: "tests/typed.stasis".to_string(),
                 trusted_graphics_source: false,
+                source_start: 0,
+                source_end: 0,
                 params: vec![typed],
                 return_type: TYPE_ID_VOID,
             },
             ResolvedExternCallSignature {
+                identity: extern_identity(
+                    "typed_return",
+                    "typed_return",
+                    "tests/typed.stasis",
+                    &[],
+                    "pool<i32, 2>",
+                ),
                 name: "typed_return".to_string(),
                 symbol: "typed_return".to_string(),
                 source_path: "tests/typed.stasis".to_string(),
                 trusted_graphics_source: false,
+                source_start: 0,
+                source_end: 0,
                 params: Vec::new(),
                 return_type: typed,
             },
@@ -2003,6 +2194,52 @@ mod tests {
         );
         assert_eq!(descriptors["State.events"].static_size_bytes, 16);
         assert!(!descriptors.contains_key("ordinary"));
+    }
+
+    #[test]
+    fn foreach_text_arrays_use_the_canonical_byte_element_type() {
+        let files = vec![SourceFile {
+            path: "text_arrays.stasis".to_string(),
+            content: concat!(
+                "global ascii_text: ascii[64];\n",
+                "global utf8_text: utf8[48];\n",
+                "global numbers: i32[3];\n",
+                "global markers: Marker[2];\n",
+            )
+            .to_string(),
+            original_content: String::new(),
+            hash: 0,
+            functions: Vec::new(),
+        }];
+        let mut type_table = TypeTable::new();
+        let collections =
+            collect_foreach_collection_infos(&files, &mut type_table, &ConstantValueMap::new())
+                .expect("array collection metadata should use canonical element types");
+
+        for (path, expected_len, expected_shape) in
+            [("ascii_text", 64, "ascii"), ("utf8_text", 48, "utf8")]
+        {
+            let info = &collections[path];
+            assert_eq!(info.len, expected_len, "{path} keeps its capacity");
+            assert_eq!(info.element_type, Some(TYPE_ID_U8), "{path} indexes as u8");
+            assert_eq!(info.element_shape, expected_shape);
+            assert!(info.fully_migratable);
+        }
+
+        let numbers = &collections["numbers"];
+        assert_eq!(numbers.len, 3);
+        assert_eq!(numbers.element_type, Some(TYPE_ID_I32));
+        assert_eq!(numbers.element_shape, "i32");
+        assert!(numbers.fully_migratable);
+
+        let markers = &collections["markers"];
+        assert_eq!(markers.len, 2);
+        assert_eq!(
+            markers.element_type,
+            Some(type_table.resolve("Marker").expect("canonical Marker type"))
+        );
+        assert_eq!(markers.element_shape, "Marker");
+        assert!(!markers.fully_migratable);
     }
 
     #[test]

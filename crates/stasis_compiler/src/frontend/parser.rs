@@ -2421,7 +2421,7 @@ function actual(): i32 { return 1; }
     fn signature_catalog_includes_prototypes_without_changing_body_only_api() {
         let source = concat!(
             "function @effects(graphics)@asset_path(path)@extern(\"stasis_jit_sprite_load_from\") ",
-            "load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;\n",
+            "load_from(self: Sprite, path: string, width: i32, height: i32): bool;\n",
             "function implementation(): i32 { return 0; }\n",
         );
 
@@ -2441,7 +2441,7 @@ function actual(): i32 { return 1; }
                 .iter()
                 .map(|function| function.name.as_str())
                 .collect::<Vec<_>>(),
-            ["load_sprite_from", "implementation"]
+            ["load_from", "implementation"]
         );
         let load_sprite = &signatures[0];
         assert_eq!(
@@ -2469,7 +2469,7 @@ function actual(): i32 { return 1; }
         assert!(load_sprite.body_range.is_empty());
         assert_eq!(
             &source[load_sprite.signature_range.clone()],
-            "function @effects(graphics)@asset_path(path)@extern(\"stasis_jit_sprite_load_from\") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool"
+            "function @effects(graphics)@asset_path(path)@extern(\"stasis_jit_sprite_load_from\") load_from(self: Sprite, path: string, width: i32, height: i32): bool"
         );
     }
 

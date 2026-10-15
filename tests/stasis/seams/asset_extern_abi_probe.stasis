@@ -20,7 +20,7 @@ function render(): i32 {
 }
 
 function main(): i32 {
-    if (!ProbeState.sprite.load_sprite_from("assets/球.png", 47, 29)) {
+    if (!ProbeState.sprite.load_from("assets/球.png", 47, 29)) {
         return 1;
     }
     if (

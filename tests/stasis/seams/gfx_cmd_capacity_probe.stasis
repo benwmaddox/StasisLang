@@ -20,11 +20,11 @@ function prepare_text(): void {
     for (let i: i32 = 0; i < 1024; i += 1) {
         full_text[i] = 65;
     }
-    utf8_set_len_ascii(full_text, 1024);
+    set_len_ascii(full_text, 1024);
     for (let i: i32 = 0; i < 960; i += 1) {
         tail_text[i] = 66;
     }
-    utf8_set_len_ascii(tail_text, 960);
+    set_len_ascii(tail_text, 960);
 }
 
 function fill_geometry(): void {

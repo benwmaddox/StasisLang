@@ -6,7 +6,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::backend::assets::{discover_asset_references, AssetReference};
+use crate::backend::assets::{
+    collect_asset_loaders, discover_asset_references, sprite_render_loader_targets, AssetReference,
+};
 use crate::backend::compile_analysis::{
     build_compile_analysis_cache, compute_files_fingerprint, is_nested_fixed_array_collection_path,
     resolve_preferred_extern_call_signatures, CompileAnalysisCache,
@@ -464,6 +466,7 @@ impl ProgramSnapshot {
         data_flow_summaries: Arc<[FunctionDataFlowSummary]>,
         required_emit_roots: &[String],
         function_hirs: &BTreeMap<FunctionId, FunctionHIR>,
+        source_function_hirs: &BTreeMap<FunctionId, FunctionHIR>,
         analysis: CompileAnalysisCache,
         project_configuration: Option<ProjectConfiguration>,
     ) -> Result<Self, String> {
@@ -552,9 +555,20 @@ impl ProgramSnapshot {
             &analysis.constant_values,
             functions,
         );
+        let asset_loaders =
+            collect_asset_loaders(files, functions, &analysis.resolved_extern_signatures)?;
+        let hot_render_loader_targets = sprite_render_loader_targets(
+            &asset_loaders,
+            files,
+            functions,
+            types,
+            &analysis.resolved_extern_signatures,
+        )?;
         let asset_references = discover_asset_references(
             files,
             functions,
+            source_function_hirs,
+            &asset_loaders,
             &reachable_function_ids,
             &analysis.constant_values,
         )?;
@@ -565,10 +579,12 @@ impl ProgramSnapshot {
         let hot_render = analyze_hot_render_images(
             functions,
             function_hirs,
+            source_function_hirs,
+            &hot_render_loader_targets,
             &reachable_function_ids,
             &collection_capacities,
             &analysis.constant_values,
-        );
+        )?;
         let text_coverage = analyze_text_coverage(
             functions,
             function_hirs,
@@ -856,6 +872,9 @@ fn canonical_layout_digest_with_root(
     let function_hirs = compiler
         .analysis_hirs(&[])
         .map_err(|error| format!("canonical hot-render HIR failed: {error:?}"))?;
+    let source_function_hirs = compiler
+        .source_hirs_with_policy(&[], ReachabilityPolicy::Development)
+        .map_err(|error| format!("canonical source HIR failed: {error:?}"))?;
     ProgramSnapshot::build(
         ReachabilityPolicy::Development,
         revision,
@@ -866,6 +885,7 @@ fn canonical_layout_digest_with_root(
         compiler.data_flow_summaries_shared(),
         &[],
         &function_hirs,
+        &source_function_hirs,
         analysis,
         None,
     )
@@ -954,7 +974,7 @@ mod tests {
     const HOT_RENDER_PRELUDE: &str = r#"
 struct Sprite { handle: i32; width: i32; height: i32; }
 global hero: Sprite;
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_sprite_load_from") load_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function @extern("stasis_jit_sprite_draw") draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
 "#;
 
@@ -1014,6 +1034,9 @@ extern function measure_text(font: i32, text: string): f32;
         let function_hirs = compiler
             .analysis_hirs(&[])
             .expect("lower unlinked coverage fixture");
+        let source_function_hirs = compiler
+            .source_hirs_with_policy(&[], ReachabilityPolicy::Release)
+            .expect("collect unlinked source HIR");
         ProgramSnapshot::build(
             ReachabilityPolicy::Release,
             revision,
@@ -1024,6 +1047,7 @@ extern function measure_text(font: i32, text: string): f32;
             compiler.data_flow_summaries_shared(),
             &[],
             &function_hirs,
+            &source_function_hirs,
             analysis,
             None,
         )
@@ -1243,10 +1267,10 @@ global score_run: TextRun;
 function scramble(value: ascii[]): void { value[0] = 65; }
 function main(): i32 {
     let font: i32 = load_font("assets/score.ttf", 24);
-    ascii_clear(score_ascii);
-    ascii_push_i32(score_ascii, 7);
+    clear(score_ascii);
+    push_i32(score_ascii, 7);
     scramble(score_ascii);
-    utf8_from_ascii(score_utf8, score_ascii, 16);
+    from_ascii(score_utf8, score_ascii, 16);
     if (!score_run.replace_text_from(font, score_utf8)) { return 1; }
     return 0;
 }
@@ -1320,10 +1344,10 @@ global score_run: TextRun;
 function corrupt_score(): void { score_ascii[0] = 65; }
 function main(): i32 {
     let font: i32 = load_font("assets/score.ttf", 24);
-    ascii_clear(score_ascii);
-    ascii_push_i32(score_ascii, 7);
+    clear(score_ascii);
+    push_i32(score_ascii, 7);
     corrupt_score();
-    utf8_from_ascii(score_utf8, score_ascii, 16);
+    from_ascii(score_utf8, score_ascii, 16);
     if (!score_run.replace_text_from(font, score_utf8)) { return 1; }
     return 0;
 }
@@ -1348,11 +1372,11 @@ global score_utf8: utf8[16];
 global score_run: TextRun;
 function main(): i32 {
     let font: i32 = load_font("assets/score.ttf", 24);
-    ascii_clear(score_ascii);
-    ascii_push_i32(score_ascii, 7);
+    clear(score_ascii);
+    push_i32(score_ascii, 7);
     let alias: ascii[] = score_ascii;
     score_ascii[0] = 65;
-    utf8_from_ascii(score_utf8, alias, 16);
+    from_ascii(score_utf8, alias, 16);
     if (!score_run.replace_text_from(font, score_utf8)) { return 1; }
     return 0;
 }
@@ -1469,9 +1493,9 @@ global score_utf8: utf8[16];
 global score_run: TextRun;
 function main(): i32 {
     let font: i32 = load_font("assets/score.ttf", 24);
-    ascii_clear(score_ascii);
-    ascii_push_i32(score_ascii, -42);
-    utf8_from_ascii(score_utf8, score_ascii, 16);
+    clear(score_ascii);
+    push_i32(score_ascii, -42);
+    from_ascii(score_utf8, score_ascii, 16);
     if (!score_run.replace_text_from(font, score_utf8)) { return 1; }
     return 0;
 }
@@ -1524,7 +1548,7 @@ function @extern("stasis_jit_text_run_replace_from") replace_text_from(self: Tex
     fn hot_render_metadata_counts_sequential_and_exclusive_draws() {
         let snapshot = hot_render_snapshot(
             r#"
-function main(): void { hero.load_sprite_from("assets/hero.png", 32, 24); }
+function main(): void { hero.load_from("assets/hero.png", 32, 24); }
 function render(): void {
     hero.draw(1.0, 2.0, 255, 0);
     if (true) { hero.draw(3.0, 4.0, 255, 0); }
@@ -1554,9 +1578,9 @@ function render(): void {
         let source = r#"
 struct Sprite { handle: i32; width: i32; height: i32; }
 global hero: Sprite;
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_sprite_load_from") load_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void { return; }
-function main(): void { hero.load_sprite_from("assets/hero.png", 32, 24); }
+function main(): void { hero.load_from("assets/hero.png", 32, 24); }
 function render(): void { hero.draw(1.0, 2.0, 255, 0); hero.draw(3.0, 4.0, 255, 0); }
 "#;
         let mut jit = JitProcess::new();
@@ -1588,8 +1612,8 @@ function render(): void { hero.draw(1.0, 2.0, 255, 0); hero.draw(3.0, 4.0, 255, 
 global a: Sprite;
 global b: Sprite;
 function main(): void {
-    a.load_sprite_from("a.png", 16, 16);
-    b.load_sprite_from("b.png", 16, 16);
+    a.load_from("a.png", 16, 16);
+    b.load_from("b.png", 16, 16);
 }
 function render(): void {
     if (true) {
@@ -1652,17 +1676,17 @@ global b: Sprite;
 global c: Sprite;
 global d: Sprite;
 global enabled: bool;
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_sprite_load_from") load_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void { return; }
 function draw_text(font: i32, text: string, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32): void { return; }
 function fill_rect(x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32): void { return; }
 function text_barrier(): void { draw_text(0, "", 0.0, 0.0, 1.0, 1.0, 1.0, 1.0); }
 function pure_helper(): void { return; }
 function main(): void {
-    a.load_sprite_from("a.png", 16, 16);
-    b.load_sprite_from("b.png", 16, 16);
-    c.load_sprite_from("c.png", 16, 16);
-    d.load_sprite_from("d.png", 16, 16);
+    a.load_from("a.png", 16, 16);
+    b.load_from("b.png", 16, 16);
+    c.load_from("c.png", 16, 16);
+    d.load_from("d.png", 16, 16);
 }
 function render(): void {
     a.draw(0.0, 0.0, 255, 0);
@@ -1719,8 +1743,8 @@ global a: Sprite;
 global b: Sprite;
 extern function @effects(graphics)@extern("stasis_jit_font_status") custom_renderer(font: i32): i32;
 function main(): void {
-    a.load_sprite_from("a.png", 16, 16);
-    b.load_sprite_from("b.png", 16, 16);
+    a.load_from("a.png", 16, 16);
+    b.load_from("b.png", 16, 16);
 }
 function render(): void {
     a.draw(0.0, 0.0, 255, 0);
@@ -1748,7 +1772,7 @@ function render(): void {
         let mut loads = String::new();
         for index in 0..6 {
             loads.push_str(&format!(
-                "pieces[{index}].load_sprite_from(\"assets/piece-{index}.png\", {}, {}); enemies[{index}].load_sprite_from(\"assets/enemy-{index}.png\", {}, {});",
+                "pieces[{index}].load_from(\"assets/piece-{index}.png\", {}, {}); enemies[{index}].load_from(\"assets/enemy-{index}.png\", {}, {});",
                 32 + index * 2,
                 28 + index * 2,
                 36 + index * 2,
@@ -1760,7 +1784,7 @@ function render(): void {
 struct Sprite {{ handle: i32; width: i32; height: i32; }}
 global pieces: Sprite[6];
 global enemies: Sprite[6];
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_sprite_load_from") load_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function @extern("stasis_jit_sprite_draw") draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
 function main(): void {{ {loads} }}
 function render(): void {{
@@ -1800,9 +1824,9 @@ function render(): void {{
 struct Sprite {{ handle: i32; width: i32; height: i32; }}
 global a: Sprite;
 global b: Sprite;
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_sprite_load_from") load_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function @extern("stasis_jit_sprite_draw") draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
-function main(): void {{ a.load_sprite_from("a.png", 256, 256); b.load_sprite_from("b.png", 128, 256); }}
+function main(): void {{ a.load_from("a.png", 256, 256); b.load_from("b.png", 128, 256); }}
 function render(): void {{ {draws} }}
 "#
             );
@@ -1841,7 +1865,7 @@ function render(): void {{ {draws} }}
         let snapshot = hot_render_snapshot(
             r#"
 function paint(sprite: Sprite): void { sprite.draw(1.0, 2.0, 255, 0); }
-function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function main(): void { hero.load_from("assets/hero.png", 16, 16); }
 function render(): void {
     for (let i: i32 = 0; i < 4; i += 1) { paint(hero); }
 }
@@ -1856,7 +1880,7 @@ function render(): void {
     fn hot_render_metadata_preserves_exact_zero_and_one() {
         let zero = hot_render_snapshot(
             r#"
-function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function main(): void { hero.load_from("assets/hero.png", 16, 16); }
 function render(): void { return; }
 "#,
         );
@@ -1864,7 +1888,7 @@ function render(): void { return; }
 
         let one = hot_render_snapshot(
             r#"
-function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function main(): void { hero.load_from("assets/hero.png", 16, 16); }
 function render(): void { hero.draw(1.0, 2.0, 255, 0); }
 "#,
         );
@@ -1877,7 +1901,7 @@ function render(): void { hero.draw(1.0, 2.0, 255, 0); }
         let snapshot = hot_render_snapshot(
             r#"
 function paint(sprite: Sprite): void { sprite.draw(1.0, 2.0, 255, 0); }
-function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function main(): void { hero.load_from("assets/hero.png", 16, 16); }
 function render(): void { paint(hero); paint(hero); paint(hero); }
 "#,
         );
@@ -1891,7 +1915,7 @@ function render(): void { paint(hero); paint(hero); paint(hero); }
     fn hot_render_metadata_multiplies_nested_and_zero_or_one_loops() {
         let nested = hot_render_snapshot(
             r#"
-function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function main(): void { hero.load_from("assets/hero.png", 16, 16); }
 function render(): void {
     for (let i: i32 = 0; i < 2; i += 1) {
         for (let j: i32 = 0; j <= 2; j += 1) {
@@ -1908,7 +1932,7 @@ function render(): void {
 
         let zero = hot_render_snapshot(
             r#"
-function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function main(): void { hero.load_from("assets/hero.png", 16, 16); }
 function render(): void {
     for (let i: i32 = 1; i < 1; i += 1) { hero.draw(1.0, 2.0, 255, 0); }
 }
@@ -1925,7 +1949,7 @@ function recursive_paint(depth: i32): void {
     hero.draw(1.0, 2.0, 255, 0);
     recursive_paint(depth);
 }
-function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function main(): void { hero.load_from("assets/hero.png", 16, 16); }
 function render(): void { recursive_paint(1); }
 "#,
         );
@@ -1957,9 +1981,9 @@ const PATH: string = "assets/sheet.png";
 const COLUMNS: i32 = 4;
 const ROWS: i32 = 2;
 const CELL: i32 = 32;
-function @extern("stasis_jit_sprite_load_from") load_sprite_sheet_from(self: SpriteSheet, path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool;
+function @extern("stasis_jit_sprite_load_from") load_from(self: SpriteSheet, path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool;
 function @extern("stasis_jit_sprite_draw_frame") draw_frame(self: SpriteSheet, frame: i32, x: f32, y: f32, alpha: i32, rotation: i32): void;
-function main(): void { sheet.load_sprite_sheet_from(PATH, COLUMNS, ROWS, CELL, CELL); }
+function main(): void { sheet.load_from(PATH, COLUMNS, ROWS, CELL, CELL); }
 function render(): void { sheet.draw_frame(0, 1.0, 2.0, 255, 0); }
 "#;
         let mut aot = AotProcess::new();
@@ -1983,9 +2007,9 @@ function render(): void { sheet.draw_frame(0, 1.0, 2.0, 255, 0); }
         let source = r#"
 struct SpriteSheet { handle: i32; columns: i32; rows: i32; cell_width: i32; cell_height: i32; }
 global sheet: SpriteSheet;
-function @extern("stasis_jit_sprite_load_from") load_sprite_sheet_from(self: SpriteSheet, path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool;
+function @extern("stasis_jit_sprite_load_from") load_from(self: SpriteSheet, path: string, columns: i32, rows: i32, cell_width: i32, cell_height: i32): bool;
 function @extern("stasis_jit_sprite_draw_frame") draw_frame(self: SpriteSheet, frame: i32, x: f32, y: f32, alpha: i32, rotation: i32): void;
-function main(): void { sheet.load_sprite_sheet_from("assets/sheet.png", 2147483647, 2, 3, 32); }
+function main(): void { sheet.load_from("assets/sheet.png", 2147483647, 2, 3, 32); }
 function render(): void { sheet.draw_frame(0, 1.0, 2.0, 255, 0); }
 "#;
         let mut aot = AotProcess::new();
@@ -2013,9 +2037,9 @@ function render(): void { sheet.draw_frame(0, 1.0, 2.0, 255, 0); }
 struct Sprite {{ handle: i32; width: i32; height: i32; }}
 global a: Sprite;
 global b: Sprite;
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_sprite_load_from") load_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function @extern("stasis_jit_sprite_draw") draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
-function main(): void {{ a.load_sprite_from("a.png", 256, 256); b.load_sprite_from("b.png", 256, 256); }}
+function main(): void {{ a.load_from("a.png", 256, 256); b.load_from("b.png", 256, 256); }}
 function render(): void {{ {draws} }}
 "#,
             draws = "a.draw(0.0, 0.0, 255, 0); b.draw(0.0, 0.0, 255, 0); ".repeat(5)
@@ -2047,9 +2071,7 @@ function render(): void {{ {draws} }}
                 .collect::<Vec<_>>()
                 .join("\n");
             let loads = (0..8)
-                .map(|index| {
-                    format!("sprite{index}.load_sprite_from(\"sprite{index}.png\", 512, 512);")
-                })
+                .map(|index| format!("sprite{index}.load_from(\"sprite{index}.png\", 512, 512);"))
                 .collect::<Vec<_>>()
                 .join("\n");
             let order = if interleaved {
@@ -2068,7 +2090,7 @@ function render(): void {{ {draws} }}
                 r#"
 struct Sprite {{ handle: i32; width: i32; height: i32; }}
 {globals}
-function @extern("stasis_jit_sprite_load_from") load_sprite_from(self: Sprite, path: string, width: i32, height: i32): bool;
+function @extern("stasis_jit_sprite_load_from") load_from(self: Sprite, path: string, width: i32, height: i32): bool;
 function @extern("stasis_jit_sprite_draw") draw(self: Sprite, x: f32, y: f32, alpha: i32, rotation: i32): void;
 function main(): void {{ {loads} }}
 function render(): void {{ {draws} }}
@@ -2111,7 +2133,7 @@ function render(): void {{ {draws} }}
         let finite = hot_render_snapshot(
             r#"
 global values: i32[3];
-function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function main(): void { hero.load_from("assets/hero.png", 16, 16); }
 function render(): void {
     foreach (let value in values) { hero.draw(1.0, 2.0, 255, 0); }
 }
@@ -2125,7 +2147,7 @@ function render(): void {
         let unknown = hot_render_snapshot(
             r#"
 global limit: i32;
-function main(): void { hero.load_sprite_from("assets/hero.png", 16, 16); }
+function main(): void { hero.load_from("assets/hero.png", 16, 16); }
 function render(): void {
     for (let i: i32 = 0; i < limit; i += 1) { hero.draw(1.0, 2.0, 255, 0); }
 }

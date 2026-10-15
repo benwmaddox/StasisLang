@@ -50,8 +50,8 @@ function sample_reset(): i32 {
     sample_simulation_ticks = 0;
     sample_control_transitions = 0;
     sample_sequence = 0;
-    sample_history.world_camera_history_reset(sample_player_x, sample_player_y);
-    sample_camera.world_camera_configure(0.0, 0.0, SAMPLE_WORLD_W, SAMPLE_WORLD_H, 0.0, SAMPLE_VIEWPORT_Y, SAMPLE_VIEWPORT_W, SAMPLE_VIEWPORT_H, 1.0);
+    sample_history.reset(sample_player_x, sample_player_y);
+    sample_camera.configure(0.0, 0.0, SAMPLE_WORLD_W, SAMPLE_WORLD_H, 0.0, SAMPLE_VIEWPORT_Y, SAMPLE_VIEWPORT_W, SAMPLE_VIEWPORT_H, 1.0);
     return sample_schedule(1, 0);
 }
 
@@ -80,7 +80,7 @@ function sample_simulation_step(): i32 {
     sample_player_x = sample_player_x + i32_to_f32(sample_control_x[0]) * 4.0;
     sample_player_y = sample_player_y + i32_to_f32(sample_control_y[0]) * 4.0;
     sample_simulation_ticks = sample_simulation_ticks + 1;
-    sample_history.world_camera_history_advance(sample_player_x, sample_player_y);
+    sample_history.advance(sample_player_x, sample_player_y);
     return 0;
 }
 
@@ -131,13 +131,13 @@ function sample_cadence_probe(): i32 {
 function sample_draw_world(alpha: f32): void {
     let presentation_x: f32 = sample_history.interpolated_x(alpha);
     let presentation_y: f32 = sample_history.interpolated_y(alpha);
-    sample_camera.world_camera_follow(presentation_x, presentation_y);
-    sample_tiles.world_camera_tile_range_calculate(sample_camera, SAMPLE_TILE_SIZE, 1);
+    sample_camera.follow(presentation_x, presentation_y);
+    sample_tiles.calculate_for_camera(sample_camera, SAMPLE_TILE_SIZE, 1);
     if (sample_tiles.status != 0) {
         return;
     }
     let tile_size: f32 = sample_tiles.effective_tile_world_size;
-    sample_camera.world_camera_clip_begin();
+    sample_camera.clip_begin();
     let tile_y: i32 = sample_tiles.first_y;
     for (tile_y = sample_tiles.first_y; tile_y < sample_tiles.end_y; tile_y = tile_y + 1) {
         let tile_x: i32 = sample_tiles.first_x;
@@ -170,7 +170,7 @@ function sample_draw_world(alpha: f32): void {
         0.20,
         1.0
     );
-    sample_camera.world_camera_clip_end();
+    sample_camera.clip_end();
 }
 
 function main(): i32 {

@@ -2,6 +2,13 @@
 
 Application Stasis code imports `stdlib/graphics.stasis`. The supported frame path is:
 
+Public receiver APIs use the action name directly: resource methods are
+`ImageAsset.load(path, ...)` and `AudioAsset.load(path)`, sprites and sprite
+sheets use `load_from(path, ...)`, and collection operations use names such as
+`reset`. The former receiver-prefixed names are removed without source aliases;
+see [`receiver_api_migration.md`](receiver_api_migration.md) for the full
+source-breaking migration table. The sprite host extern symbol remains stable.
+
 Lifecycle 1 applies only to a package with a zero-argument authored `render()`
 entry. Tick-only or render-less packages without an exported render entry may
 use lifecycle 0/absent direct or manual construction. Packaged render entries
@@ -46,7 +53,7 @@ a tick-only or render-less package may remain lifecycle 0/absent direct/manual.
 Consumers without a production bridge need only the coordinated vendor and
 metadata refresh. This migration has no viewport or resolution-cap effect.
 
-`LineBatch` owns storage for 512 typed `Line` values and its bounded count. Use `reset_lines`, `append` or `append_line`, then `draw`. Failed appends return `false`; drawing clamps a corrupted count to owned storage. Lines still enter the canonical command stream one at a time, preserving painter order, the shared line/rectangle capacity, and deterministic drop accounting.
+`LineBatch` owns storage for 512 typed `Line` values and its bounded count. Use `reset`, `append` or `append_line`, then `draw`. Failed appends return `false`; drawing clamps a corrupted count to owned storage. Lines still enter the canonical command stream one at a time, preserving painter order, the shared line/rectangle capacity, and deterministic drop accounting.
 
 `SpriteRef` is the compiler-owned nominal identity returned by `Sprite.reference()` and carried by `Sprite`, `SpriteSheet`, `ImageAsset`, `SpriteRunWriter`, and `PresentationCommand`. It keeps the existing 32-bit host ABI lane, but integers cannot be assigned or passed as sprite references and application modules cannot redefine the type. Use `Sprite.valid()` and `Sprite.poll_reload()` instead of inspecting a raw handle.
 
@@ -70,7 +77,7 @@ scale it into destination-local units with
 `pivot_x = source_pivot_x * destination_width / source_width` (and likewise
 for y).
 
-`SpriteSheet.load_sprite_sheet_from(path, cols, rows, cell_w, cell_h)` declares
+`SpriteSheet.load_from(path, cols, rows, cell_w, cell_h)` declares
 the sheet's logical extent as `cols * cell_w` by `rows * cell_h`; source
 rectangles use that logical pixel space. `draw_frame_scaled` is a convenience
 for a row-major sheet frame: it uses a centered pivot and unit scale, takes an
