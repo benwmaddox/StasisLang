@@ -23,7 +23,7 @@ NUMERIC_TEXT_ACCEPTANCE_MARKER = re.compile(
     r"Stasis Android numeric text: ([^\r\n]*)"
 )
 ASSET_DIAGNOSTIC = re.compile(r"code=([^ ]+) path=(.*?) detail=(.+)")
-ANDROID_LOG_RECORD_PID = re.compile(r"^[VDIWEFA]/\S+\s+\(\s*(\d+)\):")
+ANDROID_LOG_RECORD_PID = re.compile(r"^[VDIWEFA]/\S+\s*\(\s*(\d+)\):")
 ANDROID_GENERICS_BOUNDS_INDEX = re.compile(
     r"Stasis Android generics bounds probe index=(-?\d+)\b"
 )

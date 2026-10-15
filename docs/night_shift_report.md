@@ -1343,8 +1343,10 @@ Java/abort rejection, process exit and no-restart checks remain mandatory.
 
 The focused Windows suite passed 76 tests; the final Linux focused and
 downstream batch passed 145 tests. Replaying both original failed-run captures
-passed: low PID 4242 had 414 process lines/64,768 bytes; high PID 4420 had 675
-process lines/104,107 bytes. Native records and their continuation lines are
+passed: low PID 4242 had 247 process lines/29,906 bytes; high PID 4420 had 248
+process lines/30,012 bytes. The canonical PID parser accepts both padded short
+tags and unpadded long tags, so foreign records cannot become continuations
+and unpadded app records cannot escape the budget. Native continuation lines are
 retained; no tail truncation or raised cap hides excess app output. The full
 merged-source nightly remains pending.
 

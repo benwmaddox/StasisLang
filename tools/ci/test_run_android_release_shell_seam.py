@@ -147,24 +147,49 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
     def test_android_generics_bounds_scopes_caps_and_preserves_trap_checks(self):
         package_id = "com.stasislang.generics_collections"
         initialized = (
-            'I/Stasis  (4100): Stasis seam: '
+            'I/Stasis( 4100): Stasis seam: '
             '{"schema":"stasis.seam_test.v1","test_id":"ANDROID-GENERICS",'
             '"event":"initialized","frame":0}\n'
         )
         index_record = (
-            "I/Stasis  (4100): Stasis Android generics bounds probe index=-1\n"
+            "I/Stasis( 4100): Stasis Android generics bounds probe index=-1\n"
         )
         continuation = "    at bounds_probe (generics.stasis:12)\n"
         fatal = (
-            "F/libc    ( 4100): Fatal signal 4 (SIGILL), code 2, in tid 4101 (SDLThread), "
+            "F/libc( 4100): Fatal signal 4 (SIGILL), code 2, in tid 4101 (SDLThread), "
             "pid 4100 (SDLActivity)\n"
         )
         target_log = initialized + index_record + continuation + fatal
+        spaced_target_log = (
+            initialized.replace("I/Stasis( 4100):", "I/Stasis  (4100):")
+            + index_record.replace("I/Stasis( 4100):", "I/Stasis  (4100):")
+            + continuation
+            + fatal.replace("F/libc( 4100):", "F/libc    (4100):")
+        )
         unrelated_noise = "".join(
-            f"W/Platform ({5000 + number % 3}): unrelated warning {number}\n"
+            f"W/PlatformConfigurator({5000 + number % 3}): unrelated warning {number}\n"
             for number in range(seam.ANDROID_GENERICS_MAX_LOG_LINES + 1)
-        ) + "F/libc (4999): Fatal signal 6 (SIGABRT), unrelated system process\n"
-        log = unrelated_noise + target_log
+        ) + "F/libc(4999): Fatal signal 6 (SIGABRT), unrelated system process\n"
+        log = (
+            initialized.replace("I/Stasis( 4100):", "I/Stasis  (4100):")
+            + unrelated_noise
+            + index_record.replace("I/Stasis( 4100):", "I/Stasis  (4100):")
+            + continuation
+            + fatal.replace("F/libc( 4100):", "F/libc    (4100):")
+        )
+
+        self.assertEqual(
+            4100,
+            seam.android_log_record_pid("I/Stasis( 4100): initialized"),
+        )
+        self.assertEqual(
+            1267,
+            seam.android_log_record_pid("W/PlatformConfigurator(1267): warning"),
+        )
+        unpadded_result = seam.validate_android_generics_bounds_trap(
+            target_log, -1, package_id, "SIGILL"
+        )
+        self.assertEqual(4100, unpadded_result["pid"])
 
         with tempfile.TemporaryDirectory() as temporary:
             process_path = Path(temporary) / "bounds-process.log"
@@ -175,24 +200,24 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                 "SIGILL",
                 process_output_path=process_path,
             )
-            self.assertEqual(target_log, process_path.read_text(encoding="utf-8"))
+            self.assertEqual(spaced_target_log, process_path.read_text(encoding="utf-8"))
 
         self.assertEqual(-1, result["index"])
         self.assertEqual(4100, result["pid"])
         self.assertEqual("process", result["log_scope"])
         self.assertGreater(result["raw_log_line_count"], seam.ANDROID_GENERICS_MAX_LOG_LINES)
-        self.assertEqual(len(target_log.splitlines()), result["log_line_count"])
+        self.assertEqual(len(spaced_target_log.splitlines()), result["log_line_count"])
         self.assertEqual(len(log.encode("utf-8")), result["raw_log_byte_count"])
         self.assertEqual(
-            len(target_log.encode("utf-8")), result["log_byte_count"]
+            len(spaced_target_log.encode("utf-8")), result["log_byte_count"]
         )
 
         invalid_logs = (
             (
                 "mixed init/index PID",
                 target_log.replace(
-                    "I/Stasis  (4100): Stasis Android generics bounds probe index=-1",
-                    "I/Stasis  (4101): Stasis Android generics bounds probe index=-1",
+                    "I/Stasis( 4100): Stasis Android generics bounds probe index=-1",
+                    "I/Stasis( 4101): Stasis Android generics bounds probe index=-1",
                 ),
                 "same package process",
             ),
@@ -204,7 +229,7 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             (
                 "post-trap frame",
                 target_log
-                + 'I/Stasis  (4100): Stasis seam: '
+                + 'I/Stasis( 4100): Stasis seam: '
                 '{"schema":"stasis.seam_test.v1","test_id":"ANDROID-GENERICS",'
                 '"event":"frame","frame":1}\n',
                 "rendered past the trapped tick",
@@ -212,33 +237,33 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
             (
                 "mixed marker PIDs",
                 target_log
-                + 'I/Stasis  (4101): Stasis seam: '
+                + 'I/Stasis( 4101): Stasis seam: '
                 '{"schema":"stasis.seam_test.v1","test_id":"ANDROID-GENERICS",'
                 '"event":"frame","frame":1}\n',
                 "same package process",
             ),
             (
                 "Java abort",
-                target_log + "E/AndroidRuntime (4100): FATAL EXCEPTION: main\n",
+                target_log + "E/AndroidRuntime(4100): FATAL EXCEPTION: main\n",
                 "Java or abort failure",
             ),
             (
                 "unattributed index",
                 target_log.replace(
-                    "I/Stasis  (4100): Stasis Android generics bounds probe index=-1",
+                    "I/Stasis( 4100): Stasis Android generics bounds probe index=-1",
                     "I/Stasis: Stasis Android generics bounds probe index=-1",
                 ),
                 "no process id",
             ),
             (
                 "unattributed initialized marker",
-                target_log.replace("I/Stasis  (4100): Stasis seam:", "I/Stasis: Stasis seam:"),
+                target_log.replace("I/Stasis( 4100): Stasis seam:", "I/Stasis: Stasis seam:"),
                 "no process id",
             ),
             (
                 "malformed target marker",
                 target_log
-                + 'I/Stasis  (4100): Stasis seam: {"test_id":"ANDROID-GENERICS",}\n',
+                + 'I/Stasis( 4100): Stasis seam: {"test_id":"ANDROID-GENERICS",}\n',
                 "marker is malformed",
             ),
         )
@@ -249,16 +274,17 @@ class AndroidReleaseShellSeamTests(unittest.TestCase):
                         invalid_log, -1, package_id, "SIGILL"
                     )
 
-        over_line_limit = target_log + (
-            "I/Stasis (4100): app diagnostic record\n"
+        target_flood_prefix = spaced_target_log + "I/Foreign (4999): unrelated\n"
+        over_line_limit = target_flood_prefix + (
+            "I/LongTargetTag(4100): app diagnostic record\n"
             * seam.ANDROID_GENERICS_MAX_LOG_LINES
         )
         with self.assertRaisesRegex(seam.SeamError, "process log exceeded its bound"):
             seam.validate_android_generics_bounds_trap(
                 over_line_limit, -1, package_id, "SIGILL"
             )
-        over_byte_limit = target_log + (
-            "I/Stasis (4100): "
+        over_byte_limit = target_flood_prefix + (
+            "I/LongTargetTag(4100): "
             + "x" * seam.ANDROID_GENERICS_MAX_LOG_BYTES
             + "\n"
         )
