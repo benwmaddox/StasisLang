@@ -138,12 +138,18 @@ struct Resources {
     font: i32;
 }
 
+struct GameSettings {
+    win_score: i32 = 5;
+    show_tutorial: bool = false;
+}
+
 struct AppState {
     world: GameWorld;
     input: TickInput;
     ui: UiState;
     cache: WorldCache;
     resources: Resources;
+    settings: GameSettings;
 }
 
 global game: AppState;
@@ -160,6 +166,23 @@ The groups answer practical questions:
 
 Small games can keep these fields flat. Add a nested record when it clarifies
 ownership or lifetime, not just to make the root record shorter.
+
+## Runtime settings belong in the state that owns them
+
+Keep tunable values in persistent state owned by the system or entity that uses
+them. Related game-wide values fit in a nested settings record such as
+`game.settings.win_score`; an entity-specific value belongs on that entity.
+Use a bool for an actual on/off option and an enum for named alternatives such
+as screens or play modes. Keep constants for fixed storage capacities,
+compile-time generic values, and immutable external contracts.
+
+Scalar field defaults use `field: Type = value;` and initialize newly created
+state. Keep them to supported scalar constant expressions; they cannot read
+runtime state. Editing a default does not replace values preserved by an ordinary compatible hot swap.
+When an explicit supported migration initializes an added field or storage
+growth, the incoming default supplies that new storage while copied live fields
+keep their values. A setting that changes an external window, graphics, or audio
+resource still needs the resource's normal explicit update or rebuild lifecycle.
 
 ## Translate input into game actions
 

@@ -2132,7 +2132,11 @@ mod tests {
                  + fixed_walls.max_length + generic_walls.runs.max_length;\n\
          }\n";
 
-    fn standalone_storage_symbol_bytes(object: &File<'_>, name: &str) -> Vec<u8> {
+    fn standalone_storage_symbol_bytes(
+        object: &File<'_>,
+        name: &str,
+        expected_len: usize,
+    ) -> Vec<u8> {
         let symbol = object
             .symbols()
             .find(|symbol| symbol.name().ok() == Some(name))
@@ -2141,15 +2145,48 @@ mod tests {
             .section_by_index(symbol.section_index().expect("storage symbol section"))
             .expect("storage symbol section contents");
         let section_bytes = section.data().expect("storage symbol bytes");
-        let start = usize::try_from(
-            symbol
-                .address()
-                .checked_sub(section.address())
-                .expect("storage symbol address within section"),
-        )
-        .expect("storage symbol offset fits usize");
-        let len = usize::try_from(symbol.size()).expect("storage symbol size fits usize");
-        section_bytes[start..start + len].to_vec()
+        let format = object.format();
+        let reported_size = symbol.size();
+        let symbol_address = symbol.address();
+        let section_address = section.address();
+        let offset = symbol_address
+            .checked_sub(section_address)
+            .unwrap_or_else(|| {
+                panic!(
+                    "standalone storage symbol '{name}' in {format:?} starts before its section: symbol address {symbol_address}, section address {section_address}, reported size {reported_size}, expected {expected_len} bytes, section length {}",
+                    section_bytes.len()
+                )
+            });
+        let start = usize::try_from(offset).unwrap_or_else(|_| {
+            panic!(
+                "standalone storage symbol '{name}' in {format:?} offset {offset} does not fit usize: reported size {reported_size}, expected {expected_len} bytes, section length {}",
+                section_bytes.len()
+            )
+        });
+        let expected_size = u64::try_from(expected_len).expect("expected symbol size fits u64");
+        assert!(
+            expected_len > 0
+                && (reported_size == expected_size
+                    || (reported_size == 0
+                        && matches!(format, BinaryFormat::Coff | BinaryFormat::MachO))),
+            "standalone storage symbol '{name}' in {format:?} reports size {reported_size}, expected {expected_len} bytes (section length {}, offset {start})",
+            section_bytes.len()
+        );
+        let end = start.checked_add(expected_len).unwrap_or_else(|| {
+            panic!(
+                "standalone storage symbol '{name}' in {format:?} range overflows: offset {start}, expected {expected_len} bytes, reported size {reported_size}, section length {}",
+                section_bytes.len()
+            )
+        });
+        section_bytes
+            .get(start..end)
+            .unwrap_or_else(|| {
+                panic!(
+                    "standalone storage symbol '{name}' in {format:?} is out of section bounds: offset {start}, expected {expected_len} bytes, reported size {reported_size}, section length {}",
+                    section_bytes.len()
+                )
+            })
+            .to_vec()
     }
 
     #[cfg(windows)]
@@ -3543,74 +3580,76 @@ mod tests {
             .expect("standalone storage object")
             .expect("field defaults require standalone storage");
         let object = File::parse(bytes.as_slice()).expect("parse field-default storage object");
-        let scalar = |path: &str| {
+        let scalar = |path: &str, expected_len: usize| {
             standalone_storage_symbol_bytes(
                 &object,
                 &aot_storage_symbol(AotStorageSymbolKind::Scalar, path, ""),
+                expected_len,
             )
         };
-        let lane = |field: &str| {
+        let lane = |field: &str, expected_len: usize| {
             standalone_storage_symbol_bytes(
                 &object,
                 &aot_storage_symbol(AotStorageSymbolKind::Array, "actors", field),
+                expected_len,
             )
         };
 
-        assert_eq!(scalar("world.tuning.health"), 11_i32.to_le_bytes());
+        assert_eq!(scalar("world.tuning.health", 4), 11_i32.to_le_bytes());
         assert_eq!(
-            scalar("world.tuning.rate_f32"),
+            scalar("world.tuning.rate_f32", 4),
             0x3dcccccd_u32.to_le_bytes()
         );
         assert_eq!(
-            scalar("world.tuning.rate_f64"),
+            scalar("world.tuning.rate_f64", 8),
             0x3fb999999999999a_u64.to_le_bytes()
         );
         assert_eq!(
-            scalar("world.tuning.negative_zero_f32"),
+            scalar("world.tuning.negative_zero_f32", 4),
             0x80000000_u32.to_le_bytes()
         );
         assert_eq!(
-            scalar("world.tuning.negative_zero_f64"),
+            scalar("world.tuning.negative_zero_f64", 8),
             0x8000000000000000_u64.to_le_bytes()
         );
-        assert_eq!(scalar("world.tuning.enabled"), [1, 0, 0, 0]);
-        assert_eq!(scalar("world.mode"), 9_i32.to_le_bytes());
-        assert_eq!(scalar("world.tuning.length"), 23_i32.to_le_bytes());
-        assert_eq!(scalar("world.tuning.max_length"), 29_i32.to_le_bytes());
-        assert_eq!(scalar("actors.max_length"), 2_i32.to_le_bytes());
-        assert_eq!(scalar("world.tuning.no_default"), [0, 0, 0, 0]);
-        assert_eq!(lane("tuning.health"), [7, 0, 0, 0, 7, 0, 0, 0]);
+        assert_eq!(scalar("world.tuning.enabled", 4), [1, 0, 0, 0]);
+        assert_eq!(scalar("world.mode", 4), 9_i32.to_le_bytes());
+        assert_eq!(scalar("world.tuning.length", 4), 23_i32.to_le_bytes());
+        assert_eq!(scalar("world.tuning.max_length", 4), 29_i32.to_le_bytes());
+        assert_eq!(scalar("actors.max_length", 4), 2_i32.to_le_bytes());
+        assert_eq!(scalar("world.tuning.no_default", 4), [0, 0, 0, 0]);
+        assert_eq!(lane("tuning.health", 8), [7, 0, 0, 0, 7, 0, 0, 0]);
         assert_eq!(
-            lane("tuning.rate_f32"),
+            lane("tuning.rate_f32", 8),
             [0xcd, 0xcc, 0xcc, 0x3d, 0xcd, 0xcc, 0xcc, 0x3d]
         );
         assert_eq!(
-            lane("tuning.rate_f64"),
+            lane("tuning.rate_f64", 16),
             [
                 0x9a, 0x99, 0x99, 0x99, 0x99, 0x99, 0xb9, 0x3f, 0x9a, 0x99, 0x99, 0x99, 0x99, 0x99,
                 0xb9, 0x3f,
             ]
         );
         assert_eq!(
-            lane("tuning.negative_zero_f32"),
+            lane("tuning.negative_zero_f32", 8),
             [0, 0, 0, 0x80, 0, 0, 0, 0x80]
         );
         assert_eq!(
-            lane("tuning.negative_zero_f64"),
+            lane("tuning.negative_zero_f64", 16),
             [0, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0x80]
         );
-        assert_eq!(lane("tuning.enabled"), [1, 0, 0, 0, 1, 0, 0, 0]);
-        assert_eq!(lane("tuning.length"), [23, 0, 0, 0, 23, 0, 0, 0]);
-        assert_eq!(lane("tuning.max_length"), [29, 0, 0, 0, 29, 0, 0, 0]);
-        assert_eq!(lane("length"), [31, 0, 0, 0, 31, 0, 0, 0]);
-        assert_eq!(lane("max_length"), [37, 0, 0, 0, 37, 0, 0, 0]);
-        assert_eq!(lane("tuning.byte"), [17, 17]);
+        assert_eq!(lane("tuning.enabled", 8), [1, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(lane("tuning.length", 8), [23, 0, 0, 0, 23, 0, 0, 0]);
+        assert_eq!(lane("tuning.max_length", 8), [29, 0, 0, 0, 29, 0, 0, 0]);
+        assert_eq!(lane("length", 8), [31, 0, 0, 0, 31, 0, 0, 0]);
+        assert_eq!(lane("max_length", 8), [37, 0, 0, 0, 37, 0, 0, 0]);
+        assert_eq!(lane("tuning.byte", 2), [17, 17]);
         assert_eq!(
-            lane("tuning.flags"),
+            lane("tuning.flags", 8),
             [0x40, 0xe2, 0x01, 0, 0x40, 0xe2, 0x01, 0]
         );
-        assert_eq!(lane("tuning.no_default"), [0; 8]);
-        assert_eq!(lane("armor"), [1, 2, 1, 2]);
+        assert_eq!(lane("tuning.no_default", 8), [0; 8]);
+        assert_eq!(lane("armor", 4), [1, 2, 1, 2]);
 
         let changed_default =
             STRUCT_FIELD_DEFAULTS_FIXTURE.replace("health: i32 = N;", "health: i32 = N + 10;");
@@ -3635,6 +3674,7 @@ mod tests {
             standalone_storage_symbol_bytes(
                 &object,
                 &aot_storage_symbol(AotStorageSymbolKind::Scalar, "world.tuning.health", ""),
+                4,
             ),
             21_i32.to_le_bytes(),
             "fresh standalone storage reflects the refreshed declaration default"
@@ -3643,6 +3683,7 @@ mod tests {
             standalone_storage_symbol_bytes(
                 &object,
                 &aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "tuning.health"),
+                8,
             ),
             [17, 0, 0, 0, 17, 0, 0, 0],
             "fresh SoA storage reflects the refreshed generic default"

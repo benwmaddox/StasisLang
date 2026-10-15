@@ -6,6 +6,19 @@ for normal project work.
 Read `PROJECT_ARCHITECTURE.md` before structuring game code. Use its input, tick, state, and
 rendering boundaries as the default unless the project documents a concrete reason to differ.
 
+## Put runtime tuning in owned state
+
+Runtime-tunable values belong in feature-owned state. Group related values in a nested
+settings record, and keep entity-specific values with their entity. Use `bool` for a true
+on/off choice and an enum for named alternatives. Keep constants for fixed capacities,
+generic value arguments, and immutable external contracts.
+
+A field default initializes new state. Keep defaults to supported scalar constant expressions;
+they cannot read runtime state. Changing a default does not overwrite values kept through an
+ordinary compatible hot swap. A supported explicit migration can use incoming defaults for
+newly added fields or storage while preserving copied live values. If a setting controls a
+window, graphics, or audio resource, update that resource through its normal lifecycle.
+
 ## Quick task loop
 
 1. If the target is unknown, start with `stasis --json symbol list`. If its file is known,
