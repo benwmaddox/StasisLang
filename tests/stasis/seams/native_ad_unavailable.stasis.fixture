@@ -33,6 +33,14 @@ function main(): i32 {
     if (task.handle != 0 || task.state != AdState.Idle) {
         return 9;
     }
+    task.state = AdState.Loading;
+    if (task.status() != AdState.Loading) {
+        return 10;
+    }
+    if (!task.should_block_gameplay()) {
+        return 11;
+    }
+    task.reset();
 
     notify_portal_lifecycle(PortalLifecycleEvent.LoadingStarted);
     notify_portal_lifecycle(PortalLifecycleEvent.LoadingFinished);

@@ -44,6 +44,14 @@ function probe_mobile_ad_shims(): i32 {
     if (mobile_ad_task.handle != 0 || mobile_ad_task.state != AdState.Idle) {
         return 7;
     }
+    mobile_ad_task.state = AdState.Loading;
+    if (ad_tasks.status(mobile_ad_task) != AdState.Loading) {
+        return 8;
+    }
+    if (!ad_tasks.should_block_gameplay(mobile_ad_task)) {
+        return 9;
+    }
+    ad_tasks.reset(mobile_ad_task);
     notify_portal_lifecycle(PortalLifecycleEvent.LoadingStarted);
     notify_portal_lifecycle(PortalLifecycleEvent.LoadingFinished);
     notify_portal_lifecycle(PortalLifecycleEvent.GameplayStarted);

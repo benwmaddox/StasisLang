@@ -65,7 +65,15 @@ to it. Its entries are sorted, have normalized timestamps, and begin at the pack
 does not emit an upload ZIP. The package config selects just one SDK. It includes the shared
 `ad_lifecycle.js` module and injects the selected public configuration; the module loads only that
 provider's SDK. This SDK wiring is not portal approval, live ad fill, or permission to use an
-intrusive placement. Follow the [request, reward, and placement contract](web_ads.md) for the
+intrusive placement. Follow the [request, reward, and placement contract](web_ads.md) for host
+behavior, provider capabilities, and placement guidance.
+
+The guest reports `Requesting` while ad state is unknown, then `Loading` only after documented
+GameDistribution per-ad progress. Unknown state gets 5 seconds from request acceptance; confirmed
+GameDistribution loading gets one 30-second cap from its first progress event. Actual playback has
+no load deadline and remains blocked until provider terminal evidence. Other providers stay in the
+unknown state until start or terminal evidence because the adapter has no documented per-ad loading
+signal for them.
 
 For local browser acceptance, build a development package and use the CDP runner. Its SDK
 interception supplies a deterministic test fake at script evaluation; it does not contact the
