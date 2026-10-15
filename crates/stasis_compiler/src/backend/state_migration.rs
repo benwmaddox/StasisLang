@@ -1,4 +1,5 @@
 use super::jit::{JitProcess, JitScalarValue, JitStateLayout};
+use super::state_initialization::{ScalarStorageKind, TypedScalarDefault};
 use super::state_layout::collection_field_element_count;
 pub use super::state_layout::state_layout_version;
 use std::collections::{BTreeMap, BTreeSet};
@@ -602,7 +603,7 @@ fn restore_runtime_state(
         }
     }
     for (path, field, values) in &snapshot.collections {
-        let target = if active.global_collection_capacity(path).is_some() {
+        let target = if active.has_global_collection_field(path, field) {
             active
         } else {
             candidate
@@ -770,7 +771,10 @@ fn apply_migration_state(
                 incoming.write_global_scalar(&step.path, value)?;
             }
             (StateMigrationStepKind::Initialize, None) => {
-                incoming.write_global_scalar(&step.path, default_scalar_value(&step.type_name)?)?;
+                incoming.write_global_scalar(
+                    &step.path,
+                    migration_default_value(incoming, &step.path, None, &step.type_name)?,
+                )?;
             }
             (StateMigrationStepKind::Copy, Some(field)) => {
                 let values = collections
@@ -800,7 +804,8 @@ fn apply_migration_state(
                 }
             }
             (StateMigrationStepKind::Initialize, Some(field)) => {
-                let value = default_scalar_value(&step.type_name)?;
+                let value =
+                    migration_default_value(incoming, &step.path, Some(field), &step.type_name)?;
                 for index in step.start_index..step.start_index.saturating_add(step.elements) {
                     incoming.write_global_collection_scalar(
                         &step.path,
@@ -828,6 +833,60 @@ fn apply_migration_state(
         normalize_collection_lengths(incoming, path, capacity)?;
     }
     Ok(())
+}
+
+fn migration_default_value(
+    incoming: &JitProcess,
+    path: &str,
+    lane: Option<&str>,
+    storage_type: &str,
+) -> Result<JitScalarValue, String> {
+    let default = incoming
+        .state_initialization_plan()
+        .and_then(|plan| match lane {
+            Some(lane) => plan.collection_lane_default(path, lane),
+            None => plan.scalar_default(path),
+        });
+    if let Some(default) = default {
+        return jit_scalar_from_typed_default(default);
+    }
+    default_scalar_value(storage_type)
+}
+
+fn jit_scalar_from_typed_default(default: &TypedScalarDefault) -> Result<JitScalarValue, String> {
+    let width = default.byte_width();
+    if width == 0 || width > 8 || (width < 8 && default.bits >> (width * 8) != 0) {
+        return Err(format!(
+            "state initialization default for '{}' has invalid {width}-byte value bits",
+            default.declared_type.canonical_name
+        ));
+    }
+    if default.storage_kind == ScalarStorageKind::Bool && default.bits > 1 {
+        return Err(format!(
+            "state initialization default for '{}' has a noncanonical bool value",
+            default.declared_type.canonical_name
+        ));
+    }
+    let bytes = default.to_le_bytes();
+    if bytes.len() != width {
+        return Err(format!(
+            "state initialization default for '{}' encoded {} bytes instead of {width}",
+            default.declared_type.canonical_name,
+            bytes.len()
+        ));
+    }
+    let mut padded = [0u8; 8];
+    padded[..width].copy_from_slice(&bytes);
+    let bits = u64::from_le_bytes(padded);
+    match default.storage_kind {
+        ScalarStorageKind::Bool => Ok(JitScalarValue::Bool(bits != 0)),
+        ScalarStorageKind::I32 => Ok(JitScalarValue::I32(bits as u32 as i32)),
+        ScalarStorageKind::U8 => Ok(JitScalarValue::U8(bits as u8)),
+        ScalarStorageKind::U16 => Ok(JitScalarValue::U16(bits as u16)),
+        ScalarStorageKind::U32 => Ok(JitScalarValue::U32(bits as u32)),
+        ScalarStorageKind::F32 => Ok(JitScalarValue::F32(f32::from_bits(bits as u32))),
+        ScalarStorageKind::F64 => Ok(JitScalarValue::F64(f64::from_bits(bits))),
+    }
 }
 
 fn normalize_collection_lengths(
@@ -995,6 +1054,38 @@ mod tests {
     use super::*;
     use crate::backend::jit::{JitStateCollectionFieldLayout, JitStateCollectionLayout};
 
+    fn migration_game_source(bonus_default: Option<i32>) -> String {
+        let bonus =
+            bonus_default.map_or_else(String::new, |value| format!("bonus: i32 = {value}; "));
+        format!(
+            "struct Game {{ score: i32; {bonus}}}\nglobal game: Game;\nfunction main(): i32 {{ return game.score; }}\n"
+        )
+    }
+
+    fn initialized_game() -> JitProcess {
+        let mut active = JitProcess::new();
+        active.upsert_file("migration_defaults.stasis", migration_game_source(None));
+        active
+            .compile()
+            .expect("compile active migration generation");
+        active
+            .write_global_scalar("game.score", JitScalarValue::I32(42))
+            .expect("seed active score");
+        active
+    }
+
+    fn candidate_game(active: &JitProcess, bonus_default: i32) -> JitProcess {
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file(
+            "migration_defaults.stasis",
+            migration_game_source(Some(bonus_default)),
+        );
+        candidate
+            .compile_staged()
+            .expect("compile migration candidate");
+        candidate
+    }
+
     fn enum_state_layout(
         type_name: &str,
         include_score: bool,
@@ -1133,6 +1224,292 @@ mod tests {
         assert_eq!(
             active.read_global_scalar("score"),
             Ok(JitScalarValue::I32(7))
+        );
+    }
+
+    #[test]
+    fn migration_initialize_uses_incoming_default_and_preserves_copied_state() {
+        let active = initialized_game();
+        let candidate = candidate_game(&active, 17);
+        let preview = plan_state_migration(
+            &active.state_layout(),
+            &candidate.state_layout(),
+            Vec::new(),
+            false,
+            None,
+        )
+        .expect("plan added field migration");
+
+        // A preexisting fallback value is preserved by provisioning. The migration
+        // Initialize step must still apply the incoming declaration default.
+        stasis_dynload::stasis_jit_global_i32_store(
+            crate::backend::emit::hash_global_path("game.bonus"),
+            3,
+        );
+        let accepted = activate_candidate_transactionally(
+            Some(&active),
+            &candidate,
+            &preview,
+            false,
+            || {
+                candidate.read_global_scalar("game.bonus") == Ok(JitScalarValue::I32(17))
+                    && candidate.read_global_scalar("game.score") == Ok(JitScalarValue::I32(42))
+            },
+            |accepted| *accepted,
+        )
+        .expect("apply incoming field default");
+
+        assert!(
+            accepted,
+            "migration did not initialize from its declaration default"
+        );
+        assert_eq!(
+            candidate.read_global_scalar("game.score"),
+            Ok(JitScalarValue::I32(42))
+        );
+        assert_eq!(
+            candidate.read_global_scalar("game.bonus"),
+            Ok(JitScalarValue::I32(17))
+        );
+    }
+
+    #[test]
+    fn rejected_default_migration_restores_old_code_and_live_state() {
+        let active = initialized_game();
+        let candidate = candidate_game(&active, 23);
+        let preview = plan_state_migration(
+            &active.state_layout(),
+            &candidate.state_layout(),
+            Vec::new(),
+            false,
+            None,
+        )
+        .expect("plan added field migration");
+        stasis_dynload::stasis_jit_global_i32_store(
+            crate::backend::emit::hash_global_path("game.bonus"),
+            5,
+        );
+
+        let accepted = activate_candidate_transactionally(
+            Some(&active),
+            &candidate,
+            &preview,
+            true,
+            || -> Result<(), String> {
+                let incoming_default =
+                    candidate.read_global_scalar("game.bonus") == Ok(JitScalarValue::I32(23));
+                if !incoming_default {
+                    return Err("migration did not apply the incoming default".to_string());
+                }
+                candidate.write_global_scalar("game.score", JitScalarValue::I32(99))?;
+                Err("simulated commit hook failure".to_string())
+            },
+            |result| result.is_ok(),
+        )
+        .expect("rejected migration rolls back cleanly");
+
+        assert_eq!(accepted, Err("simulated commit hook failure".to_string()));
+        assert_eq!(
+            active.read_global_scalar("game.score"),
+            Ok(JitScalarValue::I32(42))
+        );
+        assert_eq!(
+            active.execute_i32_noarg_by_name("main"),
+            Ok(42),
+            "candidate code remained active after its migration was rejected"
+        );
+    }
+
+    #[test]
+    fn rejected_collection_default_migration_restores_old_lane_and_candidate_snapshot() {
+        fn actor_source(capacity: usize, hp_default: i32, rank_default: Option<i32>) -> String {
+            let rank = rank_default
+                .map(|value| format!("rank: i32 = {value}; "))
+                .unwrap_or_default();
+            format!(
+                "struct Actor {{ hp: i32 = {hp_default}; {rank}}}\nglobal actors: Actor[{capacity}];\nfunction main(): i32 {{ return actors[0].hp; }}\n"
+            )
+        }
+
+        let mut active = JitProcess::new();
+        active.upsert_file("actors.stasis", actor_source(2, 4, None));
+        active
+            .compile()
+            .expect("compile active collection generation");
+        active
+            .write_global_collection_scalar("actors", "hp", 0, JitScalarValue::I32(91))
+            .expect("seed active first row");
+        active
+            .write_global_collection_scalar("actors", "hp", 1, JitScalarValue::I32(92))
+            .expect("seed active second row");
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file("actors.stasis", actor_source(3, 12, Some(31)));
+        candidate
+            .compile_staged()
+            .expect("compile candidate with a defaulted lane and added row");
+        let preview = plan_state_migration(
+            &active.state_layout(),
+            &candidate.state_layout(),
+            Vec::new(),
+            false,
+            None,
+        )
+        .expect("plan collection default migration");
+
+        assert!(preview.migration_steps.iter().any(|step| {
+            step.kind == StateMigrationStepKind::Initialize
+                && step.path == "actors"
+                && step.field.as_deref() == Some("hp")
+                && step.start_index == 2
+                && step.elements == 1
+        }));
+        assert!(preview.migration_steps.iter().any(|step| {
+            step.kind == StateMigrationStepKind::Initialize
+                && step.path == "actors"
+                && step.field.as_deref() == Some("rank")
+                && step.start_index == 0
+                && step.elements == 3
+        }));
+
+        let failure = "simulated collection commit failure".to_string();
+        let result = activate_candidate_transactionally(
+            Some(&active),
+            &candidate,
+            &preview,
+            true,
+            || -> Result<(), String> {
+                assert_eq!(
+                    candidate.read_global_collection_scalar("actors", "hp", 0),
+                    Ok(JitScalarValue::I32(91))
+                );
+                assert_eq!(
+                    candidate.read_global_collection_scalar("actors", "hp", 1),
+                    Ok(JitScalarValue::I32(92))
+                );
+                assert_eq!(
+                    candidate.read_global_collection_scalar("actors", "hp", 2),
+                    Ok(JitScalarValue::I32(12)),
+                    "the new hp row uses the incoming default"
+                );
+                for index in 0..3 {
+                    assert_eq!(
+                        candidate.read_global_collection_scalar("actors", "rank", index),
+                        Ok(JitScalarValue::I32(31)),
+                        "new lane row {index} uses the incoming default"
+                    );
+                }
+                candidate.write_global_collection_scalar(
+                    "actors",
+                    "rank",
+                    0,
+                    JitScalarValue::I32(99),
+                )?;
+                Err(failure.clone())
+            },
+            |result| result.is_ok(),
+        )
+        .expect("rollback restores active state and candidate-only lane");
+
+        assert_eq!(result, Err(failure));
+        assert_eq!(
+            active.execute_i32_noarg_by_name("main"),
+            Ok(91),
+            "candidate code remains inactive after rollback"
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("actors", "hp", 0),
+            Ok(JitScalarValue::I32(91))
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("actors", "hp", 1),
+            Ok(JitScalarValue::I32(92))
+        );
+        assert_eq!(
+            candidate.read_global_collection_scalar("actors", "rank", 0),
+            Ok(JitScalarValue::I32(0)),
+            "rollback restores the candidate-only lane to its pre-activation value"
+        );
+    }
+
+    #[test]
+    fn runtime_snapshot_restore_routes_active_enum_and_candidate_only_lanes() {
+        fn source(keep_phase: bool, include_rank: bool) -> String {
+            let phase_field = if keep_phase { "phase: Phase; " } else { "" };
+            let rank_field = if include_rank { "rank: i32; " } else { "" };
+            format!(
+                "enum Phase {{ Setup, Playing, }}\nstruct Actor {{ {phase_field}hp: i32; {rank_field}}}\nglobal actors: Actor[1];\nfunction main(): i32 {{ return actors[0].hp; }}\n"
+            )
+        }
+
+        let mut active = JitProcess::new();
+        active.upsert_file("actors.stasis", source(true, false));
+        active.compile().expect("compile active enum lane");
+        active
+            .write_global_collection_scalar("actors", "phase", 0, JitScalarValue::I32(1))
+            .expect("seed enum lane");
+        active
+            .write_global_collection_scalar("actors", "hp", 0, JitScalarValue::I32(17))
+            .expect("seed retained lane");
+        assert_eq!(
+            active.global_collection_field_type("actors", "phase"),
+            None,
+            "public builtin type reporting does not name enum lanes"
+        );
+        assert!(active.has_global_collection_field("actors", "phase"));
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file("actors.stasis", source(false, true));
+        candidate
+            .compile_staged()
+            .expect("compile candidate without the enum lane and with a new lane");
+        let preview = plan_state_migration(
+            &active.state_layout(),
+            &candidate.state_layout(),
+            Vec::new(),
+            false,
+            None,
+        )
+        .expect("plan removal of the enum lane");
+        assert!(!preview.state_layout_compatible);
+        assert!(preview
+            .rejection
+            .as_deref()
+            .is_some_and(|message| message.contains("non-migratable")));
+        assert!(!candidate.has_global_collection_field("actors", "phase"));
+        assert!(candidate.has_global_collection_field("actors", "rank"));
+
+        // This exercises the runtime snapshot/restore primitive directly. The
+        // planner correctly rejects migration of the enum-bearing collection;
+        // this does not assert that such a migration can be activated.
+        let snapshot = capture_runtime_state(&active, &candidate, MAX_STATE_SNAPSHOT_BYTES)
+            .expect("capture active and candidate collection lanes");
+        active
+            .write_global_collection_scalar("actors", "phase", 0, JitScalarValue::I32(7))
+            .expect("mutate active enum lane");
+        active
+            .write_global_collection_scalar("actors", "hp", 0, JitScalarValue::I32(99))
+            .expect("mutate active shared lane");
+        candidate
+            .write_global_collection_scalar("actors", "rank", 0, JitScalarValue::I32(88))
+            .expect("mutate candidate-only lane");
+
+        restore_runtime_state(&active, &candidate, &snapshot)
+            .expect("restore enum and candidate-only collection lanes");
+
+        assert_eq!(
+            active.read_global_collection_scalar("actors", "phase", 0),
+            Ok(JitScalarValue::I32(1)),
+            "the removed named lane is restored into the active generation"
+        );
+        assert_eq!(
+            active.read_global_collection_scalar("actors", "hp", 0),
+            Ok(JitScalarValue::I32(17))
+        );
+        assert_eq!(
+            candidate.read_global_collection_scalar("actors", "rank", 0),
+            Ok(JitScalarValue::I32(0)),
+            "the candidate-only lane is restored into the candidate generation"
         );
     }
 

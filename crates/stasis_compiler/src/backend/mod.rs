@@ -16,6 +16,7 @@ pub mod patch_plan;
 pub mod program_snapshot;
 pub(crate) mod reachability;
 mod runtime_exports;
+pub(crate) mod state_initialization;
 pub mod state_layout;
 #[cfg(feature = "native")]
 pub mod state_migration;

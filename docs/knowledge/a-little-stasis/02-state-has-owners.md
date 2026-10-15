@@ -6,10 +6,12 @@ Give each kind of state its own record. Live rules and pending requests may cont
 
 ```stasis
 struct TowerRules {
-    damage: i32;
-    range_end: i32;
-    cooldown_ticks: i32;
+    damage: i32 = 4;
+    range_end: i32 = 6;
+    cooldown_ticks: i32 = 3;
 }
+
+global tower_rules: TowerRules;
 
 struct TowerRuleInput {
     damage: i32;
@@ -40,6 +42,11 @@ struct SimulationState {
 ```
 
 Queueing an input must not silently update live rules. This small test stops before application so that ownership, not the fixture values, is the assertion.
+
+The defaults on `TowerRules` initialize its newly created global storage.
+`TowerRuleInput` still carries values chosen by the caller. A local binding to
+an existing `TowerRules` value is a view, so it observes the owner's state and
+does not create a second copy or reapply defaults.
 
 ```stasis
 test `queued input does not mutate live rules`(): bool {

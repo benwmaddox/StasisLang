@@ -3339,6 +3339,12 @@ impl Expansion {
                         push_declaration(&field.name)?;
                         push_declaration(": ")?;
                         push_declaration(&field_type)?;
+                        if let Some(initializer) = &field.initializer {
+                            let expression =
+                                rewrite_generic_identifiers(&initializer.expression, &environment);
+                            push_declaration(" = ")?;
+                            push_declaration(&expression)?;
+                        }
                         push_declaration(";\n")?;
                     }
                     push_declaration("}\n")?;
@@ -5803,6 +5809,10 @@ impl<'a> ConstantParser<'a> {
                     .ok_or_else(|| "compile-time negation overflowed i32".to_string())
             }
             ConstantToken::Unary(ExprUnaryOp::BitwiseNot) => Ok(!self.parse_prefix()?),
+            ConstantToken::Unary(ExprUnaryOp::Negate) => self
+                .parse_prefix()?
+                .checked_neg()
+                .ok_or_else(|| "compile-time negation overflowed i32".to_string()),
             ConstantToken::Open => {
                 let value = self.parse_expression(0)?;
                 match self.tokens.get(self.cursor) {
@@ -6749,6 +6759,20 @@ mod tests {
                 .expect("generic JIT program executes"),
             4
         );
+    }
+
+    #[test]
+    fn specializes_generic_field_default_expressions() {
+        let mut compiler = crate::compiler::Compiler::new();
+        compiler.upsert_file(
+            "main.stasis",
+            "struct Settings<N: i32> { score: i32 = N + 2; }\nglobal app: Settings<7>;\nfunction main(): i32 { return app.score; }\n",
+        );
+        compiler.check().expect("generic default specializes");
+
+        let generated = &compiler.files()[0].content;
+        assert!(generated.contains("score: i32 = 7 + 2;"), "{generated}");
+        assert!(!generated.contains("score: i32 = N + 2;"), "{generated}");
     }
 
     #[test]

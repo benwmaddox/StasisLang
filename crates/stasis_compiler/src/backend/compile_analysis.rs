@@ -6,16 +6,19 @@ use crate::backend::hash::hash_string_literal;
 use crate::backend::runtime_exports::is_aot_runtime_export_symbol;
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::frontend::body_parser::*;
+use crate::frontend::constant_evaluation::ScalarConstantEvaluator;
+use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::parser::{
     parse_top_level_extern_functions, parse_top_level_type_layout, ParsedExternFunctionDeclaration,
-    ParsedField,
+    ParsedField, ParsedGlobalBlockDefinition, ParsedStructDefinition,
 };
 use crate::frontend::types::{
-    TypeCategory, TypeId, TypeTable, TypedCollectionDescriptor, TYPE_ID_BOOL, TYPE_ID_F32,
-    TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
+    SourceTypeOrigin, TypeCategory, TypeId, TypeTable, TypedCollectionDescriptor, TYPE_ID_BOOL,
+    TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
 use crate::ir::hir::{ExternCallIdentity, FunctionHIR, SimpleCondition, SimpleExpr, SimpleStmt};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Range;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CallSignature {
@@ -93,6 +96,7 @@ pub(crate) struct CompileAnalysisCache {
     pub(crate) typed_collection_descriptors: TypedCollectionInfoMap,
     pub(crate) named_struct_field_types: NamedStructFieldTypeMap,
     pub(crate) extern_symbol_addresses: ExternSymbolAddressMap,
+    pub(crate) initialization_plan: crate::backend::state_initialization::StateInitializationPlan,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -316,6 +320,7 @@ pub(crate) fn resolve_preferred_extern_call_signatures(
 
 pub(crate) fn build_compile_analysis_cache(
     files: &[SourceFile],
+    module_graph: &ModuleGraph,
     functions: &[FunctionMeta],
     type_table: &mut TypeTable,
     files_fingerprint: u64,
@@ -331,6 +336,7 @@ pub(crate) fn build_compile_analysis_cache(
         extern_resolver(&extern_signatures)?;
     build_compile_analysis_cache_from_resolved_externs(
         files,
+        module_graph,
         functions,
         type_table,
         files_fingerprint,
@@ -341,6 +347,7 @@ pub(crate) fn build_compile_analysis_cache(
 
 pub(crate) fn build_compile_analysis_cache_from_resolved_externs(
     files: &[SourceFile],
+    module_graph: &ModuleGraph,
     functions: &[FunctionMeta],
     type_table: &mut TypeTable,
     files_fingerprint: u64,
@@ -359,6 +366,18 @@ pub(crate) fn build_compile_analysis_cache_from_resolved_externs(
     let collection_infos = collect_foreach_collection_infos(files, type_table, &constant_values)?;
     let named_struct_field_types =
         collect_named_struct_field_types(files, type_table, &constant_values)?;
+    let initialization_catalog =
+        collect_scalar_field_initializers(files, module_graph, type_table, &constant_values)
+            .map_err(|error| format!("{}: {}", error.path, error.message))?;
+    let initialization_plan = build_state_initialization_plan(
+        files,
+        &initialization_catalog,
+        module_graph,
+        type_table,
+        &global_path_types,
+        &collection_infos,
+    )
+    .map_err(|error| format!("{}: {}", error.path, error.message))?;
     Ok(CompileAnalysisCache {
         files_fingerprint,
         call_signatures,
@@ -369,7 +388,877 @@ pub(crate) fn build_compile_analysis_cache_from_resolved_externs(
         typed_collection_descriptors,
         named_struct_field_types,
         extern_symbol_addresses,
+        initialization_plan,
     })
+}
+
+pub(crate) fn validate_state_field_defaults(
+    files: &[SourceFile],
+    module_graph: &ModuleGraph,
+    type_table: &mut TypeTable,
+) -> Result<(), crate::backend::state_initialization::StateInitializationError> {
+    let constants = collect_top_level_constant_values(files, type_table).map_err(|message| {
+        crate::backend::state_initialization::StateInitializationError {
+            path: files
+                .first()
+                .map_or_else(String::new, |file| file.path.clone()),
+            range: 0..0,
+            symbol: String::new(),
+            message,
+        }
+    })?;
+    let catalog = collect_scalar_field_initializers(files, module_graph, type_table, &constants)?;
+    if !catalog.has_explicit_defaults() {
+        return Ok(());
+    }
+
+    let global_path_types =
+        collect_global_path_types(files, type_table, &constants).map_err(|message| {
+            crate::backend::state_initialization::StateInitializationError {
+                path: files
+                    .first()
+                    .map_or_else(String::new, |file| file.path.clone()),
+                range: 0..0,
+                symbol: String::new(),
+                message,
+            }
+        })?;
+    let collection_infos = collect_foreach_collection_infos(files, type_table, &constants)
+        .map_err(
+            |message| crate::backend::state_initialization::StateInitializationError {
+                path: files
+                    .first()
+                    .map_or_else(String::new, |file| file.path.clone()),
+                range: 0..0,
+                symbol: String::new(),
+                message,
+            },
+        )?;
+    build_state_initialization_plan(
+        files,
+        &catalog,
+        module_graph,
+        type_table,
+        &global_path_types,
+        &collection_infos,
+    )
+    .map(|_| ())
+}
+
+#[derive(Debug, Clone)]
+struct StateStructDefinition {
+    path: String,
+    source_origin: SourceTypeOrigin,
+    definition: ParsedStructDefinition,
+}
+
+#[derive(Debug, Clone)]
+struct StateGlobalRoot {
+    source_path: String,
+    name: String,
+    type_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct StateGlobalBlockRoot {
+    source_path: String,
+    definition: ParsedGlobalBlockDefinition,
+}
+
+#[derive(Debug, Clone)]
+enum InitializerOwner {
+    Struct {
+        definition_path: String,
+        concrete_name: String,
+        source_origin: SourceTypeOrigin,
+    },
+    GlobalBlock {
+        block_name: String,
+        source_path: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct PendingStateDefault {
+    owner: InitializerOwner,
+    field: ParsedField,
+    expected_type: TypeId,
+    scope_path: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StateInitializationCatalog {
+    structs: BTreeMap<(String, String), StateStructDefinition>,
+    globals: Vec<StateGlobalRoot>,
+    global_blocks: Vec<StateGlobalBlockRoot>,
+    struct_defaults: BTreeMap<
+        (String, String, String),
+        crate::backend::state_initialization::TypedScalarDefault,
+    >,
+    global_block_defaults: BTreeMap<
+        (String, String, String),
+        crate::backend::state_initialization::TypedScalarDefault,
+    >,
+}
+
+impl StateInitializationCatalog {
+    fn has_explicit_defaults(&self) -> bool {
+        !self.struct_defaults.is_empty() || !self.global_block_defaults.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CollectionLaneContext {
+    collection_path: String,
+    lane_prefix: String,
+}
+
+/// Validate and evaluate every explicit concrete scalar field default once.
+/// The evaluator is constructed only when the parsed source actually contains
+/// a field initializer, and is shared by all defaults in this analysis pass.
+fn collect_scalar_field_initializers(
+    files: &[SourceFile],
+    module_graph: &ModuleGraph,
+    type_table: &mut TypeTable,
+    constant_values: &ConstantValueMap,
+) -> Result<
+    StateInitializationCatalog,
+    crate::backend::state_initialization::StateInitializationError,
+> {
+    use crate::backend::state_initialization::{
+        ScalarStorageKind, StableDeclaredTypeIdentity, StateInitializationError, TypedScalarDefault,
+    };
+
+    let mut catalog = StateInitializationCatalog::default();
+    let mut pending = Vec::new();
+
+    for file in files {
+        let layout = parse_top_level_type_layout(&file.content).map_err(|error| {
+            StateInitializationError {
+                path: file.path.clone(),
+                range: 0..0,
+                symbol: String::new(),
+                message: format!("failed parsing state declarations: {error}"),
+            }
+        })?;
+
+        for global in &layout.globals {
+            catalog.globals.push(StateGlobalRoot {
+                source_path: file.path.clone(),
+                name: global.name.clone(),
+                type_name: global.type_name.clone(),
+            });
+        }
+        for block in &layout.global_blocks {
+            catalog.global_blocks.push(StateGlobalBlockRoot {
+                source_path: file.path.clone(),
+                definition: block.clone(),
+            });
+        }
+
+        for structure in layout.structs {
+            let type_id = type_table
+                .resolve_or_intern(&structure.name)
+                .map_err(|message| StateInitializationError {
+                    path: file.path.clone(),
+                    range: 0..0,
+                    symbol: structure.name.clone(),
+                    message,
+                })?;
+            let origin = type_table
+                .source_type_origin(type_id)
+                .cloned()
+                .unwrap_or_else(|| SourceTypeOrigin {
+                    path: file.path.clone(),
+                    name: structure.name.clone(),
+                });
+            let key = (file.path.clone(), structure.name.clone());
+            catalog.structs.insert(
+                key,
+                StateStructDefinition {
+                    path: file.path.clone(),
+                    source_origin: origin.clone(),
+                    definition: structure.clone(),
+                },
+            );
+
+            // Generic templates can contain unbound type and value parameters.
+            // Their generated concrete declarations are present in `content`
+            // and are evaluated below after substitution.
+            if !structure.generic_parameters.is_empty() {
+                continue;
+            }
+            for field in &structure.fields {
+                let Some(initializer) = &field.initializer else {
+                    continue;
+                };
+                let expected_type =
+                    resolve_global_path_type_id(&field.type_name, type_table, constant_values)
+                        .map_err(|message| {
+                            state_field_error(
+                                files,
+                                &InitializerOwner::Struct {
+                                    definition_path: file.path.clone(),
+                                    concrete_name: structure.name.clone(),
+                                    source_origin: origin.clone(),
+                                },
+                                field,
+                                &initializer.expression_range,
+                                message,
+                            )
+                        })?;
+                pending.push(PendingStateDefault {
+                    owner: InitializerOwner::Struct {
+                        definition_path: file.path.clone(),
+                        concrete_name: structure.name.clone(),
+                        source_origin: origin.clone(),
+                    },
+                    field: field.clone(),
+                    expected_type,
+                    scope_path: origin.path.clone(),
+                });
+            }
+        }
+
+        for block in layout.global_blocks {
+            for field in &block.fields {
+                let Some(initializer) = &field.initializer else {
+                    continue;
+                };
+                let expected_type =
+                    resolve_global_path_type_id(&field.type_name, type_table, constant_values)
+                        .map_err(|message| {
+                            state_field_error(
+                                files,
+                                &InitializerOwner::GlobalBlock {
+                                    block_name: block.name.clone(),
+                                    source_path: file.path.clone(),
+                                },
+                                field,
+                                &initializer.expression_range,
+                                message,
+                            )
+                        })?;
+                pending.push(PendingStateDefault {
+                    owner: InitializerOwner::GlobalBlock {
+                        block_name: block.name.clone(),
+                        source_path: file.path.clone(),
+                    },
+                    field: field.clone(),
+                    expected_type,
+                    scope_path: file.path.clone(),
+                });
+            }
+        }
+    }
+
+    if pending.is_empty() {
+        return Ok(StateInitializationCatalog::default());
+    }
+
+    let mut evaluator =
+        ScalarConstantEvaluator::new(files, module_graph, type_table).map_err(|message| {
+            StateInitializationError {
+                path: files
+                    .first()
+                    .map_or_else(String::new, |file| file.path.clone()),
+                range: 0..0,
+                symbol: String::new(),
+                message,
+            }
+        })?;
+
+    for item in pending {
+        let initializer = item
+            .field
+            .initializer
+            .as_ref()
+            .expect("pending state defaults always have an initializer");
+        let evaluated = evaluator
+            .evaluate(
+                &item.scope_path,
+                &initializer.expression,
+                item.expected_type,
+            )
+            .map_err(|message| {
+                state_field_error(
+                    files,
+                    &item.owner,
+                    &item.field,
+                    &initializer.expression_range,
+                    message,
+                )
+            })?;
+        let type_info = type_table.type_info(item.expected_type).ok_or_else(|| {
+            state_field_error(
+                files,
+                &item.owner,
+                &item.field,
+                &initializer.expression_range,
+                format!("unknown field type {}", item.expected_type),
+            )
+        })?;
+        let storage_kind = match item.expected_type {
+            TYPE_ID_BOOL => ScalarStorageKind::Bool,
+            TYPE_ID_I32 => ScalarStorageKind::I32,
+            TYPE_ID_U8 => ScalarStorageKind::U8,
+            TYPE_ID_U16 => ScalarStorageKind::U16,
+            TYPE_ID_U32 => ScalarStorageKind::U32,
+            TYPE_ID_F32 => ScalarStorageKind::F32,
+            TYPE_ID_F64 => ScalarStorageKind::F64,
+            _ if type_info.category == TypeCategory::Named
+                && evaluated.nominal_origin.is_some() =>
+            {
+                ScalarStorageKind::I32
+            }
+            _ => {
+                return Err(state_field_error(
+                    files,
+                    &item.owner,
+                    &item.field,
+                    &initializer.expression_range,
+                    format!(
+                        "field default type '{}' has no scalar storage representation",
+                        type_info.name
+                    ),
+                ));
+            }
+        };
+        let typed_default = TypedScalarDefault {
+            declared_type: StableDeclaredTypeIdentity {
+                canonical_name: type_info.name.clone(),
+                origin: evaluated
+                    .nominal_origin
+                    .clone()
+                    .or_else(|| type_table.source_type_origin(item.expected_type).cloned()),
+            },
+            storage_kind,
+            bits: evaluated.bits,
+        };
+        match item.owner {
+            InitializerOwner::Struct {
+                definition_path,
+                concrete_name,
+                ..
+            } => {
+                catalog.struct_defaults.insert(
+                    (definition_path, concrete_name, item.field.name),
+                    typed_default,
+                );
+            }
+            InitializerOwner::GlobalBlock {
+                block_name,
+                source_path,
+            } => {
+                catalog
+                    .global_block_defaults
+                    .insert((source_path, block_name, item.field.name), typed_default);
+            }
+        }
+    }
+
+    Ok(catalog)
+}
+
+fn build_state_initialization_plan(
+    files: &[SourceFile],
+    catalog: &StateInitializationCatalog,
+    module_graph: &ModuleGraph,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    collection_infos: &CollectionInfoMap,
+) -> Result<
+    crate::backend::state_initialization::StateInitializationPlan,
+    crate::backend::state_initialization::StateInitializationError,
+> {
+    let mut plan = crate::backend::state_initialization::StateInitializationPlan::default();
+    for global in &catalog.globals {
+        visit_state_type(
+            files,
+            catalog,
+            module_graph,
+            type_table,
+            global_path_types,
+            collection_infos,
+            &global.source_path,
+            &global.type_name,
+            &global.name,
+            None,
+            &mut BTreeSet::new(),
+            &mut plan,
+        )?;
+    }
+    for block in &catalog.global_blocks {
+        for field in &block.definition.fields {
+            let state_path = format!("{}.{}", block.definition.name, field.name);
+            let key = (
+                block.source_path.clone(),
+                block.definition.name.clone(),
+                field.name.clone(),
+            );
+            if let Some(value) = catalog.global_block_defaults.get(&key) {
+                if !global_path_types.contains_key(&state_path) {
+                    return Err(state_field_error(
+                        files,
+                        &InitializerOwner::GlobalBlock {
+                            block_name: block.definition.name.clone(),
+                            source_path: block.source_path.clone(),
+                        },
+                        field,
+                        &field
+                            .initializer
+                            .as_ref()
+                            .map(|initializer| initializer.expression_range.clone())
+                            .unwrap_or(0..0),
+                        format!(
+                            "defaulted state path '{state_path}' has no allocated scalar storage"
+                        ),
+                    ));
+                }
+                insert_scalar_default(&mut plan.scalar_defaults, state_path.clone(), value.clone())
+                    .map_err(|message| state_plan_error(&block.source_path, message))?;
+            }
+            visit_state_type(
+                files,
+                catalog,
+                module_graph,
+                type_table,
+                global_path_types,
+                collection_infos,
+                &block.source_path,
+                &field.type_name,
+                &state_path,
+                None,
+                &mut BTreeSet::new(),
+                &mut plan,
+            )?;
+        }
+    }
+    Ok(plan)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_state_type(
+    files: &[SourceFile],
+    catalog: &StateInitializationCatalog,
+    module_graph: &ModuleGraph,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    collection_infos: &CollectionInfoMap,
+    scope_path: &str,
+    type_name: &str,
+    state_path: &str,
+    collection_lane: Option<CollectionLaneContext>,
+    visiting: &mut BTreeSet<(String, String)>,
+    plan: &mut crate::backend::state_initialization::StateInitializationPlan,
+) -> Result<(), crate::backend::state_initialization::StateInitializationError> {
+    if let Some((element_type, _)) = parse_array_type_parts(type_name.trim()) {
+        if collection_infos.contains_key(state_path) {
+            return visit_state_type(
+                files,
+                catalog,
+                module_graph,
+                type_table,
+                global_path_types,
+                collection_infos,
+                scope_path,
+                element_type.trim(),
+                state_path,
+                Some(CollectionLaneContext {
+                    collection_path: state_path.to_string(),
+                    lane_prefix: String::new(),
+                }),
+                visiting,
+                plan,
+            );
+        }
+        return Ok(());
+    }
+    let Some(structure) = find_state_struct(catalog, module_graph, scope_path, type_name) else {
+        return Ok(());
+    };
+    let visiting_key = (structure.path.clone(), structure.definition.name.clone());
+    if !visiting.insert(visiting_key.clone()) {
+        return Err(state_plan_error(
+            &structure.path,
+            format!(
+                "recursive struct defaults are unsupported for '{}'",
+                structure.definition.name
+            ),
+        ));
+    }
+    let definition_scope_path = structure.path.clone();
+    for field in &structure.definition.fields {
+        let child_path = format!("{state_path}.{}", field.name);
+        let default_key = (
+            structure.path.clone(),
+            structure.definition.name.clone(),
+            field.name.clone(),
+        );
+        if let Some(value) = catalog.struct_defaults.get(&default_key) {
+            let owner = InitializerOwner::Struct {
+                definition_path: structure.path.clone(),
+                concrete_name: structure.definition.name.clone(),
+                source_origin: structure.source_origin.clone(),
+            };
+            let initializer_range = field
+                .initializer
+                .as_ref()
+                .map(|initializer| initializer.expression_range.clone())
+                .unwrap_or(0..0);
+            if let Some(lanes) = &collection_lane {
+                let lane_path = if lanes.lane_prefix.is_empty() {
+                    field.name.clone()
+                } else {
+                    format!("{}.{}", lanes.lane_prefix, field.name)
+                };
+                let collection = collection_infos
+                    .get(&lanes.collection_path)
+                    .ok_or_else(|| {
+                        state_plan_error(
+                            &structure.path,
+                            format!(
+                                "missing collection metadata for '{}'",
+                                lanes.collection_path
+                            ),
+                        )
+                    })?;
+                if collection.field_types.contains_key(&lane_path) {
+                    insert_lane_default(
+                        &mut plan.collection_lane_defaults,
+                        (lanes.collection_path.clone(), lane_path),
+                        value.clone(),
+                    )
+                    .map_err(|message| state_plan_error(&structure.path, message))?;
+                } else {
+                    return Err(state_field_error(
+                        files,
+                        &owner,
+                        field,
+                        &initializer_range,
+                        format!(
+                            "defaulted state path '{child_path}' has no stored lane '{lane_path}' in owning collection '{}'",
+                            lanes.collection_path
+                        ),
+                    ));
+                }
+            } else if global_path_types.contains_key(&child_path) {
+                insert_scalar_default(&mut plan.scalar_defaults, child_path.clone(), value.clone())
+                    .map_err(|message| state_plan_error(&structure.path, message))?;
+            } else {
+                return Err(state_field_error(
+                    files,
+                    &owner,
+                    field,
+                    &initializer_range,
+                    format!("defaulted state path '{child_path}' has no allocated scalar storage"),
+                ));
+            }
+        }
+
+        if let Some((element_type, _)) = parse_array_type_parts(field.type_name.trim()) {
+            if collection_infos.contains_key(&child_path) {
+                let nested_lane = collection_lane
+                    .as_ref()
+                    .filter(|_| {
+                        is_nested_fixed_array_collection_path(
+                            &child_path,
+                            collection_infos,
+                            type_table,
+                        )
+                    })
+                    .map(|lanes| CollectionLaneContext {
+                        collection_path: lanes.collection_path.clone(),
+                        lane_prefix: if lanes.lane_prefix.is_empty() {
+                            field.name.clone()
+                        } else {
+                            format!("{}.{}", lanes.lane_prefix, field.name)
+                        },
+                    });
+                visit_state_type(
+                    files,
+                    catalog,
+                    module_graph,
+                    type_table,
+                    global_path_types,
+                    collection_infos,
+                    &definition_scope_path,
+                    element_type.trim(),
+                    &child_path,
+                    nested_lane.or_else(|| {
+                        Some(CollectionLaneContext {
+                            collection_path: child_path.clone(),
+                            lane_prefix: String::new(),
+                        })
+                    }),
+                    visiting,
+                    plan,
+                )?;
+            } else if let Some(parent_lanes) = &collection_lane {
+                let element_type = element_type.trim();
+                if find_state_struct(catalog, module_graph, &definition_scope_path, element_type)
+                    .is_some()
+                    && state_type_has_explicit_default(
+                        catalog,
+                        module_graph,
+                        &definition_scope_path,
+                        element_type,
+                        &mut BTreeSet::new(),
+                    )
+                {
+                    let lane_prefix = if parent_lanes.lane_prefix.is_empty() {
+                        field.name.clone()
+                    } else {
+                        format!("{}.{}", parent_lanes.lane_prefix, field.name)
+                    };
+                    visit_state_type(
+                        files,
+                        catalog,
+                        module_graph,
+                        type_table,
+                        global_path_types,
+                        collection_infos,
+                        &definition_scope_path,
+                        element_type,
+                        &child_path,
+                        Some(CollectionLaneContext {
+                            collection_path: parent_lanes.collection_path.clone(),
+                            lane_prefix,
+                        }),
+                        visiting,
+                        plan,
+                    )?;
+                }
+            }
+        } else if find_state_struct(
+            catalog,
+            module_graph,
+            &definition_scope_path,
+            &field.type_name,
+        )
+        .is_some()
+        {
+            let nested_lane = collection_lane.as_ref().map(|lanes| CollectionLaneContext {
+                collection_path: lanes.collection_path.clone(),
+                lane_prefix: if lanes.lane_prefix.is_empty() {
+                    field.name.clone()
+                } else {
+                    format!("{}.{}", lanes.lane_prefix, field.name)
+                },
+            });
+            visit_state_type(
+                files,
+                catalog,
+                module_graph,
+                type_table,
+                global_path_types,
+                collection_infos,
+                &definition_scope_path,
+                &field.type_name,
+                &child_path,
+                nested_lane,
+                visiting,
+                plan,
+            )?;
+        }
+    }
+    visiting.remove(&visiting_key);
+    Ok(())
+}
+
+fn state_type_has_explicit_default(
+    catalog: &StateInitializationCatalog,
+    module_graph: &ModuleGraph,
+    scope_path: &str,
+    type_name: &str,
+    visiting: &mut BTreeSet<(String, String)>,
+) -> bool {
+    if let Some((element_type, _)) = parse_array_type_parts(type_name.trim()) {
+        return state_type_has_explicit_default(
+            catalog,
+            module_graph,
+            scope_path,
+            element_type.trim(),
+            visiting,
+        );
+    }
+    let Some(structure) = find_state_struct(catalog, module_graph, scope_path, type_name) else {
+        return false;
+    };
+    let key = (structure.path.clone(), structure.definition.name.clone());
+    if !visiting.insert(key.clone()) {
+        return false;
+    }
+    let has_default = structure.definition.fields.iter().any(|field| {
+        catalog.struct_defaults.contains_key(&(
+            structure.path.clone(),
+            structure.definition.name.clone(),
+            field.name.clone(),
+        )) || state_type_has_explicit_default(
+            catalog,
+            module_graph,
+            &structure.path,
+            &field.type_name,
+            visiting,
+        )
+    });
+    visiting.remove(&key);
+    has_default
+}
+
+fn state_plan_error(
+    path: &str,
+    message: String,
+) -> crate::backend::state_initialization::StateInitializationError {
+    crate::backend::state_initialization::StateInitializationError {
+        path: path.to_string(),
+        range: 0..0,
+        symbol: String::new(),
+        message,
+    }
+}
+
+fn find_state_struct<'a>(
+    catalog: &'a StateInitializationCatalog,
+    module_graph: &ModuleGraph,
+    scope_path: &str,
+    type_name: &str,
+) -> Option<&'a StateStructDefinition> {
+    let type_name = type_name.trim();
+    let type_name = parse_array_type_parts(type_name)
+        .map_or(type_name, |(element_type, _)| element_type.trim());
+    if let Some((qualifier, name)) = type_name.rsplit_once('.') {
+        if let Some(target) = module_graph.imported_alias_target(scope_path, qualifier) {
+            return catalog.structs.get(&(target.to_string(), name.to_string()));
+        }
+    }
+    if let Some(local) = catalog
+        .structs
+        .get(&(scope_path.to_string(), type_name.to_string()))
+    {
+        return Some(local);
+    }
+    let candidates = module_graph
+        .dependency_closure(scope_path)
+        .into_iter()
+        .filter_map(|path| catalog.structs.get(&(path, type_name.to_string())))
+        .collect::<Vec<_>>();
+    (candidates.len() == 1).then(|| candidates[0])
+}
+
+fn insert_scalar_default(
+    defaults: &mut BTreeMap<String, crate::backend::state_initialization::TypedScalarDefault>,
+    path: String,
+    value: crate::backend::state_initialization::TypedScalarDefault,
+) -> Result<(), String> {
+    if let Some(previous) = defaults.get(&path) {
+        if previous != &value {
+            return Err(format!("conflicting scalar field defaults for '{path}'"));
+        }
+    } else {
+        defaults.insert(path, value);
+    }
+    Ok(())
+}
+
+fn insert_lane_default(
+    defaults: &mut BTreeMap<
+        (String, String),
+        crate::backend::state_initialization::TypedScalarDefault,
+    >,
+    path: (String, String),
+    value: crate::backend::state_initialization::TypedScalarDefault,
+) -> Result<(), String> {
+    if let Some(previous) = defaults.get(&path) {
+        if previous != &value {
+            return Err(format!(
+                "conflicting collection lane defaults for '{}.{}'",
+                path.0, path.1
+            ));
+        }
+    } else {
+        defaults.insert(path, value);
+    }
+    Ok(())
+}
+
+/// Reuse the source declarations as the diagnostic authority. Specialized
+/// generic fields can move in expanded source, so their ranges are recovered
+/// from the original template declaration by stable source origin.
+fn state_default_source_range(
+    files: &[SourceFile],
+    source_path: &str,
+    owner_name: &str,
+    field_name: &str,
+    is_global_block: bool,
+    fallback: &Range<usize>,
+) -> Range<usize> {
+    let Some(file) = files.iter().find(|file| file.path == source_path) else {
+        return fallback.clone();
+    };
+    let source = if file.original_content.is_empty() {
+        &file.content
+    } else {
+        &file.original_content
+    };
+    let Ok(layout) = parse_top_level_type_layout(source) else {
+        return fallback.clone();
+    };
+    let initializer = if is_global_block {
+        layout
+            .global_blocks
+            .iter()
+            .find(|block| block.name == owner_name)
+            .and_then(|block| block.fields.iter().find(|field| field.name == field_name))
+    } else {
+        layout
+            .structs
+            .iter()
+            .find(|structure| structure.name == owner_name)
+            .and_then(|structure| {
+                structure
+                    .fields
+                    .iter()
+                    .find(|field| field.name == field_name)
+            })
+    };
+    initializer
+        .and_then(|field| field.initializer.as_ref())
+        .map(|initializer| initializer.expression_range.clone())
+        .unwrap_or_else(|| fallback.clone())
+}
+
+fn state_field_error(
+    files: &[SourceFile],
+    owner: &InitializerOwner,
+    field: &ParsedField,
+    fallback_range: &Range<usize>,
+    detail: String,
+) -> crate::backend::state_initialization::StateInitializationError {
+    let (source_path, owner_name, is_global_block) = match owner {
+        InitializerOwner::Struct { source_origin, .. } => (
+            source_origin.path.as_str(),
+            source_origin.name.as_str(),
+            false,
+        ),
+        InitializerOwner::GlobalBlock {
+            block_name,
+            source_path,
+        } => (source_path.as_str(), block_name.as_str(), true),
+    };
+    crate::backend::state_initialization::StateInitializationError {
+        path: source_path.to_string(),
+        range: state_default_source_range(
+            files,
+            source_path,
+            owner_name,
+            &field.name,
+            is_global_block,
+            fallback_range,
+        ),
+        symbol: field.name.clone(),
+        message: format!("field default for '{owner_name}.{}': {detail}", field.name),
+    }
 }
 
 fn validate_privileged_graphics_extern_provenance(
@@ -2259,6 +3148,7 @@ mod tests {
         let mut type_table = TypeTable::new();
         let cache = build_compile_analysis_cache_from_resolved_externs(
             &files,
+            &ModuleGraph::default(),
             &[],
             &mut type_table,
             1,
@@ -2334,6 +3224,7 @@ mod tests {
         let mut type_table = TypeTable::new();
         let error = build_compile_analysis_cache_from_resolved_externs(
             &files,
+            &ModuleGraph::default(),
             &[],
             &mut type_table,
             1,

@@ -1,4 +1,5 @@
 pub(crate) mod body_parser;
+pub(crate) mod constant_evaluation;
 pub mod formatter;
 pub(crate) mod generics;
 pub mod indexer;

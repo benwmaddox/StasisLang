@@ -1,0 +1,157 @@
+enum Mode {
+    Ready = 7,
+    Active = 9,
+}
+
+const ZERO_F32: f32 = 0.0;
+
+struct Tuning<N: i32> {
+    health: i32 = N;
+    rate_f32: f32 = 0.1;
+    rate_f64: f64 = 0.1;
+    negative_zero_f32: f32 = -ZERO_F32;
+    positive_zero_f32: f32 = 0.0 - ZERO_F32;
+    negative_zero_f64: f64 = -0.0;
+    minimum_i32: i32 = -2147483648;
+    enabled: bool = true;
+    length: i32 = 23;
+    max_length: i32 = 29;
+    byte: u8 = 17;
+    flags: u32 = 123456;
+    no_default: i32;
+}
+
+struct Actor {
+    tuning: Tuning<7>;
+    armor: u16 = 513;
+    length: i32 = 31;
+    max_length: i32 = 37;
+}
+
+struct World {
+    tuning: Tuning<11>;
+    mode: Mode = Mode.Active;
+}
+
+global world: World;
+global actors: Actor[2];
+
+function minimum_i32_runtime(): i32 {
+    return -2147483648;
+}
+
+function main(): i32 {
+    let expected_rate_f64: f64 = 0.1;
+    let negative_rate: f64 = -0.1;
+    if (negative_rate != 0.0 - expected_rate_f64) {
+        return 34;
+    }
+    if (world.tuning.health != 11) {
+        return 1;
+    }
+    if (world.tuning.rate_f32 != 0.1) {
+        return 2;
+    }
+    if (world.tuning.rate_f64 != expected_rate_f64) {
+        return 3;
+    }
+    if (!(1.0 / world.tuning.negative_zero_f32 < 0.0)) {
+        return 4;
+    }
+    if (!(1.0 / world.tuning.positive_zero_f32 > 0.0)) {
+        return 5;
+    }
+    if (!(1.0 / world.tuning.negative_zero_f64 < 0.0)) {
+        return 6;
+    }
+    if (world.tuning.minimum_i32 != -2147483648) {
+        return 7;
+    }
+    if (minimum_i32_runtime() != world.tuning.minimum_i32) {
+        return 8;
+    }
+    if (!world.tuning.enabled) {
+        return 9;
+    }
+    if (world.mode != Mode.Active) {
+        return 10;
+    }
+    if (world.tuning.length != 23 || world.tuning.max_length != 29) {
+        return 11;
+    }
+    if (world.tuning.byte != 17 || world.tuning.flags != 123456) {
+        return 12;
+    }
+    if (world.tuning.no_default != 0) {
+        return 13;
+    }
+
+    if (actors[0].tuning.health != 7) {
+        return 14;
+    }
+    if (actors[1].tuning.health != 7) {
+        return 15;
+    }
+    if (actors[0].tuning.rate_f32 != 0.1) {
+        return 16;
+    }
+    if (actors[1].tuning.rate_f64 != expected_rate_f64) {
+        return 17;
+    }
+    if (!(1.0 / actors[0].tuning.negative_zero_f32 < 0.0)) {
+        return 18;
+    }
+    if (!(1.0 / actors[1].tuning.positive_zero_f32 > 0.0)) {
+        return 19;
+    }
+    if (!(1.0 / actors[1].tuning.negative_zero_f64 < 0.0)) {
+        return 20;
+    }
+    if (actors[0].tuning.minimum_i32 != -2147483648) {
+        return 21;
+    }
+    if (actors[1].tuning.minimum_i32 != -2147483648) {
+        return 21;
+    }
+    if (!actors[0].tuning.enabled || !actors[1].tuning.enabled) {
+        return 22;
+    }
+    if (actors[0].tuning.length != 23 || actors[1].tuning.max_length != 29) {
+        return 24;
+    }
+    if (actors[0].tuning.byte != 17 || actors[1].tuning.flags != 123456) {
+        return 25;
+    }
+    if (actors[0].tuning.no_default != 0 || actors[1].tuning.no_default != 0) {
+        return 26;
+    }
+    if (actors[0].armor != 513 || actors[1].armor != 513) {
+        return 27;
+    }
+    if (actors[0].length != 31 || actors[1].max_length != 37) {
+        return 28;
+    }
+    if (actors.max_length != 2) {
+        return 29;
+    }
+
+    if (!(1.0 /(-world.tuning.positive_zero_f32) < 0.0)) {
+        return 31;
+    }
+    world.tuning.negative_zero_f64 = 0.0;
+    if (!(1.0 /(-world.tuning.negative_zero_f64) < 0.0)) {
+        return 32;
+    }
+
+    let unsigned_maximum: u32 = -1;
+    if (unsigned_maximum + 1 != 0) {
+        return 33;
+    }
+
+    world.tuning.health = 90;
+    actors[1].tuning.health = 91;
+    if (world.tuning.health != 90 || actors[1].tuning.health != 91) {
+        return 30;
+    }
+    return 0;
+}

@@ -1252,6 +1252,43 @@ mod tests {
     }
 
     #[test]
+    fn formats_scalar_field_defaults_canonically_and_idempotently() {
+        let source = "enum Mode{Ready,Active} const BASE:i32=4; struct Settings<N:i32>{score:i32=BASE+N;enabled:bool=true;mode:Mode=Mode.Ready;} global defaults{limit:i32=BASE+1;active:bool=false;}";
+        let formatted = format_source(source).expect("format field defaults");
+        assert!(formatted.contains("score: i32 = BASE + N;"), "{formatted}");
+        assert!(formatted.contains("enabled: bool = true;"), "{formatted}");
+        assert!(
+            formatted.contains("mode: Mode = Mode.Ready;"),
+            "{formatted}"
+        );
+        assert!(formatted.contains("limit: i32 = BASE + 1;"), "{formatted}");
+        assert!(formatted.contains("active: bool = false;"), "{formatted}");
+        assert_eq!(
+            format_source(&formatted).expect("reformat field defaults"),
+            formatted,
+            "field initializer tokens should have one canonical spelling"
+        );
+        let parsed = super::super::parser::parse_top_level_type_layout(&formatted)
+            .expect("formatted defaults remain parseable");
+        assert_eq!(
+            parsed.structs[0].fields[0]
+                .initializer
+                .as_ref()
+                .unwrap()
+                .expression,
+            "BASE + N"
+        );
+        assert_eq!(
+            parsed.global_blocks[0].fields[0]
+                .initializer
+                .as_ref()
+                .unwrap()
+                .expression,
+            "BASE + 1"
+        );
+    }
+
+    #[test]
     fn keeps_shift_tokens_whole_while_formatting_bitwise_expressions() {
         let source = "function main(): i32 { return (1<<3) | (8>>1); }";
         let formatted = format_source(source).expect("format bitwise expression");

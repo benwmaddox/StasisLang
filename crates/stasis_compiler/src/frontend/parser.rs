@@ -104,6 +104,13 @@ pub struct ParsedExternFunctionDeclaration {
 pub struct ParsedField {
     pub name: String,
     pub type_name: String,
+    pub initializer: Option<ParsedFieldInitializer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedFieldInitializer {
+    pub expression: String,
+    pub expression_range: Range<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +156,7 @@ pub struct ParsedConstDefinition {
     pub name: String,
     pub type_name: String,
     pub value_text: String,
+    pub value_range: Range<usize>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1740,12 +1748,14 @@ fn parse_const_definition(
         .unwrap_or_default()
         .trim()
         .to_string();
+    let value_range = value_start..semicolon.start;
     next_cursor = semicolon_cursor + 1;
     Ok((
         ParsedConstDefinition {
             name,
             type_name,
             value_text,
+            value_range,
         },
         next_cursor,
     ))
@@ -1773,11 +1783,46 @@ fn parse_braced_fields(
         cursor += 1;
         let (type_name, next_cursor) = parse_type_name(source, tokens, cursor)?;
         cursor = next_cursor;
+        let initializer = if tokens
+            .get(cursor)
+            .copied()
+            .is_some_and(|token| token_is_other_char(source, token, b'='))
+        {
+            cursor += 1;
+            let expression_start = tokens
+                .get(cursor)
+                .map_or_else(|| tokens[cursor - 1].end, |token| token.start);
+            let mut semicolon_cursor = cursor;
+            while let Some(token) = tokens.get(semicolon_cursor) {
+                if token.kind == TokenKind::Semicolon {
+                    break;
+                }
+                if matches!(token.kind, TokenKind::RBrace | TokenKind::Eof) {
+                    return Err(format!("field '{}' initializer is missing ';'", field_name));
+                }
+                semicolon_cursor += 1;
+            }
+            let semicolon = expect(tokens, semicolon_cursor, TokenKind::Semicolon)?;
+            let expression_range = expression_start..semicolon.start;
+            let expression = source
+                .get(expression_range.clone())
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            cursor = semicolon_cursor;
+            Some(ParsedFieldInitializer {
+                expression,
+                expression_range,
+            })
+        } else {
+            None
+        };
         expect(tokens, cursor, TokenKind::Semicolon)?;
         cursor += 1;
         fields.push(ParsedField {
             name: field_name,
             type_name,
+            initializer,
         });
     }
     expect(tokens, cursor, TokenKind::RBrace)?;
@@ -2662,6 +2707,55 @@ function tick(): i32 {
         assert_eq!(parsed.global_blocks[0].fields.len(), 2);
         assert_eq!(parsed.global_blocks[0].fields[1].name, "first_enemy");
         assert_eq!(parsed.global_blocks[0].fields[1].type_name, "Enemy");
+    }
+
+    #[test]
+    fn parses_struct_and_global_block_field_initializers_with_source_ranges() {
+        let source = concat!(
+            "struct Settings { width: f32 = 640.0; score: i32 = BASE + 2; }\n",
+            "global State { enabled: bool = true; settings: Settings; }\n",
+        );
+        let parsed = parse_top_level_type_layout(source).expect("parse field defaults");
+
+        let width = parsed.structs[0].fields[0]
+            .initializer
+            .as_ref()
+            .expect("width default");
+        assert_eq!(width.expression, "640.0");
+        assert_eq!(&source[width.expression_range.clone()], "640.0");
+
+        let score = parsed.structs[0].fields[1]
+            .initializer
+            .as_ref()
+            .expect("score default");
+        assert_eq!(score.expression, "BASE + 2");
+        assert_eq!(&source[score.expression_range.clone()], "BASE + 2");
+
+        let enabled = parsed.global_blocks[0].fields[0]
+            .initializer
+            .as_ref()
+            .expect("enabled default");
+        assert_eq!(enabled.expression, "true");
+        assert_eq!(&source[enabled.expression_range.clone()], "true");
+        assert!(parsed.global_blocks[0].fields[1].initializer.is_none());
+    }
+
+    #[test]
+    fn missing_field_initializer_semicolon_does_not_consume_following_function() {
+        let source = concat!(
+            "struct Broken { value: i32 = 4\n",
+            "}\n",
+            "function main(): i32 { return 0; }\n",
+        );
+        let error = parse_top_level_type_layout(source).expect_err("missing semicolon");
+        assert!(
+            error.contains("field 'value' initializer is missing ';'"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("main"),
+            "later function text leaked into error: {error}"
+        );
     }
 
     #[test]

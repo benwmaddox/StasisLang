@@ -30,11 +30,11 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
     assert.equal([...source.matchAll(/\bglobal\s+/g)].length, 1, "one coherent global game state");
     assert.match(source, /global state: (PongState|SpriteExampleState);/);
     assert.match(source, /function main\(\): i32/);
-    assert.match(source, /init_window\(640, 360,/);
     assert.match(source, /function tick\(\): i32/);
     assert.match(source, /function render\(\): i32/);
     assert.match(source, /input_frame\.refresh\(\);/);
     if (index === 1) {
+      assert.match(source, /init_window\(640, 360,/);
       assert.match(source, /input_frame\.pointers\[0\]\.x_logical/);
       assert.match(source, /input_frame\.keys\[SCANCODE_LEFT\]/);
       assert.match(source, /input_frame\.keys\[SCANCODE_RIGHT\]/);
@@ -46,6 +46,7 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
       assert.match(source, /sample_sprite\.load_from\(/);
       assert.match(source, /state\.sample_sprite\.draw\(state\.sprite_x,/);
     } else {
+      assert.match(source, /init_window\(state\.settings\.screen_width, state\.settings\.screen_height,/);
       assert.match(source, /ball: BallState;/);
       assert.match(source, /player: PaddleState;/);
       assert.match(source, /cpu: PaddleState;/);
@@ -79,6 +80,29 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
       assert.match(playgroundHtml, /tap after the match to restart/);
     }
   }
+});
+
+test("Pong gameplay settings are initialized fields in coherent state", () => {
+  const settings = DEFAULT_PONG_SOURCE.match(/struct PongSettings\s*\{([^}]*)\}/)?.[1];
+  assert.ok(settings, "PongSettings declaration exists");
+  for (const [name, type, value] of [
+    ["screen_width", "i32", "640"],
+    ["screen_height", "i32", "360"],
+    ["paddle_x", "f32", "30.0"],
+    ["cpu_paddle_x", "f32", "598.0"],
+    ["paddle_height", "f32", "72.0"],
+    ["ball_radius", "f32", "7.0"],
+    ["win_score", "i32", "5"],
+  ]) {
+    assert.match(settings, new RegExp(`\\b${name}:\\s*${type}\\s*=\\s*${value};`));
+    assert.match(DEFAULT_PONG_SOURCE, new RegExp(`state\\.settings\\.${name}\\b`));
+  }
+  assert.equal([...settings.matchAll(/\b(?:screen_width|screen_height|paddle_x|cpu_paddle_x|paddle_height|ball_radius|win_score)\s*:/g)].length, 7);
+  assert.match(DEFAULT_PONG_SOURCE, /settings: PongSettings;/);
+  assert.doesNotMatch(DEFAULT_PONG_SOURCE, /^\s*const\s+(?:SCREEN_WIDTH|SCREEN_HEIGHT|PADDLE_X|CPU_PADDLE_X|PADDLE_HEIGHT|BALL_RADIUS|WIN_SCORE)\b/m);
+  assert.match(DEFAULT_PONG_SOURCE, /i32_to_f32\(state\.settings\.screen_width\)/);
+  assert.match(DEFAULT_PONG_SOURCE, /i32_to_f32\(state\.settings\.screen_height\)/);
+  assert.doesNotMatch(DEFAULT_PONG_SOURCE, /state\.settings\.screen_(?:width|height)\.to_f32/);
 });
 
 test("default Pong images are small SVGs imported before playground readiness", () => {

@@ -270,15 +270,69 @@ implicit deep copies. Struct and element parameters remain caller-backed views.
 
 Operations depending on `T` are checked after substitution by the ordinary
 semantic checker. Generics do not add traits, implicit operators, conversions,
-memcpy, or field contracts. Generic enums, aliases, defaults, variadic and
-higher-kinded parameters, runtime value arguments, non-`i32` value parameters,
-and arbitrary unsupported composite copies are deferred.
+memcpy, or field contracts. Generic enums, aliases, generic parameter
+defaults, variadic and higher-kinded parameters, runtime value arguments,
+non-`i32` value parameters, and arbitrary unsupported composite copies are
+deferred.
 
 The current reference coverage and backend boundary are recorded in
 [`docs/generics.md`](generics.md). Bounded named-struct arrays use caller-backed
 views in JIT, native AOT, and internal Wasm calls. Stored views and named-struct
 returns are rejected by the shared frontend; no aggregate is silently copied
 or returned across an internal, lifecycle, host, or generated-wrapper boundary.
+
+### 4.2.3 Scalar Struct Field Defaults
+
+Struct and global-block fields may declare a compile-time scalar initializer
+after their type, before the terminating semicolon:
+
+```stasis
+enum MovementMode {
+    Idle = 0,
+    Moving = 1,
+}
+
+struct AgentSettings {
+    health: i32 = 100;
+    speed: f32 = 0.1;
+    enabled: bool = true;
+    mode: MovementMode = MovementMode.Idle;
+    retries: i32;
+}
+```
+
+The initializer is checked against the declared field type. Supported
+expressions are numeric and boolean literals, enum variants, visible typed
+scalar constants, and constant-only arithmetic or bitwise expressions handled
+by the compile-time scalar evaluator. Enum defaults must name a member of the
+field's declared enum. Calls, reads of mutable runtime state, strings, and side
+effects are compile-time errors with a source location. Generic arguments are
+substituted before a specialized field default is evaluated. Fixed-array,
+view, and named-struct field initializers are outside this scalar feature.
+
+Defaults initialize scalar storage owned by a global struct or by a
+struct-backed fixed collection. Nested struct fields are expanded recursively;
+each scalar leaf in a struct collection becomes a SoA lane and receives the
+field default for every newly provisioned element. A field without an
+initializer retains its existing zero initialization. An explicit write after
+storage is created replaces the stored value normally. Local named-struct
+bindings remain views of owner storage and do not create a second instance or
+replay field defaults.
+
+Supported paths include global state reached through nested non-array structs
+and fixed arrays of structs with materialized scalar lanes. A fixed array of
+structs nested inside an outer struct-backed collection may not have allocated
+scalar lanes for its element fields. If an explicit default in that shape would
+be dropped (for example, `actors.cells.hp`), `Compiler.check` and JIT
+compilation reject it; a defaulted type that is not used through that shape is
+still valid. This feature does not create missing nested-array storage.
+
+Field defaults are initialization metadata, not part of `StateLayout` or its
+compatibility digest. A new activation or fresh native/Wasm instance uses the
+declared defaults. A default-only source edit does not reset existing live
+state. During explicit state migration, compatible fields are copied, while a
+new field or a newly grown collection lane range uses the incoming declaration
+default; fields with no initializer still use zero.
 
 ### 4.3 Numeric Conversion Semantics
 
@@ -1183,8 +1237,9 @@ Current migration policy (pre-1.0):
 - Every JIT entry point uses the same migration planner and bounded transactional activation at the runtime safe point. There is no scalar-only runner migration path.
 - Layout-changing commits without a staged JIT candidate, including current AOT runtime swaps, reject with a restart-required diagnostic.
 - Migration compatibility is path-based: overlapping paths must keep compatible scalar or collection-element type shape.
-- Compatible scalar and fixed-collection fields are copied; new fields are initialized to their type default; removed fields are discarded with an explicit preview warning.
-- Fixed-collection growth is storage-ownership preflighted and bounded before allocation, preserves the old prefix, and initializes the expanded tail.
+- Compatible scalar and fixed-collection fields are copied; new fields use their declared scalar default or type zero; removed fields are discarded with an explicit preview warning.
+- Fixed-collection growth is storage-ownership preflighted and bounded before allocation, preserves the old prefix, and initializes the expanded tail from each lane's declared default or type zero.
+- Field defaults are excluded from layout identity. Changing only a default preserves compatible live values; an incoming default is used when explicit migration adds a field or grows storage.
 - Shrink copies the retained prefix, warns about the discarded range, and clamps logical lengths; UTF-8 shrink retains the largest valid code-point prefix and recomputes byte and character counts.
 - Incompatible or missing state metadata fails deterministically with an actionable diagnostic.
 - Migration or `on_code_swap` failure destroys isolated candidate state; the old active entries

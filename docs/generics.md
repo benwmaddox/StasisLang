@@ -188,9 +188,10 @@ macOS CI package evidence does not establish signing or notarization.
 
 The following are not part of the current supported contract: function-owned
 generic declarations, explicit generic function calls, generic enums, aliases,
-defaults, variadic or higher-kinded parameters, traits, runtime value arguments,
-non-`i32` value parameters, symbolic equation solving, or arbitrary
-composite-element copying. Lifecycle and host entries remain concrete.
+generic parameter defaults, variadic or higher-kinded parameters, traits,
+runtime value arguments, non-`i32` value parameters, symbolic equation solving,
+or arbitrary composite-element copying. Lifecycle and host entries remain
+concrete.
 
 Named-struct returns and stored views are rejected by the shared frontend, so
 JIT, native AOT, Wasm, lifecycle declarations, host externs, and generated

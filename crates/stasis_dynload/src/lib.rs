@@ -3413,13 +3413,48 @@ fn direct_storage_slot_address(
 }
 
 pub fn provision_direct_scalar_storage(kind: JitStorageKind, path_hash: i32) -> Result<(), String> {
+    provision_direct_scalar_storage_with_default(kind, path_hash, None)
+}
+
+/// Provision direct scalar storage, using `default_bits` only when this runtime
+/// first creates its owned backing. The bit pattern is interpreted according
+/// to `kind`; existing owned, fallback, and externally registered values are
+/// preserved.
+pub fn provision_direct_scalar_storage_with_default(
+    kind: JitStorageKind,
+    path_hash: i32,
+    default_bits: Option<u64>,
+) -> Result<(), String> {
     let _rebind = acquire_rebind_guard()?;
     match kind {
-        JitStorageKind::I32 => ensure_owned_i32_scalar(path_hash)?,
-        JitStorageKind::F32 => ensure_owned_f32_scalar(path_hash)?,
-        JitStorageKind::F64 => ensure_owned_f64_scalar(path_hash)?,
-        JitStorageKind::U8 => ensure_jit_u8_array_capacity_unlocked(path_hash, 0, 1)?,
-        JitStorageKind::U16 => ensure_jit_u16_array_capacity_unlocked(path_hash, 0, 1)?,
+        JitStorageKind::I32 => ensure_owned_i32_scalar_with_initial(
+            path_hash,
+            default_bits
+                .map(|bits| bits as u32 as i32)
+                .unwrap_or_default(),
+        )?,
+        JitStorageKind::F32 => ensure_owned_f32_scalar_with_initial(
+            path_hash,
+            default_bits
+                .map(|bits| f32::from_bits(bits as u32))
+                .unwrap_or_default(),
+        )?,
+        JitStorageKind::F64 => ensure_owned_f64_scalar_with_initial(
+            path_hash,
+            default_bits.map(f64::from_bits).unwrap_or_default(),
+        )?,
+        JitStorageKind::U8 => ensure_jit_u8_array_capacity_unlocked_with_initial(
+            path_hash,
+            0,
+            1,
+            default_bits.map(|bits| bits as u8).unwrap_or_default(),
+        )?,
+        JitStorageKind::U16 => ensure_jit_u16_array_capacity_unlocked_with_initial(
+            path_hash,
+            0,
+            1,
+            default_bits.map(|bits| bits as u16).unwrap_or_default(),
+        )?,
     }
     let (data, len) = registered_storage(kind, path_hash, 0)?;
     update_direct_storage_slot((kind, path_hash, 0), data, len);
@@ -3432,24 +3467,56 @@ pub fn provision_direct_array_storage(
     field_hash: i32,
     len: usize,
 ) -> Result<(), String> {
+    provision_direct_array_storage_with_default(kind, collection_hash, field_hash, len, None)
+}
+
+/// Provision a direct array lane, using `default_bits` only for its new
+/// backing or the range added by growth. Existing values and external backing
+/// remain untouched.
+pub fn provision_direct_array_storage_with_default(
+    kind: JitStorageKind,
+    collection_hash: i32,
+    field_hash: i32,
+    len: usize,
+    default_bits: Option<u64>,
+) -> Result<(), String> {
     let _rebind = acquire_rebind_guard()?;
     let key = (kind, collection_hash, field_hash);
     match kind {
-        JitStorageKind::I32 => {
-            ensure_jit_i32_array_capacity_unlocked(collection_hash, field_hash, len)?
-        }
-        JitStorageKind::F32 => {
-            ensure_jit_f32_array_capacity_unlocked(collection_hash, field_hash, len)?
-        }
-        JitStorageKind::F64 => {
-            ensure_jit_f64_array_capacity_unlocked(collection_hash, field_hash, len)?
-        }
-        JitStorageKind::U8 => {
-            ensure_jit_u8_array_capacity_unlocked(collection_hash, field_hash, len)?
-        }
-        JitStorageKind::U16 => {
-            ensure_jit_u16_array_capacity_unlocked(collection_hash, field_hash, len)?
-        }
+        JitStorageKind::I32 => ensure_jit_i32_array_capacity_unlocked_with_initial(
+            collection_hash,
+            field_hash,
+            len,
+            default_bits
+                .map(|bits| bits as u32 as i32)
+                .unwrap_or_default(),
+        )?,
+        JitStorageKind::F32 => ensure_jit_f32_array_capacity_unlocked_with_initial(
+            collection_hash,
+            field_hash,
+            len,
+            default_bits
+                .map(|bits| f32::from_bits(bits as u32))
+                .unwrap_or_default(),
+        )?,
+        JitStorageKind::F64 => ensure_jit_f64_array_capacity_unlocked_with_initial(
+            collection_hash,
+            field_hash,
+            len,
+            default_bits.map(f64::from_bits).unwrap_or_default(),
+        )?,
+        JitStorageKind::U8 => ensure_jit_u8_array_capacity_unlocked_with_initial(
+            collection_hash,
+            field_hash,
+            len,
+            default_bits.map(|bits| bits as u8).unwrap_or_default(),
+        )?,
+        JitStorageKind::U16 => ensure_jit_u16_array_capacity_unlocked_with_initial(
+            collection_hash,
+            field_hash,
+            len,
+            default_bits.map(|bits| bits as u16).unwrap_or_default(),
+        )?,
     }
     let (data, actual_len) = registered_storage(kind, collection_hash, field_hash)?;
     direct_array_required_lengths()
@@ -3540,8 +3607,9 @@ fn owned_f64_scalars() -> &'static Mutex<HashMap<i32, Box<f64>>> {
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn ensure_owned_scalar<T: Copy + Default>(
+fn ensure_owned_scalar<T: Copy>(
     path_hash: i32,
+    initial: T,
     owned: &Mutex<HashMap<i32, Box<T>>>,
     registered: &Mutex<HashMap<i32, usize>>,
     fallback: &Mutex<HashMap<i32, T>>,
@@ -3558,7 +3626,7 @@ fn ensure_owned_scalar<T: Copy + Default>(
         .lock()
         .expect("fallback scalar table mutex poisoned")
         .remove(&path_hash)
-        .unwrap_or_default();
+        .unwrap_or(initial);
     let mut owned = owned.lock().expect("owned scalar table mutex poisoned");
     let value = owned.entry(path_hash).or_insert_with(|| Box::new(initial));
     let address = value.as_mut() as *mut T as usize;
@@ -3569,27 +3637,30 @@ fn ensure_owned_scalar<T: Copy + Default>(
     Ok(())
 }
 
-fn ensure_owned_i32_scalar(path_hash: i32) -> Result<(), String> {
+fn ensure_owned_i32_scalar_with_initial(path_hash: i32, initial: i32) -> Result<(), String> {
     ensure_owned_scalar(
         path_hash,
+        initial,
         owned_i32_scalars(),
         registered_i32_ptrs(),
         jit_i32_global_table(),
     )
 }
 
-fn ensure_owned_f32_scalar(path_hash: i32) -> Result<(), String> {
+fn ensure_owned_f32_scalar_with_initial(path_hash: i32, initial: f32) -> Result<(), String> {
     ensure_owned_scalar(
         path_hash,
+        initial,
         owned_f32_scalars(),
         registered_f32_ptrs(),
         jit_f32_global_table(),
     )
 }
 
-fn ensure_owned_f64_scalar(path_hash: i32) -> Result<(), String> {
+fn ensure_owned_f64_scalar_with_initial(path_hash: i32, initial: f64) -> Result<(), String> {
     ensure_owned_scalar(
         path_hash,
+        initial,
         owned_f64_scalars(),
         registered_f64_ptrs(),
         jit_f64_global_table(),
@@ -3845,6 +3916,27 @@ fn migrate_fallback_array<T: Copy>(
     }
 }
 
+fn migrate_integer_fallback_array<T: Copy>(
+    key: ArrayKey,
+    owned: &Mutex<HashMap<ArrayKey, Vec<T>>>,
+    fallback: &Mutex<HashMap<(i32, i32, i32), i32>>,
+    convert: impl Fn(i32) -> T,
+) {
+    let mut owned_guard = owned.lock().expect("owned array table mutex poisoned");
+    let Some(array) = owned_guard.get_mut(&key) else {
+        return;
+    };
+    let mut fallback = fallback.lock().expect("jit i32 array table mutex poisoned");
+    for (index, slot) in array.iter_mut().enumerate() {
+        let Ok(index) = i32::try_from(index) else {
+            break;
+        };
+        if let Some(value) = fallback.remove(&(key.0, key.1, index)) {
+            *slot = convert(value);
+        }
+    }
+}
+
 fn direct_array_rebind_guard(
     kind: JitStorageKind,
     collection_hash: i32,
@@ -3871,12 +3963,26 @@ fn ensure_jit_i32_array_capacity_unlocked(
     field_hash: i32,
     requested_len: usize,
 ) -> Result<(), String> {
+    ensure_jit_i32_array_capacity_unlocked_with_initial(
+        collection_hash,
+        field_hash,
+        requested_len,
+        0,
+    )
+}
+
+fn ensure_jit_i32_array_capacity_unlocked_with_initial(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+    initial: i32,
+) -> Result<(), String> {
     let key = (collection_hash, field_hash);
     discard_integer_array_lane(key, JitStorageKind::I32);
     ensure_owned_array_capacity(
         key,
         requested_len,
-        0,
+        initial,
         owned_i32_arrays(),
         registered_i32_arrays(),
     )?;
@@ -3906,11 +4012,25 @@ fn ensure_jit_f32_array_capacity_unlocked(
     field_hash: i32,
     requested_len: usize,
 ) -> Result<(), String> {
+    ensure_jit_f32_array_capacity_unlocked_with_initial(
+        collection_hash,
+        field_hash,
+        requested_len,
+        0.0,
+    )
+}
+
+fn ensure_jit_f32_array_capacity_unlocked_with_initial(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+    initial: f32,
+) -> Result<(), String> {
     let key = (collection_hash, field_hash);
     ensure_owned_array_capacity(
         key,
         requested_len,
-        0.0,
+        initial,
         owned_f32_arrays(),
         registered_f32_arrays(),
     )?;
@@ -3940,11 +4060,25 @@ fn ensure_jit_f64_array_capacity_unlocked(
     field_hash: i32,
     requested_len: usize,
 ) -> Result<(), String> {
+    ensure_jit_f64_array_capacity_unlocked_with_initial(
+        collection_hash,
+        field_hash,
+        requested_len,
+        0.0,
+    )
+}
+
+fn ensure_jit_f64_array_capacity_unlocked_with_initial(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+    initial: f64,
+) -> Result<(), String> {
     let key = (collection_hash, field_hash);
     ensure_owned_array_capacity(
         key,
         requested_len,
-        0.0,
+        initial,
         owned_f64_arrays(),
         registered_f64_arrays(),
     )?;
@@ -3974,15 +4108,35 @@ fn ensure_jit_u8_array_capacity_unlocked(
     field_hash: i32,
     requested_len: usize,
 ) -> Result<(), String> {
+    ensure_jit_u8_array_capacity_unlocked_with_initial(
+        collection_hash,
+        field_hash,
+        requested_len,
+        0,
+    )
+}
+
+fn ensure_jit_u8_array_capacity_unlocked_with_initial(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+    initial: u8,
+) -> Result<(), String> {
     let key = (collection_hash, field_hash);
     discard_integer_array_lane(key, JitStorageKind::U8);
     ensure_owned_array_capacity(
         key,
         requested_len,
-        0,
+        initial,
         owned_u8_arrays(),
         registered_u8_arrays(),
     )?;
+    migrate_integer_fallback_array(
+        key,
+        owned_u8_arrays(),
+        jit_i32_array_global_table(),
+        |value| value as u8,
+    );
     let (data, len) = registered_u8_arrays()
         .lock()
         .expect("registered u8 array table mutex poisoned")
@@ -4033,15 +4187,35 @@ fn ensure_jit_u16_array_capacity_unlocked(
     field_hash: i32,
     requested_len: usize,
 ) -> Result<(), String> {
+    ensure_jit_u16_array_capacity_unlocked_with_initial(
+        collection_hash,
+        field_hash,
+        requested_len,
+        0,
+    )
+}
+
+fn ensure_jit_u16_array_capacity_unlocked_with_initial(
+    collection_hash: i32,
+    field_hash: i32,
+    requested_len: usize,
+    initial: u16,
+) -> Result<(), String> {
     let key = (collection_hash, field_hash);
     discard_integer_array_lane(key, JitStorageKind::U16);
     ensure_owned_array_capacity(
         key,
         requested_len,
-        0,
+        initial,
         owned_u16_arrays(),
         registered_u16_arrays(),
     )?;
+    migrate_integer_fallback_array(
+        key,
+        owned_u16_arrays(),
+        jit_i32_array_global_table(),
+        |value| value as u16,
+    );
     let (data, len) = registered_u16_arrays()
         .lock()
         .expect("registered u16 array table mutex poisoned")
@@ -10015,7 +10189,7 @@ mod tests {
         let _lock = test_lock();
         clear_registered_global_memory();
         let key = 76;
-        ensure_owned_i32_scalar(key).expect("provision owned scalar");
+        ensure_owned_i32_scalar_with_initial(key, 0).expect("provision owned scalar");
         stasis_jit_global_i32_store(key, 7);
 
         let mut borrowed = 11;
@@ -10026,6 +10200,211 @@ mod tests {
 
         assert_eq!(borrowed, 13);
         assert_eq!(stasis_jit_global_i32_load(key), 13);
+        clear_registered_global_memory();
+    }
+
+    #[test]
+    fn direct_storage_defaults_only_fill_new_owned_slots() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+
+        let bool_path = 0x6400_0001;
+        provision_direct_scalar_storage_with_default(JitStorageKind::I32, bool_path, Some(1))
+            .expect("provision bool-backed scalar with true default");
+        assert_eq!(stasis_jit_global_i32_load(bool_path), 1);
+        stasis_jit_global_i32_store(bool_path, 0);
+        provision_direct_scalar_storage_with_default(JitStorageKind::I32, bool_path, Some(1))
+            .expect("reprovision existing bool-backed scalar");
+        assert_eq!(stasis_jit_global_i32_load(bool_path), 0);
+
+        let fallback_path = 0x6400_0006;
+        stasis_jit_global_i32_store(fallback_path, 37);
+        provision_direct_scalar_storage_with_default(JitStorageKind::I32, fallback_path, Some(19))
+            .expect("provision scalar with fallback value");
+        assert_eq!(
+            stasis_jit_global_i32_load(fallback_path),
+            37,
+            "a preexisting fallback value must take precedence over a declaration default"
+        );
+
+        let byte_path = 0x6400_0002;
+        provision_direct_scalar_storage_with_default(JitStorageKind::U8, byte_path, Some(0xa5))
+            .expect("provision u8 scalar with default");
+        assert_eq!(
+            owned_u8_arrays()
+                .lock()
+                .expect("owned u8 array table")
+                .get(&(byte_path, 0))
+                .cloned(),
+            Some(vec![0xa5])
+        );
+
+        let short_path = 0x6400_0003;
+        provision_direct_scalar_storage_with_default(JitStorageKind::U16, short_path, Some(0x1234))
+            .expect("provision u16 scalar with default");
+        assert_eq!(
+            owned_u16_arrays()
+                .lock()
+                .expect("owned u16 array table")
+                .get(&(short_path, 0))
+                .cloned(),
+            Some(vec![0x1234])
+        );
+
+        let collection = 0x6400_0004;
+        let lane = 0x64;
+        provision_direct_array_storage_with_default(
+            JitStorageKind::U8,
+            collection,
+            lane,
+            2,
+            Some(0x31),
+        )
+        .expect("allocate u8 SoA lane with field default");
+        owned_u8_arrays()
+            .lock()
+            .expect("owned u8 array table")
+            .get_mut(&(collection, lane))
+            .expect("new u8 lane")
+            .copy_from_slice(&[0x11, 0x22]);
+        provision_direct_array_storage_with_default(
+            JitStorageKind::U8,
+            collection,
+            lane,
+            4,
+            Some(0x77),
+        )
+        .expect("grow u8 SoA lane with field default");
+        assert_eq!(
+            owned_u8_arrays()
+                .lock()
+                .expect("owned u8 array table")
+                .get(&(collection, lane))
+                .cloned(),
+            Some(vec![0x11, 0x22, 0x77, 0x77])
+        );
+
+        let float_path = 0x6400_0005;
+        let float_bits = 0x3dcccccd;
+        provision_direct_scalar_storage_with_default(
+            JitStorageKind::F32,
+            float_path,
+            Some(float_bits),
+        )
+        .expect("provision f32 scalar from exact bits");
+        assert_eq!(
+            stasis_jit_global_f32_load(float_path).to_bits(),
+            float_bits as u32
+        );
+
+        clear_registered_global_memory();
+    }
+
+    #[test]
+    fn direct_storage_defaults_preserve_integer_fallback_values() {
+        let _lock = test_lock();
+        clear_registered_global_memory();
+
+        let byte_path = 0x6500_0001;
+        stasis_jit_global_i32_array_store(byte_path, 0, 0, 0x1a5);
+        provision_direct_scalar_storage_with_default(JitStorageKind::U8, byte_path, Some(0x22))
+            .expect("provision u8 scalar over an existing i32 fallback");
+        assert_eq!(stasis_jit_global_i32_array_load(byte_path, 0, 0), 0xa5);
+        assert_eq!(stasis_jit_global_i32_array_load(byte_path, 0, -1), 0);
+
+        let short_path = 0x6500_0002;
+        stasis_jit_global_i32_array_store(short_path, 0, 0, 0x1_2345);
+        provision_direct_scalar_storage_with_default(JitStorageKind::U16, short_path, Some(0x22))
+            .expect("provision u16 scalar over an existing i32 fallback");
+        assert_eq!(stasis_jit_global_i32_array_load(short_path, 0, 0), 0x2345);
+        assert_eq!(stasis_jit_global_i32_array_load(short_path, 0, 1), 0);
+
+        let byte_collection = 0x6500_0003;
+        let byte_lane = 0x65;
+        stasis_jit_global_i32_array_store(byte_collection, byte_lane, 0, 0x111);
+        stasis_jit_global_i32_array_store(byte_collection, byte_lane, 1, 0x222);
+        stasis_jit_global_i32_array_store(byte_collection, byte_lane, 3, 0x444);
+        stasis_jit_global_i32_array_store(byte_collection, byte_lane, -1, 0x555);
+        provision_direct_array_storage_with_default(
+            JitStorageKind::U8,
+            byte_collection,
+            byte_lane,
+            2,
+            Some(0x31),
+        )
+        .expect("provision u8 lane over existing fallback entries");
+        assert_eq!(
+            stasis_jit_global_i32_array_load(byte_collection, byte_lane, 0),
+            0x11
+        );
+        assert_eq!(
+            stasis_jit_global_i32_array_load(byte_collection, byte_lane, 1),
+            0x22
+        );
+        assert_eq!(
+            stasis_jit_global_i32_array_load(byte_collection, byte_lane, 2),
+            0,
+            "out-of-range loads stay zero before the lane grows"
+        );
+        assert_eq!(
+            stasis_jit_global_i32_array_load(byte_collection, byte_lane, -1),
+            0,
+            "negative indices stay guarded"
+        );
+        provision_direct_array_storage_with_default(
+            JitStorageKind::U8,
+            byte_collection,
+            byte_lane,
+            4,
+            Some(0x77),
+        )
+        .expect("grow u8 lane and apply a new default only to the tail");
+        assert_eq!(
+            (0..4)
+                .map(|index| stasis_jit_global_i32_array_load(byte_collection, byte_lane, index))
+                .collect::<Vec<_>>(),
+            vec![0x11, 0x22, 0x77, 0x44]
+        );
+
+        let short_collection = 0x6500_0004;
+        let short_lane = 0x66;
+        stasis_jit_global_i32_array_store(short_collection, short_lane, 0, 0x1_0001);
+        stasis_jit_global_i32_array_store(short_collection, short_lane, 2, 0x2_0003);
+        stasis_jit_global_i32_array_store(short_collection, short_lane, 4, 0x4_0005);
+        stasis_jit_global_i32_array_store(short_collection, short_lane, -1, 0x6_0007);
+        provision_direct_array_storage_with_default(
+            JitStorageKind::U16,
+            short_collection,
+            short_lane,
+            3,
+            Some(0x51),
+        )
+        .expect("provision u16 lane over existing fallback entries");
+        assert_eq!(
+            stasis_jit_global_i32_array_load(short_collection, short_lane, 3),
+            0,
+            "u16 lane out-of-range loads stay zero"
+        );
+        assert_eq!(
+            stasis_jit_global_i32_array_load(short_collection, short_lane, -1),
+            0,
+            "u16 lane negative indices stay guarded"
+        );
+        provision_direct_array_storage_with_default(
+            JitStorageKind::U16,
+            short_collection,
+            short_lane,
+            5,
+            Some(0x77),
+        )
+        .expect("grow u16 lane and migrate newly in-range fallback values");
+        assert_eq!(
+            (0..5)
+                .map(|index| stasis_jit_global_i32_array_load(short_collection, short_lane, index))
+                .collect::<Vec<_>>(),
+            vec![1, 0x51, 3, 0x77, 5]
+        );
+
         clear_registered_global_memory();
     }
 

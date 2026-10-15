@@ -1310,7 +1310,10 @@ pub(crate) fn parse_value_expression(expression: &str) -> Result<SimpleExpr, Str
     parse_value_expression_at(expression, 0)
 }
 
-fn parse_value_expression_at(expression: &str, source_offset: usize) -> Result<SimpleExpr, String> {
+pub(crate) fn parse_value_expression_at(
+    expression: &str,
+    source_offset: usize,
+) -> Result<SimpleExpr, String> {
     parse_expression_at(expression, source_offset)?.into_expression()
 }
 
@@ -1769,15 +1772,10 @@ impl ExprParser<'_> {
                 }
             }
             ExprToken::Operator(ExprBinaryOp::Subtract) => {
-                let rhs = self.parse_precedence(110)?.into_value()?;
-                let lhs = match rhs {
-                    SimpleExpr::Float(_) => SimpleExpr::Float(0.0),
-                    _ => SimpleExpr::Int(0),
-                };
-                Ok(ParsedExpression::Value(SimpleExpr::Binary {
-                    lhs: Box::new(lhs),
-                    op: ExprBinaryOp::Subtract,
-                    rhs: Box::new(rhs),
+                let operand = self.parse_precedence(110)?.into_value()?;
+                Ok(ParsedExpression::Value(SimpleExpr::Unary {
+                    op: ExprUnaryOp::Negate,
+                    operand: Box::new(operand),
                 }))
             }
             ExprToken::Operator(ExprBinaryOp::Add) => self.parse_precedence(110),
@@ -2110,6 +2108,39 @@ mod expression_parser_tests {
                 rhs,
             } if matches!(*lhs, SimpleExpr::Int(8))
                 && matches!(*rhs, SimpleExpr::Binary { op: ExprBinaryOp::Add, .. })
+        ));
+    }
+
+    #[test]
+    fn preserves_unary_negation_in_expression_ast() {
+        let negative_zero = parse_value_expression("-0.0").expect("negative zero literal");
+        assert!(matches!(
+            negative_zero,
+            SimpleExpr::Unary {
+                op: ExprUnaryOp::Negate,
+                operand,
+            } if matches!(*operand, SimpleExpr::Float(value) if value.to_bits() == 0.0_f64.to_bits())
+        ));
+
+        let negative_constant =
+            parse_value_expression("-ZERO_F32").expect("negated typed constant");
+        assert!(matches!(
+            negative_constant,
+            SimpleExpr::Unary {
+                op: ExprUnaryOp::Negate,
+                operand,
+            } if matches!(operand.as_ref(), SimpleExpr::Identifier(name) if name == "ZERO_F32")
+        ));
+
+        let subtraction = parse_value_expression("0.0 - ZERO_F32").expect("binary subtraction");
+        assert!(matches!(
+            subtraction,
+            SimpleExpr::Binary {
+                lhs,
+                op: ExprBinaryOp::Subtract,
+                rhs,
+            } if matches!(*lhs, SimpleExpr::Float(0.0))
+                && matches!(rhs.as_ref(), SimpleExpr::Identifier(name) if name == "ZERO_F32")
         ));
     }
 
