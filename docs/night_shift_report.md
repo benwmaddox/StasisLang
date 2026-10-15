@@ -1294,3 +1294,30 @@ metadata.
 Visual evidence: inspected current game-over, restarted, exported Pong, and
 exported-asset PNGs plus frames 1, 5, and 9 decoded from `browser.mp4` under
 `D:/code/.automation-evidence/nightly-20261015-task839-browser/`.
+
+### #839 nightly follow-up: packaged-assets sprite reference
+
+The full Nightly Release on merged PR #929 reached IT-021 and rejected the
+packaged-assets sample assigning `Sprite.reference(): SpriteRef` to an `i32`
+global. The strict compiler result check was correct. Migrated that global,
+its initialization and render validity test to `SpriteRef`/`SpriteRef.Invalid`,
+matching the desktop manifest asset seam. Native telemetry still reads the
+same i32 ABI lane; no compiler coercion or safety check changed.
+
+Reproduced the exact `package-mobile --target android-x86_64 --out d
+--development-build` failure with a fresh copy of the sample and canonical
+stdlib. After the migration, that command passed and emitted the Android AOT
+objects and published binding manifest. Canonical Stasis formatting, diff
+checks, runtime ABI (981 comparisons) and host-runtime contract (1,167) passed.
+The full nightly device/packaged execution gate remains pending the follow-up.
+
+Theory gained: a host's raw telemetry storage type does not define the source
+type of an opaque handle. The existing desktop seam demonstrates typed source
+handles with unchanged native i32 observation.
+Good: the full nightly exercised a packaged sample absent from the local core
+suite and caught an incomplete nominal-type migration.
+Bad: migrating receiver spellings alone missed the sample's stale i32 handle.
+Adjustment: validate maintained packaged consumers, including their typed
+destinations and invalid sentinels, rather than only migrated call names.
+Visual evidence: not applicable to the three-line type/sentinel correction;
+Android device rendering assertions and capture remain a pending nightly gate.
