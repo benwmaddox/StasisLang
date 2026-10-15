@@ -1410,3 +1410,51 @@ starter-pong-restarted.png (0:0 and resumed ball), exported-starter-pong.png
 (offline assets and play), and browser.mp4 via decoded frames at 1/5/9 seconds
 (Pong, live-swap scene, imported assets), all under
 D:/code/.automation-evidence/nightly-20261015-task840-browser/.
+
+## #841: state-owned tuning in fresh projects and executable defaults lessons
+
+Fresh project agent/architecture guidance now puts runtime tuning in coherent owned
+state, uses bools/enums for state choices, and reserves constants for compile-time
+requirements and immutable external contracts. It explains new-storage defaults,
+compatible live-state preservation, supported explicit migration, and external-resource
+updates. Canonical embedded sources and packaged knowledge agree; generator behavior,
+templates, and the minimal scaffold remain unchanged.
+
+The maintained Pong lesson nests declaration-defaulted court settings and tests fresh
+values, configured bounds, reset preservation, scoring once, and derived-center movement.
+The state-owner TowerRules lesson and quick-reference AgentSettings example now have
+matching compiler-checked backing source. Their exact-excerpt checks are retained.
+The post-#840 Windows nightly also exposed a test-only object-reader assumption: COFF
+and Mach-O do not supply data-symbol sizes through the locked object reader. The AOT
+oracle now uses explicit ABI extents for those formats, validates reported sizes where
+available, and reads strict checked section ranges. All byte and layout assertions remain.
+
+Validation:
+- Rust/Stasis formatting and final diff checks passed.
+- Full Linux CLI executable suite: 250 passed, one official-provenance test filtered
+  exactly as in CI. Exact nightly integration: 59 passed, including all 41 CLI tests.
+  Separate web packaging: 21 passed in 651.49 seconds, within the 900-second limit.
+- Fresh source-built CLI generated new/init projects; inspected guides and packaged
+  README, checked canonical content, formatted/checked/tested both, and ran the new
+  starter headlessly. Copied packaged examples: 35 tests passed across eight files.
+- Focused AOT storage oracle passed on Linux; the exact required-signed Windows compiler
+  command passed 1080 tests (986 unit and 94 integration), including the previously failing oracle.
+- Runtime ABI: 981 comparisons passed. Host runtime contract: 1167 comparisons passed.
+- Six independent reviewer personas are green. Full merged nightly remains pending
+  post-merge and must be verified before the current run is reported complete.
+
+Theory gained: defaults initialize owner storage once; tuning then remains ordinary live
+state. The configurable-court test and eight-lane defaults test support that mapping.
+An adjacent change to a source default should affect new storage without resetting an
+existing compatible game. Object-file metadata must be interpreted by format; initialized
+bytes and explicit language ABI widths remain the portable validation contract.
+
+Good: new guidance and behavior assertions failed before implementation, and exact
+nightly checks caught documentation drift and the platform-specific oracle assumption.
+Bad: #840's defaulted snippets were changed without updating all executable backing files,
+and its object-byte helper assumed ELF symbol metadata on Windows.
+Adjustment: validate every packaged Stasis fence against real examples and keep object
+inspection explicit about each format's available metadata.
+
+Visual evidence: not applicable to this documentation, headless lesson, and test-only
+oracle change. Prior #840 Pong PNG/MP4 acceptance evidence remains recorded above.

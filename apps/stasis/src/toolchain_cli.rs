@@ -13810,6 +13810,13 @@ mod tests {
     fn generated_graphical_project_has_effect_boundaries_and_checks() {
         let root = temp_dir("effect_template");
         create_project(root.clone(), "effect_template".to_string()).expect("create project");
+        let agent_guide = fs::read_to_string(root.join("AGENTS.md")).expect("read agent guide");
+        assert!(agent_guide.contains("Runtime-tunable values belong in feature-owned state"));
+        assert!(agent_guide.contains("A field default initializes new state"));
+        let architecture = fs::read_to_string(root.join(PROJECT_ARCHITECTURE_NAME))
+            .expect("read project architecture");
+        assert!(architecture.contains("Runtime settings belong in the state that owns them"));
+        assert!(architecture.contains("ordinary compatible hot swap"));
         let source = fs::read_to_string(root.join("src/main.stasis")).expect("read source");
         assert_eq!(
             source
@@ -15351,6 +15358,9 @@ mod tests {
         for file in KNOWLEDGE_FILES {
             assert!(docs.join(file).is_file(), "{file}");
         }
+        let readme = fs::read_to_string(docs.join("README.md")).expect("read packaged docs README");
+        assert!(readme.contains("PROJECT_ARCHITECTURE.md"));
+        assert!(readme.contains("practical-examples/pong-score-after-the-ball-crosses-the-goal.md"));
         let source = fs::read(root.join("src/main.stasis")).expect("source");
         let stdlib_hash = vendor_directory_sha256(&package.join("stdlib")).expect("stdlib hash");
         let mut workspace = load_workspace(Some(&root)).expect("workspace");
@@ -18531,6 +18541,7 @@ mod tests {
         assert!(!root.join(".github/workflows").exists());
         let agent_guide = fs::read_to_string(root.join("AGENTS.md")).expect("read AGENTS.md");
         assert!(!agent_guide.contains("## Local validation"));
+        assert!(agent_guide.contains("Runtime-tunable values belong in feature-owned state"));
         remove_temp(&root);
     }
 
