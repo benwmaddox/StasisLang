@@ -1,14 +1,6 @@
 export const DEFAULT_PONG_SOURCE = `import "vendor/stasis/stdlib/graphics.stasis";
 import "vendor/stasis/stdlib/host_frame.stasis";
 
-const SCREEN_WIDTH: f32 = 640.0;
-const SCREEN_HEIGHT: f32 = 360.0;
-const PADDLE_X: f32 = 30.0;
-const CPU_PADDLE_X: f32 = 598.0;
-const PADDLE_HEIGHT: f32 = 72.0;
-const BALL_RADIUS: f32 = 7.0;
-const WIN_SCORE: i32 = 5;
-
 // HostFrame.keys uses SDL scancode slots.
 const SCANCODE_W: i32 = 26;
 const SCANCODE_S: i32 = 22;
@@ -30,8 +22,19 @@ struct PaddleState {
     score_text: TextRun;
 }
 
+struct PongSettings {
+    screen_width: i32 = 640;
+    screen_height: i32 = 360;
+    paddle_x: f32 = 30.0;
+    cpu_paddle_x: f32 = 598.0;
+    paddle_height: f32 = 72.0;
+    ball_radius: f32 = 7.0;
+    win_score: i32 = 5;
+}
+
 struct PongState {
     input_frame: HostFrame;
+    settings: PongSettings;
     arena: Sprite;
     paddle: Sprite;
     ball: BallState;
@@ -52,8 +55,8 @@ function refresh_scores(): void {
 }
 
 function serve(direction: i32): void {
-    state.ball.x = SCREEN_WIDTH / 2.0;
-    state.ball.y = SCREEN_HEIGHT / 2.0;
+    state.ball.x = i32_to_f32(state.settings.screen_width) / 2.0;
+    state.ball.y = i32_to_f32(state.settings.screen_height) / 2.0;
     state.ball.vx = 4.0;
     state.ball.vy = 2.25;
     if (direction < 0) {
@@ -72,7 +75,7 @@ function reset_match(): void {
 }
 
 function main(): i32 {
-    init_window(640, 360, "Stasis Pong");
+    init_window(state.settings.screen_width, state.settings.screen_height, "Stasis Pong");
     state.arena.load_from("assets/pong-arena.png", 640, 360);
     state.paddle.load_from("assets/pong-paddle.png", 12, 72);
     state.ball.sprite.load_from("assets/pong-ball.png", 16, 16);
@@ -93,7 +96,7 @@ function clamp_paddle(y: f32): f32 {
 
 function move_player(): void {
     if (state.input_frame.pointer_count > 0 && state.input_frame.pointers[0].is_down) {
-        state.player.y = state.input_frame.pointers[0].y_logical - PADDLE_HEIGHT / 2.0;
+        state.player.y = state.input_frame.pointers[0].y_logical - state.settings.paddle_height / 2.0;
     } else if (state.input_frame.keys[SCANCODE_UP] != 0 || state.input_frame.keys[SCANCODE_W] != 0) {
         state.player.y -= 5.0;
     } else if (state.input_frame.keys[SCANCODE_DOWN] != 0 || state.input_frame.keys[SCANCODE_S] != 0) {
@@ -103,7 +106,7 @@ function move_player(): void {
 }
 
 function move_cpu(): void {
-    let cpu_center: f32 = state.cpu.y + PADDLE_HEIGHT / 2.0;
+    let cpu_center: f32 = state.cpu.y + state.settings.paddle_height / 2.0;
     if (state.ball.y < cpu_center) {
         state.cpu.y -= 2.4;
     } else if (state.ball.y > cpu_center) {
@@ -115,9 +118,9 @@ function move_cpu(): void {
 function bounce_from_paddle(paddle_y: f32, contact_x: f32): void {
     state.ball.x = contact_x;
     state.ball.vx = 0.0 - state.ball.vx;
-    if (state.ball.y < paddle_y + PADDLE_HEIGHT / 2.0) {
+    if (state.ball.y < paddle_y + state.settings.paddle_height / 2.0) {
         state.ball.vy -= 1.0;
-    } else if (state.ball.y > paddle_y + PADDLE_HEIGHT / 2.0) {
+    } else if (state.ball.y > paddle_y + state.settings.paddle_height / 2.0) {
         state.ball.vy += 1.0;
     }
 }
@@ -135,13 +138,13 @@ function move_ball(): void {
     }
 
     if (state.ball.vx < 0.0 && state.ball.x <= 49.0 && state.ball.x >= 23.0
-        && state.ball.y + BALL_RADIUS >= state.player.y
-        && state.ball.y - BALL_RADIUS <= state.player.y + PADDLE_HEIGHT) {
+        && state.ball.y + state.settings.ball_radius >= state.player.y
+        && state.ball.y - state.settings.ball_radius <= state.player.y + state.settings.paddle_height) {
         bounce_from_paddle(state.player.y, 49.0);
     }
     if (state.ball.vx > 0.0 && state.ball.x >= 591.0 && state.ball.x <= 617.0
-        && state.ball.y + BALL_RADIUS >= state.cpu.y
-        && state.ball.y - BALL_RADIUS <= state.cpu.y + PADDLE_HEIGHT) {
+        && state.ball.y + state.settings.ball_radius >= state.cpu.y
+        && state.ball.y - state.settings.ball_radius <= state.cpu.y + state.settings.paddle_height) {
         bounce_from_paddle(state.cpu.y, 591.0);
     }
 
@@ -153,18 +156,18 @@ function move_ball(): void {
 }
 
 function check_score(): void {
-    if (state.ball.x < 0.0 - BALL_RADIUS - 1.0) {
+    if (state.ball.x < 0.0 - state.settings.ball_radius - 1.0) {
         state.cpu.score += 1;
         refresh_scores();
-        if (state.cpu.score >= WIN_SCORE) {
+        if (state.cpu.score >= state.settings.win_score) {
             state.game_over = true;
         } else {
             serve(1);
         }
-    } else if (state.ball.x > SCREEN_WIDTH + BALL_RADIUS + 1.0) {
+    } else if (state.ball.x > i32_to_f32(state.settings.screen_width) + state.settings.ball_radius + 1.0) {
         state.player.score += 1;
         refresh_scores();
-        if (state.player.score >= WIN_SCORE) {
+        if (state.player.score >= state.settings.win_score) {
             state.game_over = true;
         } else {
             serve(-1);
@@ -191,14 +194,14 @@ function tick(): i32 {
 
 function render(): i32 {
     state.arena.draw(0.0, 0.0, 255, 0);
-    state.paddle.draw(PADDLE_X, state.player.y, 255, 0);
-    state.paddle.draw(CPU_PADDLE_X, state.cpu.y, 255, 0);
+    state.paddle.draw(state.settings.paddle_x, state.player.y, 255, 0);
+    state.paddle.draw(state.settings.cpu_paddle_x, state.cpu.y, 255, 0);
     state.ball.sprite.draw(state.ball.x - 8.0, state.ball.y - 8.0, 255, 0);
     state.player.score_text.draw(280.0, 24.0, 0.34, 0.91, 0.80, 1.0);
     state.cpu.score_text.draw(344.0, 24.0, 1.0, 0.75, 0.38, 1.0);
 
     if (state.game_over) {
-        if (state.player.score >= WIN_SCORE) {
+        if (state.player.score >= state.settings.win_score) {
             state.score_font.draw_text("YOU WIN", 257.0, 150.0, 0.34, 0.91, 0.80, 1.0);
         } else {
             state.score_font.draw_text("CPU WINS", 248.0, 150.0, 1.0, 0.75, 0.38, 1.0);

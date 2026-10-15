@@ -655,6 +655,11 @@ impl ProgramSnapshot {
     pub fn module_graph(&self) -> &ModuleGraph {
         &self.module_graph
     }
+    pub(crate) fn state_initialization_plan(
+        &self,
+    ) -> &crate::backend::state_initialization::StateInitializationPlan {
+        &self.analysis.initialization_plan
+    }
     pub fn functions(&self) -> &[ProgramFunction] {
         &self.functions
     }
@@ -864,6 +869,7 @@ fn canonical_layout_digest_with_root(
     let revision = compute_files_fingerprint(compiler.files());
     let analysis = build_compile_analysis_cache(
         compiler.files(),
+        compiler.module_graph(),
         compiler.functions(),
         &mut types,
         revision,
@@ -1025,6 +1031,7 @@ extern function measure_text(font: i32, text: string): f32;
         let revision = compute_files_fingerprint(compiler.files());
         let analysis = build_compile_analysis_cache(
             compiler.files(),
+            compiler.module_graph(),
             compiler.functions(),
             &mut types,
             revision,

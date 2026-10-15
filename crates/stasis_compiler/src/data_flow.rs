@@ -3015,15 +3015,17 @@ fn contextual_ascii_literal_type(
 fn is_contextual_bitwise_expression(expression: &SimpleExpr) -> bool {
     matches!(
         expression,
-        SimpleExpr::Unary { .. }
-            | SimpleExpr::Binary {
-                op: ExprBinaryOp::ShiftLeft
-                    | ExprBinaryOp::ShiftRight
-                    | ExprBinaryOp::BitAnd
-                    | ExprBinaryOp::BitXor
-                    | ExprBinaryOp::BitOr,
-                ..
-            }
+        SimpleExpr::Unary {
+            op: ExprUnaryOp::BitwiseNot,
+            ..
+        } | SimpleExpr::Binary {
+            op: ExprBinaryOp::ShiftLeft
+                | ExprBinaryOp::ShiftRight
+                | ExprBinaryOp::BitAnd
+                | ExprBinaryOp::BitXor
+                | ExprBinaryOp::BitOr,
+            ..
+        }
     )
 }
 
@@ -3968,8 +3970,7 @@ fn validate_expression_access_with_expected(
                 );
             }
             validate_expression_access(operand, context, local_types)?;
-            integer_unary_result_type(*op, operand, context, local_types, &BTreeMap::new())
-                .map(|_| ())
+            unary_result_type(*op, operand, context, local_types, &BTreeMap::new()).map(|_| ())
         }
         SimpleExpr::Binary { lhs, op, rhs } => {
             if !op.requires_integer_operands() {
@@ -4145,7 +4146,7 @@ fn validate_contextual_integer_expression_lane(
 
     match expression {
         SimpleExpr::Unary {
-            op: ExprUnaryOp::BitwiseNot,
+            op: ExprUnaryOp::BitwiseNot | ExprUnaryOp::Negate,
             operand,
         } if operand.is_contextual_integer_expression() => {
             validate_contextual_integer_expression_lane(operand, lane, context, local_types)
@@ -6263,12 +6264,20 @@ fn expression_type(
                     .map(|signature| signature.return_type)
                 })
         }
-        SimpleExpr::Unary { operand, .. } => {
+        SimpleExpr::Unary { op, operand } => {
             let operand_type = expression_type(operand, context, local_types, aliases)?;
-            context
-                .types
-                .is_integer(operand_type)
-                .then_some(operand_type)
+            match op {
+                ExprUnaryOp::BitwiseNot if context.types.is_integer(operand_type) => {
+                    Some(operand_type)
+                }
+                ExprUnaryOp::Negate
+                    if context.types.is_integer(operand_type)
+                        || matches!(operand_type, TYPE_ID_F32 | TYPE_ID_F64) =>
+                {
+                    Some(operand_type)
+                }
+                _ => None,
+            }
         }
         SimpleExpr::Binary { lhs, op, rhs } => {
             if op.requires_integer_operands() {
@@ -6370,7 +6379,7 @@ fn integer_operator_result_type(
     ))
 }
 
-fn integer_unary_result_type(
+fn unary_result_type(
     operator: ExprUnaryOp,
     operand: &SimpleExpr,
     context: &AnalysisContext<'_>,
@@ -6384,15 +6393,25 @@ fn integer_unary_result_type(
                 operator.spelling()
             )
         })?;
-    if context.types.is_integer(operand_type) {
-        Ok(operand_type)
-    } else {
-        Err(format!(
-            "operator '{}' requires integer operands; found {}",
-            operator.spelling(),
-            type_name(operand_type, context.types)
-        ))
+    let supported = match operator {
+        ExprUnaryOp::BitwiseNot => context.types.is_integer(operand_type),
+        ExprUnaryOp::Negate => {
+            context.types.is_integer(operand_type)
+                || matches!(operand_type, TYPE_ID_F32 | TYPE_ID_F64)
+        }
+    };
+    if supported {
+        return Ok(operand_type);
     }
+    let expected = match operator {
+        ExprUnaryOp::BitwiseNot => "integer",
+        ExprUnaryOp::Negate => "numeric",
+    };
+    Err(format!(
+        "operator '{}' requires {expected} operands; found {}",
+        operator.spelling(),
+        type_name(operand_type, context.types)
+    ))
 }
 
 fn path_type(
@@ -7113,6 +7132,98 @@ mod tests {
             .expect_err("typed u8 lane rejects an out-of-range nested literal");
         assert!(
             error.contains("integer literal 256 is not representable in contextual lane u8"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn unary_negation_accepts_numeric_lanes_and_keeps_integer_boundaries() {
+        let types = TypeTable::new();
+        let context = build_context(&[], &[], &types).expect("empty semantic context");
+        let local_types = BTreeMap::from([
+            ("signed".to_string(), TYPE_ID_I32),
+            ("fraction".to_string(), TYPE_ID_F32),
+            ("wide_fraction".to_string(), TYPE_ID_F64),
+            ("flag".to_string(), TYPE_ID_BOOL),
+        ]);
+        let parse = |source: &str| {
+            crate::frontend::body_parser::parse_value_expression(source)
+                .unwrap_or_else(|error| panic!("parse {source}: {error}"))
+        };
+
+        for (source, expected) in [
+            ("-signed", TYPE_ID_I32),
+            ("-fraction", TYPE_ID_F32),
+            ("-wide_fraction", TYPE_ID_F64),
+            ("-0.0", TYPE_ID_F32),
+        ] {
+            let expression = parse(source);
+            validate_expression_access(&expression, &context, &local_types)
+                .unwrap_or_else(|error| panic!("valid numeric negation {source}: {error}"));
+            assert_eq!(
+                expression_type(&expression, &context, &local_types, &BTreeMap::new()),
+                Some(expected),
+                "{source} retains its operand lane"
+            );
+        }
+        assert_eq!(
+            semantic_expression_type_with_expected(
+                &parse("-0.1"),
+                Some(TYPE_ID_F64),
+                &context,
+                &local_types,
+            ),
+            Some(TYPE_ID_F64),
+            "unary decimal literals keep the established f32-to-f64 contextual widening"
+        );
+
+        let unsigned_wrapping_negation = parse("-1");
+        validate_expression_access_with_expected(
+            &unsigned_wrapping_negation,
+            Some(crate::frontend::types::TYPE_ID_U32),
+            &context,
+            &local_types,
+        )
+        .expect("runtime unary negation remains an i32-compatible unsigned assignment");
+        assert_eq!(
+            semantic_expression_type_with_expected(
+                &unsigned_wrapping_negation,
+                Some(crate::frontend::types::TYPE_ID_U32),
+                &context,
+                &local_types,
+            ),
+            Some(TYPE_ID_I32),
+            "a negative literal remains an i32 expression instead of a range-checked u32 literal"
+        );
+
+        for source in ["-flag", "~fraction"] {
+            let error = validate_expression_access(&parse(source), &context, &local_types)
+                .expect_err(source);
+            assert!(error.contains("requires"), "{source}: {error}");
+        }
+
+        let minimum = parse("-2147483648");
+        assert_eq!(
+            minimum.contextual_integer_literal_value(),
+            Some(i64::from(i32::MIN))
+        );
+        validate_expression_access_with_expected(
+            &minimum,
+            Some(TYPE_ID_I32),
+            &context,
+            &local_types,
+        )
+        .expect("i32 minimum remains representable after unary lowering");
+        let underflow = parse("-2147483649");
+        let error = validate_expression_access_with_expected(
+            &underflow,
+            Some(TYPE_ID_I32),
+            &context,
+            &local_types,
+        )
+        .expect_err("i32 underflow is rejected");
+        assert!(
+            error.contains("not representable in contextual lane i32"),
             "{error}"
         );
     }

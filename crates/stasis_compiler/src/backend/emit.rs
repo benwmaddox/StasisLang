@@ -12307,6 +12307,25 @@ pub(crate) fn emit_simple_expression(
             })
         }
         SimpleExpr::Unary {
+            op: ExprUnaryOp::Negate,
+            operand,
+        } => emit_negate_expression(
+            builder,
+            expression,
+            operand,
+            expected_type,
+            values_by_name,
+            runtime_call_refs,
+            internal_calls,
+            call_signatures,
+            type_table,
+            global_path_types,
+            constant_values,
+            collection_infos,
+            named_struct_field_types,
+            foreach_bindings,
+        ),
+        SimpleExpr::Unary {
             op: ExprUnaryOp::BitwiseNot,
             operand,
         } => emit_bitwise_not_expression(
@@ -12617,6 +12636,91 @@ fn emit_contextual_bitwise_operand(
         named_struct_field_types,
         foreach_bindings,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_negate_expression(
+    builder: &mut FunctionBuilder<'_>,
+    expression: &SimpleExpr,
+    operand: &SimpleExpr,
+    expected_type: Option<TypeId>,
+    values_by_name: &BTreeMap<String, LocalBinding>,
+    runtime_call_refs: &RuntimeCallRefs,
+    internal_calls: &mut InternalCallMode<'_>,
+    call_signatures: &CallSignatureMap,
+    type_table: &TypeTable,
+    global_path_types: &GlobalPathTypeMap,
+    constant_values: &ConstantValueMap,
+    collection_infos: &CollectionInfoMap,
+    named_struct_field_types: &NamedStructFieldTypeMap,
+    foreach_bindings: &ForeachBindingMap,
+) -> Result<ValueBinding, String> {
+    let operand_expected = if operand.is_contextual_integer_expression() {
+        Some(
+            expected_type
+                .filter(|type_id| type_table.integer_width_bits(*type_id).is_some())
+                .unwrap_or(TYPE_ID_I32),
+        )
+    } else {
+        expected_type.filter(|type_id| {
+            type_table.integer_width_bits(*type_id).is_some()
+                || matches!(*type_id, TYPE_ID_F32 | TYPE_ID_F64)
+        })
+    };
+
+    // The positive spelling of i32::MIN cannot be represented as an i32
+    // operand, even though its negation is valid. Emit that one folded signed
+    // result directly; other literals still use the same width-aware operand
+    // checks and Cranelift negation as runtime values.
+    if let (Some(value), Some(operand_value), Some(TYPE_ID_I32)) = (
+        expression.contextual_integer_literal_value(),
+        operand.contextual_integer_literal_value(),
+        operand_expected,
+    ) {
+        if i32::try_from(value).is_ok() && i32::try_from(operand_value).is_err() {
+            return Ok(ValueBinding {
+                value: builder.ins().iconst(types::I32, value),
+                type_id: TYPE_ID_I32,
+            });
+        }
+    }
+
+    let operand_value = emit_simple_expression(
+        builder,
+        operand,
+        operand_expected,
+        values_by_name,
+        runtime_call_refs,
+        internal_calls,
+        call_signatures,
+        type_table,
+        global_path_types,
+        constant_values,
+        collection_infos,
+        named_struct_field_types,
+        foreach_bindings,
+    )?;
+    let value = if operand_value.type_id == TYPE_ID_F32 {
+        builder.ins().fneg(operand_value.value)
+    } else if operand_value.type_id == TYPE_ID_F64 {
+        builder.ins().fneg(operand_value.value)
+    } else if type_table
+        .integer_width_bits(operand_value.type_id)
+        .is_some()
+    {
+        let negated = builder.ins().ineg(operand_value.value);
+        normalize_unsigned_value(builder, negated, operand_value.type_id, type_table)
+    } else {
+        return Err(format!(
+            "'{}' requires a numeric operand, found type {}",
+            ExprUnaryOp::Negate.spelling(),
+            operand_value.type_id,
+        ));
+    };
+    Ok(ValueBinding {
+        value,
+        type_id: operand_value.type_id,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

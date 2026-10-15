@@ -1362,3 +1362,51 @@ under `D:/code/.automation-evidence/nightly-20261015-839-staged-android-evidence
 (`android/bundled/runtime/`); it shows the expected green rectangle and fitted
 dark viewport before the separate bounds probes. New device execution remains
 a pending full-nightly gate.
+
+### #840: scalar field defaults and state-owned Pong settings
+
+Scalar struct and global-block fields now accept checked compile-time defaults.
+A separate typed initialization plan carries exact value bits and declaration
+identity across JIT, native AOT, and Wasm without entering persisted state layout
+or compatibility digests. Fresh storage and supported migration additions/growth
+receive incoming defaults; compatible live values remain intact. Unsupported
+runtime expressions and unallocated nested-array lanes fail at their source.
+The existing conservative enum-collection migration policy remains in place.
+
+Pong now owns its seven tuning values in nested PongSettings. Window dimensions
+and win score remain i32; geometry stays f32. Explicit i32_to_f32 conversions use
+the existing function form for nested field expressions. Scancode IDs, sprites,
+font scores, first-to-five behavior, restart, and offline export are preserved.
+
+Validation: exact Linux PR CI passed workspace all-target tests, the 349-test CLI
+library suite, the 250-test CLI command suite (one existing provenance exclusion),
+Rust formatting, and all seven architecture commands. Compiler unit tests passed
+795/795. Fresh Linux and required-signed Windows executions passed both shared
+JIT/linked-native-AOT/Node-Wasm fixtures, including all seven scalar widths, exact
+float bits, generic defaults, enum initialization, u32 negation, f64 precision,
+compatible default edits, and supported field/growth migration. Runtime ABI and
+host contracts passed 981 and 1,167 comparisons. Node playground/swap tests passed
+25/25. Canonical Stasis formatting and diff checks passed.
+
+Fresh browser compiler: 3,183,658 bytes, SHA-256
+653d62ace2fc08b532d8230d1446819f755b73f59cfc94bbc2312e5736f6b9cb.
+Actual Chrome smoke and full playground acceptance passed with 127 captured
+frames and a 657,067-byte offline export. A full merged-source nightly is the
+remaining post-merge gate.
+
+Theory gained: declaration defaults describe creation of owner storage; they do
+not describe its current value or layout identity. The default-only cache test
+refreshes plan bits while preserving function parsing/HIR and layout digest;
+actual migration preserves live values while initializing new lanes. Future
+constant namespaces can feed the same checked plan without changing state ABI.
+Good: real executable and browser checks caught unsigned compatibility and
+nested-field conversion assumptions that source-pattern tests missed.
+Bad: the first migration fixture combined enum lanes with a deliberately
+unsupported layout change, and an AOT byte test retained its old enum path.
+Adjustment: separate fresh enum initialization from supported migration and
+preserve existing replay/bitwise oracles while testing canonical conversions.
+Visual evidence: inspected starter-pong-game-over.png (0:5 and restart prompt),
+starter-pong-restarted.png (0:0 and resumed ball), exported-starter-pong.png
+(offline assets and play), and browser.mp4 via decoded frames at 1/5/9 seconds
+(Pong, live-swap scene, imported assets), all under
+D:/code/.automation-evidence/nightly-20261015-task840-browser/.

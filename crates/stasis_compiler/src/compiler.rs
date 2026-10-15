@@ -525,6 +525,15 @@ impl Compiler {
 
     pub fn check(&mut self) -> CompileResult<IndexPassResult> {
         let index = self.analyze_program()?;
+        if let Err(error) = crate::backend::compile_analysis::validate_state_field_defaults(
+            &self.files,
+            &self.module_graph,
+            &mut self.types,
+        ) {
+            let message = error.message.clone();
+            self.last_source_diagnostic = Some(error.to_source_diagnostic());
+            return Err(CompileError::Frontend(message));
+        }
         let functions = self.functions.clone();
         for function in functions {
             let hir = match self.lower_function_to_hir(&function) {
@@ -3276,6 +3285,81 @@ mod tests {
     }
 
     #[test]
+    fn default_only_edit_refreshes_plan_without_reparsing_functions_or_changing_layout() {
+        fn plan(
+            compiler: &Compiler,
+        ) -> crate::backend::state_initialization::StateInitializationPlan {
+            let mut types = compiler.types.clone();
+            crate::backend::compile_analysis::build_compile_analysis_cache_from_resolved_externs(
+                &compiler.files,
+                &compiler.module_graph,
+                &compiler.functions,
+                &mut types,
+                0,
+                Vec::new(),
+                BTreeMap::new(),
+            )
+            .expect("compile analysis cache")
+            .initialization_plan
+        }
+
+        fn layout_digest(source: &str) -> [u8; 32] {
+            crate::backend::program_snapshot::canonical_state_layout_digest_for_files([(
+                "main.stasis".to_string(),
+                source.to_string(),
+            )])
+            .expect("canonical state layout digest")
+        }
+
+        let original = concat!(
+            "global State { rate: f64 = 1.25; }\n",
+            "function main(): i32 { return 0; }\n",
+        );
+        let changed = concat!(
+            "global State { rate: f64 = 2.50; }\n",
+            "function main(): i32 { return 0; }\n",
+        );
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("main.stasis", original);
+        compiler.check().expect("check original defaults");
+        let original_function = function_by_name(&compiler, "main").clone();
+        let original_hir = compiler
+            .lower_function_to_hir(&original_function)
+            .expect("lower original function");
+        let original_parse_count = compiler.statement_parse_count;
+        let original_layout_digest = layout_digest(original);
+        let original_default = plan(&compiler)
+            .scalar_default("State.rate")
+            .expect("original scalar default")
+            .bits;
+
+        compiler.upsert_file("main.stasis", changed);
+        compiler.check().expect("check default-only edit");
+        let changed_function = function_by_name(&compiler, "main").clone();
+        let changed_hir = compiler
+            .lower_function_to_hir(&changed_function)
+            .expect("lower function after default-only edit");
+        let changed_default = plan(&compiler)
+            .scalar_default("State.rate")
+            .expect("refreshed scalar default")
+            .bits;
+
+        assert_ne!(original_default, changed_default);
+        assert_eq!(
+            changed_default,
+            2.5_f64.to_bits(),
+            "default-only edits must refresh cached initialization data"
+        );
+        assert_eq!(layout_digest(changed), original_layout_digest);
+        assert_eq!(changed_function.id, original_function.id);
+        assert_eq!(changed_hir, original_hir);
+        assert_eq!(
+            compiler.statement_parse_count, original_parse_count,
+            "an unchanged function body should reuse its cached parsed HIR"
+        );
+    }
+
+    #[test]
     fn body_only_change_marks_only_changed_function_dirty() {
         let mut compiler = Compiler::new();
         compiler.upsert_file(
@@ -4355,6 +4439,66 @@ function prepare_enemy(): void { let enemy: Enemy = 0.0; return; }
             .check()
             .expect_err("explicit float initializer should remain invalid");
         assert!(format!("{error:?}").contains("expected Enemy expression but found f32"));
+    }
+
+    #[test]
+    fn check_rejects_field_defaults_with_a_source_located_type_error() {
+        let mut compiler = Compiler::new();
+        let source = "struct Settings { score: i32 = true; }\nglobal settings: Settings;\nfunction main(): i32 { return settings.score; }\n";
+        compiler.upsert_file("field_default_type.stasis", source);
+
+        let error = compiler
+            .check()
+            .expect_err("an i32 field must reject a bool field default");
+        assert!(format!("{error:?}").contains("field default"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("field default should have a source diagnostic");
+        assert_eq!(diagnostic.path, "field_default_type.stasis");
+        assert_eq!(
+            &source[diagnostic.start..diagnostic.end],
+            "true",
+            "diagnostic should point at the invalid initializer expression"
+        );
+    }
+
+    #[test]
+    fn field_defaults_require_an_allocated_scalar_or_soa_lane() {
+        let source = "struct Cell { hp: i32 = 7; }\nstruct Actor { cells: Cell[2]; }\nglobal actors: Actor[2];\nfunction main(): i32 { return 0; }\n";
+
+        let mut unused = Compiler::new();
+        unused.upsert_file(
+            "unsupported_nested_default.stasis",
+            source.replace("global actors: Actor[2];\n", ""),
+        );
+        unused
+            .check()
+            .expect("a default on an uninstantiated type does not allocate state");
+
+        let mut compiler = Compiler::new();
+        compiler.upsert_file("unsupported_nested_default.stasis", source);
+        let error = compiler
+            .check()
+            .expect_err("an unrepresented nested SoA default must be rejected");
+        assert!(format!("{error:?}").contains("actors.cells.hp"));
+        assert!(format!("{error:?}").contains("owning collection 'actors'"));
+        let diagnostic = compiler
+            .last_source_diagnostic()
+            .expect("unsupported default should have a source diagnostic");
+        assert_eq!(diagnostic.path, "unsupported_nested_default.stasis");
+        assert_eq!(
+            &source[diagnostic.start..diagnostic.end],
+            "7",
+            "diagnostic should point at the unsupported default expression"
+        );
+
+        let mut jit = crate::backend::jit::JitProcess::new();
+        jit.set_required_emit_roots(&["main".to_string()]);
+        jit.upsert_file("unsupported_nested_default.stasis", source);
+        let backend_error = jit
+            .compile()
+            .expect_err("backend compile must reject the same unallocated default");
+        assert!(format!("{backend_error:?}").contains("actors.cells.hp"));
     }
 
     #[test]

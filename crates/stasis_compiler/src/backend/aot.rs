@@ -15,6 +15,7 @@ use crate::backend::program_snapshot::{
     ProjectConfiguration,
 };
 use crate::backend::reachability::matches_root;
+use crate::backend::state_initialization::{ScalarStorageKind, TypedScalarDefault};
 use crate::backend::state_layout::{
     aot_storage_symbol, collection_field_element_count, is_named_scalar_state_path,
     AotStorageSymbolKind, StateLayout,
@@ -236,6 +237,7 @@ impl AotProcess {
                 .source_hirs_with_policy(&self.required_emit_roots, self.reachability_policy)?;
             let next_cache = build_compile_analysis_cache(
                 self.compiler.files(),
+                self.compiler.module_graph(),
                 self.compiler.functions(),
                 &mut analysis_type_table,
                 snapshot_revision,
@@ -604,6 +606,10 @@ impl AotProcess {
             .flat_map(|ids| ids.iter().copied())
             .collect();
         let layout = self.state_layout();
+        let initialization_plan = self
+            .program_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.state_initialization_plan());
         let exits_windows_process =
             cfg!(windows) && matches!(self.target, stasis_jit::AotTarget::Native);
         if layout.scalars.is_empty()
@@ -674,8 +680,17 @@ impl AotProcess {
                     .iter()
                     .find(|collection| collection.path == collection_path)
                 {
-                    bytes[..4].copy_from_slice(&collection.capacity.to_ne_bytes());
+                    bytes[..4].copy_from_slice(&collection.capacity.to_le_bytes());
+                } else if let Some(default) =
+                    initialization_plan.and_then(|plan| plan.scalar_default(&scalar.path))
+                {
+                    bytes =
+                        aot_typed_default_bytes(default, storage_type_name, width, &scalar.path)?;
                 }
+            } else if let Some(default) =
+                initialization_plan.and_then(|plan| plan.scalar_default(&scalar.path))
+            {
+                bytes = aot_typed_default_bytes(default, storage_type_name, width, &scalar.path)?;
             }
             let symbol = aot_storage_symbol(AotStorageSymbolKind::Scalar, &scalar.path, "");
             let data_id =
@@ -717,10 +732,24 @@ impl AotProcess {
                 })?;
                 let symbol =
                     aot_storage_symbol(AotStorageSymbolKind::Array, &collection.path, &field.field);
+                let mut initial_bytes = vec![0; size];
+                if let Some(default) = initialization_plan
+                    .and_then(|plan| plan.collection_lane_default(&collection.path, &field.field))
+                {
+                    let value = aot_typed_default_bytes(
+                        default,
+                        storage_type_name,
+                        width,
+                        &format!("{}.{}", collection.path, field.field),
+                    )?;
+                    for element in initial_bytes.chunks_exact_mut(width) {
+                        element.copy_from_slice(&value);
+                    }
+                }
                 let data_id = define_standalone_storage_data(
                     &mut module,
                     &symbol,
-                    vec![0; size],
+                    initial_bytes,
                     width as u64,
                 )?;
                 registrations.push((
@@ -1234,6 +1263,53 @@ fn define_standalone_storage_data(
         .define_data(data_id, &description)
         .map_err(|error| format!("failed to define standalone storage '{symbol}': {error}"))?;
     Ok(data_id)
+}
+
+fn aot_typed_default_bytes(
+    default: &TypedScalarDefault,
+    storage_type_name: &str,
+    expected_width: usize,
+    path: &str,
+) -> Result<Vec<u8>, String> {
+    let expected_kind = match storage_type_name {
+        "bool" => ScalarStorageKind::Bool,
+        "i32" => ScalarStorageKind::I32,
+        "u8" => ScalarStorageKind::U8,
+        "u16" => ScalarStorageKind::U16,
+        "u32" => ScalarStorageKind::U32,
+        "f32" => ScalarStorageKind::F32,
+        "f64" => ScalarStorageKind::F64,
+        other => {
+            return Err(format!(
+                "standalone AOT default for '{path}' has unsupported storage type '{other}'"
+            ))
+        }
+    };
+    if default.storage_kind != expected_kind {
+        return Err(format!(
+            "standalone AOT default for '{path}' has storage kind {:?}, expected {:?}",
+            default.storage_kind, expected_kind
+        ));
+    }
+    let mut bytes = default.to_le_bytes();
+    if bytes.len() != expected_kind.byte_width()
+        || default.byte_width() != expected_kind.byte_width()
+    {
+        return Err(format!(
+            "standalone AOT default for '{path}' has inconsistent scalar encoding width {}",
+            bytes.len()
+        ));
+    }
+    if default.storage_kind == ScalarStorageKind::Bool && expected_width == 4 && bytes.len() == 1 {
+        bytes.resize(4, 0);
+    }
+    if bytes.len() != expected_width {
+        return Err(format!(
+            "standalone AOT default for '{path}' has width {}, expected {expected_width}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
 }
 
 fn build_aot_direct_storage_bindings(
@@ -2042,6 +2118,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    const STRUCT_FIELD_DEFAULTS_FIXTURE: &str =
+        include_str!("../../../../tests/stasis/seams/struct_field_defaults_cross_backend.stasis");
+
     const STRUCT_LENGTH_FIELDS_FIXTURE: &str = "struct WallRun { x: i32; length: i32; }\n\
          struct WallCache<N: i32> { runs: WallRun[N]; }\n\
          global fixed_walls: WallRun[2];\n\
@@ -2052,6 +2131,26 @@ mod tests {
              return fixed_walls[0].length + generic_walls.runs[0].length\n\
                  + fixed_walls.max_length + generic_walls.runs.max_length;\n\
          }\n";
+
+    fn standalone_storage_symbol_bytes(object: &File<'_>, name: &str) -> Vec<u8> {
+        let symbol = object
+            .symbols()
+            .find(|symbol| symbol.name().ok() == Some(name))
+            .unwrap_or_else(|| panic!("missing standalone storage symbol '{name}'"));
+        let section = object
+            .section_by_index(symbol.section_index().expect("storage symbol section"))
+            .expect("storage symbol section contents");
+        let section_bytes = section.data().expect("storage symbol bytes");
+        let start = usize::try_from(
+            symbol
+                .address()
+                .checked_sub(section.address())
+                .expect("storage symbol address within section"),
+        )
+        .expect("storage symbol offset fits usize");
+        let len = usize::try_from(symbol.size()).expect("storage symbol size fits usize");
+        section_bytes[start..start + len].to_vec()
+    }
 
     #[cfg(windows)]
     fn sign_test_executable(path: &Path) {
@@ -3423,6 +3522,130 @@ mod tests {
         assert!(
             symbols.contains("ExitProcess"),
             "native Windows wrapper must terminate with the Stasis result: {symbols:?}"
+        );
+    }
+
+    #[test]
+    fn standalone_aot_storage_encodes_typed_defaults_and_refreshes_without_layout_change() {
+        let mut process = AotProcess::new();
+        process.set_required_emit_roots(&["main".to_string()]);
+        process.upsert_file("field_defaults.stasis", STRUCT_FIELD_DEFAULTS_FIXTURE);
+        process
+            .compile()
+            .expect("compile field-default AOT fixture");
+        let initial_layout_digest = process
+            .program_snapshot()
+            .expect("initial field-default snapshot")
+            .layout_digest();
+
+        let (bytes, _) = process
+            .compile_standalone_storage_object("aot_fn_0")
+            .expect("standalone storage object")
+            .expect("field defaults require standalone storage");
+        let object = File::parse(bytes.as_slice()).expect("parse field-default storage object");
+        let scalar = |path: &str| {
+            standalone_storage_symbol_bytes(
+                &object,
+                &aot_storage_symbol(AotStorageSymbolKind::Scalar, path, ""),
+            )
+        };
+        let lane = |field: &str| {
+            standalone_storage_symbol_bytes(
+                &object,
+                &aot_storage_symbol(AotStorageSymbolKind::Array, "actors", field),
+            )
+        };
+
+        assert_eq!(scalar("world.tuning.health"), 11_i32.to_le_bytes());
+        assert_eq!(
+            scalar("world.tuning.rate_f32"),
+            0x3dcccccd_u32.to_le_bytes()
+        );
+        assert_eq!(
+            scalar("world.tuning.rate_f64"),
+            0x3fb999999999999a_u64.to_le_bytes()
+        );
+        assert_eq!(
+            scalar("world.tuning.negative_zero_f32"),
+            0x80000000_u32.to_le_bytes()
+        );
+        assert_eq!(
+            scalar("world.tuning.negative_zero_f64"),
+            0x8000000000000000_u64.to_le_bytes()
+        );
+        assert_eq!(scalar("world.tuning.enabled"), [1, 0, 0, 0]);
+        assert_eq!(scalar("world.mode"), 9_i32.to_le_bytes());
+        assert_eq!(scalar("world.tuning.length"), 23_i32.to_le_bytes());
+        assert_eq!(scalar("world.tuning.max_length"), 29_i32.to_le_bytes());
+        assert_eq!(scalar("actors.max_length"), 2_i32.to_le_bytes());
+        assert_eq!(scalar("world.tuning.no_default"), [0, 0, 0, 0]);
+        assert_eq!(lane("tuning.health"), [7, 0, 0, 0, 7, 0, 0, 0]);
+        assert_eq!(
+            lane("tuning.rate_f32"),
+            [0xcd, 0xcc, 0xcc, 0x3d, 0xcd, 0xcc, 0xcc, 0x3d]
+        );
+        assert_eq!(
+            lane("tuning.rate_f64"),
+            [
+                0x9a, 0x99, 0x99, 0x99, 0x99, 0x99, 0xb9, 0x3f, 0x9a, 0x99, 0x99, 0x99, 0x99, 0x99,
+                0xb9, 0x3f,
+            ]
+        );
+        assert_eq!(
+            lane("tuning.negative_zero_f32"),
+            [0, 0, 0, 0x80, 0, 0, 0, 0x80]
+        );
+        assert_eq!(
+            lane("tuning.negative_zero_f64"),
+            [0, 0, 0, 0, 0, 0, 0, 0x80, 0, 0, 0, 0, 0, 0, 0, 0x80]
+        );
+        assert_eq!(lane("tuning.enabled"), [1, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(lane("tuning.length"), [23, 0, 0, 0, 23, 0, 0, 0]);
+        assert_eq!(lane("tuning.max_length"), [29, 0, 0, 0, 29, 0, 0, 0]);
+        assert_eq!(lane("length"), [31, 0, 0, 0, 31, 0, 0, 0]);
+        assert_eq!(lane("max_length"), [37, 0, 0, 0, 37, 0, 0, 0]);
+        assert_eq!(lane("tuning.byte"), [17, 17]);
+        assert_eq!(
+            lane("tuning.flags"),
+            [0x40, 0xe2, 0x01, 0, 0x40, 0xe2, 0x01, 0]
+        );
+        assert_eq!(lane("tuning.no_default"), [0; 8]);
+        assert_eq!(lane("armor"), [1, 2, 1, 2]);
+
+        let changed_default =
+            STRUCT_FIELD_DEFAULTS_FIXTURE.replace("health: i32 = N;", "health: i32 = N + 10;");
+        process.upsert_file("field_defaults.stasis", changed_default);
+        process
+            .compile()
+            .expect("refresh default-only AOT compilation");
+        assert_eq!(
+            process
+                .program_snapshot()
+                .expect("refreshed field-default snapshot")
+                .layout_digest(),
+            initial_layout_digest,
+            "declaration defaults do not change persistent state layout"
+        );
+        let (bytes, _) = process
+            .compile_standalone_storage_object("aot_fn_0")
+            .expect("refreshed standalone storage object")
+            .expect("field defaults require standalone storage");
+        let object = File::parse(bytes.as_slice()).expect("parse refreshed storage object");
+        assert_eq!(
+            standalone_storage_symbol_bytes(
+                &object,
+                &aot_storage_symbol(AotStorageSymbolKind::Scalar, "world.tuning.health", ""),
+            ),
+            21_i32.to_le_bytes(),
+            "fresh standalone storage reflects the refreshed declaration default"
+        );
+        assert_eq!(
+            standalone_storage_symbol_bytes(
+                &object,
+                &aot_storage_symbol(AotStorageSymbolKind::Array, "actors", "tuning.health"),
+            ),
+            [17, 0, 0, 0, 17, 0, 0, 0],
+            "fresh SoA storage reflects the refreshed generic default"
         );
     }
 

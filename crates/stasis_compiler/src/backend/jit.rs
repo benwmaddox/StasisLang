@@ -17,6 +17,9 @@ use crate::backend::program_snapshot::{
     ProgramArtifactMapping, ProgramFunction, ProgramSnapshot, ProjectConfiguration,
 };
 use crate::backend::reachability::matches_root;
+use crate::backend::state_initialization::{
+    ScalarStorageKind, StateInitializationPlan, TypedScalarDefault,
+};
 use crate::backend::state_layout::{build_state_memory_report, is_named_scalar_state_path};
 use crate::backend::state_query::{
     parse_state_query, BinaryOperator, ScalarExpression, StateQuery, StateValueReference,
@@ -934,6 +937,7 @@ impl JitProcess {
                 })?;
             let next_cache = build_compile_analysis_cache_from_resolved_externs(
                 self.compiler.files(),
+                self.compiler.module_graph(),
                 self.compiler.functions(),
                 &mut analysis_type_table,
                 snapshot_revision,
@@ -1494,18 +1498,18 @@ impl JitProcess {
     }
 
     pub fn activate_staged_runtime(&self) -> Result<(), String> {
-        let analysis = &self
+        let snapshot = self
             .program_snapshot
             .as_ref()
-            .ok_or_else(|| "cannot activate an uncompiled JIT process".to_string())?
-            .analysis
-            .clone();
-        build_direct_storage_bindings(
+            .ok_or_else(|| "cannot activate an uncompiled JIT process".to_string())?;
+        let analysis = &snapshot.analysis;
+        build_direct_storage_bindings_with_initialization(
             &analysis.global_path_types,
             &analysis.collection_infos,
             &analysis.typed_collection_descriptors,
             self.compiler.types(),
             true,
+            Some(snapshot.state_initialization_plan()),
         )?;
         seed_fixed_collection_max_length_headers(
             &analysis.global_path_types,
@@ -1596,6 +1600,12 @@ impl JitProcess {
             .is_some_and(|snapshot| snapshot.analysis.global_path_types.contains_key(path))
     }
 
+    pub(crate) fn state_initialization_plan(&self) -> Option<&StateInitializationPlan> {
+        self.program_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.state_initialization_plan())
+    }
+
     pub fn global_scalar_type(&self, path: &str) -> Option<&'static str> {
         let type_id = self
             .program_snapshot
@@ -1661,6 +1671,10 @@ impl JitProcess {
             .field_type_ids
             .get(field)?;
         scalar_type_name(*type_id)
+    }
+
+    pub(crate) fn has_global_collection_field(&self, path: &str, field: &str) -> bool {
+        self.global_collection_value_type(path, field).is_ok()
     }
 
     pub fn global_scalar_paths(&self) -> Vec<(String, &'static str)> {
@@ -3084,6 +3098,24 @@ fn build_direct_storage_bindings(
     type_table: &TypeTable,
     provision: bool,
 ) -> Result<DirectStorageBindings, String> {
+    build_direct_storage_bindings_with_initialization(
+        global_path_types,
+        collection_infos,
+        typed_collection_descriptors,
+        type_table,
+        provision,
+        None,
+    )
+}
+
+fn build_direct_storage_bindings_with_initialization(
+    global_path_types: &crate::backend::compile_analysis::GlobalPathTypeMap,
+    collection_infos: &crate::backend::compile_analysis::CollectionInfoMap,
+    typed_collection_descriptors: &TypedCollectionInfoMap,
+    type_table: &TypeTable,
+    provision: bool,
+    initialization_plan: Option<&StateInitializationPlan>,
+) -> Result<DirectStorageBindings, String> {
     let mut bindings = DirectStorageBindings::default();
     let mut claimed_slots = BTreeMap::<(u8, i32, i32), String>::new();
     for (path, type_id) in global_path_types {
@@ -3105,7 +3137,21 @@ fn build_direct_storage_bindings(
             )?;
             let address = stasis_dynload::direct_scalar_storage_slot_address(kind, path_hash)?;
             if provision {
-                stasis_dynload::provision_direct_scalar_storage(kind, path_hash)?;
+                let default_bits = initialization_plan
+                    .and_then(|plan| plan.scalar_default(path))
+                    .map(|default| {
+                        checked_initialization_default_bits(
+                            default,
+                            kind,
+                            &format!("scalar path '{path}'"),
+                        )
+                    })
+                    .transpose()?;
+                stasis_dynload::provision_direct_scalar_storage_with_default(
+                    kind,
+                    path_hash,
+                    default_bits,
+                )?;
             }
             insert_jit_scalar_binding(
                 &mut bindings,
@@ -3147,11 +3193,22 @@ fn build_direct_storage_bindings(
                 &format!("array lane '{path}'"),
             )?;
             if provision {
-                stasis_dynload::provision_direct_array_storage(
+                let default_bits = initialization_plan
+                    .and_then(|plan| plan.collection_lane_default(path, ""))
+                    .map(|default| {
+                        checked_initialization_default_bits(
+                            default,
+                            kind,
+                            &format!("array lane '{path}'"),
+                        )
+                    })
+                    .transpose()?;
+                stasis_dynload::provision_direct_array_storage_with_default(
                     kind,
                     path_hash,
                     0,
                     info.len as usize,
+                    default_bits,
                 )?;
             }
             insert_jit_array_binding(
@@ -3189,11 +3246,22 @@ fn build_direct_storage_bindings(
             let address =
                 stasis_dynload::direct_array_storage_slot_address(kind, path_hash, field_hash)?;
             if provision {
-                stasis_dynload::provision_direct_array_storage(
+                let default_bits = initialization_plan
+                    .and_then(|plan| plan.collection_lane_default(path, field))
+                    .map(|default| {
+                        checked_initialization_default_bits(
+                            default,
+                            kind,
+                            &format!("array lane '{path}.{field}'"),
+                        )
+                    })
+                    .transpose()?;
+                stasis_dynload::provision_direct_array_storage_with_default(
                     kind,
                     path_hash,
                     field_hash,
                     lane_len as usize,
+                    default_bits,
                 )?;
             }
             insert_jit_array_binding(
@@ -3223,7 +3291,17 @@ fn build_direct_storage_bindings(
                 claim_jit_storage_slot(&mut claimed_slots, kind, path_hash, 0, &lane_label)?;
                 let address = stasis_dynload::direct_scalar_storage_slot_address(kind, path_hash)?;
                 if provision {
-                    stasis_dynload::provision_direct_scalar_storage(kind, path_hash)?;
+                    let default_bits = initialization_plan
+                        .and_then(|plan| plan.collection_lane_default(path, &lane.name))
+                        .map(|default| {
+                            checked_initialization_default_bits(default, kind, &lane_label)
+                        })
+                        .transpose()?;
+                    stasis_dynload::provision_direct_scalar_storage_with_default(
+                        kind,
+                        path_hash,
+                        default_bits,
+                    )?;
                 }
                 insert_jit_scalar_binding(
                     &mut bindings,
@@ -3258,11 +3336,18 @@ fn build_direct_storage_bindings(
                     field_hash,
                 )?;
                 if provision {
-                    stasis_dynload::provision_direct_array_storage(
+                    let default_bits = initialization_plan
+                        .and_then(|plan| plan.collection_lane_default(path, &lane.name))
+                        .map(|default| {
+                            checked_initialization_default_bits(default, kind, &lane_label)
+                        })
+                        .transpose()?;
+                    stasis_dynload::provision_direct_array_storage_with_default(
                         kind,
                         crate::backend::emit::hash_global_path(path),
                         field_hash,
                         length,
+                        default_bits,
                     )?;
                 }
                 insert_jit_array_binding(
@@ -3279,6 +3364,49 @@ fn build_direct_storage_bindings(
         }
     }
     Ok(bindings)
+}
+
+fn checked_initialization_default_bits(
+    default: &TypedScalarDefault,
+    expected: stasis_dynload::JitStorageKind,
+    lane: &str,
+) -> Result<u64, String> {
+    let expected_kind = match default.storage_kind {
+        ScalarStorageKind::Bool | ScalarStorageKind::I32 | ScalarStorageKind::U32 => {
+            stasis_dynload::JitStorageKind::I32
+        }
+        ScalarStorageKind::U8 => stasis_dynload::JitStorageKind::U8,
+        ScalarStorageKind::U16 => stasis_dynload::JitStorageKind::U16,
+        ScalarStorageKind::F32 => stasis_dynload::JitStorageKind::F32,
+        ScalarStorageKind::F64 => stasis_dynload::JitStorageKind::F64,
+    };
+    if expected_kind != expected {
+        return Err(format!(
+            "state initialization default for {lane} uses storage kind {:?}, but JIT backing requires {expected:?}",
+            default.storage_kind
+        ));
+    }
+    let width = default.byte_width();
+    if width == 0 || width > 8 || (width < 8 && default.bits >> (width * 8) != 0) {
+        return Err(format!(
+            "state initialization default for {lane} has invalid {width}-byte value bits"
+        ));
+    }
+    if default.storage_kind == ScalarStorageKind::Bool && default.bits > 1 {
+        return Err(format!(
+            "state initialization default for {lane} has a noncanonical bool value"
+        ));
+    }
+    let bytes = default.to_le_bytes();
+    if bytes.len() != width {
+        return Err(format!(
+            "state initialization default for {lane} encoded {} bytes instead of {width}",
+            bytes.len()
+        ));
+    }
+    let mut padded = [0u8; 8];
+    padded[..width].copy_from_slice(&bytes);
+    Ok(u64::from_le_bytes(padded))
 }
 
 fn claim_jit_storage_slot(
@@ -4076,6 +4204,149 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn declaration_defaults_seed_fresh_state_and_hot_swap_preserves_live_values() {
+        fn source(
+            enabled_default: bool,
+            byte_default: u8,
+            short_default: u16,
+            ratio_default: &str,
+            score_default: i32,
+        ) -> String {
+            format!(
+                "struct Settings {{ enabled: bool = {enabled_default}; byte: u8 = {byte_default}; short: u16 = {short_default}; ratio: f32 = {ratio_default}; score: i32 = {score_default}; }}\nglobal settings: Settings;\nfunction main(): i32 {{ return settings.score; }}\n"
+            )
+        }
+
+        let mut active = JitProcess::new();
+        active.upsert_file("state_defaults.stasis", source(true, 17, 500, "0.1", 6));
+        active.compile().expect("compile and activate defaults");
+        assert_eq!(
+            active.read_global_scalar("settings.enabled"),
+            Ok(JitScalarValue::Bool(true))
+        );
+        assert_eq!(
+            active.read_global_scalar("settings.byte"),
+            Ok(JitScalarValue::U8(17))
+        );
+        assert_eq!(
+            active.read_global_scalar("settings.short"),
+            Ok(JitScalarValue::U16(500))
+        );
+        assert_eq!(
+            active.read_global_scalar("settings.ratio"),
+            Ok(JitScalarValue::F32(0.1))
+        );
+        assert_eq!(
+            active.read_global_scalar("settings.score"),
+            Ok(JitScalarValue::I32(6))
+        );
+
+        active
+            .write_global_scalar("settings.enabled", JitScalarValue::Bool(false))
+            .expect("mutate bool state");
+        active
+            .write_global_scalar("settings.byte", JitScalarValue::U8(33))
+            .expect("mutate u8 state");
+        active
+            .write_global_scalar("settings.short", JitScalarValue::U16(1025))
+            .expect("mutate u16 state");
+        active
+            .write_global_scalar("settings.ratio", JitScalarValue::F32(0.25))
+            .expect("mutate f32 state");
+        active
+            .write_global_scalar("settings.score", JitScalarValue::I32(99))
+            .expect("mutate i32 state");
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file("state_defaults.stasis", source(true, 18, 501, "0.2", 7));
+        candidate
+            .compile_staged()
+            .expect("compile compatible candidate with edited defaults");
+        candidate
+            .activate_staged_runtime()
+            .expect("activate candidate without resetting compatible state");
+
+        assert_eq!(
+            candidate.read_global_scalar("settings.enabled"),
+            Ok(JitScalarValue::Bool(false))
+        );
+        assert_eq!(
+            candidate.read_global_scalar("settings.byte"),
+            Ok(JitScalarValue::U8(33))
+        );
+        assert_eq!(
+            candidate.read_global_scalar("settings.short"),
+            Ok(JitScalarValue::U16(1025))
+        );
+        assert_eq!(
+            candidate.read_global_scalar("settings.ratio"),
+            Ok(JitScalarValue::F32(0.25))
+        );
+        assert_eq!(
+            candidate.read_global_scalar("settings.score"),
+            Ok(JitScalarValue::I32(99))
+        );
+    }
+
+    #[test]
+    fn declaration_defaults_fill_only_new_nested_collection_rows() {
+        fn source(capacity: usize, hp_default: i32, active_default: bool) -> String {
+            format!(
+                "struct Stats {{ hp: i32 = {hp_default}; active: bool = {active_default}; }}\nstruct Actor {{ stats: Stats; }}\nglobal actors: Actor[{capacity}];\nfunction main(): i32 {{ return actors[0].stats.hp; }}\n"
+            )
+        }
+
+        let mut active = JitProcess::new();
+        active.upsert_file("collection_defaults.stasis", source(2, 4, true));
+        active
+            .compile()
+            .expect("compile and activate collection defaults");
+        for index in 0..2 {
+            assert_eq!(
+                active.read_global_collection_scalar("actors", "stats.hp", index),
+                Ok(JitScalarValue::I32(4))
+            );
+            assert_eq!(
+                active.read_global_collection_scalar("actors", "stats.active", index),
+                Ok(JitScalarValue::Bool(true))
+            );
+        }
+        active
+            .write_global_collection_scalar("actors", "stats.hp", 0, JitScalarValue::I32(91))
+            .expect("mutate first nested row");
+
+        let mut candidate = active.staged_candidate();
+        candidate.upsert_file("collection_defaults.stasis", source(3, 12, false));
+        candidate
+            .compile_staged()
+            .expect("compile candidate with added row and changed defaults");
+        candidate
+            .activate_staged_runtime()
+            .expect("grow lanes while preserving old rows");
+
+        assert_eq!(
+            candidate.read_global_collection_scalar("actors", "stats.hp", 0),
+            Ok(JitScalarValue::I32(91))
+        );
+        assert_eq!(
+            candidate.read_global_collection_scalar("actors", "stats.hp", 1),
+            Ok(JitScalarValue::I32(4))
+        );
+        assert_eq!(
+            candidate.read_global_collection_scalar("actors", "stats.hp", 2),
+            Ok(JitScalarValue::I32(12))
+        );
+        assert_eq!(
+            candidate.read_global_collection_scalar("actors", "stats.active", 0),
+            Ok(JitScalarValue::Bool(true))
+        );
+        assert_eq!(
+            candidate.read_global_collection_scalar("actors", "stats.active", 2),
+            Ok(JitScalarValue::Bool(false))
+        );
     }
 
     #[test]
@@ -10771,13 +11042,19 @@ function main(): i32 { return read(0); }
         );
         process.upsert_file(
             "sample.stasis",
-            "import \"math.stasis\"; global value: f32; function main(): i32 { let generated_negative_zero: f32 = 0.0 / -1.0; if (f32_to_bits(value) != (-2147483647 - 1)) { return 1; } if (f32_to_bits(math_sqrt(value)) != 0) { return 2; } if (f32_to_bits(math_abs(value)) != 0) { return 3; } if (f32_to_bits(math_atan2_degrees(value, 1.0)) != 0) { return 4; } if (math_atan2_degrees(value, -1.0) != 180.0) { return 5; } if (f32_to_bits(generated_negative_zero) != (-2147483647 - 1)) { return 6; } if (f32_to_bits(math_sqrt(generated_negative_zero)) != 0) { return 7; } if (f32_to_bits(math_abs(generated_negative_zero)) != 0) { return 8; } if (f32_to_bits(math_atan2_degrees(generated_negative_zero, 1.0)) != 0) { return 9; } if (f32_to_bits(f32_sqrt(2.0)) != 1068827891) { return 10; } return 0; }\n",
+            "import \"math.stasis\"; global value: f32; global zero: f32; global precise_zero: f64; global byte: u8; global short: u16; function main(): i32 { let generated_negative_zero: f32 = 0.0 / -1.0; if (f32_to_bits(value) != (-2147483647 - 1)) { return 1; } if (f32_to_bits(math_sqrt(value)) != 0) { return 2; } if (f32_to_bits(math_abs(value)) != 0) { return 3; } if (f32_to_bits(math_atan2_degrees(value, 1.0)) != 0) { return 4; } if (math_atan2_degrees(value, -1.0) != 180.0) { return 5; } if (f32_to_bits(generated_negative_zero) != (-2147483647 - 1)) { return 6; } if (f32_to_bits(math_sqrt(generated_negative_zero)) != 0) { return 7; } if (f32_to_bits(math_abs(generated_negative_zero)) != 0) { return 8; } if (f32_to_bits(math_atan2_degrees(generated_negative_zero, 1.0)) != 0) { return 9; } if (f32_to_bits(f32_sqrt(2.0)) != 1068827891) { return 10; } if (f32_to_bits(-zero) != (-2147483647 - 1)) { return 11; } if (f32_to_bits(-value) != 0) { return 12; } if (1.0 / -precise_zero > 0.0) { return 13; } if (1.0 / precise_zero < 0.0) { return 14; } if (-byte != 255) { return 15; } if (-short != 65535) { return 16; } return 0; }\n",
         );
         process.compile().expect("compile f32 bitcast intrinsics");
         stasis_dynload::stasis_jit_global_f32_store(
             stasis_dynload::global_path_hash("value"),
             -0.0_f32,
         );
+        process
+            .write_global_scalar("byte", JitScalarValue::U8(1))
+            .expect("write byte value");
+        process
+            .write_global_scalar("short", JitScalarValue::U16(1))
+            .expect("write short value");
         let value = process
             .execute_i32_noarg_by_name("main")
             .expect("execute main");

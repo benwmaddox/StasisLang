@@ -177,12 +177,14 @@ impl ExprBinaryOp {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ExprUnaryOp {
+    Negate,
     BitwiseNot,
 }
 
 impl ExprUnaryOp {
     pub(crate) const fn spelling(self) -> &'static str {
         match self {
+            Self::Negate => "-",
             Self::BitwiseNot => "~",
         }
     }
@@ -231,10 +233,14 @@ pub(crate) enum ResolvedCallTarget {
 
 impl SimpleExpr {
     /// Returns the signed value of an unsuffixed integer literal, including
-    /// the parser's `0 - literal` representation for unary negation.
+    /// the parser's explicit unary-negation representation.
     pub(crate) fn contextual_integer_literal_value(&self) -> Option<i64> {
         match self {
             Self::Int(value) => Some(*value),
+            Self::Unary {
+                op: ExprUnaryOp::Negate,
+                operand,
+            } => operand.contextual_integer_literal_value()?.checked_neg(),
             Self::Binary {
                 lhs,
                 op: ExprBinaryOp::Subtract,
@@ -255,7 +261,7 @@ impl SimpleExpr {
         }
         match self {
             Self::Unary {
-                op: ExprUnaryOp::BitwiseNot,
+                op: ExprUnaryOp::BitwiseNot | ExprUnaryOp::Negate,
                 operand,
             } => operand.is_contextual_integer_expression(),
             Self::Binary {
@@ -276,6 +282,10 @@ impl SimpleExpr {
 pub(crate) fn eval_const_i64(expression: &SimpleExpr) -> Option<i64> {
     match expression {
         SimpleExpr::Int(value) => Some(*value),
+        SimpleExpr::Unary {
+            op: ExprUnaryOp::Negate,
+            operand,
+        } => eval_const_i64(operand)?.checked_neg(),
         SimpleExpr::Unary {
             op: ExprUnaryOp::BitwiseNot,
             operand,

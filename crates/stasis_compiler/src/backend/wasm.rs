@@ -12,6 +12,7 @@ use crate::backend::compile_analysis::{
 use crate::backend::hash::{hash_global_path, hash_string_literal};
 use crate::backend::program_snapshot::{ProgramSnapshot, ProjectConfiguration};
 use crate::backend::reachability::matches_root;
+use crate::backend::state_initialization::{ScalarStorageKind, TypedScalarDefault};
 use crate::backend::state_layout::{
     build_state_layout, collection_field_element_count, is_replay_host_or_presentation_path,
     StateCollectionLayout, StateScalarLayout,
@@ -158,6 +159,7 @@ impl WasmProcess {
         );
         let analysis = build_compile_analysis_cache(
             self.compiler.files(),
+            self.compiler.module_graph(),
             self.compiler.functions(),
             &mut types,
             source_revision,
@@ -1042,10 +1044,139 @@ fn initial_i32_for_path(
     analysis: &crate::backend::compile_analysis::CompileAnalysisCache,
 ) -> Option<i32> {
     [".length", ".max_length"].iter().find_map(|suffix| {
-        path.strip_suffix(suffix)
-            .and_then(|collection_path| analysis.collection_infos.get(collection_path))
-            .map(|collection| collection.len)
+        let collection_path = path.strip_suffix(suffix)?;
+        let collection = analysis.collection_infos.get(collection_path)?;
+        // Compiler-owned collection metadata and a user SoA lane can share a
+        // flattened source path such as `actors.max_length`. They have
+        // separate Wasm storage bindings: this global is the metadata value,
+        // while the memory binding is the user lane and gets its typed default
+        // through `collection_lane_default` below.
+        Some(collection.len)
     })
+}
+
+fn wasm_default_storage_kind(type_id: TypeId, types: &TypeTable) -> Option<ScalarStorageKind> {
+    if type_id == TYPE_ID_BOOL {
+        Some(ScalarStorageKind::Bool)
+    } else if let Some(bits) = types.unsigned_integer_bits(type_id) {
+        match bits {
+            8 => Some(ScalarStorageKind::U8),
+            16 => Some(ScalarStorageKind::U16),
+            32 => Some(ScalarStorageKind::U32),
+            _ => None,
+        }
+    } else if type_id == TYPE_ID_F32 {
+        Some(ScalarStorageKind::F32)
+    } else if type_id == TYPE_ID_F64 {
+        Some(ScalarStorageKind::F64)
+    } else if is_i32_numeric_type(type_id, types) {
+        Some(ScalarStorageKind::I32)
+    } else {
+        None
+    }
+}
+
+fn wasm_typed_default_bytes(
+    default: &TypedScalarDefault,
+    type_id: TypeId,
+    types: &TypeTable,
+    named_struct_fields: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
+    path: &str,
+) -> Result<Vec<u8>, String> {
+    let width = storage_width(type_id, types, named_struct_fields)? as usize;
+    let expected_kind = wasm_default_storage_kind(type_id, types).ok_or_else(|| {
+        format!("web state default for '{path}' has unsupported scalar type id {type_id}")
+    })?;
+    if default.storage_kind != expected_kind {
+        return Err(format!(
+            "web state default for '{path}' has storage kind {:?}, expected {:?}",
+            default.storage_kind, expected_kind
+        ));
+    }
+    let bytes = default.to_le_bytes();
+    if default.byte_width() != width || bytes.len() != width {
+        return Err(format!(
+            "web state default for '{path}' has width {}, expected {width}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
+}
+
+fn append_wasm_global_default(
+    default: &TypedScalarDefault,
+    type_id: TypeId,
+    types: &TypeTable,
+    named_struct_fields: &crate::backend::compile_analysis::NamedStructFieldTypeMap,
+    path: &str,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    let bytes = wasm_typed_default_bytes(default, type_id, types, named_struct_fields, path)?;
+    match default.storage_kind {
+        ScalarStorageKind::Bool
+        | ScalarStorageKind::I32
+        | ScalarStorageKind::U8
+        | ScalarStorageKind::U16
+        | ScalarStorageKind::U32 => {
+            if wasm_value_type(type_id)? != I32 {
+                return Err(format!(
+                    "web state default for '{path}' does not match its i32 global lane"
+                ));
+            }
+            let bits = match bytes.len() {
+                1 => u32::from(bytes[0]),
+                2 => u32::from(u16::from_le_bytes([bytes[0], bytes[1]])),
+                4 => u32::from_le_bytes(bytes.as_slice().try_into().map_err(|_| {
+                    format!("web state default for '{path}' has invalid i32 width")
+                })?),
+                width => {
+                    return Err(format!(
+                        "web state default for '{path}' has unsupported integer width {width}"
+                    ))
+                }
+            };
+            out.push(0x41);
+            sleb(bits as i32, out);
+        }
+        ScalarStorageKind::F32 => {
+            if wasm_value_type(type_id)? != F32 {
+                return Err(format!(
+                    "web state default for '{path}' does not match its f32 global lane"
+                ));
+            }
+            out.push(0x43);
+            out.extend_from_slice(&bytes);
+        }
+        ScalarStorageKind::F64 => {
+            if wasm_value_type(type_id)? != F64 {
+                return Err(format!(
+                    "web state default for '{path}' does not match its f64 global lane"
+                ));
+            }
+            out.push(0x44);
+            out.extend_from_slice(&bytes);
+        }
+    }
+    Ok(())
+}
+
+fn collection_lane_default_for_path<'a>(
+    path: &'a str,
+    analysis: &'a crate::backend::compile_analysis::CompileAnalysisCache,
+) -> Option<(&'a str, &'a str)> {
+    analysis
+        .collection_infos
+        .iter()
+        .filter_map(|(collection_path, collection)| {
+            let lane = path
+                .strip_prefix(collection_path.as_str())?
+                .strip_prefix('.')?;
+            collection
+                .field_types
+                .contains_key(lane)
+                .then_some((collection_path.as_str(), lane))
+        })
+        .max_by_key(|(collection_path, _)| collection_path.len())
 }
 
 fn build_struct_collections(
@@ -1476,11 +1607,20 @@ fn encode_module(
 
     let mut global_section = Vec::new();
     uleb(globals.len() as u32 + 1, &mut global_section);
-    for (_, type_id, initial_i32) in &globals {
+    for (name, type_id, initial_i32) in &globals {
         global_section.extend([wasm_value_type(*type_id)?, 1]);
         if let Some(value) = initial_i32 {
             global_section.push(0x41);
             sleb(*value, &mut global_section);
+        } else if let Some(default) = analysis.initialization_plan.scalar_default(name) {
+            append_wasm_global_default(
+                default,
+                *type_id,
+                types,
+                &analysis.named_struct_field_types,
+                name,
+                &mut global_section,
+            )?;
         } else {
             encode_zero(*type_id, &mut global_section)?;
         }
@@ -1612,17 +1752,62 @@ fn encode_module(
         code_section.extend(body);
     }
     section(10, code_section, &mut module);
-    let mut initial_memory = memory_bindings
-        .iter()
-        .filter_map(|(path, binding)| {
-            binding
-                .scalar
-                .then(|| initial_i32_for_path(path, analysis))
-                .flatten()
-                .map(|value| (binding, value))
-        })
-        .collect::<Vec<_>>();
-    initial_memory.sort_by_key(|(binding, _)| binding.offset);
+    let mut initial_memory = Vec::<(u32, Vec<u8>)>::new();
+    for (path, binding) in &memory_bindings {
+        if binding.scalar {
+            if let Some(value) = initial_i32_for_path(path, analysis) {
+                let bytes = match binding.width {
+                    1 => vec![value as u8],
+                    2 => (value as u16).to_le_bytes().to_vec(),
+                    4 => value.to_le_bytes().to_vec(),
+                    width => {
+                        return Err(format!(
+                            "web state field initializer has unsupported width {width}"
+                        ))
+                    }
+                };
+                initial_memory.push((binding.offset, bytes));
+                continue;
+            }
+            if let Some(default) = analysis.initialization_plan.scalar_default(path) {
+                let bytes = wasm_typed_default_bytes(
+                    default,
+                    binding.type_id,
+                    types,
+                    &analysis.named_struct_field_types,
+                    path,
+                )?;
+                initial_memory.push((binding.offset, bytes));
+            }
+        } else if let Some((collection_path, lane_path)) =
+            collection_lane_default_for_path(path, analysis)
+        {
+            if let Some(default) = analysis
+                .initialization_plan
+                .collection_lane_default(collection_path, lane_path)
+            {
+                let value = wasm_typed_default_bytes(
+                    default,
+                    binding.type_id,
+                    types,
+                    &analysis.named_struct_field_types,
+                    path,
+                )?;
+                let count = usize::try_from(binding.len)
+                    .map_err(|_| format!("negative web memory length for '{path}'"))?;
+                let mut bytes = Vec::with_capacity(
+                    count
+                        .checked_mul(value.len())
+                        .ok_or_else(|| "web memory initializer size overflow".to_string())?,
+                );
+                for _ in 0..count {
+                    bytes.extend_from_slice(&value);
+                }
+                initial_memory.push((binding.offset, bytes));
+            }
+        }
+    }
+    initial_memory.sort_by_key(|(offset, _)| *offset);
     let literal_table = if let Some((_, first_binding)) = string_literal_memory.iter().next() {
         let table_offset = first_binding.offset;
         let mut bytes = Vec::new();
@@ -1656,21 +1841,11 @@ fn encode_module(
             (initial_memory.len() + usize::from(has_literal_table)) as u32,
             &mut data_section,
         );
-        for (binding, value) in initial_memory {
+        for (offset, bytes) in initial_memory {
             data_section.push(0);
             data_section.push(0x41);
-            sleb(binding.offset as i32, &mut data_section);
+            sleb(offset as i32, &mut data_section);
             data_section.push(0x0b);
-            let bytes = match binding.width {
-                1 => vec![value as u8],
-                2 => (value as u16).to_le_bytes().to_vec(),
-                4 => value.to_le_bytes().to_vec(),
-                width => {
-                    return Err(format!(
-                        "web state field initializer has unsupported width {width}"
-                    ))
-                }
-            };
             uleb(bytes.len() as u32, &mut data_section);
             data_section.extend(bytes);
         }
@@ -6718,6 +6893,20 @@ fn encode_expr_as(
                 out.push(0x20);
                 uleb(binding.index, out);
                 Ok(binding.type_id)
+            } else if let Some(index) = context.globals.get(name).filter(|_| {
+                context
+                    .memory
+                    .get(name)
+                    .is_some_and(|binding| !binding.scalar)
+            }) {
+                // A collection metadata global and a user SoA lane can share
+                // the same flattened path, such as `actors.max_length`. The
+                // exact global binding represents the unindexed metadata
+                // expression; indexed field access still resolves through
+                // its separate memory lane in the IndexedPath branch.
+                out.push(0x23);
+                uleb(*index, out);
+                global_type(context, name)
             } else if let Some(binding) = context.memory.get(name) {
                 if binding.scalar {
                     encode_scalar_memory_load(binding, out)?;
@@ -6756,6 +6945,64 @@ fn encode_expr_as(
             out.push(0x10);
             uleb(index, out);
             Ok(signature.result)
+        }
+        SimpleExpr::Unary {
+            op: ExprUnaryOp::Negate,
+            operand,
+        } => {
+            let negated = SimpleExpr::Unary {
+                op: ExprUnaryOp::Negate,
+                operand: operand.clone(),
+            };
+            let wraps_unsigned_literal = matches!(operand.as_ref(), SimpleExpr::Int(_))
+                && expected
+                    .is_some_and(|type_id| context.types.unsigned_integer_bits(type_id).is_some());
+            if let Some(value) = negated
+                .contextual_integer_literal_value()
+                .filter(|_| !wraps_unsigned_literal)
+            {
+                let type_id = expected
+                    .filter(|type_id| context.types.integer_width_bits(*type_id).is_some())
+                    .unwrap_or(TYPE_ID_I32);
+                if !context.types.integer_literal_fits(value, type_id) {
+                    return Err(format!(
+                        "integer literal {value} does not fit contextual web type {type_id}"
+                    ));
+                }
+                out.push(0x41);
+                sleb(value as i32, out);
+                return Ok(type_id);
+            }
+
+            let operand_expected = expected.filter(|type_id| {
+                context.types.integer_width_bits(*type_id).is_some()
+                    || matches!(*type_id, TYPE_ID_F32 | TYPE_ID_F64)
+            });
+            let mut operand_bytes = Vec::new();
+            let operand_type =
+                encode_expr_as(operand, operand_expected, context, &mut operand_bytes)?;
+            if operand_type == TYPE_ID_F32 {
+                out.extend(operand_bytes);
+                out.push(0x8c); // f32.neg
+                return Ok(TYPE_ID_F32);
+            }
+            if operand_type == TYPE_ID_F64 {
+                out.extend(operand_bytes);
+                out.push(0x9a); // f64.neg
+                return Ok(TYPE_ID_F64);
+            }
+            if context.types.integer_width_bits(operand_type).is_some() {
+                out.push(0x41);
+                sleb(0, out);
+                out.extend(operand_bytes);
+                out.push(0x6b); // i32.sub
+                encode_narrow_integer_normalization(operand_type, context.types, out);
+                return Ok(operand_type);
+            }
+            Err(format!(
+                "web '{}' requires a numeric operand, found type {operand_type}",
+                ExprUnaryOp::Negate.spelling()
+            ))
         }
         SimpleExpr::Unary {
             op: ExprUnaryOp::BitwiseNot,
@@ -8654,6 +8901,55 @@ function render(): i32 { return 0; }
     }
 
     #[test]
+    fn collection_extent_global_coexists_with_same_named_soa_lane() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "extent_lane_collision.stasis",
+            concat!(
+                "struct Actor { length: i32 = 31; max_length: i32 = 37; } ",
+                "global actors: Actor[2]; ",
+                "function main(): i32 { ",
+                "if (actors.max_length != 2) { return 1; } ",
+                "if (actors[0].length != 31 || actors[1].length != 31) { return 2; } ",
+                "if (actors[0].max_length != 37 || actors[1].max_length != 37) { return 3; } ",
+                "return 0; } ",
+                "function tick(): i32 { return 0; } ",
+                "function render(): i32 { return 0; }",
+            ),
+        );
+        process
+            .compile()
+            .expect("compile collection extent and colliding user lane");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let wasm_path = std::env::temp_dir().join(format!(
+            "stasis_wasm_extent_lane_collision_{}_{}.wasm",
+            std::process::id(),
+            stamp
+        ));
+        fs::write(&wasm_path, process.module_bytes()).expect("write extent/lane collision wasm");
+        let output = Command::new("node")
+            .args([
+                "-e",
+                "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+            ])
+            .arg(&wasm_path)
+            .output()
+            .expect("run Node for extent/lane collision wasm");
+        let _ = fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "0");
+    }
+
+    #[test]
     fn lowers_numeric_intrinsics_without_fake_host_calls() {
         let mut process = WasmProcess::new();
         process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
@@ -8707,6 +9003,66 @@ function render(): i32 { return 0; }
             .arg(&wasm_path)
             .output()
             .expect("run Node for math negative-zero oracle");
+        let _ = fs::remove_file(&wasm_path);
+        assert!(
+            output.status.success(),
+            "Node failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "0");
+    }
+
+    #[test]
+    fn unary_negation_preserves_float_zero_and_handles_integer_lanes_in_wasm() {
+        let mut process = WasmProcess::new();
+        process.set_required_emit_roots(&["main".into(), "tick".into(), "render".into()]);
+        process.upsert_file(
+            "unary_negation.stasis",
+            concat!(
+                "const ZERO_F32: f32 = 0.0; ",
+                "const ZERO_F64: f64 = 0.0; ",
+                "function main(): i32 { ",
+                "let negative_f32: f32 = -ZERO_F32; ",
+                "if (f32_to_bits(negative_f32) != (-2147483647 - 1)) { return 1; } ",
+                "let positive_f32: f32 = 0.0 - ZERO_F32; ",
+                "if (f32_to_bits(positive_f32) != 0) { return 2; } ",
+                "let negative_f64: f64 = -ZERO_F64; ",
+                "if (1.0 / negative_f64 >= 0.0) { return 3; } ",
+                "let negative_i32: i32 = -5; ",
+                "if (negative_i32 != -5) { return 4; } ",
+                "let positive_u8: u8 = 5; let negative_u8: u8 = -positive_u8; ",
+                "if (negative_u8 != 251) { return 5; } ",
+                "let positive_u16: u16 = 5; let negative_u16: u16 = -positive_u16; ",
+                "if (negative_u16 != 65531) { return 6; } ",
+                "let minimum_i32: i32 = -2147483648; ",
+                "if (minimum_i32 != (-2147483647 - 1)) { return 7; } ",
+                "return 0; } ",
+                "function tick(): i32 { return 0; } ",
+                "function render(): i32 { return 0; }",
+            ),
+        );
+        process
+            .compile()
+            .expect("compile typed unary negation for WebAssembly");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let wasm_path = std::env::temp_dir().join(format!(
+            "stasis_wasm_unary_negation_{}_{}.wasm",
+            std::process::id(),
+            stamp
+        ));
+        fs::write(&wasm_path, process.module_bytes()).expect("write unary negation wasm");
+        let output = Command::new("node")
+            .args([
+                "-e",
+                "const fs=require('node:fs'); WebAssembly.instantiate(fs.readFileSync(process.argv[1]), {}).then(({instance}) => process.stdout.write(String(instance.exports.main()))).catch((error) => { console.error(error); process.exit(1); });",
+            ])
+            .arg(&wasm_path)
+            .output()
+            .expect("run Node for unary negation wasm");
         let _ = fs::remove_file(&wasm_path);
         assert!(
             output.status.success(),
