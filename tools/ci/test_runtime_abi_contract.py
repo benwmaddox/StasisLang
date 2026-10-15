@@ -204,8 +204,8 @@ class RuntimeAbiContractTests(unittest.TestCase):
     def test_it015_public_fixture_rejects_private_graphics_storage(self):
         failures, _ = self.run_with(
             contract.MOBILE_PACKAGED_ASSETS_FIXTURE,
-            "global seam_sprite_handle: i32;",
-            "global gfx_cmd_i32: i32[67888];\nglobal seam_sprite_handle: i32;",
+            "global seam_sprite_handle: SpriteRef;",
+            "global gfx_cmd_i32: i32[67888];\nglobal seam_sprite_handle: SpriteRef;",
         )
         failure = next(
             failure for failure in failures

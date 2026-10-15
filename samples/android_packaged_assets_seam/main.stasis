@@ -3,7 +3,7 @@ import "/vendor/stasis/src/stdlib/graphics.stasis";
 
 global ticks: i32;
 global seam_state_checksum: i32;
-global seam_sprite_handle: i32;
+global seam_sprite_handle: SpriteRef;
 global seam_font_handle: i32;
 global seam_cached_text_handle: i32;
 global seam_audio_handle: i32;
@@ -22,7 +22,7 @@ function main(): i32 {
     if (!seam_audio_stream.open(48000, 2, 512)) {
         return 11;
     }
-    seam_sprite_handle = 0;
+    seam_sprite_handle = SpriteRef.Invalid;
     if (!seam_sprite.load_from("assets/asset_sprite.svg", 128, 128)) {
         return 12;
     }
@@ -80,7 +80,7 @@ function tick(): i32 {
 }
 
 function render(): i32 {
-    if (seam_sprite_handle <= 0 || seam_cached_text_handle <= 0 || seam_direct_text_width <= 0.0 || seam_cached_text_width <= 0.0) {
+    if (seam_sprite_handle == SpriteRef.Invalid || seam_cached_text_handle <= 0 || seam_direct_text_width <= 0.0 || seam_cached_text_width <= 0.0) {
         return 20;
     }
     clear(0.03, 0.06, 0.11, 1.0);

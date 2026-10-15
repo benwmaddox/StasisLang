@@ -1,7 +1,7 @@
 import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";
 import "/.stasis_cache/toolchain/src/stdlib/graphics.stasis";
 
-global seam_sprite_handle: i32;
+global seam_sprite_handle: SpriteRef;
 global seam_font_handle: i32;
 global seam_cached_handle: i32;
 global seam_audio_handle: i32;

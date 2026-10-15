@@ -23,7 +23,10 @@ NUMERIC_TEXT_ACCEPTANCE_MARKER = re.compile(
     r"Stasis Android numeric text: ([^\r\n]*)"
 )
 ASSET_DIAGNOSTIC = re.compile(r"code=([^ ]+) path=(.*?) detail=(.+)")
-ANDROID_LOG_RECORD_PID = re.compile(r"^[VDIWEF]/\S+\s+\(\s*(\d+)\):")
+ANDROID_LOG_RECORD_PID = re.compile(r"^[VDIWEFA]/\S+\s*\(\s*(\d+)\):")
+ANDROID_GENERICS_BOUNDS_INDEX = re.compile(
+    r"Stasis Android generics bounds probe index=(-?\d+)\b"
+)
 ANDROID_GENERICS_MAX_LOG_LINES = 2500
 ANDROID_GENERICS_MAX_LOG_BYTES = 1_000_000
 # FrameTracker emits this IME UI timeout as E/ even when the app launch succeeds.
@@ -567,26 +570,142 @@ def android_log_record_pid(line: str) -> int | None:
     return int(match.group(1)) if match is not None else None
 
 
+def _android_generics_bounds_target_pid(
+    log: str,
+    index: int,
+    package_id: str,
+    *,
+    allow_pending: bool,
+) -> int | None:
+    initialized_pids = []
+    marker_pids = []
+    index_records = []
+    for line in log.splitlines():
+        marker_match = MARKER.search(line)
+        if marker_match is not None:
+            try:
+                marker = json.loads(marker_match.group(1))
+            except json.JSONDecodeError as error:
+                if "ANDROID-GENERICS" in marker_match.group(1):
+                    raise SeamError(
+                        f"ANDROID-GENERICS bounds marker is malformed: {error}"
+                    ) from error
+                marker = None
+            if not isinstance(marker, dict):
+                if marker is not None and "ANDROID-GENERICS" in marker_match.group(1):
+                    raise SeamError(
+                        "ANDROID-GENERICS bounds marker must be a JSON object"
+                    )
+                marker = None
+            if marker is not None and marker.get("test_id") == "ANDROID-GENERICS":
+                if marker.get("schema") != SCHEMA:
+                    raise SeamError(
+                        "ANDROID-GENERICS bounds marker has an unexpected schema"
+                    )
+                record_pid = android_log_record_pid(line)
+                if record_pid is None:
+                    raise SeamError(
+                        "ANDROID-GENERICS bounds marker has no process id"
+                    )
+                marker_pids.append(record_pid)
+                if marker.get("event") == "initialized":
+                    initialized_pids.append(record_pid)
+
+        index_match = ANDROID_GENERICS_BOUNDS_INDEX.search(line)
+        if index_match is not None:
+            record_pid = android_log_record_pid(line)
+            if record_pid is None:
+                raise SeamError(
+                    "ANDROID-GENERICS bounds index record has no process id"
+                )
+            index_records.append((int(index_match.group(1)), record_pid))
+
+    evidence_pids = set(marker_pids)
+    evidence_pids.update(pid for _, pid in index_records)
+    if len(evidence_pids) > 1:
+        raise SeamError(
+            "ANDROID-GENERICS initialized/index/fatal records are not from the "
+            f"same package process: marker={marker_pids} "
+            f"index={[pid for _, pid in index_records]}"
+        )
+
+    if any(record_index != index for record_index, _ in index_records):
+        raise SeamError(
+            f"ANDROID-GENERICS bounds launch did not apply index {index}"
+        )
+    if len(initialized_pids) > 1 or len(index_records) > 1:
+        raise SeamError(
+            "ANDROID-GENERICS bounds launch must contain one PID-tagged initialized "
+            f"marker and index record for {package_id}: initialized={initialized_pids} "
+            f"index={[pid for _, pid in index_records]}"
+        )
+    if len(initialized_pids) != 1 or len(index_records) != 1:
+        if allow_pending:
+            return None
+        raise SeamError(
+            "ANDROID-GENERICS bounds launch must contain one PID-tagged initialized "
+            f"marker and index record for {package_id}: initialized={initialized_pids} "
+            f"index={[pid for _, pid in index_records]}"
+        )
+
+    return next(iter(evidence_pids))
+
+
+def _android_generics_process_log(log: str, process_pid: int) -> str:
+    process_lines = []
+    current_pid = None
+    for line in log.splitlines(keepends=True):
+        if line.startswith("--------- beginning of "):
+            current_pid = None
+            continue
+        record_pid = android_log_record_pid(line)
+        if record_pid is not None:
+            current_pid = record_pid
+            if record_pid == process_pid:
+                process_lines.append(line)
+        elif current_pid == process_pid:
+            # Keep logcat continuation lines attached to this process record.
+            process_lines.append(line)
+    return "".join(process_lines)
+
+
 def validate_android_generics_bounds_trap(
     log: str,
     index: int,
     package_id: str,
     expected_signal: str,
-) -> dict[str, int | str]:
-    """Require the fixed-array trap in one fresh package process."""
-    line_count = len(log.splitlines())
-    byte_count = len(log.encode("utf-8"))
+    *,
+    allow_pending: bool = False,
+    process_output_path: Path | None = None,
+) -> dict[str, int | str] | None:
+    """Require the fixed-array trap in one fresh package-process log slice."""
+    raw_line_count = len(log.splitlines())
+    raw_byte_count = len(log.encode("utf-8"))
+    process_pid = _android_generics_bounds_target_pid(
+        log, index, package_id, allow_pending=allow_pending
+    )
+    if process_pid is None:
+        if process_output_path is not None:
+            process_output_path.write_text("", encoding="utf-8")
+        return None
+    process_log = _android_generics_process_log(log, process_pid)
+    if process_output_path is not None:
+        process_output_path.write_text(process_log, encoding="utf-8")
+    line_count = len(process_log.splitlines())
+    byte_count = len(process_log.encode("utf-8"))
     if (
         line_count > ANDROID_GENERICS_MAX_LOG_LINES
         or byte_count > ANDROID_GENERICS_MAX_LOG_BYTES
     ):
         raise SeamError(
-            "ANDROID-GENERICS bounds launch log exceeded its bound: "
+            "ANDROID-GENERICS bounds process log exceeded its bound: "
             f"lines={line_count} bytes={byte_count}"
         )
     signal_matches = list(
-        re.finditer(r"Fatal signal (\d+) \((SIG[A-Z]+)\)[^\r\n]*", log)
+        re.finditer(r"Fatal signal (\d+) \((SIG[A-Z]+)\)[^\r\n]*", process_log)
     )
+    if not signal_matches and allow_pending:
+        return None
     if len(signal_matches) != 1 or signal_matches[0].group(2) != expected_signal:
         observed = [match.group(0) for match in signal_matches]
         raise SeamError(
@@ -602,7 +721,7 @@ def validate_android_generics_bounds_trap(
     fatal_pid = int(pid_match.group(1))
     fatal_record_pids = [
         record_pid
-        for line in log.splitlines()
+        for line in process_log.splitlines()
         if fatal_line in line
         if (record_pid := android_log_record_pid(line)) is not None
     ]
@@ -612,13 +731,13 @@ def validate_android_generics_bounds_trap(
             f"{fatal_line}"
         )
     required_index = f"Stasis Android generics bounds probe index={index}"
-    if required_index not in log:
+    if required_index not in process_log:
         raise SeamError(
             f"ANDROID-GENERICS bounds launch did not apply index {index}"
         )
     initialized_pids = []
     index_pids = []
-    for line in log.splitlines():
+    for line in process_log.splitlines():
         marker_match = MARKER.search(line)
         if marker_match is not None:
             try:
@@ -627,6 +746,8 @@ def validate_android_generics_bounds_trap(
                 raise SeamError(
                     f"ANDROID-GENERICS bounds marker is malformed: {error}"
                 ) from error
+            if not isinstance(marker, dict):
+                raise SeamError("ANDROID-GENERICS bounds marker must be a JSON object")
             if (
                 marker.get("test_id") == "ANDROID-GENERICS"
                 and marker.get("event") == "initialized"
@@ -650,20 +771,23 @@ def validate_android_generics_bounds_trap(
             f"same package process: initialized={initialized_pids[0]} "
             f"index={index_pids[0]} fatal={fatal_pid}"
         )
-    markers = parse_markers(log, "ANDROID-GENERICS")
+    markers = parse_markers(process_log, "ANDROID-GENERICS")
     events = {marker.get("event") for marker in markers}
     if "initialized" not in events:
         raise SeamError("ANDROID-GENERICS bounds process did not initialize the sample")
     if "frame" in events or "stable" in events:
         raise SeamError("ANDROID-GENERICS bounds process rendered past the trapped tick")
-    if re.search(r"FATAL EXCEPTION|Abort message", log, re.I):
+    if re.search(r"FATAL EXCEPTION|Abort message", process_log, re.I):
         raise SeamError("ANDROID-GENERICS bounds launch contained a Java or abort failure")
     return {
         "index": index,
         "signal": expected_signal,
         "pid": fatal_pid,
+        "log_scope": "process",
         "log_line_count": line_count,
         "log_byte_count": byte_count,
+        "raw_log_line_count": raw_line_count,
+        "raw_log_byte_count": raw_byte_count,
     }
 
 
@@ -2357,14 +2481,20 @@ def run_android_generics_bounds_probe(
     expected_signal: str,
     output_path: Path,
     timeout_seconds: float = 25.0,
+    process_output_path: Path | None = None,
 ) -> dict:
     """Run one allowlisted out-of-bounds index in a fresh Android process."""
     if index not in (-1, 2) or label not in ("low", "high"):
         raise SeamError(
             f"ANDROID-GENERICS refuses an unallowlisted {label} index: {index}"
         )
-    _run(adb, serial, "shell", "am", "force-stop", package_id)
-    _run(adb, serial, "logcat", "-c")
+    if process_output_path is None:
+        process_output_path = output_path.with_name(
+            f"{output_path.stem}-process{output_path.suffix}"
+        )
+    process_output_path.write_text("", encoding="utf-8")
+    _run(adb, serial, "shell", "am", "force-stop", package_id, timeout=10)
+    _run(adb, serial, "logcat", "-c", timeout=10)
     _run(
         adb,
         serial,
@@ -2397,16 +2527,39 @@ def run_android_generics_bounds_probe(
                 "-d",
                 "-v",
                 "brief",
-                "-t",
-                "2000",
                 required=False,
+                timeout=min(5.0, max(0.1, deadline - time.monotonic())),
             )
-            if "Fatal signal" in log:
-                result = validate_android_generics_bounds_trap(
-                    log, index, package_id, expected_signal
-                )
+            result = validate_android_generics_bounds_trap(
+                log,
+                index,
+                package_id,
+                expected_signal,
+                allow_pending=True,
+                process_output_path=process_output_path,
+            )
+            if result is not None:
                 pid = str(result["pid"])
                 while time.monotonic() < deadline:
+                    log = _run(
+                        adb,
+                        serial,
+                        "logcat",
+                        "-b",
+                        "all",
+                        "-d",
+                        "-v",
+                        "brief",
+                        required=False,
+                        timeout=min(5.0, max(0.1, deadline - time.monotonic())),
+                    )
+                    result = validate_android_generics_bounds_trap(
+                        log,
+                        index,
+                        package_id,
+                        expected_signal,
+                        process_output_path=process_output_path,
+                    )
                     processes = _run(
                         adb,
                         serial,
@@ -2414,6 +2567,7 @@ def run_android_generics_bounds_probe(
                         "pidof",
                         package_id,
                         required=False,
+                        timeout=min(5.0, max(0.1, deadline - time.monotonic())),
                     ).split()
                     if pid not in processes:
                         if processes:
@@ -2424,7 +2578,9 @@ def run_android_generics_bounds_probe(
                         return {
                             **result,
                             "process_exited": True,
-                            "log": str(output_path),
+                            "log": str(process_output_path),
+                            "raw_log_path": str(output_path),
+                            "process_log_path": str(process_output_path),
                         }
                     time.sleep(0.2)
                 raise SeamError(
@@ -2432,6 +2588,13 @@ def run_android_generics_bounds_probe(
                     f"pid={pid}"
                 )
             time.sleep(0.2)
+        validate_android_generics_bounds_trap(
+            log,
+            index,
+            package_id,
+            expected_signal,
+            process_output_path=process_output_path,
+        )
         raise SeamError(
             "ANDROID-GENERICS bounds probe timed out without its native trap: "
             f"index={index} log={log[-1200:]}"
@@ -3228,7 +3391,8 @@ def main() -> int:
             bounds_probes = []
             for label in ("low", "high"):
                 index = generics_contract["bounds_indices"][label]
-                probe_path = args.output / f"bounds-{label}-logcat.txt"
+                raw_probe_path = args.output / f"bounds-{label}-logcat.txt"
+                process_probe_path = args.output / f"bounds-{label}-process-logcat.txt"
                 bounds_probes.append(
                     run_android_generics_bounds_probe(
                         args.adb,
@@ -3238,7 +3402,8 @@ def main() -> int:
                         index,
                         label,
                         generics_contract["bounds_signal"],
-                        probe_path,
+                        raw_probe_path,
+                        process_output_path=process_probe_path,
                     )
                 )
             if bounds_probes[0]["pid"] == bounds_probes[1]["pid"]:
@@ -3248,8 +3413,14 @@ def main() -> int:
             evidence["artifacts"].update(
                 {
                     "device_log": str(device_log_path),
-                    "bounds_low_log": str(args.output / "bounds-low-logcat.txt"),
-                    "bounds_high_log": str(args.output / "bounds-high-logcat.txt"),
+                    "bounds_low_log": str(
+                        args.output / "bounds-low-process-logcat.txt"
+                    ),
+                    "bounds_high_log": str(
+                        args.output / "bounds-high-process-logcat.txt"
+                    ),
+                    "bounds_low_raw_log": str(args.output / "bounds-low-logcat.txt"),
+                    "bounds_high_raw_log": str(args.output / "bounds-high-logcat.txt"),
                 }
             )
             generics_evidence = {
