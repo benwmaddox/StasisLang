@@ -1206,12 +1206,17 @@ GameDistribution progress sets Loading=6 and starts a fixed 30-second budget;
 playback clears that budget. Existing state values are preserved. Explicit
 errors/cancellation settle promptly. A timed-out public request cannot regain
 reward eligibility, while late physical playback still owns the provider slot
-and pauses the game. Previously verified reward proof survives provider errors.
+and pauses the game. A GameDistribution `SDK_ERROR` fails the public handle but
+keeps its issued call reserved until the promise settles and any observed pause
+resumes, or an ad-specific terminal event arrives. Previously verified reward
+proof survives provider errors.
 
 Validation: deterministic host-clock tests cover both deadline boundaries,
 repeated progress, actual playback, cancellation, late callbacks, and reward
-proof. Fresh native JIT and linked AOT Loading fixtures pass. The generated
-mobile seam remains blocked by an existing non-ASCII-to-ASCII fixture expression.
+proof. SDK error tests cover reservation through handle release or guest reset,
+late playback, resume, and promise settlement. Fresh native JIT and linked AOT
+Loading fixtures pass. The generated mobile seam remains blocked by an existing
+non-ASCII-to-ASCII fixture expression.
 The fresh verified SDK browser sample receives Loading=6 and blocks simulation.
 Exact test receipts and final source identity are recorded in PR #928.
 

@@ -267,6 +267,15 @@
       retireCall(call);
     }
 
+    function failGameDistributionUncertain(call, message) {
+      if (!call || call.physicalTerminal) return;
+      setPublicState(call, AdState.Failed);
+      if (message) diagnostic(message);
+      clearAdDeadline(call);
+      // SDK_ERROR is critical, but does not document cancellation of an issued ad call.
+      // Retain its physical reservation until the promise or an ad terminal event settles it.
+    }
+
     function failIssuedUncertain(call, message) {
       if (!call || call.physicalTerminal) return;
       if (call.provider === "gamedistribution") {
@@ -460,7 +469,7 @@
       if (eventName === "SDK_ERROR") {
         if (!readySettled) settleReady(false, "GameDistribution SDK initialization failed.");
         else if (activeCall?.provider === "gamedistribution" && activeCall.issued && !activeCall.physicalTerminal) {
-          failGameDistributionCall(activeCall, "GameDistribution reported an SDK error.");
+          failGameDistributionUncertain(activeCall, "GameDistribution reported an SDK error.");
         } else diagnostic("GameDistribution reported an SDK error.");
         return;
       }

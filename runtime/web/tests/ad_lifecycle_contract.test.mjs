@@ -1035,7 +1035,7 @@ test("GameDistribution global resume without a matching pause does not settle a 
   h.manager.dispose();
 });
 
-test("GameDistribution no-fill and provider errors resume immediately without rewarding", async () => {
+test("GameDistribution ad terminal events release immediately while SDK errors keep the call reserved", async () => {
   for (const terminal of ["AD_ERROR", "SDK_ERROR", "AD_SDK_CANCELED"]) {
     const h = makeHarness("gamedistribution");
     const result = deferred();
@@ -1050,15 +1050,72 @@ test("GameDistribution no-fill and provider errors resume immediately without re
     assert.equal(h.manager.poll(handle), 4, `${terminal} should fail a request with no playback`);
     assert.equal(h.manager.gameplayBlocked(), 0, `${terminal} should resume gameplay immediately`);
     assert.equal(h.manager.takeReward(handle), 0);
-    assert.ok(h.manager.request(0) > handle, `${terminal} should release the physical reservation`);
+    if (terminal === "SDK_ERROR") {
+      assert.equal(h.manager.request(0), -1, "SDK_ERROR does not prove the issued call is physically terminal");
+    } else {
+      assert.ok(h.manager.request(0) > handle, `${terminal} should release the physical reservation`);
+    }
     result.resolve();
     await flushPromises();
     assert.equal(h.manager.poll(handle), 4);
+    if (terminal === "SDK_ERROR") {
+      assert.ok(h.manager.request(0) > handle, "promise settlement releases the SDK_ERROR reservation");
+    }
     h.manager.dispose();
   }
 });
 
-test("GameDistribution terminal errors preserve prior reward proof exactly once", async () => {
+test("GameDistribution SDK error retains calls through release or reset and late playback", async () => {
+  for (const cleanup of ["release", "reset"]) {
+    const h = makeHarness("gamedistribution");
+    const result = deferred();
+    h.windowObject.gdsdk = { showAd: () => result.promise };
+    const handle = h.manager.request(1);
+    h.emitVendorEvent("SDK_READY");
+    await readyAfterMicrotasks(h.manager);
+    activateGameDistributionGesture(h);
+    h.emitVendorEvent("AD_METADATA");
+    h.emitVendorEvent("SDK_REWARDED_WATCH_COMPLETE");
+
+    h.emitVendorEvent("SDK_ERROR");
+    assert.equal(h.manager.poll(handle), 4, "SDK_ERROR fails the public request immediately");
+    assert.equal(h.manager.takeReward(handle), 1, "SDK_ERROR preserves prior provider proof");
+    assert.equal(h.manager.takeReward(handle), 0, "preserved provider proof remains single-use");
+    assert.equal(h.manager.request(0), -1, "the unresolved physical call keeps the provider slot busy");
+    h.clock.advance(30_001);
+    assert.equal(h.calls.diagnostics.at(-1), "GameDistribution reported an SDK error.", "SDK_ERROR clears the load deadline");
+    assert.equal(h.manager.request(0), -1, "no deadline releases the uncertain physical call");
+
+    if (cleanup === "release") h.manager.release(handle);
+    else h.manager.resetGuest();
+    assert.equal(h.manager.request(0), -1, `${cleanup} does not release the issued call`);
+    h.emitVendorEvent("SDK_GAME_PAUSE");
+    assert.equal(h.manager.gameplayBlocked(), 1, "a late physical start still blocks gameplay");
+    assert.equal(h.calls.audio.at(-1), true, "a late physical start still pauses audio");
+    assert.equal(h.manager.request(0), -1, "the late start remains attributed to the original call");
+
+    if (cleanup === "release") {
+      h.emitVendorEvent("SDK_GAME_START");
+      assert.equal(h.manager.gameplayBlocked(), 0);
+      assert.equal(h.calls.audio.at(-1), false);
+      assert.equal(h.manager.request(0), -1, "the unresolved promise still owns the provider slot");
+      result.resolve();
+      await flushPromises();
+    } else {
+      result.resolve();
+      await flushPromises();
+      assert.equal(h.manager.request(0), -1, "promise settlement retains the call while the provider pause is active");
+      h.emitVendorEvent("SDK_GAME_START");
+      assert.equal(h.manager.gameplayBlocked(), 0);
+      assert.equal(h.calls.audio.at(-1), false);
+    }
+
+    assert.ok(h.manager.request(0) > handle, `${cleanup} call retires after promise settlement and resume`);
+    h.manager.dispose();
+  }
+});
+
+test("GameDistribution request errors preserve prior reward proof exactly once", async () => {
   for (const terminal of ["AD_ERROR", "SDK_ERROR"]) {
     const h = makeHarness("gamedistribution");
     const result = deferred();
