@@ -3,6 +3,11 @@
 Small, executable lessons for Stasis developers. The language specification
 and compiler diagnostics remain authoritative for syntax and semantics.
 
+For project structure and state ownership, read the generated
+`PROJECT_ARCHITECTURE.md`; the
+[configurable Pong lesson](practical-examples/pong-score-after-the-ball-crosses-the-goal.md)
+shows runtime settings in action.
+
 ## A Little Stasis
 
 Read these in order. Each lesson adds one idea and uses snippets backed by the

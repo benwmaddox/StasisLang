@@ -42,13 +42,13 @@ test `stack flags overflow and repeated rest deterministically`(): bool {
     ui_layout_begin(0.0, 0.0, 40.0, 40.0);
     ui_vstack_begin(0.0, 0.0, 40.0, 40.0, 4.0, UiStackDirection.Forward);
     ui_vstack_next_fixed(50.0);
-    if (ui_current_height() != 50.0 || ui_status() != UI_STATUS_OVERFLOW) {
+    if (ui_current_height() != 50.0 || ui_status() != UI_STATUS_FLAG.OVERFLOW) {
         return false;
     }
     ui_vstack_next_rest();
     ui_vstack_next_rest();
     ui_vstack_end();
-    return ui_status() == UI_STATUS_OVERFLOW + UI_STATUS_REST_REPEATED;
+    return ui_status() == UI_STATUS_FLAG.OVERFLOW + UI_STATUS_FLAG.REST_REPEATED;
 }
 
 test `inset anchors and intersection share current rectangle`(): bool {
@@ -229,7 +229,7 @@ test `missing primary pointer cancels scroll drag`(): bool {
 test `zero tap id reports bad argument`(): bool {
     ui_input_begin(3, 20.0, 20.0, true, true, false);
     ui_layout_begin(0.0, 0.0, 100.0, 100.0);
-    return !ui_tap(1, 0, 10.0, 10.0, 30.0, 20.0) && ui_status() == UI_STATUS_BAD_ARGUMENT;
+    return !ui_tap(1, 0, 10.0, 10.0, 30.0, 20.0) && ui_status() == UI_STATUS_FLAG.BAD_ARGUMENT;
 }
 
 test `modal layer cancels a lower layer scroll drag`(): bool {

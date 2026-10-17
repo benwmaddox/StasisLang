@@ -36,12 +36,14 @@ const UI_MAX_STACK_DEPTH: i32 = 32;
 const UI_MAX_SCROLL_STATES: i32 = 32;
 
 // Status bits describe deterministic misuse without throwing away the frame.
-const UI_STATUS_STACK_OVERFLOW: i32 = 1;
-const UI_STATUS_STACK_UNDERFLOW: i32 = 2;
-const UI_STATUS_BAD_ARGUMENT: i32 = 4;
-const UI_STATUS_OVERFLOW: i32 = 8;
-const UI_STATUS_REST_REPEATED: i32 = 16;
-const UI_STATUS_SCROLL_CAPACITY: i32 = 32;
+const UI_STATUS_FLAG {
+    STACK_OVERFLOW: i32 = 1;
+    STACK_UNDERFLOW: i32 = 2;
+    BAD_ARGUMENT: i32 = 4;
+    OVERFLOW: i32 = 8;
+    REST_REPEATED: i32 = 16;
+    SCROLL_CAPACITY: i32 = 32;
+}
 
 // Current-frame output rectangle.  Callers use these accessors immediately
 // after an operation; no rectangle is retained for the next frame.
@@ -225,7 +227,7 @@ function @inline ui_input_pressed(): bool {
 
 function ui_scope_begin(kind: UiScopeKind, direction: UiStackDirection, x: f32, y: f32, w: f32, h: f32, spacing: f32): void {
     if (ui_stack_depth >= UI_MAX_STACK_DEPTH) {
-        ui_mark_status(UI_STATUS_STACK_OVERFLOW);
+        ui_mark_status(UI_STATUS_FLAG.STACK_OVERFLOW);
         ui_scope_overflow_count = ui_scope_overflow_count + 1;
         ui_set_rect(x, y, w, h);
         return;
@@ -247,7 +249,7 @@ function ui_scope_begin(kind: UiScopeKind, direction: UiStackDirection, x: f32, 
 
     if (spacing < 0.0) {
         ui_scope_spacing[depth] = 0.0;
-        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+        ui_mark_status(UI_STATUS_FLAG.BAD_ARGUMENT);
     }
 
     if (kind == UiScopeKind.Horizontal) {
@@ -290,7 +292,7 @@ function ui_scope_next_fixed(extent: f32): void {
         return;
     }
     if (ui_stack_depth <= 0) {
-        ui_mark_status(UI_STATUS_STACK_UNDERFLOW);
+        ui_mark_status(UI_STATUS_FLAG.STACK_UNDERFLOW);
         ui_set_rect(0.0, 0.0, 0.0, 0.0);
         return;
     }
@@ -299,7 +301,7 @@ function ui_scope_next_fixed(extent: f32): void {
     let size: f32 = extent;
     if (size < 0.0) {
         size = 0.0;
-        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+        ui_mark_status(UI_STATUS_FLAG.BAD_ARGUMENT);
     }
 
     let spacing: f32 = ui_scope_spacing[depth];
@@ -313,12 +315,12 @@ function ui_scope_next_fixed(extent: f32): void {
         if (reverse) {
             ui_scope_cursor[depth] = x - spacing;
             if (x < ui_scope_x[depth]) {
-                ui_mark_status(UI_STATUS_OVERFLOW);
+                ui_mark_status(UI_STATUS_FLAG.OVERFLOW);
             }
         } else {
             ui_scope_cursor[depth] = x + size + spacing;
             if (x + size > ui_scope_x[depth] + ui_scope_w[depth]) {
-                ui_mark_status(UI_STATUS_OVERFLOW);
+                ui_mark_status(UI_STATUS_FLAG.OVERFLOW);
             }
         }
     } else {
@@ -330,12 +332,12 @@ function ui_scope_next_fixed(extent: f32): void {
         if (reverse) {
             ui_scope_cursor[depth] = y - spacing;
             if (y < ui_scope_y[depth]) {
-                ui_mark_status(UI_STATUS_OVERFLOW);
+                ui_mark_status(UI_STATUS_FLAG.OVERFLOW);
             }
         } else {
             ui_scope_cursor[depth] = y + size + spacing;
             if (y + size > ui_scope_y[depth] + ui_scope_h[depth]) {
-                ui_mark_status(UI_STATUS_OVERFLOW);
+                ui_mark_status(UI_STATUS_FLAG.OVERFLOW);
             }
         }
     }
@@ -347,14 +349,14 @@ function ui_scope_next_rest(): void {
         return;
     }
     if (ui_stack_depth <= 0) {
-        ui_mark_status(UI_STATUS_STACK_UNDERFLOW);
+        ui_mark_status(UI_STATUS_FLAG.STACK_UNDERFLOW);
         ui_set_rect(0.0, 0.0, 0.0, 0.0);
         return;
     }
 
     let depth: i32 = ui_stack_depth - 1;
     if (ui_scope_rest_used[depth] != 0) {
-        ui_mark_status(UI_STATUS_REST_REPEATED);
+        ui_mark_status(UI_STATUS_FLAG.REST_REPEATED);
         ui_set_rect(ui_rect_x, ui_rect_y, 0.0, 0.0);
         return;
     }
@@ -373,7 +375,7 @@ function ui_scope_next_rest(): void {
         }
         if (w < 0.0) {
             w = 0.0;
-            ui_mark_status(UI_STATUS_OVERFLOW);
+            ui_mark_status(UI_STATUS_FLAG.OVERFLOW);
         }
         ui_set_rect(x, ui_scope_y[depth], w, ui_scope_h[depth]);
     } else {
@@ -388,7 +390,7 @@ function ui_scope_next_rest(): void {
         }
         if (h < 0.0) {
             h = 0.0;
-            ui_mark_status(UI_STATUS_OVERFLOW);
+            ui_mark_status(UI_STATUS_FLAG.OVERFLOW);
         }
         ui_set_rect(ui_scope_x[depth], y, ui_scope_w[depth], h);
     }
@@ -401,7 +403,7 @@ function ui_scope_end(): void {
         return;
     }
     if (ui_stack_depth <= 0) {
-        ui_mark_status(UI_STATUS_STACK_UNDERFLOW);
+        ui_mark_status(UI_STATUS_FLAG.STACK_UNDERFLOW);
         return;
     }
     let depth: i32 = ui_stack_depth - 1;
@@ -440,11 +442,11 @@ function ui_inset(x: f32, y: f32, w: f32, h: f32, pad_left: f32, pad_top: f32, p
     let next_h: f32 = h - pad_top - pad_bottom;
     if (next_w < 0.0) {
         next_w = 0.0;
-        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+        ui_mark_status(UI_STATUS_FLAG.BAD_ARGUMENT);
     }
     if (next_h < 0.0) {
         next_h = 0.0;
-        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+        ui_mark_status(UI_STATUS_FLAG.BAD_ARGUMENT);
     }
     ui_set_rect(next_x, next_y, next_w, next_h);
 }
@@ -458,11 +460,11 @@ function ui_anchor(x: f32, y: f32, w: f32, h: f32, child_w: f32, child_h: f32, h
     let safe_h: f32 = child_h;
     if (safe_w < 0.0) {
         safe_w = 0.0;
-        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+        ui_mark_status(UI_STATUS_FLAG.BAD_ARGUMENT);
     }
     if (safe_h < 0.0) {
         safe_h = 0.0;
-        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+        ui_mark_status(UI_STATUS_FLAG.BAD_ARGUMENT);
     }
     ui_set_rect(ui_place_x(x, w, safe_w, horizontal), ui_place_y(y, h, safe_h, vertical), safe_w, safe_h);
 }
@@ -493,7 +495,7 @@ function ui_intersection(x: f32, y: f32, w: f32, h: f32, clip_x: f32, clip_y: f3
 
 function ui_viewport_fit(x: f32, y: f32, w: f32, h: f32, content_w: f32, content_h: f32, fit: UiViewportFit): void {
     if (w <= 0.0 || h <= 0.0 || content_w <= 0.0 || content_h <= 0.0) {
-        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+        ui_mark_status(UI_STATUS_FLAG.BAD_ARGUMENT);
         ui_set_rect(x, y, 0.0, 0.0);
         return;
     }
@@ -575,7 +577,7 @@ function @inline ui_input_allowed(layer_id: i32): bool {
 // rectangle; drawing remains the caller's responsibility.
 function ui_tap(layer_id: i32, id: i32, x: f32, y: f32, w: f32, h: f32): bool {
     if (id <= 0) {
-        ui_mark_status(UI_STATUS_BAD_ARGUMENT);
+        ui_mark_status(UI_STATUS_FLAG.BAD_ARGUMENT);
         return false;
     }
     if (ui_input_pointer_id < 0) {
@@ -653,7 +655,7 @@ function ui_scroll_slot(id: i32): i32 {
             return i;
         }
     }
-    ui_mark_status(UI_STATUS_SCROLL_CAPACITY);
+    ui_mark_status(UI_STATUS_FLAG.SCROLL_CAPACITY);
     return -1;
 }
 

@@ -1516,3 +1516,49 @@ and verify real execution, limit neighbors, and the full Stasis behavior suite a
 resolver changes. Keep documentation fences in shipped, executable examples.
 
 Visual evidence: not applicable to this compiler and headless tooling change.
+
+## 2026-10-17 - MaddoxTasks #843: stdlib typed constant groups
+
+Migrated six related i32 families across graphics, external URLs, platform services,
+and immediate UI to qualified typed groups. Values and types are unchanged; public
+old-to-new maps document the intentional breaking names without redundant aliases.
+Standalone capacities, typed enums (including Scancode), tuning state, and the host
+ABI retain their existing definitions. Repository callers use the qualified names.
+
+Validation:
+- Tests-first real-library fixture failed on the missing grouped response-field
+  COUNT before migration. All four grouped-constant fixtures now pass on Linux and
+  Windows, including actual JIT, executed linked native AOT, and Node Wasm. The new
+  fixture imports all four real modules and checks animation, safe invalid request
+  paths, constant array extents/indexes, and deduplicated UI status flags.
+- Exact Linux PR core CI command passed 1342 tests across 49 targets. The complete
+  Stasis behavior integration passed on Windows, as did the platform-services
+  mailbox consumer and generated packaged knowledge examples.
+- Fresh development CLI SHA-256 f1e5ce4d28cccf434cee3a06cf8248701f54dc1d3ddf24cf304e9f241f13ba27
+  refreshed all six vendor workspaces through status/update/status. Every snapshot
+  reports hash version 2, current, verified pin, and no local changes, with package
+  SHA-256 00040f158cab49356b8b6586ce87e3f66c62e4c5357130da256c4cadd794256d.
+  An independent audit matches all 77 copied package files per workspace to source.
+  The official refresh also carries previously merged knowledge improvements.
+- All six workspace suites passed 44 tests across 8 files, including 14 tests in
+  Brickout Defense's three files. Fresh JIT development builds passed for sprite
+  animation, UI gallery, and asset breakout. Sprite animation's tests reside in the
+  root behavior suite; it has no separate workspace tests directory.
+- Rust and Stasis formatting, old-name source audit, and diff checks passed. ABI
+  981/host 1167 comparisons passed. All six final review personas are GREEN.
+  No owned compiler or test executables remained running after validation.
+
+Theory gained: a typed constant group changes source organization while preserving
+scalar contracts through imports, array extents, indexes, and backend execution.
+The real-library fixture and unchanged ABI comparisons support this mapping. A new
+related scalar family should use the same qualified access without runtime storage.
+
+Good: testing actual imported libraries in both executed backends verifies the API
+migration beyond source spelling. Official vendor refresh plus independent copied
+content checks catches stale snapshots even under a shared development release ID.
+Bad: the initial validation plan assumed a sample-local tests directory and an old
+CLI test syntax; the repository's actual root suite is an integration-test target.
+Adjustment: inspect each workspace manifest and the selected CLI interface before
+recording validation commands, and use content hashes as vendor provenance evidence.
+
+Visual evidence: not applicable; these API spelling changes preserve runtime behavior.

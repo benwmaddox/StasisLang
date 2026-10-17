@@ -59,3 +59,18 @@ bit via `ui_status` instead of allocating or silently changing the recipe.
 
 See [`samples/ui_gallery`](../samples/ui_gallery/README.md) for a runnable
 gallery and interaction examples.
+
+## Status flags
+
+`ui_status()` returns a bit field composed from typed compile-time `i32`
+members of `UI_STATUS_FLAG`. Qualify each flag; the previous flat constants
+are removed without aliases. Values and combined-status behavior are unchanged.
+
+| Qualified member | Value | Replaces |
+| --- | ---: | --- |
+| `UI_STATUS_FLAG.STACK_OVERFLOW` | 1 | `UI_STATUS_STACK_OVERFLOW` |
+| `UI_STATUS_FLAG.STACK_UNDERFLOW` | 2 | `UI_STATUS_STACK_UNDERFLOW` |
+| `UI_STATUS_FLAG.BAD_ARGUMENT` | 4 | `UI_STATUS_BAD_ARGUMENT` |
+| `UI_STATUS_FLAG.OVERFLOW` | 8 | `UI_STATUS_OVERFLOW` |
+| `UI_STATUS_FLAG.REST_REPEATED` | 16 | `UI_STATUS_REST_REPEATED` |
+| `UI_STATUS_FLAG.SCROLL_CAPACITY` | 32 | `UI_STATUS_SCROLL_CAPACITY` |

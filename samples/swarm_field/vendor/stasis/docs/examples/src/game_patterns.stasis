@@ -15,9 +15,9 @@ struct WaveEvent {
 }
 
 struct TowerRules {
-    damage: i32;
-    range_end: i32;
-    cooldown_ticks: i32;
+    damage: i32 = 2;
+    range_end: i32 = 8;
+    cooldown_ticks: i32 = 2;
 }
 
 struct TowerRuleInput {

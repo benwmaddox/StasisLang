@@ -1504,9 +1504,12 @@ capacity-checked at the JIT boundary, and authoritative hashes use two unsigned
 
 `src/stdlib/external_url.stasis` exposes `open_external_url(url: string): i32`
 with the `platform` effect. The host accepts bounded HTTP(S) URLs from an
-explicit pointer or keyboard activation. Results are `EXTERNAL_URL_INVALID`
-(-1), `EXTERNAL_URL_IGNORED` (0), and `EXTERNAL_URL_OPENED` (1). The last result
-means the platform accepted the dispatch, not that a page finished loading.
+explicit pointer or keyboard activation. Results are `EXTERNAL_URL_RESULT.INVALID`
+(-1, replacing the flat `EXTERNAL_URL_INVALID`), `EXTERNAL_URL_RESULT.IGNORED`
+(0, replacing `EXTERNAL_URL_IGNORED`), and `EXTERNAL_URL_RESULT.OPENED` (1,
+replacing `EXTERNAL_URL_OPENED`). These are typed compile-time `i32` group
+members; the old flat names have no aliases. The last result means the platform
+accepted the dispatch, not that a page finished loading.
 Headless execution and recordings return ignored for valid requests and never
 launch a browser. Guests must not make gameplay state depend on browser success.
 

@@ -1,5 +1,24 @@
 import "/vendor/stasis/stdlib/storage.stasis";
 
+const SCANCODE {
+    A: i32 = 4;
+    B: i32 = SCANCODE.A + 1;
+}
+
+struct AgentSettings {
+    health: i32 = 100;
+    speed: f32 = 0.1;
+    enabled: bool = true;
+    retries: i32;
+}
+
+struct Agent {
+    settings: AgentSettings;
+}
+
+global player: Agent;
+global agents: Agent[8];
+
 struct ScoreBuffer<T: type, N: i32> {
     count: i32;
     values: T[N];
