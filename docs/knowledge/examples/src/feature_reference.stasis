@@ -1,5 +1,10 @@
 import "/vendor/stasis/stdlib/storage.stasis";
 
+const SCANCODE {
+    A: i32 = 4;
+    B: i32 = SCANCODE.A + 1;
+}
+
 struct AgentSettings {
     health: i32 = 100;
     speed: f32 = 0.1;
