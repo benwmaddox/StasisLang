@@ -10,7 +10,9 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use crate::compiler::SourceFile;
-use crate::frontend::module_graph::ModuleGraph;
+use crate::frontend::module_graph::{
+    is_explicit_graphics_test_seam_path, is_recognized_graphics_implementation_source, ModuleGraph,
+};
 use crate::frontend::parser::{
     parse_top_level_type_layout, ParsedConstDefinition, ParsedConstGroupDefinition,
     ParsedConstGroupMemberDefinition, ParsedEnumDefinition,
@@ -58,6 +60,7 @@ pub(crate) struct CompileTimeDeclarationIndex {
     flat_constants: BTreeMap<(String, String), Vec<IndexedConstantDeclaration>>,
     groups: BTreeMap<(String, String), Vec<IndexedConstantGroup>>,
     enums: BTreeMap<(String, String), Vec<ParsedEnumDefinition>>,
+    host_sprite_ref_enum_paths: BTreeSet<String>,
     value_names_by_path: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -65,6 +68,8 @@ impl CompileTimeDeclarationIndex {
     pub(crate) fn build(files: &[SourceFile]) -> Result<Self, (String, String)> {
         let mut index = Self::default();
         for file in files {
+            let is_host_graphics_source =
+                is_recognized_graphics_implementation_source(&file.path, &file.original_content);
             // Original source is stable across generic materialization. Indexing
             // generated content here would duplicate declarations on rebuild.
             let layout = parse_top_level_type_layout(&file.original_content)
@@ -94,6 +99,9 @@ impl CompileTimeDeclarationIndex {
                     .push(indexed);
             }
             for enumeration in layout.enums {
+                if is_host_graphics_source && enumeration.name == "SpriteRef" {
+                    index.host_sprite_ref_enum_paths.insert(file.path.clone());
+                }
                 index
                     .enums
                     .entry((file.path.clone(), enumeration.name.clone()))
@@ -383,26 +391,17 @@ impl CompileTimeDeclarationIndex {
             }
         }
 
-        if let Some(enumeration) = self.visible_enum_owner(graph, source_path, root)? {
-            let variants = enumeration
-                .variants
-                .iter()
-                .filter(|variant| variant.name == member)
-                .collect::<Vec<_>>();
-            match variants.as_slice() {
-                [_] => candidates.push(CompileTimeValueId {
-                    source_path: self
-                        .enum_source_path(graph, source_path, root)?
-                        .ok_or_else(|| format!("missing enum source for '{root}'"))?,
-                    owner: CompileTimeValueOwner::Enum(root.to_string()),
-                    member: member.to_string(),
-                }),
-                [] if missing_owner_error.is_none() => {
-                    missing_owner_error = Some(format!("unknown enum variant '{root}.{member}'"));
-                }
-                [] => {}
-                _ => return Err(format!("ambiguous enum variant '{root}.{member}'")),
-            }
+        let enum_owner = self.visible_enum_owner(graph, source_path, root)?;
+        if let Some(enum_source_path) =
+            self.visible_enum_variant_source_path(graph, source_path, root, member, enum_owner)?
+        {
+            candidates.push(CompileTimeValueId {
+                source_path: enum_source_path,
+                owner: CompileTimeValueOwner::Enum(root.to_string()),
+                member: member.to_string(),
+            });
+        } else if enum_owner.is_some() && missing_owner_error.is_none() {
+            missing_owner_error = Some(format!("unknown enum variant '{root}.{member}'"));
         }
 
         if candidates.is_empty() {
@@ -505,6 +504,64 @@ impl CompileTimeDeclarationIndex {
             .flat_map(|path| self.enums(&path, name))
             .collect::<Vec<_>>();
         unique_enum(visible, name, source_path)
+    }
+
+    fn visible_enum_variant_source_path(
+        &self,
+        graph: &ModuleGraph,
+        source_path: &str,
+        name: &str,
+        member: &str,
+        enum_owner: Option<&ParsedEnumDefinition>,
+    ) -> Result<Option<String>, String> {
+        let Some(enumeration) = enum_owner else {
+            return Ok(None);
+        };
+        let local_variants = enumeration
+            .variants
+            .iter()
+            .filter(|variant| variant.name == member)
+            .count();
+        match local_variants {
+            1 => return self.enum_source_path(graph, source_path, name),
+            count if count > 1 => {
+                return Err(format!("ambiguous enum variant '{name}.{member}'"));
+            }
+            _ => {}
+        }
+
+        // Graphics test seams may extend the compiler-owned SpriteRef enum
+        // locally. Preserve that one established host merge behavior by
+        // binding an absent local variant to its actual canonical host
+        // declaration. Other local enums remain closed owners: a missing
+        // local member never falls through to a dependency enum.
+        if name != "SpriteRef"
+            || !is_explicit_graphics_test_seam_path(source_path)
+            || self.enums(source_path, name).is_empty()
+        {
+            return Ok(None);
+        }
+
+        let mut host_matches = Vec::new();
+        for path in graph.dependency_closure(source_path) {
+            if path == source_path || !self.host_sprite_ref_enum_paths.contains(&path) {
+                continue;
+            }
+            for enumeration in self.enums(&path, "SpriteRef") {
+                for variant in &enumeration.variants {
+                    if variant.name == member {
+                        host_matches.push(path.clone());
+                    }
+                }
+            }
+        }
+        match host_matches.as_slice() {
+            [] => Ok(None),
+            [path] => Ok(Some(path.clone())),
+            _ => Err(format!(
+                "ambiguous host SpriteRef variant 'SpriteRef.{member}' visible from '{source_path}'"
+            )),
+        }
     }
 
     fn enum_source_path(

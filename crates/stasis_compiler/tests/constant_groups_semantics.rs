@@ -110,6 +110,49 @@ function main(): i32 { return library.LIMITS.MISSING; }
 }
 
 #[test]
+fn host_owned_sprite_ref_extension_resolves_canonical_variant() {
+    let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut compiler = Compiler::new();
+    compiler
+        .set_project_root(repository_root.to_string_lossy())
+        .expect("repository root should be accepted");
+    compiler.upsert_file(
+        "tests/stasis/constant_group_sprite_ref_extension.test.stasis",
+        r#"
+import "../../src/stdlib/graphics.stasis";
+enum SpriteRef { Prior = 11, Published = 22, }
+function main(): i32 {
+    if (SpriteRef.Invalid == SpriteRef.Prior) { return 1; }
+    return 0;
+}
+"#,
+    );
+    compiler
+        .check()
+        .expect("the local SpriteRef extension should retain the host Invalid variant");
+
+    const MAIN: &str = r#"
+import "library.stasis";
+enum Phase { Local, }
+function main(): i32 { return Phase.Imported; }
+"#;
+    const LIBRARY: &str = "enum Phase { Imported, }\n";
+    let files = [("main.stasis", MAIN), ("library.stasis", LIBRARY)];
+    let diagnostic = diagnostic_for(&files);
+    assert!(diagnostic.message.contains("Phase"));
+    assert!(diagnostic.message.contains("Imported"));
+
+    const DUPLICATE: &str = r#"
+enum Phase { Same = 1, Same = 1, }
+function main(): i32 { return Phase.Same; }
+"#;
+    let duplicate_diagnostic = diagnostic_for(&[("main.stasis", DUPLICATE)]);
+    assert!(duplicate_diagnostic
+        .message
+        .contains("ambiguous enum variant 'Phase.Same'"));
+}
+
+#[test]
 fn alias_only_missing_member_is_diagnosed_instead_of_falling_through() {
     const MAIN: &str = r#"
 import "library.stasis";
