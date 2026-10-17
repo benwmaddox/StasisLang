@@ -1721,3 +1721,19 @@ commands with the recorded CI toolchain version before drawing product conclusio
 
 Visual evidence: not applicable; this correction changes only test-fixture import
 resolution and preserves the previously inspected game behavior.
+
+### #647 - Isolate local-installer smoke workspace
+
+The post-activation smoke copies the nine tracked fixture inputs into a confined `target` workspace, runs real `prepare` and `record`, then cleans it in `finally`. Integration receipts record cache presence and hashes, supporting fresh checkouts without a cache. The integration driver clears `STASIS_RUNTIME_*` overrides while retaining signing settings. The injected frames-zero path uses the real CLI; unexpected success fails validation, while integration requires the authentic rejection after successful prepare.
+
+**Tests and receipts:** `python -m unittest tools.ci.test_local_toolchain_install -v` passes 18/18, covering callback success/failure, nine fixture hashes, populated-cache preservation, and absent cache. `git diff --check` passes. The clean-candidate command `python -m tools.ci.test_local_toolchain_install --real-install-integration --evidence-dir D:\code\.automation-evidence\nightly-20261017-task647-real-integration-r2` passed on commit `025cd8dc8a6f5767a0c8ba80a9ece57d0b50360b`. Real install recorded a 320x180 PNG. The frames-zero failure preserved BinRoot NTFS ID `1688849863917183`, CLI SHA-256 `fb75133d92fefac23d1a2e27ae9a81b7b731f2ab0a7d01687917ff4ff0dd3ac1`, and CLI/runtime fingerprint `9e44be7c533978c53ffb8e0ece531469c789e63bbceec4902928b0c5cc53e7a1`. Three cache receipts match the independent 77-file oracle; all nine inputs match baseline hashes. No owned staging, backup, workspace, or failed-record output remained. Summary and logs: `D:\code\.automation-evidence\nightly-20261017-task647-real-integration-r2`.
+
+**Visual evidence:** [successful-record-frame.png](D:/code/.automation-evidence/nightly-20261017-task647-real-integration-r2/successful-record-frame.png) is 320x180; independent review confirmed the magenta PNG circle, green SVG check, dark-blue field, and yellow StasisParity font bars.
+
+**Theory gained:** Transactional promotion can validate the activated candidate with real lifecycle commands while keeping mutable compiler cache state outside the canonical sample; a real post-prepare record failure is the meaningful rollback trigger.
+
+**Good:** The fast behavior test exercises the same disposable-workspace helper on both callback success and failure, and the real integration verifies the previous executable remains usable after rollback. Six-persona review was GREEN; independent Sol review confirmed source/runtime evidence.
+
+**Bad:** The first real integration attempt failed before promotion because the long disposable root exceeded Windows PowerShell 5's MAX_PATH. This was harness path length, not cache isolation.
+
+**Adjustment:** Shortened only the driver root to `target/local-it-<8 hex>`; fresh-build integration then passed. Tests-first chronology: the initial static contract check was RED on the canonical sample path; behavioral coverage followed and passed. All post-change quality gates passed. The full validation entrypoint policy/Python/Node/architecture phase returned 0. Cargo targets were split into four bounded groups: `python tools/cargo_cache.py run -- cargo test --workspace --lib --bins --examples -- --test-threads=1`; 19 app integration targets; all 11 Windows launch/recording tests; and the remaining 33 integration targets. All returned 0 in 556.02, 436.36, 645.84, 230.05 seconds. Exact commands and receipts are in `D:\code\.automation-evidence\nightly-20261017-task647-post-cargo-manifest.json`. The implementation was tested on clean `025cd8dc`; this follow-up adds only this report, with identical installer/test blobs.
