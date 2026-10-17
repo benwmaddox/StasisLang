@@ -1690,3 +1690,34 @@ starter-pong-restarted.png showing the preserved game, scoring and restart.
 Encoded browser.mp4 was inspected through decoded frames at 1, 3 and 6 seconds,
 showing Pong movement and the live compile/game transition. Receipt fields prove
 keyboard positions, settings/state preservation, new-session defaults and exports.
+
+## 2026-10-17: #845 clean Pointer Pong fixture imports
+
+The full nightly caught a sample-fixture gap after the shared scancode migration.
+Its Windows sprite-run seam rebased only graphics, leaving the new scancode
+import in an absent prepared cache. Rebase the complete stdlib import prefix,
+assert both real imports resolve locally, and reject any remaining cache prefix.
+The actual JIT/AOT compilation and score-source assertions remain unchanged.
+
+Validation: the exact failing Windows command passed with CI's Rust 1.99.1:
+`python tools/cargo_cache.py run -- cargo test -p stasis_compiler -- --test-threads=1 --nocapture`.
+The focused Windows seam passed all four tests; the Linux scancode JIT/AOT target
+passed all three. The Windows-only seam selects zero tests on Linux and is not
+counted there. Rust formatting and diff checks passed; all six reviewers are green.
+An old local Rust 1.92 build produced a malformed signed world-camera test image;
+matching CI and rebuilding cleared that artifact without changing signing policy.
+
+Theory gained: a fixture compiling cache-authored sample source must rebase the
+whole import namespace. A prepared local cache hid the missing dependency, while
+the clean CI checkout exposed it. Another stdlib import should now compile from
+canonical sources without first preparing a sample SDK.
+
+Good: the real clean nightly found the hidden fixture dependency, and the exact
+Windows command now verifies the correction with required signed execution.
+Bad: the local prepared cache masked a fresh-checkout failure; the default Rust
+version also differed from CI during the first reproduction.
+Adjustment: make fixture import closure explicit and reproduce signed Windows
+commands with the recorded CI toolchain version before drawing product conclusions.
+
+Visual evidence: not applicable; this correction changes only test-fixture import
+resolution and preserves the previously inspected game behavior.
