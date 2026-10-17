@@ -2,8 +2,11 @@ param(
   [string]$ReleaseId = "",
   [string]$BinRoot = "",
   [switch]$SkipBuild,
+  [switch]$TestInjectRecordFailure,
   [switch]$TestInjectPromotionFailure,
   [switch]$TestInjectValidationFailure,
+  [switch]$TestSmokeWorkspaceOnly,
+  [string]$TestSmokeWorkspaceRoot = "",
   [switch]$TestPromotionOnly,
   [string]$TestPromotionRoot = ""
 )
@@ -192,6 +195,73 @@ function Copy-TrackedTree {
   }
 }
 
+function Assert-NewSmokeWorkspacePath {
+  param([Parameter(Mandatory)] [string]$WorkspaceRoot)
+  $targetPath = Join-Path $repoRoot "target"
+  New-Item -ItemType Directory -Force -Path $targetPath | Out-Null
+  $targetRoot = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $targetPath).Path).TrimEnd(
+    [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar
+  )
+  $candidate = [IO.Path]::GetFullPath($WorkspaceRoot)
+  $candidateParent = [IO.Path]::GetDirectoryName($candidate).TrimEnd(
+    [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar
+  )
+  $comparison = [StringComparison]::Ordinal
+  if ([IO.Path]::DirectorySeparatorChar -eq '\') { $comparison = [StringComparison]::OrdinalIgnoreCase }
+  if (-not [string]::Equals($candidateParent, $targetRoot, $comparison) -or
+      -not ([IO.Path]::GetFileName($candidate).StartsWith("local-toolchain-smoke-", $comparison))) {
+    throw "smoke workspace must be a new direct child of the repository target directory"
+  }
+  if (Test-Path -LiteralPath $candidate) {
+    throw "smoke workspace already exists; refusing to replace pre-existing target state: $candidate"
+  }
+  return $candidate
+}
+
+function Remove-OwnedSmokeWorkspace {
+  param([Parameter(Mandatory)] [string]$WorkspaceRoot)
+  if (-not (Test-Path -LiteralPath $WorkspaceRoot)) { return }
+  $targetPath = Join-Path $repoRoot "target"
+  $targetRoot = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $targetPath).Path).TrimEnd(
+    [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar
+  )
+  $resolvedRoot = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $WorkspaceRoot).Path)
+  $resolvedParent = [IO.Path]::GetDirectoryName($resolvedRoot).TrimEnd(
+    [IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar
+  )
+  $comparison = [StringComparison]::Ordinal
+  if ([IO.Path]::DirectorySeparatorChar -eq '\') { $comparison = [StringComparison]::OrdinalIgnoreCase }
+  if (-not [string]::Equals($resolvedParent, $targetRoot, $comparison) -or
+      -not ([IO.Path]::GetFileName($resolvedRoot).StartsWith("local-toolchain-smoke-", $comparison))) {
+    throw "refusing recursive cleanup outside the owned smoke workspace under target"
+  }
+  $item = Get-Item -LiteralPath $resolvedRoot -Force
+  if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "refusing recursive cleanup of a reparse-point smoke workspace"
+  }
+  Remove-Item -LiteralPath $resolvedRoot -Recurse -Force
+  if (Test-Path -LiteralPath $resolvedRoot) { throw "smoke workspace cleanup did not remove $resolvedRoot" }
+}
+
+function Invoke-SmokeInDisposableWorkspace {
+  param(
+    [Parameter(Mandatory)] [string]$WorkspaceRoot,
+    [Parameter(Mandatory)] [scriptblock]$Action
+  )
+  $ownedRoot = Assert-NewSmokeWorkspacePath -WorkspaceRoot $WorkspaceRoot
+  try {
+    Copy-TrackedTree -SourceRoot $repoRoot -Destination $ownedRoot -RelativeRoot "samples/windows_launch_smoke"
+    $smokeWorkspace = Join-Path $ownedRoot "samples/windows_launch_smoke"
+    $canonicalSample = [IO.Path]::GetFullPath((Join-Path $repoRoot "samples/windows_launch_smoke"))
+    if ([string]::Equals($smokeWorkspace, $canonicalSample, [StringComparison]::OrdinalIgnoreCase)) {
+      throw "smoke workspace resolved to the canonical tracked sample"
+    }
+    & $Action $smokeWorkspace
+  } finally {
+    Remove-OwnedSmokeWorkspace -WorkspaceRoot $ownedRoot
+  }
+}
+
 function Assert-CompleteToolchainStaging {
   param([Parameter(Mandatory)] [string]$Root)
   $required = @(
@@ -322,6 +392,77 @@ if ($TestPromotionOnly) {
   exit 0
 }
 
+if ($TestSmokeWorkspaceOnly) {
+  if ($env:STASIS_TEST_MODE -ne "1") {
+    throw "TestSmokeWorkspaceOnly requires STASIS_TEST_MODE=1"
+  }
+  if (-not $TestSmokeWorkspaceRoot) { throw "TestSmokeWorkspaceRoot is required for TestSmokeWorkspaceOnly" }
+  $assertTrackedSmokeFixture = {
+    param([string]$smokeWorkspace)
+    $canonicalSample = [IO.Path]::GetFullPath((Join-Path $repoRoot "samples/windows_launch_smoke"))
+    if ([string]::Equals($smokeWorkspace, $canonicalSample, [StringComparison]::OrdinalIgnoreCase)) {
+      throw "smoke test callback received the canonical tracked sample"
+    }
+    $listed = Invoke-Bounded -FilePath "git" -Arguments @(
+      "-C", $repoRoot, "-c", "core.quotepath=false", "ls-files", "--", "samples/windows_launch_smoke"
+    )
+    $expectedFiles = @(
+      $listed -split "`r?`n" | Where-Object { $_ } |
+        ForEach-Object { $_.Substring("samples/windows_launch_smoke/".Length) } | Sort-Object
+    )
+    if ($expectedFiles.Count -ne 9) { throw "expected the nine tracked smoke fixture inputs, found $($expectedFiles.Count)" }
+    $actualFiles = @(
+      Get-ChildItem -LiteralPath $smokeWorkspace -Recurse -File -Force |
+        ForEach-Object { $_.FullName.Substring($smokeWorkspace.Length + 1).Replace('\', '/') } |
+        Sort-Object
+    )
+    $differences = @(Compare-Object -ReferenceObject $expectedFiles -DifferenceObject $actualFiles)
+    if ($differences.Count -ne 0) { throw "smoke workspace does not contain exactly the tracked fixture files" }
+    foreach ($relative in $expectedFiles) {
+      $source = Join-Path (Join-Path $repoRoot "samples/windows_launch_smoke") $relative
+      $copy = Join-Path $smokeWorkspace $relative
+      if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne
+          (Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash) {
+        throw "tracked smoke fixture bytes differ after staging: $relative"
+      }
+    }
+    if (Test-Path -LiteralPath (Join-Path $smokeWorkspace ".stasis_cache")) {
+      throw "smoke workspace copied ignored sample cache content"
+    }
+  }
+
+  Invoke-SmokeInDisposableWorkspace -WorkspaceRoot $TestSmokeWorkspaceRoot -Action {
+    param([string]$smokeWorkspace)
+    & $assertTrackedSmokeFixture $smokeWorkspace
+  }
+  if (Test-Path -LiteralPath $TestSmokeWorkspaceRoot) { throw "successful smoke workspace cleanup left its owned root behind" }
+
+  $failureWorkspaceRoot = "$TestSmokeWorkspaceRoot-failure"
+  $callbackFailureObserved = $false
+  try {
+    Invoke-SmokeInDisposableWorkspace -WorkspaceRoot $failureWorkspaceRoot -Action {
+      param([string]$smokeWorkspace)
+      & $assertTrackedSmokeFixture $smokeWorkspace
+      $injectedCacheFile = Join-Path $smokeWorkspace ".stasis_cache/toolchain/src/test-failure"
+      New-Item -ItemType Directory -Force -Path (Split-Path -Parent $injectedCacheFile) | Out-Null
+      Set-Content -LiteralPath $injectedCacheFile -Value "failure after workspace prepare" -NoNewline
+      throw "test-injected smoke callback failure"
+    }
+    throw "smoke callback failure injection unexpectedly succeeded"
+  } catch {
+    if ($_.Exception.Message -notlike "*test-injected smoke callback failure*") { throw }
+    $callbackFailureObserved = $true
+  }
+  if (-not $callbackFailureObserved) { throw "smoke callback failure was not observed" }
+  if (Test-Path -LiteralPath $failureWorkspaceRoot) { throw "failed smoke workspace cleanup left its owned root behind" }
+  Write-Host "Disposable smoke workspace success and failure cleanup tests passed for nine tracked inputs"
+  exit 0
+}
+
+if ($TestInjectRecordFailure -and $env:STASIS_TEST_MODE -ne "1") {
+  throw "TestInjectRecordFailure requires STASIS_TEST_MODE=1"
+}
+
 $sourceCommit = (Invoke-Bounded -FilePath "git" -Arguments @("-C", $repoRoot, "rev-parse", "HEAD")).Trim()
 $commonGitDir = (Invoke-Bounded -FilePath "git" -Arguments @(
   "-C", $repoRoot, "rev-parse", "--path-format=absolute", "--git-common-dir"
@@ -427,18 +568,26 @@ try {
       throw "activated editor-info fingerprint does not match source revision $fingerprint"
     }
 
-    # Record inspects the selected snapshot; prepare refreshes the smoke
-    # workspace from this activated toolchain before it is compiled.
-    Invoke-Bounded -FilePath $installedExecutable -Arguments @(
-      "--workspace", (Join-Path $repoRoot "samples/windows_launch_smoke"), "prepare"
-    ) -WorkingDirectory $binRoot | Out-Null
-    if (Test-Path -LiteralPath $smokeOutput) { Remove-Item -LiteralPath $smokeOutput -Recurse -Force }
-    Invoke-Bounded -FilePath $installedExecutable -Arguments @(
-      "--workspace", (Join-Path $repoRoot "samples/windows_launch_smoke"), "record",
-      "--output", $smokeOutput, "--width", "320", "--height", "180", "--fps", "30", "--frames", "1"
-    ) -WorkingDirectory $binRoot | Out-Null
-    if (-not (Get-ChildItem -LiteralPath $smokeOutput -Filter "*.png" -File -ErrorAction SilentlyContinue)) {
-      throw "bounded record smoke did not produce a PNG frame"
+    # Stage only tracked fixture inputs; prepare may write the toolchain cache.
+    $smokeWorkspaceRoot = Join-Path (Join-Path $repoRoot "target") "local-toolchain-smoke-$PID-$([guid]::NewGuid().ToString('N'))"
+    Invoke-SmokeInDisposableWorkspace -WorkspaceRoot $smokeWorkspaceRoot -Action {
+      param([string]$smokeWorkspace)
+      Invoke-Bounded -FilePath $installedExecutable -Arguments @(
+        "--workspace", $smokeWorkspace, "prepare"
+      ) -WorkingDirectory $binRoot | Out-Null
+      if (Test-Path -LiteralPath $smokeOutput) { Remove-Item -LiteralPath $smokeOutput -Recurse -Force }
+      $recordFrames = "1"
+      if ($TestInjectRecordFailure -and $env:STASIS_TEST_MODE -eq "1") { $recordFrames = "0" }
+      Invoke-Bounded -FilePath $installedExecutable -Arguments @(
+        "--workspace", $smokeWorkspace, "record",
+        "--output", $smokeOutput, "--width", "320", "--height", "180", "--fps", "30", "--frames", $recordFrames
+      ) -WorkingDirectory $binRoot | Out-Null
+      if ($TestInjectRecordFailure -and $env:STASIS_TEST_MODE -eq "1") {
+        throw "actual record --frames 0 unexpectedly succeeded"
+      }
+      if (-not (Get-ChildItem -LiteralPath $smokeOutput -Filter "*.png" -File -ErrorAction SilentlyContinue)) {
+        throw "bounded record smoke did not produce a PNG frame"
+      }
     }
     if ($TestInjectValidationFailure -and $env:STASIS_TEST_MODE -eq "1") {
       throw "test-injected post-activation validation failure"
