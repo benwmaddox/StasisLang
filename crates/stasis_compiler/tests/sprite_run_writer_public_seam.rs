@@ -677,9 +677,15 @@ fn dynamic_text_run_api_and_pointer_pong_compile_for_jit_and_aot() {
     assert!(POINTER_PONG.contains("48 + display / 10"));
     assert!(POINTER_PONG.contains("48 + display % 10"));
     let source = POINTER_PONG.replace(
-        "import \".stasis_cache/toolchain/src/stdlib/graphics.stasis\";",
-        "import \"../../src/stdlib/graphics.stasis\";",
+        "import \".stasis_cache/toolchain/src/stdlib/",
+        "import \"../../src/stdlib/",
     );
+    assert!(
+        !source.contains(".stasis_cache/toolchain/src/stdlib/"),
+        "Pointer Pong fixture must not retain imports from a prepared stdlib cache"
+    );
+    assert!(source.contains("import \"../../src/stdlib/graphics.stasis\";"));
+    assert!(source.contains("import \"../../src/stdlib/sdl_scancodes.stasis\";"));
     let root = repository_root();
     let required = ["main".to_string(), "tick".to_string(), "render".to_string()];
     let mut jit = JitProcess::new();
