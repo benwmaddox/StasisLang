@@ -35,6 +35,7 @@ Each page solves one system problem for one style of game.
 
 - [Language quick reference](language-quick-reference.md)
 - [Graphics and asset ownership](graphics-and-assets.md)
+- [SDL physical-key scancodes](sdl-scancodes.md)
 - [Rig joints and sprite pivots](../rig2d.md)
 - [Project and CLI lifecycle](project-and-cli.md)
 - [Bounded collections and generics](bounded-collections.md)

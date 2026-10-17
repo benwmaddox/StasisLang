@@ -1,5 +1,6 @@
 import "/.stasis_cache/toolchain/src/stdlib/host_frame.stasis";
 import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";
+import "/.stasis_cache/toolchain/src/stdlib/sdl_scancodes.stasis";
 
 const SCREEN_WIDTH: i32 = 640;
 const PLAYER_WIDTH: i32 = 64;
@@ -68,10 +69,10 @@ function tick(): i32 {
         pointer_x.from_f32(web_host_frame.pointers[0].x_logical);
         player_x = pointer_x - PLAYER_WIDTH / 2;
     } else {
-        if (web_host_frame.keys[80] != 0) {
+        if (web_host_frame.keys[SCANCODE.LEFT] != 0) {
             player_x -= 5;
         }
-        if (web_host_frame.keys[79] != 0) {
+        if (web_host_frame.keys[SCANCODE.RIGHT] != 0) {
             player_x += 5;
         }
     }
@@ -81,7 +82,7 @@ function tick(): i32 {
     if (player_x > SCREEN_WIDTH - PLAYER_WIDTH) {
         player_x = SCREEN_WIDTH - PLAYER_WIDTH;
     }
-    if (web_host_frame.keys[44] != 0 ||(web_host_frame.pointer_count > 0 && web_host_frame.pointers[0].is_down)) {
+    if (web_host_frame.keys[SCANCODE.SPACE] != 0 ||(web_host_frame.pointer_count > 0 && web_host_frame.pointers[0].is_down)) {
         if (!tone_latched) {
             web_audio_stream.push(audio_samples, 2400);
             score += 1;

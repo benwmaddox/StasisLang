@@ -1,4 +1,5 @@
 import ".stasis_cache/toolchain/src/stdlib/graphics.stasis";
+import ".stasis_cache/toolchain/src/stdlib/sdl_scancodes.stasis";
 
 const SCREEN_W: f32 = 640.0;
 const SCREEN_H: f32 = 360.0;
@@ -93,10 +94,10 @@ function update_player(): void {
         return;
     }
 
-    if (pointer_pong_host_frame.keys[82] != 0) {
+    if (pointer_pong_host_frame.keys[SCANCODE.UP] != 0) {
         state.left_y = state.left_y - 5.0;
     }
-    if (pointer_pong_host_frame.keys[81] != 0) {
+    if (pointer_pong_host_frame.keys[SCANCODE.DOWN] != 0) {
         state.left_y = state.left_y + 5.0;
     }
     state.left_y = clamp_paddle(state.left_y);

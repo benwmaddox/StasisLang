@@ -1,0 +1,10 @@
+import "/vendor/stasis/stdlib/host_frame.stasis";
+import "/vendor/stasis/stdlib/sdl_scancodes.stasis";
+
+global frame: HostFrame;
+
+function should_move_left(): bool {
+    // Refresh once per game tick, then read all keys from that snapshot.
+    frame.refresh();
+    return frame.keys[sdl_scancodes.SCANCODE.A] != 0 || frame.keys[sdl_scancodes.SCANCODE.LEFT] != 0;
+}

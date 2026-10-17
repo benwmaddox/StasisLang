@@ -56,6 +56,7 @@ fi
 "$PYTHON" -m unittest tools.ci.test_audio_stream_native_acceptance
 "$PYTHON" -m unittest tools.ci.test_local_toolchain_install
 "$PYTHON" -m unittest tools.ci.test_sdl3_migration
+"$PYTHON" -m unittest tools.ci.test_generate_sdl_scancodes
 "$PYTHON" -m unittest tools.ci.test_windows_sign_runner
 "$PYTHON" -m unittest tools.ci.test_windows_signing_policy
 "$PYTHON" -m unittest tools.ci.test_windows_signing_trust

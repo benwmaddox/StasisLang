@@ -3,6 +3,7 @@ import "/vendor/stasis/stdlib/graphics.stasis";
 import "/vendor/stasis/stdlib/audio.stasis";
 import "/vendor/stasis/stdlib/asset_tasks.stasis";
 import "/vendor/stasis/stdlib/host_frame.stasis";
+import "/vendor/stasis/stdlib/sdl_scancodes.stasis";
 import "brickout_defense_core.stasis";
 import "brickout_defense_asset_catalog.stasis";
 import "brickout_defense_animations.stasis";
@@ -24,19 +25,6 @@ const MAX_ORIGINAL_BALLS: i32 = 256;
 const MAX_ORIGINAL_PROJECTILES: i32 = 192;
 const FIXED_DT: f32 = 0.0166667;
 const PI: f32 = 3.1415926;
-
-// SDL scancodes not yet present in the small shared enum.
-const KEY_ESCAPE: i32 = 41;
-const KEY_1: i32 = 30;
-const KEY_2: i32 = 31;
-const KEY_3: i32 = 32;
-const KEY_4: i32 = 33;
-const KEY_5: i32 = 34;
-const KEY_6: i32 = 35;
-const KEY_N: i32 = 17;
-const KEY_P: i32 = 19;
-const KEY_S: i32 = 22;
-const KEY_U: i32 = 24;
 
 struct OriginalTower {
     x: f32;
@@ -2970,17 +2958,17 @@ function original_handle_number_press(number: i32): void {
 }
 
 function original_handle_keyboard(): void {
-    let escape: bool = brickout_defense_host_frame.keys[KEY_ESCAPE] != 0;
-    let pause: bool = brickout_defense_host_frame.keys[KEY_P] != 0;
-    let next: bool = brickout_defense_host_frame.keys[KEY_N] != 0;
-    let sell: bool = brickout_defense_host_frame.keys[KEY_S] != 0;
-    let upgrade: bool = brickout_defense_host_frame.keys[KEY_U] != 0;
-    let one: bool = brickout_defense_host_frame.keys[KEY_1] != 0;
-    let two: bool = brickout_defense_host_frame.keys[KEY_2] != 0;
-    let three: bool = brickout_defense_host_frame.keys[KEY_3] != 0;
-    let four: bool = brickout_defense_host_frame.keys[KEY_4] != 0;
-    let five: bool = brickout_defense_host_frame.keys[KEY_5] != 0;
-    let six: bool = brickout_defense_host_frame.keys[KEY_6] != 0;
+    let escape: bool = brickout_defense_host_frame.keys[SCANCODE.ESCAPE] != 0;
+    let pause: bool = brickout_defense_host_frame.keys[SCANCODE.P] != 0;
+    let next: bool = brickout_defense_host_frame.keys[SCANCODE.N] != 0;
+    let sell: bool = brickout_defense_host_frame.keys[SCANCODE.S] != 0;
+    let upgrade: bool = brickout_defense_host_frame.keys[SCANCODE.U] != 0;
+    let one: bool = brickout_defense_host_frame.keys[SCANCODE.DIGIT_1] != 0;
+    let two: bool = brickout_defense_host_frame.keys[SCANCODE.DIGIT_2] != 0;
+    let three: bool = brickout_defense_host_frame.keys[SCANCODE.DIGIT_3] != 0;
+    let four: bool = brickout_defense_host_frame.keys[SCANCODE.DIGIT_4] != 0;
+    let five: bool = brickout_defense_host_frame.keys[SCANCODE.DIGIT_5] != 0;
+    let six: bool = brickout_defense_host_frame.keys[SCANCODE.DIGIT_6] != 0;
 
     if (escape && !original_state.keys.escape) {
         if (original_state.screen == OriginalScreen.Game) {

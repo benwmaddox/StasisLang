@@ -88,10 +88,10 @@ function tick(): i32 {
     host_frame.refresh();
     if (host_frame.quit_requested) { return 1; }
 
-    if (host_frame.keys[Scancode.Left] != 0) {
+    if (host_frame.keys[SCANCODE.LEFT] != 0) {
         state.x -= state.speed;
     }
-    if (host_frame.keys[Scancode.Right] != 0) {
+    if (host_frame.keys[SCANCODE.RIGHT] != 0) {
         state.x += state.speed;
     }
 

@@ -743,6 +743,7 @@ function createSpriteExample(path) {
   const escaped = JSON.stringify(path);
   return `import "vendor/stasis/stdlib/graphics.stasis";
 import "vendor/stasis/stdlib/host_frame.stasis";
+import "vendor/stasis/stdlib/sdl_scancodes.stasis";
 
 struct SpriteExampleState {
     input_frame: HostFrame;
@@ -752,14 +753,6 @@ struct SpriteExampleState {
 }
 
 global state: SpriteExampleState;
-
-// HostFrame.keys uses SDL scancode slots.
-const SCANCODE {
-    A: i32 = 4;
-    D: i32 = 7;
-    LEFT: i32 = 80;
-    RIGHT: i32 = 79;
-}
 
 function main(): i32 {
     init_window(640, 360, "Stasis Asset Example");
@@ -773,9 +766,9 @@ function tick(): i32 {
     state.input_frame.refresh();
     if (state.input_frame.pointer_count > 0 && state.input_frame.pointers[0].is_down) {
         state.sprite_x = state.input_frame.pointers[0].x_logical - 48.0;
-    } else if (state.input_frame.keys[SCANCODE.LEFT] != 0 || state.input_frame.keys[SCANCODE.A] != 0) {
+    } else if (state.input_frame.keys[sdl_scancodes.SCANCODE.LEFT] != 0 || state.input_frame.keys[sdl_scancodes.SCANCODE.A] != 0) {
         state.sprite_x -= 3.0;
-    } else if (state.input_frame.keys[SCANCODE.RIGHT] != 0 || state.input_frame.keys[SCANCODE.D] != 0) {
+    } else if (state.input_frame.keys[sdl_scancodes.SCANCODE.RIGHT] != 0 || state.input_frame.keys[sdl_scancodes.SCANCODE.D] != 0) {
         state.sprite_x += 3.0;
     } else {
         state.sprite_x += state.sprite_direction * 2.0;

@@ -63,7 +63,7 @@ test `HostFrame number keys select the recovered campaign`(): bool {
     original_testkit_reset_frame();
     original_testkit_reset_key_edges();
     original_state.screen = OriginalScreen.MainMenu;
-    brickout_defense_host_frame.keys[KEY_1] = 1;
+    brickout_defense_host_frame.keys[SCANCODE.DIGIT_1] = 1;
     original_handle_keyboard();
     if (original_state.screen != OriginalScreen.CampaignMenu) {
         return false;
