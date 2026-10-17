@@ -149,7 +149,7 @@ def run_real_windows_integration(evidence_directory: Path) -> None:
 
     target = ROOT / "target"
     target.mkdir(parents=True, exist_ok=True)
-    integration_root = target / f"local-toolchain-integration-{uuid.uuid4().hex}"
+    integration_root = target / f"local-it-{uuid.uuid4().hex[:8]}"
     if integration_root.exists():
         raise FileExistsError(integration_root)
     bin_root = integration_root / "bin"
@@ -291,7 +291,7 @@ def run_real_windows_integration(evidence_directory: Path) -> None:
             },
         )
     finally:
-        remove_owned_target_tree(integration_root, prefix="local-toolchain-integration-")
+        remove_owned_target_tree(integration_root, prefix="local-it-")
 
 
 class LocalToolchainInstallTests(unittest.TestCase):
