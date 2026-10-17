@@ -15,8 +15,8 @@ use crate::frontend::parser::{
 };
 use crate::frontend::types::{TypeCategory, TypeId, TypeTable, TYPE_ID_VOID};
 use crate::ir::hir::{
-    AssignTarget, ExternCallIdentity, FunctionHIR, ResolvedCallTarget, SimpleCondition, SimpleExpr,
-    SimpleStmt,
+    AssignTarget, ExternCallIdentity, FunctionHIR, ResolvedCallTarget, ResolvedConstantValue,
+    SimpleCondition, SimpleExpr, SimpleStmt,
 };
 
 const ASSET_ANNOTATION: &str = "asset_path";
@@ -31,6 +31,12 @@ struct AssetLoader {
 enum AssetCallee {
     Function(FunctionId),
     Extern(ExternCallIdentity),
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedAssetCall<'hir> {
+    callee: AssetCallee,
+    args: &'hir [SimpleExpr],
 }
 
 #[derive(Debug, Clone, Default)]
@@ -551,7 +557,7 @@ fn discover_function_references(
     function_name: &str,
     parameter_names: &[String],
     local_declarations: &[ParsedLocalDeclaration],
-    resolved_calls: &BTreeMap<(usize, usize), AssetCallee>,
+    resolved_calls: &BTreeMap<(usize, usize), ResolvedAssetCall<'_>>,
     loaders: &AssetLoaderCatalog,
     constants: &BTreeMap<String, ConstantValue>,
     out: &mut Vec<AssetReference>,
@@ -563,10 +569,10 @@ fn discover_function_references(
             continue;
         }
         let name = &body[token.start..token.end];
-        let Some(callee) = resolved_calls.get(&(token.start, token.end)) else {
+        let Some(resolved_call) = resolved_calls.get(&(token.start, token.end)) else {
             continue;
         };
-        let Some(loader_signatures) = loaders.by_callee.get(callee) else {
+        let Some(loader_signatures) = loaders.by_callee.get(&resolved_call.callee) else {
             continue;
         };
         let dotted_call = index > 0
@@ -623,14 +629,20 @@ fn discover_function_references(
         let start = range.start + leading;
         let end = start + expression.len();
         let expression_start = body_offset + start;
-        let logical_path = static_string(expression, constants, |name| {
-            parameter_names.iter().any(|parameter| parameter == name)
-                || local_declarations.iter().any(|declaration| {
-                    declaration.function_name == function_name
-                        && declaration.name == name
-                        && declaration.visibility_range.contains(&expression_start)
-                })
-        })?;
+        let logical_path = if let Some(path) =
+            resolved_string_operand(resolved_call, path_operand, arguments.len())
+        {
+            Some(path.to_string())
+        } else {
+            static_string(expression, constants, |name| {
+                parameter_names.iter().any(|parameter| parameter == name)
+                    || local_declarations.iter().any(|declaration| {
+                        declaration.function_name == function_name
+                            && declaration.name == name
+                            && declaration.visibility_range.contains(&expression_start)
+                    })
+            })?
+        };
         out.push(AssetReference {
             api: name.to_string(),
             source_path: source_path.to_string(),
@@ -642,10 +654,10 @@ fn discover_function_references(
     Ok(())
 }
 
-fn resolved_asset_calls(
+fn resolved_asset_calls<'hir>(
     function: &FunctionMeta,
-    hir: Option<&FunctionHIR>,
-) -> BTreeMap<(usize, usize), AssetCallee> {
+    hir: Option<&'hir FunctionHIR>,
+) -> BTreeMap<(usize, usize), ResolvedAssetCall<'hir>> {
     let mut calls = BTreeMap::new();
     let Some(hir) = hir else {
         return calls;
@@ -663,9 +675,9 @@ fn resolved_asset_calls(
     calls
 }
 
-fn collect_calls_in_statement(
-    statement: &SimpleStmt,
-    calls: &mut BTreeMap<(usize, usize), AssetCallee>,
+fn collect_calls_in_statement<'hir>(
+    statement: &'hir SimpleStmt,
+    calls: &mut BTreeMap<(usize, usize), ResolvedAssetCall<'hir>>,
 ) {
     match statement {
         SimpleStmt::Let { expression, .. }
@@ -720,9 +732,9 @@ fn collect_calls_in_statement(
     }
 }
 
-fn collect_calls_in_assignment_target(
-    target: &AssignTarget,
-    calls: &mut BTreeMap<(usize, usize), AssetCallee>,
+fn collect_calls_in_assignment_target<'hir>(
+    target: &'hir AssignTarget,
+    calls: &mut BTreeMap<(usize, usize), ResolvedAssetCall<'hir>>,
 ) {
     if let AssignTarget::IndexedPath {
         index,
@@ -737,9 +749,9 @@ fn collect_calls_in_assignment_target(
     }
 }
 
-fn collect_calls_in_condition(
-    condition: &SimpleCondition,
-    calls: &mut BTreeMap<(usize, usize), AssetCallee>,
+fn collect_calls_in_condition<'hir>(
+    condition: &'hir SimpleCondition,
+    calls: &mut BTreeMap<(usize, usize), ResolvedAssetCall<'hir>>,
 ) {
     match condition {
         SimpleCondition::Comparison { lhs, rhs, .. } => {
@@ -755,9 +767,9 @@ fn collect_calls_in_condition(
     }
 }
 
-fn collect_calls_in_expression(
-    expression: &SimpleExpr,
-    calls: &mut BTreeMap<(usize, usize), AssetCallee>,
+fn collect_calls_in_expression<'hir>(
+    expression: &'hir SimpleExpr,
+    calls: &mut BTreeMap<(usize, usize), ResolvedAssetCall<'hir>>,
 ) {
     match expression {
         SimpleExpr::Condition(condition) => collect_calls_in_condition(condition, calls),
@@ -784,7 +796,7 @@ fn collect_calls_in_expression(
                 };
                 calls.insert(
                     (source_span.start as usize, source_span.end as usize),
-                    callee,
+                    ResolvedAssetCall { callee, args },
                 );
             }
             for argument in args {
@@ -801,7 +813,31 @@ fn collect_calls_in_expression(
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_)
-        | SimpleExpr::Identifier(_) => {}
+        | SimpleExpr::Identifier(_)
+        | SimpleExpr::ResolvedConstant { .. } => {}
+    }
+}
+
+fn resolved_string_operand<'hir>(
+    call: &ResolvedAssetCall<'hir>,
+    path_operand: PathOperand,
+    source_argument_count: usize,
+) -> Option<&'hir str> {
+    let implicit_argument_count = call.args.len().checked_sub(source_argument_count)?;
+    if implicit_argument_count > 1 {
+        return None;
+    }
+    let index = match path_operand {
+        PathOperand::Receiver if implicit_argument_count == 1 => 0,
+        PathOperand::Receiver => return None,
+        PathOperand::Argument(index) => index.checked_add(implicit_argument_count)?,
+    };
+    match call.args.get(index)? {
+        SimpleExpr::ResolvedConstant {
+            value: ResolvedConstantValue::String(value),
+            ..
+        } => Some(value),
+        _ => None,
     }
 }
 
@@ -1619,6 +1655,83 @@ function main(): i32 {
         assert_eq!(packaged.references.len(), 1);
         assert_eq!(packaged.references[0].project_path, "assets/sheet.png");
         fs::remove_dir_all(project_root).ok();
+    }
+
+    #[test]
+    fn snapshot_discovers_imported_group_asset_path() {
+        let main = r#"
+import "font_paths.stasis";
+extern function @asset_path(path) load_font(path: string, size: i32): i32;
+function main(): i32 {
+    font_paths.ASSETS.FONT_PATH.load_font(16);
+    return load_font(font_paths.ASSETS.FONT_PATH, 16);
+}
+"#;
+        let font_paths = r#"
+const ASSETS {
+    FONT_PATH: string = "assets/ui.ttf";
+}
+"#;
+        let main_path = "tests/stasis/assets/grouped_font_main.stasis";
+        let mut jit = JitProcess::new();
+        jit.upsert_file(main_path, main);
+        jit.upsert_file("tests/stasis/assets/font_paths.stasis", font_paths);
+        jit.compile().expect("compile grouped font asset fixture");
+        let references = jit.program_snapshot().expect("snapshot").asset_references();
+
+        assert_eq!(references.len(), 2);
+        assert!(references
+            .iter()
+            .all(|reference| reference.source_path == main_path));
+        assert!(references
+            .iter()
+            .all(|reference| reference.api == "load_font"));
+        assert!(references
+            .iter()
+            .all(|reference| { reference.logical_path.as_deref() == Some("assets/ui.ttf") }));
+        assert_eq!(
+            &main[references[0].start..references[0].end],
+            "font_paths.ASSETS.FONT_PATH"
+        );
+        assert_eq!(
+            &main[references[1].start..references[1].end],
+            "font_paths.ASSETS.FONT_PATH"
+        );
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let project_root = std::env::temp_dir().join(format!("stasis_group_asset_{stamp}"));
+        fs::create_dir_all(project_root.join("assets")).expect("asset directory");
+        fs::write(project_root.join("assets/ui.ttf"), "font").expect("font asset");
+        let packaged = validate_asset_references(
+            &project_root,
+            &[],
+            references,
+            Some(&BTreeSet::from(["assets/ui.ttf".to_string()])),
+            &BTreeSet::new(),
+        );
+        assert_eq!(packaged.references.len(), 2);
+        assert!(packaged
+            .references
+            .iter()
+            .all(|reference| reference.project_path == "assets/ui.ttf"));
+        assert!(packaged.resolved_paths.contains("assets/ui.ttf"));
+        assert!(packaged.diagnostics.is_empty());
+        fs::remove_dir_all(project_root).ok();
+
+        let mut aot = AotProcess::new();
+        aot.upsert_file(main_path, main);
+        aot.upsert_file("tests/stasis/assets/font_paths.stasis", font_paths);
+        aot.compile()
+            .expect("compile AOT grouped font asset fixture");
+        assert_eq!(
+            references,
+            aot.program_snapshot()
+                .expect("AOT snapshot")
+                .asset_references()
+        );
     }
 
     #[test]

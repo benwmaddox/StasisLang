@@ -231,10 +231,11 @@ function capacity(self: Buffer<T, N>): i32 {
 
 `T: type` is substituted with a concrete supported type. `N: i32` is a checked,
 compile-time signed 32-bit value, not a runtime parameter and not inherently an
-array capacity. Value arguments may use literals, named constants, enclosing
-generic values, parentheses, unary signs, and checked integer `+`, `-`, `*`,
-`/`, and `%` expressions. They also support integer bitwise complement `~`,
-bitwise `&`, `^`, and `|`, and shifts `<<` and `>>`; these compile-time
+array capacity. Value arguments may use literals, named constants (including
+qualified group members), enclosing generic values, parentheses, unary signs,
+and checked integer `+`, `-`, `*`, `/`, and `%` expressions. They also support
+integer bitwise complement `~`, bitwise `&`, `^`, and `|`, and shifts `<<` and
+`>>`; these compile-time
 expressions use the `i32` value domain. Parenthesize a shift expression inside
 a generic application so its closing `>` is unambiguous, for example
 `Bits<(1 << 3)>` or `Bits<(8 >> 1)>`. Overflow, division by zero, and an invalid
@@ -303,10 +304,11 @@ struct AgentSettings {
 
 The initializer is checked against the declared field type. Supported
 expressions are numeric and boolean literals, enum variants, visible typed
-scalar constants, and constant-only arithmetic or bitwise expressions handled
-by the compile-time scalar evaluator. Enum defaults must name a member of the
-field's declared enum. Calls, reads of mutable runtime state, strings, and side
-effects are compile-time errors with a source location. Generic arguments are
+scalar constants (including qualified scalar group members), and constant-only
+arithmetic or bitwise expressions handled by the compile-time scalar evaluator.
+Enum defaults must name a member of the field's declared enum. Calls, reads of
+mutable runtime state, strings, and side effects are compile-time errors with a
+source location. Generic arguments are
 substituted before a specialized field default is evaluated. Fixed-array,
 view, and named-struct field initializers are outside this scalar feature.
 
@@ -717,6 +719,53 @@ Rules:
 return;
 return value;
 ```
+
+### 6.7 Compile-Time Constants
+
+Flat constants keep the form `const NAME: Type = expression;`. Related
+constants may be declared in a one-level group:
+
+```stasis
+const SCANCODE {
+    A: i32 = 4;
+    B: i32 = SCANCODE.A + 1;
+}
+```
+
+Every member has an explicit type and initializer. Member names are only
+available through their group, including when one member refers to a sibling.
+Members end with semicolons; the closing brace has no trailing semicolon.
+Groups cannot contain nested groups. Members use the same supported types and
+initializer rules as flat constants: `i32`, `u8`, `u16`, `u32`, `f32`,
+`f64`, `bool`, nominal enum values, and string views (`ascii[]`, `utf8[]`,
+or the existing `string` alias). String-view members require literal string
+initializers; fixed-size string buffers are not constant declarations. Other
+members follow the existing compile-time expression rules. Group members are
+available wherever named
+constants are accepted, subject to each consumer's existing type and
+expression limits.
+
+Constants do not create mutable variables. A group is only a compile-time name
+namespace; it creates no runtime object, type, layout, storage, or reset state.
+Flat constant behavior is unchanged. Duplicate top-level names within one
+source file remain errors across groups, enums, structs, and flat constants;
+duplicate group members are errors. Separate modules may use the same group
+and member names.
+
+Bare flat constants retain local-first visibility, and group members are never
+injected into bare-name lookup. Qualified lookup preserves existing
+lexical/value-root and module-alias shadowing rules. For a two-part name,
+eligible module-qualified flat constants, group members, and enum variants are
+considered; one distinct declaration resolves, and multiple distinct
+declarations are ambiguous.
+
+A `GROUP.MEMBER` group candidate uses a local group if present, or otherwise
+the unique visible dependency owner. Multiple visible dependency owners are
+ambiguous. Once a group owner is selected, a missing member is an error and
+lookup does not fall back to another owner. `module.GROUP.MEMBER`, when
+resolved through an import alias, selects the group in that exact imported
+module. A known module or group root with a missing member is an error, not a
+runtime-path fallback.
 
 ## 7. Functions and Calls
 

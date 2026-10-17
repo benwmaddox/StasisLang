@@ -10,7 +10,8 @@ use crate::backend::assets::SpriteRenderLoaderTargets;
 use crate::backend::compile_analysis::{ConstantValue, ConstantValueMap};
 use crate::compiler::{FunctionId, FunctionMeta};
 use crate::ir::hir::{
-    eval_const_i64, AssignOp, AssignTarget, FunctionHIR, ResolvedCallTarget, SimpleExpr, SimpleStmt,
+    eval_const_i64, AssignOp, AssignTarget, FunctionHIR, ResolvedCallTarget, ResolvedConstantValue,
+    SimpleExpr, SimpleStmt,
 };
 
 pub const HOT_RENDER_METADATA_VERSION: u32 = 4;
@@ -616,6 +617,10 @@ fn const_i64(expr: &SimpleExpr, constants: &ConstantValueMap) -> Option<i64> {
 fn const_string(expr: &SimpleExpr, constants: &ConstantValueMap) -> Option<String> {
     match expr {
         SimpleExpr::StringLiteral(value) => Some(value.clone()),
+        SimpleExpr::ResolvedConstant {
+            value: ResolvedConstantValue::String(value),
+            ..
+        } => Some(value.clone()),
         SimpleExpr::Identifier(name) => match constants.get(name) {
             Some(ConstantValue::String { value, .. }) => Some(value.clone()),
             _ => None,

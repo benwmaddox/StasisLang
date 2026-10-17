@@ -11,11 +11,14 @@ use crate::frontend::lexer::{lex, Token, TokenKind};
 pub use crate::frontend::module_graph::{workshop_file_exposure, WorkshopExposure};
 use crate::frontend::parser::{
     parse_local_declarations, parse_top_level_extern_functions, parse_top_level_functions,
-    parse_top_level_type_layout, ParsedGenericParameter, ParsedGenericParameterKind,
+    parse_top_level_type_layout, ParsedConstGroupDefinition, ParsedGenericParameter,
+    ParsedGenericParameterKind,
 };
 use crate::identity::{
     canonical_source_path, overload_discriminator, CanonicalSourcePath, SymbolId,
 };
+
+const CONST_GROUP_VISIBILITY_SCOPE_OWNER: &str = "__constant_group_visibility__";
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -1082,9 +1085,18 @@ fn parse_simple_top_level_symbols(source: &str) -> Result<Vec<ParsedSimpleSymbol
                     }
                     WorkshopSymbolKind::Constant => {
                         let name_token = expect_token(&tokens, cursor + 1, TokenKind::Identifier)?;
-                        let end = find_next_token(&tokens, cursor + 2, TokenKind::Semicolon)?;
                         let name = token_text(source, name_token).to_string();
-                        let signature = source[token.start..tokens[end].end].trim().to_string();
+                        let (signature, end) = if tokens
+                            .get(cursor + 2)
+                            .is_some_and(|token| token.kind == TokenKind::LBrace)
+                        {
+                            let open = cursor + 2;
+                            let close = find_matching_rbrace(&tokens, open + 1, 1)?;
+                            (format!("const {name}"), close)
+                        } else {
+                            let end = find_next_token(&tokens, cursor + 2, TokenKind::Semicolon)?;
+                            (source[token.start..tokens[end].end].trim().to_string(), end)
+                        };
                         (name, signature, end)
                     }
                     WorkshopSymbolKind::Test => {
@@ -2135,15 +2147,18 @@ pub fn find_workshop_references(
             "generic parameter '{symbol}' is ambiguous without a source position"
         ));
     }
-    let definition = match field_definition_reference(files, &segments, &items)? {
+    let definition = match const_group_definition_reference(files, &segments, &items)? {
         Some(reference) => Some(reference),
-        None => match global_definition_reference(files, &segments, &items)? {
+        None => match field_definition_reference(files, &segments, &items)? {
             Some(reference) => Some(reference),
-            None => match method_definition_reference(files, &segments, &items)? {
+            None => match global_definition_reference(files, &segments, &items)? {
                 Some(reference) => Some(reference),
-                None => match function_definition_reference(files, &segments, &items)? {
+                None => match method_definition_reference(files, &segments, &items)? {
                     Some(reference) => Some(reference),
-                    None => struct_definition_reference(files, &segments, &items)?,
+                    None => match function_definition_reference(files, &segments, &items)? {
+                        Some(reference) => Some(reference),
+                        None => struct_definition_reference(files, &segments, &items)?,
+                    },
                 },
             },
         },
@@ -2809,11 +2824,42 @@ fn resolve_workshop_rename_target(
     semantic_path: &str,
 ) -> Result<WorkshopRenameTarget, String> {
     let token_name = token_text(&file.source, token);
+    let layout = parse_top_level_type_layout(&file.source)?;
+    for group in &layout.const_groups {
+        if group.name_range == (token.start..token.end) {
+            return Ok(WorkshopRenameTarget {
+                kind: "constant_group".to_string(),
+                name: token_name.to_string(),
+                owner: None,
+                file: file.path.clone(),
+                scope: None,
+                signature: Some(format!("const {}", group.name)),
+            });
+        }
+        if let Some(member) = group
+            .members
+            .iter()
+            .find(|member| member.name_range == (token.start..token.end))
+        {
+            return Ok(WorkshopRenameTarget {
+                kind: "constant_group_member".to_string(),
+                name: token_name.to_string(),
+                owner: Some(group.name.clone()),
+                file: file.path.clone(),
+                scope: None,
+                signature: Some(format!(
+                    "const {}.{}: {}",
+                    group.name, member.name, member.type_name
+                )),
+            });
+        }
+    }
     let mut candidates = catalog
         .iter()
         .filter(|item| {
             (item.text == semantic_path || item.text == token_name)
                 && rename_completion_visible(files, item, file, token)
+                && !const_group_completion_shadowed(files, item, file, token)
         })
         .collect::<Vec<_>>();
     candidates.sort_by_key(|item| {
@@ -2836,10 +2882,41 @@ fn resolve_workshop_rename_target(
         kind: primary.kind.clone(),
         name: token_name.to_string(),
         owner: primary.owner.clone(),
-        file: file.path.clone(),
+        file: if matches!(
+            primary.kind.as_str(),
+            "constant_group" | "constant_group_member"
+        ) {
+            primary.file.clone()
+        } else {
+            file.path.clone()
+        },
         scope: primary.scope.clone(),
         signature: primary.signature.clone(),
     })
+}
+
+fn const_group_completion_shadowed(
+    files: &[WorkshopSourceFile],
+    item: &WorkshopCompletionItem,
+    file: &WorkshopSourceFile,
+    token: Token,
+) -> bool {
+    if !item
+        .scope
+        .as_ref()
+        .is_some_and(|scope| scope.owner == CONST_GROUP_VISIBILITY_SCOPE_OWNER)
+    {
+        return false;
+    }
+    let segments = item.text.split('.').collect::<Vec<_>>();
+    let root = match (item.kind.as_str(), segments.as_slice()) {
+        ("constant_group", [group]) => Some(*group),
+        ("constant_group_member", [group, _member]) => Some(*group),
+        // Explicit aliases keep the module-qualified lookup policy used by other symbols.
+        ("constant_group", [_, _]) | ("constant_group_member", [_, _, _]) => None,
+        _ => None,
+    };
+    root.is_some_and(|root| const_group_root_binding_shadows(files, &file.path, root, token.start))
 }
 
 fn rename_completion_visible(
@@ -2907,6 +2984,25 @@ fn reject_workshop_rename_collision(
                         && item.file == target.file
                         && item.owner == target.owner
                 }
+                "constant_group" => {
+                    item.file == target.file
+                        && item.kind == "constant_group"
+                        && item.scope.as_ref().is_some_and(|scope| {
+                            scope.owner == CONST_GROUP_VISIBILITY_SCOPE_OWNER
+                                && scope.file == target.file
+                        })
+                        && item.text == new_name
+                }
+                "constant_group_member" => {
+                    item.file == target.file
+                        && item.kind == "constant_group_member"
+                        && item.owner == target.owner
+                        && item.scope.as_ref().is_some_and(|scope| {
+                            scope.owner == CONST_GROUP_VISIBILITY_SCOPE_OWNER
+                                && scope.file == target.file
+                        })
+                        && item.text.ends_with(&format!(".{}", new_name))
+                }
                 _ => item.scope.is_none(),
             }
     });
@@ -2935,7 +3031,24 @@ fn rename_target_references(
         return scoped_binding_references(files, catalog, target);
     }
     let mut paths = BTreeSet::new();
-    if matches!(target.kind.as_str(), "field" | "state_path") {
+    if target.kind == "constant_group" {
+        for item in catalog.iter().filter(|item| {
+            item.kind == "constant_group"
+                && item.file == target.file
+                && item.text.rsplit('.').next() == Some(target.name.as_str())
+        }) {
+            paths.insert(item.text.clone());
+        }
+    } else if target.kind == "constant_group_member" {
+        for item in catalog.iter().filter(|item| {
+            item.kind == "constant_group_member"
+                && item.file == target.file
+                && item.owner == target.owner
+                && item.text.ends_with(&format!(".{}", target.name))
+        }) {
+            paths.insert(item.text.clone());
+        }
+    } else if matches!(target.kind.as_str(), "field" | "state_path") {
         for item in catalog.iter().filter(|item| {
             matches!(item.kind.as_str(), "field" | "state_path")
                 && item.owner == target.owner
@@ -2959,6 +3072,13 @@ fn rename_target_references(
             ));
         }
         for reference in references {
+            if matches!(
+                target.kind.as_str(),
+                "constant_group" | "constant_group_member"
+            ) && !const_group_reference_targets_definition(files, &reference, &path, target)?
+            {
+                continue;
+            }
             let (start, end) = if reference.symbol == target.name {
                 let start = reference.source_span.start as usize;
                 (start, start.saturating_add(target.name.len()))
@@ -2969,7 +3089,225 @@ fn rename_target_references(
             locations.insert((reference.file, start, end));
         }
     }
+    if matches!(
+        target.kind.as_str(),
+        "constant_group" | "constant_group_member"
+    ) {
+        if let Some(definition_file) = files
+            .iter()
+            .find(|file| workshop_same_path(&file.path, &target.file))
+        {
+            let layout = parse_top_level_type_layout(&definition_file.source)?;
+            let definition_range = layout.const_groups.iter().find_map(|group| {
+                if target.kind == "constant_group" && group.name == target.name {
+                    return Some(group.name_range.clone());
+                }
+                if target.kind == "constant_group_member"
+                    && target.owner.as_deref() == Some(group.name.as_str())
+                {
+                    return group
+                        .members
+                        .iter()
+                        .find(|member| member.name == target.name)
+                        .map(|member| member.name_range.clone());
+                }
+                None
+            });
+            if let Some(range) = definition_range {
+                locations.insert((definition_file.path.clone(), range.start, range.end));
+            }
+        }
+    }
     Ok(locations)
+}
+
+fn const_group_reference_targets_definition(
+    files: &[WorkshopSourceFile],
+    reference: &WorkshopReference,
+    path: &str,
+    target: &WorkshopRenameTarget,
+) -> Result<bool, String> {
+    if reference.kind == WorkshopReferenceKind::Definition {
+        return Ok(workshop_same_path(&reference.file, &target.file));
+    }
+    let segments = path.split('.').collect::<Vec<_>>();
+    let (group_name, alias, member_name) = match (target.kind.as_str(), segments.as_slice()) {
+        ("constant_group", [group]) if *group == target.name => (*group, None, None),
+        ("constant_group", [alias, group]) if *group == target.name => (*group, Some(*alias), None),
+        ("constant_group_member", [group, member])
+            if target.owner.as_deref() == Some(*group) && *member == target.name =>
+        {
+            (*group, None, Some(*member))
+        }
+        ("constant_group_member", [alias, group, member])
+            if target.owner.as_deref() == Some(*group) && *member == target.name =>
+        {
+            (*group, Some(*alias), Some(*member))
+        }
+        _ => return Ok(false),
+    };
+    if alias.is_none()
+        && const_group_root_binding_shadows(
+            files,
+            &reference.file,
+            group_name,
+            reference.source_span.start as usize,
+        )
+    {
+        return Ok(false);
+    }
+    let Some(owner_file) = const_group_binding_file(files, &reference.file, group_name, alias)?
+    else {
+        return Ok(false);
+    };
+    if !workshop_same_path(&owner_file, &target.file) {
+        return Ok(false);
+    }
+    if let Some(member_name) = member_name {
+        let Some(owner) = files
+            .iter()
+            .find(|file| workshop_same_path(&file.path, &owner_file))
+        else {
+            return Ok(false);
+        };
+        let layout = parse_top_level_type_layout(&owner.source)?;
+        return Ok(layout.const_groups.iter().any(|group| {
+            group.name == group_name
+                && group
+                    .members
+                    .iter()
+                    .any(|member| member.name == member_name)
+        }));
+    }
+    Ok(true)
+}
+
+fn const_group_root_binding_shadows(
+    files: &[WorkshopSourceFile],
+    request_file: &str,
+    root_name: &str,
+    offset: usize,
+) -> bool {
+    let Some(file) = files
+        .iter()
+        .find(|file| workshop_same_path(&file.path, request_file))
+    else {
+        return false;
+    };
+    let Ok(layout) = parse_top_level_type_layout(&file.source) else {
+        return false;
+    };
+    if layout.globals.iter().any(|global| global.name == root_name)
+        || layout
+            .global_blocks
+            .iter()
+            .any(|global| global.name == root_name)
+        || layout
+            .constants
+            .iter()
+            .any(|constant| constant.name == root_name)
+    {
+        return true;
+    }
+    let Ok(functions) = parse_top_level_functions(&file.source) else {
+        return false;
+    };
+    let Some(function) = functions
+        .iter()
+        .find(|function| function.body_range.start <= offset && offset <= function.body_range.end)
+    else {
+        return false;
+    };
+    if function
+        .params
+        .iter()
+        .any(|parameter| parameter.name == root_name)
+    {
+        return true;
+    }
+    parse_local_declarations(&file.source).is_ok_and(|locals| {
+        locals.iter().any(|local| {
+            local.function_name == function.name
+                && local.name == root_name
+                && local.visibility_range.start <= offset
+                && offset <= local.visibility_range.end
+        })
+    })
+}
+
+fn const_group_binding_file(
+    files: &[WorkshopSourceFile],
+    request_file: &str,
+    group_name: &str,
+    alias: Option<&str>,
+) -> Result<Option<String>, String> {
+    if let Some(alias) = alias {
+        let mut imported = workshop_resolved_imports(files, request_file)?
+            .into_iter()
+            .filter(|(candidate, _)| candidate == alias)
+            .map(|(_, target)| target)
+            .collect::<BTreeSet<_>>();
+        let Some(target) = imported.pop_first() else {
+            return Ok(None);
+        };
+        if !imported.is_empty() {
+            return Ok(None);
+        }
+        let Some(file) = files
+            .iter()
+            .find(|file| workshop_module_identity(&file.path).as_str() == target.as_str())
+        else {
+            return Ok(None);
+        };
+        let layout = parse_top_level_type_layout(&file.source)?;
+        return Ok(layout
+            .const_groups
+            .iter()
+            .any(|group| group.name == group_name)
+            .then(|| file.path.clone()));
+    }
+
+    let Some(requester) = files
+        .iter()
+        .find(|file| workshop_same_path(&file.path, request_file))
+    else {
+        return Ok(None);
+    };
+    let local_layout = parse_top_level_type_layout(&requester.source)?;
+    if local_layout
+        .const_groups
+        .iter()
+        .any(|group| group.name == group_name)
+    {
+        return Ok(Some(requester.path.clone()));
+    }
+
+    let visible = workshop_visible_module_identities(files, request_file)?;
+    let requester_identity = workshop_module_identity(request_file);
+    let mut candidates = BTreeSet::new();
+    for file in files.iter().filter(|file| {
+        let identity = workshop_module_identity(&file.path);
+        identity != requester_identity && visible.contains(&identity)
+    }) {
+        let layout = parse_top_level_type_layout(&file.source)?;
+        if layout
+            .const_groups
+            .iter()
+            .any(|group| group.name == group_name)
+        {
+            candidates.insert(workshop_module_identity(&file.path));
+        }
+    }
+    let Some(owner) = candidates.iter().next() else {
+        return Ok(None);
+    };
+    if candidates.len() != 1 {
+        return Ok(None);
+    }
+    Ok(files
+        .iter()
+        .find(|file| workshop_module_identity(&file.path).as_str() == owner.as_str())
+        .map(|file| file.path.clone()))
 }
 
 fn generic_parameter_references(
@@ -3099,6 +3437,111 @@ fn apply_workshop_rename_edits(
         }
     }
     Ok(())
+}
+
+fn const_group_definition_reference(
+    files: &[WorkshopSourceFile],
+    segments: &[&str],
+    source_items: &[WorkshopSourceItem],
+) -> Result<Option<WorkshopReference>, String> {
+    let symbol = segments.join(".");
+    let mut candidates = BTreeMap::<(String, usize, usize), ()>::new();
+    for requester in files {
+        let tokens = lex(&requester.source)?;
+        for start_index in 0..tokens.len() {
+            let Some(end_index) =
+                reference_match_end(&requester.source, &tokens, start_index, segments)
+            else {
+                continue;
+            };
+            let reference_start = tokens[start_index].start;
+            let followed_by_dot = tokens
+                .get(end_index + 1)
+                .is_some_and(|token| token_text(&requester.source, *token) == ".");
+            // A two-part spelling is either an unqualified GROUP.MEMBER use or
+            // the GROUP prefix of alias.GROUP.MEMBER. The following dot tells
+            // those cases apart and avoids treating `[group, member]` and
+            // `[alias, group]` as identical slice patterns.
+            let (group_name, alias, member_name) = match segments {
+                [group_name] if followed_by_dot => (*group_name, None, None),
+                [group_name, member_name] if !followed_by_dot => {
+                    (*group_name, None, Some(*member_name))
+                }
+                [alias, group_name] if followed_by_dot => (*group_name, Some(*alias), None),
+                [alias, group_name, member_name] => (*group_name, Some(*alias), Some(*member_name)),
+                _ => continue,
+            };
+            if alias.is_none()
+                && const_group_root_binding_shadows(
+                    files,
+                    &requester.path,
+                    group_name,
+                    reference_start,
+                )
+            {
+                continue;
+            }
+            let Some(owner_path) =
+                const_group_binding_file(files, &requester.path, group_name, alias)?
+            else {
+                continue;
+            };
+            let Some(owner_file) = files
+                .iter()
+                .find(|file| workshop_same_path(&file.path, &owner_path))
+            else {
+                continue;
+            };
+            let layout = parse_top_level_type_layout(&owner_file.source)?;
+            let range = layout
+                .const_groups
+                .iter()
+                .find(|group| group.name == group_name)
+                .and_then(|group| match member_name {
+                    Some(member_name) => group
+                        .members
+                        .iter()
+                        .find(|member| member.name == member_name)
+                        .map(|member| member.name_range.clone()),
+                    None => Some(group.name_range.clone()),
+                });
+            if let Some(range) = range {
+                candidates.insert((owner_file.path.clone(), range.start, range.end), ());
+            }
+        }
+    }
+    if candidates.len() != 1 {
+        return Ok(None);
+    }
+    let ((owner, start, end), ()) = candidates.pop_first().expect("one definition candidate");
+    let Some(file) = files
+        .iter()
+        .find(|file| workshop_same_path(&file.path, &owner))
+    else {
+        return Ok(None);
+    };
+    let range = start..end;
+    let Some(container) = source_items.iter().find(|item| {
+        item.file == file.path
+            && item.kind == WorkshopSourceItemKind::Globals
+            && item
+                .source_spans
+                .iter()
+                .any(|span| span.start as usize <= range.start && range.end <= span.end as usize)
+    }) else {
+        return Ok(None);
+    };
+    let definitions = vec![WorkshopReference {
+        symbol,
+        kind: WorkshopReferenceKind::Definition,
+        file: file.path.clone(),
+        source_span: span_from_range(range)?,
+        containing_kind: container.kind,
+        containing_name: container.name.clone(),
+        containing_signature: container.signature.clone(),
+        containing_source_hash: container.source_hash.clone(),
+    }];
+    Ok(definitions.into_iter().next())
 }
 
 fn global_definition_reference(
@@ -3919,6 +4362,75 @@ pub fn workshop_completion_items(
         }
     }
 
+    for (requester, requester_layout, _, _, _, _) in &parsed_files {
+        let requester_identity = workshop_module_identity(&requester.path);
+        let visible = workshop_visible_module_identities(files, &requester.path)?;
+        let local_groups = requester_layout
+            .const_groups
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect::<BTreeSet<_>>();
+
+        for group in &requester_layout.const_groups {
+            add_const_group_completion_items(&mut items, group, &requester.path, None, requester);
+        }
+
+        let mut visible_group_owners = BTreeMap::<String, BTreeSet<String>>::new();
+        for (definition_file, layout, _, _, _, _) in &parsed_files {
+            let definition_identity = workshop_module_identity(&definition_file.path);
+            if definition_identity == requester_identity || !visible.contains(&definition_identity)
+            {
+                continue;
+            }
+            for group in &layout.const_groups {
+                visible_group_owners
+                    .entry(group.name.clone())
+                    .or_default()
+                    .insert(definition_identity.clone());
+            }
+        }
+        for (definition_file, layout, _, _, _, _) in &parsed_files {
+            let definition_identity = workshop_module_identity(&definition_file.path);
+            if definition_identity == requester_identity || !visible.contains(&definition_identity)
+            {
+                continue;
+            }
+            for group in &layout.const_groups {
+                if local_groups.contains(group.name.as_str())
+                    || visible_group_owners
+                        .get(&group.name)
+                        .is_none_or(|owners| owners.len() != 1)
+                {
+                    continue;
+                }
+                add_const_group_completion_items(
+                    &mut items,
+                    group,
+                    &definition_file.path,
+                    None,
+                    requester,
+                );
+            }
+        }
+
+        for (alias, target) in workshop_resolved_imports(files, &requester.path)? {
+            for (definition_file, layout, _, _, _, _) in &parsed_files {
+                if workshop_module_identity(&definition_file.path) != target {
+                    continue;
+                }
+                for group in &layout.const_groups {
+                    add_const_group_completion_items(
+                        &mut items,
+                        group,
+                        &definition_file.path,
+                        Some(&alias),
+                        requester,
+                    );
+                }
+            }
+        }
+    }
+
     let source_items = workshop_source_items(files)?;
     let mut methods = BTreeMap::<
         WorkshopStructKey,
@@ -4391,6 +4903,57 @@ fn completion_catalog_item(
         generic_parameters: Vec::new(),
         scope: None,
         exposure: workshop_file_exposure(file),
+    }
+}
+
+fn add_const_group_completion_items(
+    items: &mut Vec<WorkshopCompletionItem>,
+    group: &ParsedConstGroupDefinition,
+    file: &str,
+    module_alias: Option<&str>,
+    access_file: &WorkshopSourceFile,
+) {
+    let group_path = module_alias.map_or_else(
+        || group.name.clone(),
+        |alias| format!("{alias}.{}", group.name),
+    );
+    let mut group_item = completion_catalog_item(
+        &group_path,
+        "constant_group",
+        &format!("constant namespace [{}]", file),
+        file,
+        None,
+    );
+    group_item.signature = Some(format!("const {group_path}"));
+    group_item.scope = Some(const_group_visibility_scope(access_file));
+    items.push(group_item);
+
+    for member in &group.members {
+        let member_path = format!("{group_path}.{}", member.name);
+        let mut member_item = typed_completion_catalog_item(
+            &member_path,
+            "constant_group_member",
+            &format!("{} constant-group member [{}]", member.type_name, file),
+            file,
+            Some(group.name.clone()),
+            &member.type_name,
+        );
+        member_item.signature = Some(format!("const {member_path}: {}", member.type_name));
+        member_item.scope = Some(const_group_visibility_scope(access_file));
+        items.push(member_item);
+    }
+}
+
+fn const_group_visibility_scope(file: &WorkshopSourceFile) -> WorkshopCompletionScope {
+    WorkshopCompletionScope {
+        owner: CONST_GROUP_VISIBILITY_SCOPE_OWNER.to_string(),
+        file: file.path.clone(),
+        owner_signature: None,
+        owner_end: None,
+        declaration_from: None,
+        declaration_to: None,
+        visible_from: 0,
+        visible_to: file.source.len(),
     }
 }
 
@@ -7944,6 +8507,176 @@ function tick(): i32 {
         assert!(items
             .iter()
             .all(|item| item.detail.contains("[src/main.stasis]")));
+    }
+
+    #[test]
+    fn constant_groups_are_namespaces_for_completion_reference_and_rename() {
+        let files = vec![
+            WorkshopSourceFile {
+                path: "src/api.stasis".to_string(),
+                source: "const LIMITS { SMALL: i32 = 2; LARGE: i32 = 8; }\n".to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/main.stasis".to_string(),
+                source: concat!(
+                    "import \"api.stasis\";\n",
+                    "const LOCAL { VALUE: i32 = 3; }\n",
+                    "function main(): i32 { return api.LIMITS.SMALL + LIMITS.SMALL + LOCAL.VALUE; }\n",
+                )
+                .to_string(),
+            },
+        ];
+        let items = workshop_completion_items(&files).expect("constant-group completions");
+        let has = |text: &str, kind: &str| {
+            items
+                .iter()
+                .any(|item| item.text == text && item.kind == kind)
+        };
+        assert!(has("LIMITS", "constant_group"));
+        assert!(has("LIMITS.SMALL", "constant_group_member"));
+        assert!(has("api.LIMITS.SMALL", "constant_group_member"));
+        assert!(has("LOCAL.VALUE", "constant_group_member"));
+        assert!(!items.iter().any(|item| item.text == "SMALL"));
+        let unqualified = items
+            .iter()
+            .find(|item| {
+                item.text == "LIMITS.SMALL"
+                    && item
+                        .scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.file == "src/main.stasis")
+            })
+            .expect("unique imported unqualified member route");
+        assert_eq!(unqualified.file, "src/api.stasis");
+        let small = items
+            .iter()
+            .find(|item| item.text == "api.LIMITS.SMALL")
+            .expect("module-qualified scalar member");
+        assert_eq!(small.owner.as_deref(), Some("LIMITS"));
+        assert_eq!(small.type_name.as_deref(), Some("i32"));
+
+        let references = find_workshop_references(&files, "api.LIMITS.SMALL", 16)
+            .expect("module-qualified constant-group references");
+        assert!(references.iter().any(|reference| {
+            reference.kind == WorkshopReferenceKind::Definition
+                && reference.file == "src/api.stasis"
+        }));
+        assert!(references.iter().any(|reference| {
+            reference.kind == WorkshopReferenceKind::Read && reference.file == "src/main.stasis"
+        }));
+        let unqualified_references = find_workshop_references(&files, "LIMITS.SMALL", 16)
+            .expect("unqualified imported constant-group references");
+        assert!(unqualified_references.iter().any(|reference| {
+            reference.kind == WorkshopReferenceKind::Definition
+                && reference.file == "src/api.stasis"
+        }));
+        assert!(unqualified_references.iter().any(|reference| {
+            reference.kind == WorkshopReferenceKind::Read && reference.file == "src/main.stasis"
+        }));
+
+        let use_offset = files[1]
+            .source
+            .find("api.LIMITS.SMALL")
+            .expect("qualified member use")
+            + "api.LIMITS.".len()
+            + 1;
+        let (renamed_member, member_plan) =
+            plan_workshop_rename(&files, "src/main.stasis", use_offset, "TINY")
+                .expect("rename module-qualified member");
+        assert_eq!(member_plan.kind, "constant_group_member");
+        assert!(renamed_member[0]
+            .source
+            .contains("const LIMITS { TINY: i32 = 2;"));
+        assert!(renamed_member[1]
+            .source
+            .contains("api.LIMITS.TINY + LIMITS.TINY"));
+
+        let group_offset = files[0].source.find("LIMITS").expect("group declaration");
+        let (renamed_group, group_plan) =
+            plan_workshop_rename(&files, "src/api.stasis", group_offset, "CAPS")
+                .expect("rename group namespace");
+        assert_eq!(group_plan.kind, "constant_group");
+        assert!(renamed_group[0].source.contains("const CAPS {"));
+        assert!(renamed_group[1]
+            .source
+            .contains("api.CAPS.SMALL + CAPS.SMALL"));
+    }
+
+    #[test]
+    fn constant_group_visibility_is_request_scoped_and_rename_respects_shadowing() {
+        let files = vec![
+            WorkshopSourceFile {
+                path: "src/one.stasis".to_string(),
+                source: "const LIMITS { SMALL: i32 = 1; }\n".to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/two.stasis".to_string(),
+                source: "const LIMITS { SMALL: i32 = 2; }\n".to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/unrelated.stasis".to_string(),
+                source: "const LIMITS { SMALL: i32 = 3; }\n".to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/main.stasis".to_string(),
+                source: concat!(
+                    "import \"one.stasis\"; import \"two.stasis\";\n",
+                    "function main(): i32 { return one.LIMITS.SMALL + LIMITS.SMALL; }\n",
+                )
+                .to_string(),
+            },
+            WorkshopSourceFile {
+                path: "src/shadow.stasis".to_string(),
+                source: concat!(
+                    "import \"one.stasis\";\n",
+                    "function shadow(LIMITS: i32): i32 { return LIMITS.SMALL; }\n",
+                )
+                .to_string(),
+            },
+        ];
+        let items = workshop_completion_items(&files).expect("request-scoped group catalog");
+        assert!(!items.iter().any(|item| {
+            item.text == "LIMITS.SMALL"
+                && item
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.file == "src/main.stasis")
+        }));
+        assert!(items.iter().any(|item| {
+            item.text == "one.LIMITS.SMALL"
+                && item
+                    .scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.file == "src/main.stasis")
+        }));
+
+        let alias_reference = find_workshop_references(&files, "one.LIMITS.SMALL", 16)
+            .expect("alias-qualified reference");
+        assert!(alias_reference.iter().any(|reference| {
+            reference.kind == WorkshopReferenceKind::Definition
+                && reference.file == "src/one.stasis"
+        }));
+
+        let main_source = &files[3].source;
+        let use_offset = main_source
+            .find("one.LIMITS.SMALL")
+            .expect("unique alias use")
+            + "one.LIMITS.".len()
+            + 1;
+        let (renamed, plan) = plan_workshop_rename(&files, "src/main.stasis", use_offset, "TINY")
+            .expect("rename uniquely aliased member");
+        assert_eq!(plan.kind, "constant_group_member");
+        assert!(renamed[0].source.contains("const LIMITS { TINY: i32 = 1;"));
+        assert!(renamed[1].source.contains("SMALL: i32 = 2"));
+        assert!(renamed[2].source.contains("SMALL: i32 = 3"));
+        assert!(renamed[3].source.contains("one.LIMITS.TINY + LIMITS.SMALL"));
+        assert!(renamed[4].source.contains("LIMITS.SMALL"));
+        let shadow_source = &files[4].source;
+        let shadow_offset =
+            shadow_source.find("LIMITS.SMALL").expect("shadowed use") + "LIMITS.".len() + 1;
+        assert!(
+            plan_workshop_rename(&files, "src/shadow.stasis", shadow_offset, "OTHER",).is_err()
+        );
     }
 
     #[test]

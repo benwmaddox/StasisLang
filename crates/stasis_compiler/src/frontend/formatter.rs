@@ -1289,6 +1289,23 @@ mod tests {
     }
 
     #[test]
+    fn formats_constant_group_members_and_comments_idempotently() {
+        let source = "const SIZES{SMALL:i32=2;// small size\nLARGE:i32=8;}function main():i32{return SIZES.SMALL;}";
+        let expected = "const SIZES {\n    SMALL: i32 = 2; // small size\n    LARGE: i32 = 8;\n}\n\nfunction main(): i32 {\n    return SIZES.SMALL;\n}\n";
+        let formatted = format_source(source).expect("format constant group");
+        assert_eq!(formatted, expected);
+        assert_eq!(
+            format_source(&formatted).expect("reformat constant group"),
+            expected
+        );
+        let parsed = super::super::parser::parse_top_level_type_layout(&formatted)
+            .expect("formatted constant group remains parseable");
+        assert_eq!(parsed.const_groups[0].name, "SIZES");
+        assert_eq!(parsed.const_groups[0].members[0].name, "SMALL");
+        assert_eq!(parsed.const_groups[0].members[0].value_text, "2");
+    }
+
+    #[test]
     fn keeps_shift_tokens_whole_while_formatting_bitwise_expressions() {
         let source = "function main(): i32 { return (1<<3) | (8>>1); }";
         let formatted = format_source(source).expect("format bitwise expression");

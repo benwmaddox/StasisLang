@@ -26,7 +26,9 @@ use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32,
 };
 use crate::identity::SymbolId;
-use crate::ir::hir::{AssignTarget, FunctionHIR, SimpleCondition, SimpleExpr, SimpleStmt};
+use crate::ir::hir::{
+    AssignTarget, FunctionHIR, ResolvedConstantValue, SimpleCondition, SimpleExpr, SimpleStmt,
+};
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
 use cranelift_codegen::settings;
 use cranelift_codegen::settings::Configurable;
@@ -1707,6 +1709,14 @@ fn record_string_literals_in_expr(
         | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_) => Ok(()),
+        SimpleExpr::ResolvedConstant {
+            value: ResolvedConstantValue::Scalar { .. },
+            ..
+        } => Ok(()),
+        SimpleExpr::ResolvedConstant {
+            value: ResolvedConstantValue::String(value),
+            ..
+        } => record_string_literal(out, value),
         SimpleExpr::Identifier(name) => match constant_values.get(name) {
             Some(ConstantValue::String { value, .. }) => record_string_literal(out, value),
             _ => Ok(()),

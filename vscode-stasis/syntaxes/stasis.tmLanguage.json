@@ -88,6 +88,31 @@
           }
         },
         {
+          "name": "meta.declaration.constant-group.stasis",
+          "begin": "\\b(const)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b\\s*(\\{)",
+          "beginCaptures": {
+            "1": { "name": "keyword.declaration.stasis" },
+            "2": { "name": "entity.name.namespace.stasis" },
+            "3": { "name": "punctuation.section.block.begin.stasis" }
+          },
+          "end": "(\\})",
+          "endCaptures": {
+            "1": { "name": "punctuation.section.block.end.stasis" }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            { "include": "#strings" },
+            {
+              "name": "variable.other.constant.stasis",
+              "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*:)"
+            },
+            { "include": "#types" },
+            { "include": "#keywords" },
+            { "include": "#numbers" },
+            { "include": "#operators" }
+          ]
+        },
+        {
           "name": "meta.declaration.function.stasis",
           "match": "\\b(function)\\b\\s*(?:@[A-Za-z_][A-Za-z0-9_]*\\s*)*([A-Za-z_][A-Za-z0-9_]*)\\b",
           "captures": {

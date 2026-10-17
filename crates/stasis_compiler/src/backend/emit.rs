@@ -14,9 +14,9 @@ use crate::frontend::types::{
     TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8, TYPE_ID_VOID,
 };
 use crate::ir::hir::{
-    eval_const_i64, AssignOp, AssignTarget, ComparisonOp, ConversionKind, DebugStatement,
-    ExprBinaryOp, ExprUnaryOp, FunctionHIR, ResolvedCallTarget, SimpleCondition, SimpleExpr,
-    SimpleStmt,
+    eval_const_i64, AssignOp, AssignTarget, ComparisonOp, CompileTimeValueId, ConversionKind,
+    DebugStatement, ExprBinaryOp, ExprUnaryOp, FunctionHIR, ResolvedCallTarget,
+    ResolvedConstantValue, SimpleCondition, SimpleExpr, SimpleStmt,
 };
 use cranelift_codegen::ir::{
     condcodes::{FloatCC, IntCC},
@@ -4750,6 +4750,7 @@ fn collect_call_targets_from_hir(hir: &FunctionHIR) -> BTreeSet<String> {
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
+            | SimpleExpr::ResolvedConstant { .. }
             | SimpleExpr::Identifier(_) => {}
         }
     }
@@ -11505,6 +11506,10 @@ pub(crate) fn emit_simple_expression(
                 type_id: string_type_id,
             })
         }
+        SimpleExpr::ResolvedConstant { id, type_id, value } => {
+            let constant = resolved_constant_value(id, *type_id, value, type_table)?;
+            emit_constant_value(builder, &constant)
+        }
         SimpleExpr::Condition(condition) => {
             let bool_value = emit_simple_condition(
                 builder,
@@ -13224,6 +13229,98 @@ pub(crate) fn emit_constant_value(
     }
 }
 
+fn resolved_constant_value(
+    id: &CompileTimeValueId,
+    type_id: TypeId,
+    value: &ResolvedConstantValue,
+    type_table: &TypeTable,
+) -> Result<ConstantValue, String> {
+    match value {
+        ResolvedConstantValue::Scalar {
+            bits,
+            nominal_origin,
+        } => {
+            if type_id == TYPE_ID_BOOL {
+                match *bits {
+                    0 => Ok(ConstantValue::Bool(false)),
+                    1 => Ok(ConstantValue::Bool(true)),
+                    _ => Err(format!("resolved bool constant has invalid bits {bits}")),
+                }
+            } else if type_id == TYPE_ID_F32 {
+                Ok(ConstantValue::F32(f32::from_bits(*bits as u32)))
+            } else if type_id == TYPE_ID_F64 {
+                Ok(ConstantValue::F64(f64::from_bits(*bits)))
+            } else if type_id == TYPE_ID_I32 {
+                Ok(ConstantValue::I32 {
+                    value: *bits as u32 as i32,
+                    type_id,
+                })
+            } else if let Some(width) = type_table.unsigned_integer_bits(type_id) {
+                let value = match width {
+                    8 => *bits as u8 as i32,
+                    16 => *bits as u16 as i32,
+                    32 => *bits as u32 as i32,
+                    _ => {
+                        return Err(format!(
+                            "resolved constant uses unsupported unsigned width u{width}"
+                        ));
+                    }
+                };
+                Ok(ConstantValue::I32 { value, type_id })
+            } else if nominal_origin.is_some()
+                && type_table
+                    .type_info(type_id)
+                    .is_some_and(|info| info.category == TypeCategory::Named)
+            {
+                Ok(ConstantValue::I32 {
+                    value: *bits as u32 as i32,
+                    type_id,
+                })
+            } else {
+                let type_description = type_table
+                    .type_info(type_id)
+                    .map(|info| format!("{} ({:?})", info.name, info.category))
+                    .unwrap_or_else(|| "unknown type".to_string());
+                let origin_description = nominal_origin
+                    .as_ref()
+                    .map(|origin| format!("{}.{}", origin.path, origin.name))
+                    .unwrap_or_else(|| "none".to_string());
+                Err(format!(
+                    "resolved constant {id:?} has unsupported scalar type id {type_id} ({type_description}; nominal origin: {origin_description})"
+                ))
+            }
+        }
+        ResolvedConstantValue::String(value) => {
+            let info = type_table
+                .type_info(type_id)
+                .ok_or_else(|| format!("resolved string constant has unknown type id {type_id}"))?;
+            if !matches!(
+                info.category,
+                TypeCategory::AsciiFixed
+                    | TypeCategory::AsciiView
+                    | TypeCategory::Utf8Fixed
+                    | TypeCategory::Utf8View
+            ) {
+                return Err(format!(
+                    "resolved string constant has unsupported type '{}'",
+                    info.name
+                ));
+            }
+            if matches!(
+                info.category,
+                TypeCategory::AsciiFixed | TypeCategory::AsciiView
+            ) && !value.is_ascii()
+            {
+                return Err("non-ASCII string constant cannot initialize an ASCII buffer".into());
+            }
+            Ok(ConstantValue::String {
+                value: value.clone(),
+                type_id,
+            })
+        }
+    }
+}
+
 pub(crate) fn resolve_foreach_binding_for_path<'a>(
     path: &str,
     foreach_bindings: &'a ForeachBindingMap,
@@ -13317,7 +13414,8 @@ impl ForeachCacheScanner<'_> {
             SimpleExpr::Int(_)
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
-            | SimpleExpr::StringLiteral(_) => true,
+            | SimpleExpr::StringLiteral(_)
+            | SimpleExpr::ResolvedConstant { .. } => true,
         }
     }
 

@@ -7,10 +7,11 @@ use crate::backend::runtime_exports::is_aot_runtime_export_symbol;
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::frontend::body_parser::*;
 use crate::frontend::constant_evaluation::ScalarConstantEvaluator;
+use crate::frontend::constant_index::CompileTimeDeclarationIndex;
 use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::parser::{
     parse_top_level_extern_functions, parse_top_level_type_layout, ParsedExternFunctionDeclaration,
-    ParsedField, ParsedGlobalBlockDefinition, ParsedStructDefinition,
+    ParsedField, ParsedGlobalBlockDefinition, ParsedStructDefinition, ParsedTypeLayout,
 };
 use crate::frontend::types::{
     SourceTypeOrigin, TypeCategory, TypeId, TypeTable, TypedCollectionDescriptor, TYPE_ID_BOOL,
@@ -97,6 +98,95 @@ pub(crate) struct CompileAnalysisCache {
     pub(crate) named_struct_field_types: NamedStructFieldTypeMap,
     pub(crate) extern_symbol_addresses: ExternSymbolAddressMap,
     pub(crate) initialization_plan: crate::backend::state_initialization::StateInitializationPlan,
+}
+
+pub(crate) fn compile_time_context_for_files(
+    files: &[SourceFile],
+) -> Result<(ModuleGraph, CompileTimeDeclarationIndex), String> {
+    let sources = files
+        .iter()
+        .map(|file| (file.path.clone(), file.original_content.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let (module_graph, _) = ModuleGraph::load(files.iter().map(|file| file.path.clone()), |path| {
+        sources
+            .get(path)
+            .cloned()
+            .ok_or_else(|| format!("source file '{path}' is unavailable"))
+    })
+    .map_err(|diagnostic| diagnostic.message)?;
+    let constant_index = CompileTimeDeclarationIndex::build(files).map_err(|(path, message)| {
+        format!("failed indexing compile-time declarations in {path}: {message}")
+    })?;
+    Ok((module_graph, constant_index))
+}
+
+fn canonicalize_layout_array_extents(
+    layout: &mut ParsedTypeLayout,
+    scope_path: &str,
+    module_graph: &ModuleGraph,
+    constant_index: &CompileTimeDeclarationIndex,
+    constant_values: &ConstantValueMap,
+) -> Result<(), String> {
+    for structure in &mut layout.structs {
+        for field in &mut structure.fields {
+            field.type_name = canonicalize_source_array_extent(
+                &field.type_name,
+                scope_path,
+                module_graph,
+                constant_index,
+                constant_values,
+            )?;
+        }
+    }
+    for global in &mut layout.globals {
+        global.type_name = canonicalize_source_array_extent(
+            &global.type_name,
+            scope_path,
+            module_graph,
+            constant_index,
+            constant_values,
+        )?;
+    }
+    for block in &mut layout.global_blocks {
+        for field in &mut block.fields {
+            field.type_name = canonicalize_source_array_extent(
+                &field.type_name,
+                scope_path,
+                module_graph,
+                constant_index,
+                constant_values,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) type SourceTypeLayouts = BTreeMap<String, ParsedTypeLayout>;
+
+pub(crate) fn normalized_source_type_layouts(
+    files: &[SourceFile],
+    module_graph: &ModuleGraph,
+    constant_index: &CompileTimeDeclarationIndex,
+    constant_values: &ConstantValueMap,
+) -> Result<SourceTypeLayouts, String> {
+    let mut layouts = BTreeMap::new();
+    for file in files {
+        let mut layout = parse_top_level_type_layout(&file.content).map_err(|error| {
+            format!(
+                "failed parsing top-level type layout in {}: {error}",
+                file.path
+            )
+        })?;
+        canonicalize_layout_array_extents(
+            &mut layout,
+            &file.path,
+            module_graph,
+            constant_index,
+            constant_values,
+        )?;
+        layouts.insert(file.path.clone(), layout);
+    }
+    Ok(layouts)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -354,6 +444,31 @@ pub(crate) fn build_compile_analysis_cache_from_resolved_externs(
     resolved_extern_signatures: Vec<ResolvedExternCallSignature>,
     extern_symbol_addresses: ExternSymbolAddressMap,
 ) -> Result<CompileAnalysisCache, String> {
+    let constant_index = CompileTimeDeclarationIndex::build(files).map_err(|(path, message)| {
+        format!("failed indexing compile-time declarations in {path}: {message}")
+    })?;
+    build_compile_analysis_cache_from_resolved_externs_with_index(
+        files,
+        module_graph,
+        functions,
+        type_table,
+        files_fingerprint,
+        resolved_extern_signatures,
+        extern_symbol_addresses,
+        &constant_index,
+    )
+}
+
+pub(crate) fn build_compile_analysis_cache_from_resolved_externs_with_index(
+    files: &[SourceFile],
+    module_graph: &ModuleGraph,
+    functions: &[FunctionMeta],
+    type_table: &mut TypeTable,
+    files_fingerprint: u64,
+    resolved_extern_signatures: Vec<ResolvedExternCallSignature>,
+    extern_symbol_addresses: ExternSymbolAddressMap,
+    constant_index: &CompileTimeDeclarationIndex,
+) -> Result<CompileAnalysisCache, String> {
     validate_privileged_graphics_extern_provenance(&resolved_extern_signatures)?;
     let call_signatures =
         collect_supported_call_signatures(functions, &resolved_extern_signatures, type_table);
@@ -362,13 +477,29 @@ pub(crate) fn build_compile_analysis_cache_from_resolved_externs(
     // retain the persistent state path and source file instead of surfacing as
     // an unscoped type-interning error from the ordinary global inventory.
     let typed_collection_descriptors = collect_typed_collection_descriptors(files, type_table)?;
-    let global_path_types = collect_global_path_types(files, type_table, &constant_values)?;
-    let collection_infos = collect_foreach_collection_infos(files, type_table, &constant_values)?;
-    let named_struct_field_types =
-        collect_named_struct_field_types(files, type_table, &constant_values)?;
-    let initialization_catalog =
-        collect_scalar_field_initializers(files, module_graph, type_table, &constant_values)
-            .map_err(|error| format!("{}: {}", error.path, error.message))?;
+    let normalized_layouts =
+        normalized_source_type_layouts(files, module_graph, constant_index, &constant_values)?;
+    let global_path_types =
+        collect_global_path_types_internal(&normalized_layouts, type_table, &constant_values)?;
+    let collection_infos = collect_foreach_collection_infos_from_layouts(
+        &normalized_layouts,
+        type_table,
+        &constant_values,
+    )?;
+    let named_struct_field_types = collect_named_struct_field_types_from_layouts(
+        &normalized_layouts,
+        type_table,
+        &constant_values,
+    )?;
+    let initialization_catalog = collect_scalar_field_initializers(
+        files,
+        &normalized_layouts,
+        module_graph,
+        type_table,
+        &constant_values,
+        constant_index,
+    )
+    .map_err(|error| format!("{}: {}", error.path, error.message))?;
     let initialization_plan = build_state_initialization_plan(
         files,
         &initialization_catalog,
@@ -396,6 +527,7 @@ pub(crate) fn validate_state_field_defaults(
     files: &[SourceFile],
     module_graph: &ModuleGraph,
     type_table: &mut TypeTable,
+    constant_index: &CompileTimeDeclarationIndex,
 ) -> Result<(), crate::backend::state_initialization::StateInitializationError> {
     let constants = collect_top_level_constant_values(files, type_table).map_err(|message| {
         crate::backend::state_initialization::StateInitializationError {
@@ -407,24 +539,8 @@ pub(crate) fn validate_state_field_defaults(
             message,
         }
     })?;
-    let catalog = collect_scalar_field_initializers(files, module_graph, type_table, &constants)?;
-    if !catalog.has_explicit_defaults() {
-        return Ok(());
-    }
-
-    let global_path_types =
-        collect_global_path_types(files, type_table, &constants).map_err(|message| {
-            crate::backend::state_initialization::StateInitializationError {
-                path: files
-                    .first()
-                    .map_or_else(String::new, |file| file.path.clone()),
-                range: 0..0,
-                symbol: String::new(),
-                message,
-            }
-        })?;
-    let collection_infos = collect_foreach_collection_infos(files, type_table, &constants)
-        .map_err(
+    let normalized_layouts =
+        normalized_source_type_layouts(files, module_graph, constant_index, &constants).map_err(
             |message| crate::backend::state_initialization::StateInitializationError {
                 path: files
                     .first()
@@ -434,6 +550,41 @@ pub(crate) fn validate_state_field_defaults(
                 message,
             },
         )?;
+    let catalog = collect_scalar_field_initializers(
+        files,
+        &normalized_layouts,
+        module_graph,
+        type_table,
+        &constants,
+        constant_index,
+    )?;
+    if !catalog.has_explicit_defaults() {
+        return Ok(());
+    }
+
+    let global_path_types =
+        collect_global_path_types_internal(&normalized_layouts, type_table, &constants).map_err(
+            |message| crate::backend::state_initialization::StateInitializationError {
+                path: files
+                    .first()
+                    .map_or_else(String::new, |file| file.path.clone()),
+                range: 0..0,
+                symbol: String::new(),
+                message,
+            },
+        )?;
+    let collection_infos =
+        collect_foreach_collection_infos_from_layouts(&normalized_layouts, type_table, &constants)
+            .map_err(
+                |message| crate::backend::state_initialization::StateInitializationError {
+                    path: files
+                        .first()
+                        .map_or_else(String::new, |file| file.path.clone()),
+                    range: 0..0,
+                    symbol: String::new(),
+                    message,
+                },
+            )?;
     build_state_initialization_plan(
         files,
         &catalog,
@@ -518,9 +669,11 @@ struct CollectionLaneContext {
 /// a field initializer, and is shared by all defaults in this analysis pass.
 fn collect_scalar_field_initializers(
     files: &[SourceFile],
+    layouts: &SourceTypeLayouts,
     module_graph: &ModuleGraph,
     type_table: &mut TypeTable,
     constant_values: &ConstantValueMap,
+    constant_index: &CompileTimeDeclarationIndex,
 ) -> Result<
     StateInitializationCatalog,
     crate::backend::state_initialization::StateInitializationError,
@@ -533,14 +686,14 @@ fn collect_scalar_field_initializers(
     let mut pending = Vec::new();
 
     for file in files {
-        let layout = parse_top_level_type_layout(&file.content).map_err(|error| {
-            StateInitializationError {
+        let layout = layouts
+            .get(&file.path)
+            .ok_or_else(|| StateInitializationError {
                 path: file.path.clone(),
                 range: 0..0,
                 symbol: String::new(),
-                message: format!("failed parsing state declarations: {error}"),
-            }
-        })?;
+                message: "normalized state declarations are missing".to_string(),
+            })?;
 
         for global in &layout.globals {
             catalog.globals.push(StateGlobalRoot {
@@ -556,7 +709,7 @@ fn collect_scalar_field_initializers(
             });
         }
 
-        for structure in layout.structs {
+        for structure in &layout.structs {
             let type_id = type_table
                 .resolve_or_intern(&structure.name)
                 .map_err(|message| StateInitializationError {
@@ -592,21 +745,27 @@ fn collect_scalar_field_initializers(
                 let Some(initializer) = &field.initializer else {
                     continue;
                 };
-                let expected_type =
-                    resolve_global_path_type_id(&field.type_name, type_table, constant_values)
-                        .map_err(|message| {
-                            state_field_error(
-                                files,
-                                &InitializerOwner::Struct {
-                                    definition_path: file.path.clone(),
-                                    concrete_name: structure.name.clone(),
-                                    source_origin: origin.clone(),
-                                },
-                                field,
-                                &initializer.expression_range,
-                                message,
-                            )
-                        })?;
+                let expected_type = resolve_global_path_type_id_with_index(
+                    &field.type_name,
+                    &file.path,
+                    type_table,
+                    constant_values,
+                    module_graph,
+                    constant_index,
+                )
+                .map_err(|message| {
+                    state_field_error(
+                        files,
+                        &InitializerOwner::Struct {
+                            definition_path: file.path.clone(),
+                            concrete_name: structure.name.clone(),
+                            source_origin: origin.clone(),
+                        },
+                        field,
+                        &initializer.expression_range,
+                        message,
+                    )
+                })?;
                 pending.push(PendingStateDefault {
                     owner: InitializerOwner::Struct {
                         definition_path: file.path.clone(),
@@ -620,25 +779,31 @@ fn collect_scalar_field_initializers(
             }
         }
 
-        for block in layout.global_blocks {
+        for block in &layout.global_blocks {
             for field in &block.fields {
                 let Some(initializer) = &field.initializer else {
                     continue;
                 };
-                let expected_type =
-                    resolve_global_path_type_id(&field.type_name, type_table, constant_values)
-                        .map_err(|message| {
-                            state_field_error(
-                                files,
-                                &InitializerOwner::GlobalBlock {
-                                    block_name: block.name.clone(),
-                                    source_path: file.path.clone(),
-                                },
-                                field,
-                                &initializer.expression_range,
-                                message,
-                            )
-                        })?;
+                let expected_type = resolve_global_path_type_id_with_index(
+                    &field.type_name,
+                    &file.path,
+                    type_table,
+                    constant_values,
+                    module_graph,
+                    constant_index,
+                )
+                .map_err(|message| {
+                    state_field_error(
+                        files,
+                        &InitializerOwner::GlobalBlock {
+                            block_name: block.name.clone(),
+                            source_path: file.path.clone(),
+                        },
+                        field,
+                        &initializer.expression_range,
+                        message,
+                    )
+                })?;
                 pending.push(PendingStateDefault {
                     owner: InitializerOwner::GlobalBlock {
                         block_name: block.name.clone(),
@@ -652,21 +817,28 @@ fn collect_scalar_field_initializers(
         }
     }
 
-    if pending.is_empty() {
-        return Ok(StateInitializationCatalog::default());
-    }
-
     let mut evaluator =
-        ScalarConstantEvaluator::new(files, module_graph, type_table).map_err(|message| {
-            StateInitializationError {
+        ScalarConstantEvaluator::new_with_index(files, module_graph, type_table, constant_index)
+            .map_err(|message| StateInitializationError {
                 path: files
                     .first()
                     .map_or_else(String::new, |file| file.path.clone()),
                 range: 0..0,
                 symbol: String::new(),
                 message,
-            }
+            })?;
+    evaluator
+        .validate_all_group_members()
+        .map_err(|(id, range, message)| StateInitializationError {
+            path: id.source_path,
+            range,
+            symbol: id.member,
+            message,
         })?;
+
+    if pending.is_empty() {
+        return Ok(StateInitializationCatalog::default());
+    }
 
     for item in pending {
         let initializer = item
@@ -1488,7 +1660,8 @@ pub(crate) fn validate_owned_local_fixed_array_contract(
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
-            | SimpleExpr::Identifier(_) => Ok(()),
+            | SimpleExpr::Identifier(_)
+            | SimpleExpr::ResolvedConstant { .. } => Ok(()),
         }
     }
 
@@ -1716,30 +1889,52 @@ pub(crate) fn collect_global_path_types(
     type_table: &mut TypeTable,
     constant_values: &ConstantValueMap,
 ) -> Result<GlobalPathTypeMap, String> {
+    let (module_graph, constant_index) = compile_time_context_for_files(files)?;
+    collect_global_path_types_with_index(
+        files,
+        type_table,
+        constant_values,
+        &module_graph,
+        &constant_index,
+    )
+}
+
+pub(crate) fn collect_global_path_types_with_index(
+    files: &[SourceFile],
+    type_table: &mut TypeTable,
+    constant_values: &ConstantValueMap,
+    module_graph: &ModuleGraph,
+    constant_index: &CompileTimeDeclarationIndex,
+) -> Result<GlobalPathTypeMap, String> {
+    let layouts =
+        normalized_source_type_layouts(files, module_graph, constant_index, constant_values)?;
+    collect_global_path_types_internal(&layouts, type_table, constant_values)
+}
+
+pub(crate) fn collect_global_path_types_internal(
+    layouts: &SourceTypeLayouts,
+    type_table: &mut TypeTable,
+    constant_values: &ConstantValueMap,
+) -> Result<GlobalPathTypeMap, String> {
     let mut struct_fields_by_name: BTreeMap<String, Vec<ParsedField>> = BTreeMap::new();
     let mut typed_globals: BTreeMap<String, String> = BTreeMap::new();
     let mut global_blocks: BTreeMap<String, Vec<ParsedField>> = BTreeMap::new();
 
-    for file in files {
-        let parsed = parse_top_level_type_layout(&file.content).map_err(|error| {
-            format!(
-                "failed parsing top-level type layout in {}: {error}",
-                file.path
-            )
-        })?;
-        for parsed_struct in parsed.structs {
+    for parsed in layouts.values() {
+        for parsed_struct in &parsed.structs {
+            let fields = parsed_struct.fields.clone();
             if let Some(existing) = struct_fields_by_name.get(&parsed_struct.name) {
-                if existing != &parsed_struct.fields {
+                if existing != &fields {
                     return Err(format!(
                         "conflicting struct definition for '{}'",
                         parsed_struct.name
                     ));
                 }
             } else {
-                struct_fields_by_name.insert(parsed_struct.name, parsed_struct.fields);
+                struct_fields_by_name.insert(parsed_struct.name.clone(), fields);
             }
         }
-        for global in parsed.globals {
+        for global in &parsed.globals {
             if global_blocks.contains_key(&global.name) {
                 return Err(format!(
                     "conflicting global declarations for '{}'",
@@ -1754,10 +1949,10 @@ pub(crate) fn collect_global_path_types(
                     ));
                 }
             } else {
-                typed_globals.insert(global.name, global.type_name);
+                typed_globals.insert(global.name.clone(), global.type_name.clone());
             }
         }
-        for global_block in parsed.global_blocks {
+        for global_block in &parsed.global_blocks {
             if typed_globals.contains_key(&global_block.name) {
                 return Err(format!(
                     "conflicting global declarations for '{}'",
@@ -1772,7 +1967,7 @@ pub(crate) fn collect_global_path_types(
                     ));
                 }
             } else {
-                global_blocks.insert(global_block.name, global_block.fields);
+                global_blocks.insert(global_block.name.clone(), global_block.fields.clone());
             }
         }
     }
@@ -1895,6 +2090,66 @@ pub(crate) fn resolve_global_path_type_id(
     type_table.resolve_or_intern(trimmed)
 }
 
+fn resolve_global_path_type_id_with_index(
+    type_name: &str,
+    scope_path: &str,
+    type_table: &mut TypeTable,
+    constant_values: &ConstantValueMap,
+    module_graph: &ModuleGraph,
+    constant_index: &CompileTimeDeclarationIndex,
+) -> Result<TypeId, String> {
+    let canonical = canonicalize_source_array_extent(
+        type_name,
+        scope_path,
+        module_graph,
+        constant_index,
+        constant_values,
+    )?;
+    resolve_global_path_type_id(&canonical, type_table, constant_values)
+}
+
+fn canonicalize_source_array_extent(
+    type_name: &str,
+    scope_path: &str,
+    module_graph: &ModuleGraph,
+    constant_index: &CompileTimeDeclarationIndex,
+    constant_values: &ConstantValueMap,
+) -> Result<String, String> {
+    let Some((element_type, extent_text)) = parse_array_type_parts(type_name) else {
+        return Ok(type_name.to_string());
+    };
+    let element_type = canonicalize_source_array_extent(
+        element_type,
+        scope_path,
+        module_graph,
+        constant_index,
+        constant_values,
+    )?;
+    if extent_text.is_empty() {
+        return Ok(format!("{element_type}[]"));
+    }
+    if extent_text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Ok(format!("{element_type}[{extent_text}]"));
+    }
+    let extent = if extent_text.starts_with("__stasis_const_") {
+        resolve_fixed_array_extent(extent_text, constant_values).ok_or_else(|| {
+            format!("unsupported generated array extent '{extent_text}' in type '{type_name}'")
+        })?
+    } else {
+        constant_index
+            .evaluate_generic_i32(module_graph, scope_path, extent_text, &BTreeMap::new())
+            .map_err(|error| {
+                format!("unsupported array extent '{extent_text}' in type '{type_name}': {error}")
+            })?
+    };
+    if extent < 0 {
+        return Err(format!(
+            "negative array extent {extent} in type '{type_name}'"
+        ));
+    }
+    Ok(format!("{element_type}[{extent}]"))
+}
+
 pub(crate) fn is_primitive_scalar_type_id(type_id: TypeId) -> bool {
     matches!(
         type_id,
@@ -1932,6 +2187,18 @@ pub(crate) fn collect_top_level_constant_values(
                 file.path
             )
         })?;
+        for group in &parsed.const_groups {
+            for member in &group.members {
+                type_table
+                    .resolve_or_intern(&member.type_name)
+                    .map_err(|message| {
+                        format!(
+                            "invalid type '{}' for constant group member '{}.{}': {message}",
+                            member.type_name, group.name, member.name
+                        )
+                    })?;
+            }
+        }
         for parsed_enum in parsed.enums {
             let enum_type_id = type_table.resolve_or_intern(&parsed_enum.name)?;
             let mut next_value: i32 = 0;
@@ -2238,18 +2505,23 @@ pub(crate) fn collect_foreach_collection_infos(
     type_table: &mut TypeTable,
     constant_values: &ConstantValueMap,
 ) -> Result<CollectionInfoMap, String> {
+    let (module_graph, constant_index) = compile_time_context_for_files(files)?;
+    let layouts =
+        normalized_source_type_layouts(files, &module_graph, &constant_index, constant_values)?;
+    collect_foreach_collection_infos_from_layouts(&layouts, type_table, constant_values)
+}
+
+pub(crate) fn collect_foreach_collection_infos_from_layouts(
+    layouts: &SourceTypeLayouts,
+    type_table: &mut TypeTable,
+    constant_values: &ConstantValueMap,
+) -> Result<CollectionInfoMap, String> {
     let mut struct_fields_by_name: BTreeMap<String, Vec<ParsedField>> = BTreeMap::new();
     let mut typed_globals: BTreeMap<String, String> = BTreeMap::new();
     let mut global_blocks: BTreeMap<String, Vec<ParsedField>> = BTreeMap::new();
 
-    for file in files {
-        let parsed = parse_top_level_type_layout(&file.content).map_err(|error| {
-            format!(
-                "failed parsing top-level type layout in {}: {error}",
-                file.path
-            )
-        })?;
-        for parsed_struct in parsed.structs {
+    for parsed in layouts.values() {
+        for parsed_struct in &parsed.structs {
             if let Some(existing) = struct_fields_by_name.get(&parsed_struct.name) {
                 if existing != &parsed_struct.fields {
                     return Err(format!(
@@ -2258,10 +2530,11 @@ pub(crate) fn collect_foreach_collection_infos(
                     ));
                 }
             } else {
-                struct_fields_by_name.insert(parsed_struct.name, parsed_struct.fields);
+                struct_fields_by_name
+                    .insert(parsed_struct.name.clone(), parsed_struct.fields.clone());
             }
         }
-        for global in parsed.globals {
+        for global in &parsed.globals {
             if global_blocks.contains_key(&global.name) {
                 return Err(format!(
                     "conflicting global declarations for '{}'",
@@ -2276,10 +2549,10 @@ pub(crate) fn collect_foreach_collection_infos(
                     ));
                 }
             } else {
-                typed_globals.insert(global.name, global.type_name);
+                typed_globals.insert(global.name.clone(), global.type_name.clone());
             }
         }
-        for global_block in parsed.global_blocks {
+        for global_block in &parsed.global_blocks {
             if typed_globals.contains_key(&global_block.name) {
                 return Err(format!(
                     "conflicting global declarations for '{}'",
@@ -2294,7 +2567,7 @@ pub(crate) fn collect_foreach_collection_infos(
                     ));
                 }
             } else {
-                global_blocks.insert(global_block.name, global_block.fields);
+                global_blocks.insert(global_block.name.clone(), global_block.fields.clone());
             }
         }
     }
@@ -2328,20 +2601,14 @@ pub(crate) fn collect_foreach_collection_infos(
     Ok(out)
 }
 
-pub(crate) fn collect_named_struct_field_types(
-    files: &[SourceFile],
+pub(crate) fn collect_named_struct_field_types_from_layouts(
+    layouts: &SourceTypeLayouts,
     type_table: &mut TypeTable,
     constant_values: &ConstantValueMap,
 ) -> Result<NamedStructFieldTypeMap, String> {
     let mut struct_fields_by_name: BTreeMap<String, Vec<ParsedField>> = BTreeMap::new();
-    for file in files {
-        let parsed = parse_top_level_type_layout(&file.content).map_err(|error| {
-            format!(
-                "failed parsing top-level type layout in {}: {error}",
-                file.path
-            )
-        })?;
-        for parsed_struct in parsed.structs {
+    for parsed in layouts.values() {
+        for parsed_struct in &parsed.structs {
             if let Some(existing) = struct_fields_by_name.get(&parsed_struct.name) {
                 if existing != &parsed_struct.fields {
                     return Err(format!(
@@ -2350,7 +2617,8 @@ pub(crate) fn collect_named_struct_field_types(
                     ));
                 }
             } else {
-                struct_fields_by_name.insert(parsed_struct.name, parsed_struct.fields);
+                struct_fields_by_name
+                    .insert(parsed_struct.name.clone(), parsed_struct.fields.clone());
             }
         }
     }

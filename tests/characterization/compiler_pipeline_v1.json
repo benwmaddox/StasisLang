@@ -1587,7 +1587,7 @@
             }
           ],
           "global_type_ids": {
-            "samples": 8,
+            "samples": 10,
             "samples.length": 1,
             "samples.max_length": 1,
             "score": 1

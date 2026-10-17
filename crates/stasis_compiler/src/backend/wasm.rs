@@ -28,7 +28,7 @@ use crate::frontend::types::{
 use crate::ir::hir::FunctionHIR;
 use crate::ir::hir::{
     AssignOp, AssignTarget, ComparisonOp, ExprBinaryOp, ExprUnaryOp, ExternCallIdentity,
-    ResolvedCallTarget, SimpleCondition, SimpleExpr, SimpleStmt,
+    ResolvedCallTarget, ResolvedConstantValue, SimpleCondition, SimpleExpr, SimpleStmt,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -6272,6 +6272,7 @@ fn is_ascii_utf8_buffer_mismatch(argument: TypeId, parameter: TypeId, types: &Ty
 fn infer_web_call_argument_type(value: &SimpleExpr, context: &EncodeContext<'_>) -> Option<TypeId> {
     match value {
         SimpleExpr::DefaultValue(type_id) => Some(*type_id),
+        SimpleExpr::ResolvedConstant { type_id, .. } => Some(*type_id),
         SimpleExpr::Int(_) => Some(TYPE_ID_I32),
         SimpleExpr::Float(_) => Some(TYPE_ID_F32),
         SimpleExpr::Bool(_) | SimpleExpr::Condition(_) => Some(TYPE_ID_BOOL),
@@ -6828,6 +6829,90 @@ fn encode_expr_as(
             out.push(0x41);
             sleb(hash_string_literal(value), out);
             Ok(expected.unwrap_or(TYPE_ID_I32))
+        }
+        SimpleExpr::ResolvedConstant {
+            id,
+            type_id,
+            value:
+                ResolvedConstantValue::Scalar {
+                    bits,
+                    nominal_origin,
+                },
+            ..
+        } => {
+            if *type_id == TYPE_ID_BOOL {
+                let value = match *bits {
+                    0 => 0,
+                    1 => 1,
+                    _ => return Err(format!("resolved bool constant has invalid bits {bits}")),
+                };
+                out.extend([0x41, value]);
+            } else if *type_id == TYPE_ID_F32 {
+                out.push(0x43);
+                out.extend((*bits as u32).to_le_bytes());
+            } else if *type_id == TYPE_ID_F64 {
+                out.push(0x44);
+                out.extend(bits.to_le_bytes());
+            } else if *type_id == TYPE_ID_I32
+                || matches!(
+                    context.types.unsigned_integer_bits(*type_id),
+                    Some(8 | 16 | 32)
+                )
+                || (nominal_origin.is_some()
+                    && context
+                        .types
+                        .type_info(*type_id)
+                        .is_some_and(|info| info.category == TypeCategory::Named))
+            {
+                out.push(0x41);
+                sleb(*bits as u32 as i32, out);
+            } else {
+                let type_description = context
+                    .types
+                    .type_info(*type_id)
+                    .map(|info| format!("{} ({:?})", info.name, info.category))
+                    .unwrap_or_else(|| "unknown type".to_string());
+                let origin_description = nominal_origin
+                    .as_ref()
+                    .map(|origin| format!("{}.{}", origin.path, origin.name))
+                    .unwrap_or_else(|| "none".to_string());
+                return Err(format!(
+                    "resolved constant {id:?} has unsupported scalar type id {type_id} ({type_description}; nominal origin: {origin_description})"
+                ));
+            }
+            Ok(*type_id)
+        }
+        SimpleExpr::ResolvedConstant {
+            type_id,
+            value: ResolvedConstantValue::String(value),
+            ..
+        } => {
+            let info = context
+                .types
+                .type_info(*type_id)
+                .ok_or_else(|| format!("resolved string constant has unknown type id {type_id}"))?;
+            if !matches!(
+                info.category,
+                TypeCategory::AsciiFixed
+                    | TypeCategory::AsciiView
+                    | TypeCategory::Utf8Fixed
+                    | TypeCategory::Utf8View
+            ) {
+                return Err(format!(
+                    "resolved string constant has unsupported type '{}'",
+                    info.name
+                ));
+            }
+            if matches!(
+                info.category,
+                TypeCategory::AsciiFixed | TypeCategory::AsciiView
+            ) && !value.is_ascii()
+            {
+                return Err("non-ASCII string constant cannot initialize an ASCII buffer".into());
+            }
+            out.push(0x41);
+            sleb(hash_string_literal(value), out);
+            Ok(*type_id)
         }
         SimpleExpr::Identifier(name) => {
             if let Some((binding, suffix)) = foreach_path(context, name) {
@@ -7387,6 +7472,10 @@ fn collect_string_literals(
     ) -> Result<(), String> {
         match value {
             SimpleExpr::StringLiteral(value) => insert(out, value)?,
+            SimpleExpr::ResolvedConstant {
+                value: ResolvedConstantValue::String(value),
+                ..
+            } => insert(out, value)?,
             SimpleExpr::Identifier(name) => {
                 if let Some(ConstantValue::String { value, .. }) = constants.get(name) {
                     insert(out, value)?;

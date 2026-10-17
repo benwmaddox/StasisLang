@@ -1,10 +1,11 @@
 use crate::backend::compile_analysis::{
-    build_compile_analysis_cache_from_resolved_externs, collect_supported_extern_call_signatures,
-    compute_files_fingerprint, fixed_array_lane_type_and_len,
-    is_nested_fixed_array_collection_path, resolve_extern_call_signatures_with_index,
-    CallSignatureMap, CollectionInfoMap, CompileAnalysisCache, ConstantValueMap,
-    ExternCallSignature, ExternSymbolAddressMap, GlobalPathTypeMap, NamedStructFieldTypeMap,
-    ResolvedExternCallSignature, TypedCollectionInfoMap,
+    build_compile_analysis_cache_from_resolved_externs_with_index,
+    collect_supported_extern_call_signatures, compute_files_fingerprint,
+    fixed_array_lane_type_and_len, is_nested_fixed_array_collection_path,
+    resolve_extern_call_signatures_with_index, CallSignatureMap, CollectionInfoMap,
+    CompileAnalysisCache, ConstantValueMap, ExternCallSignature, ExternSymbolAddressMap,
+    GlobalPathTypeMap, NamedStructFieldTypeMap, ResolvedExternCallSignature,
+    TypedCollectionInfoMap,
 };
 use crate::backend::emit::{
     debug_variable_slot, DirectStorageBinding, DirectStorageBindings, RuntimeHelperLinkage,
@@ -93,6 +94,10 @@ fn elapsed_micros(started: Instant) -> u64 {
 struct FunctionLoweringReferences {
     paths: BTreeSet<String>,
     calls: BTreeSet<String>,
+    resolved_constants: BTreeMap<
+        crate::ir::hir::CompileTimeValueId,
+        (TypeId, crate::ir::hir::ResolvedConstantValue),
+    >,
 }
 
 fn path_is_local(path: &str, scopes: &[BTreeSet<String>]) -> bool {
@@ -166,6 +171,11 @@ fn collect_expression_references(
         }
         SimpleExpr::Condition(condition) => {
             collect_condition_references(condition, references, scopes)
+        }
+        SimpleExpr::ResolvedConstant { id, type_id, value } => {
+            references
+                .resolved_constants
+                .insert(id.clone(), (*type_id, value.clone()));
         }
         SimpleExpr::DefaultValue(_)
         | SimpleExpr::Int(_)
@@ -275,12 +285,22 @@ fn function_lowering_contract_hash(
     references: &FunctionLoweringReferences,
     analysis: &CompileAnalysisCache,
     parameter_storage_kinds: Option<&[crate::data_flow::ParameterStorageKind]>,
-) -> u64 {
+    types: &TypeTable,
+) -> Result<u64, String> {
     let mut facts = vec![format!("parameter_storage:{parameter_storage_kinds:?}")];
     for path in &references.paths {
         if let Some(value) = analysis.constant_values.get(path) {
             facts.push(format!("constant:{path}:{value:?}"));
         }
+    }
+    for (id, (type_id, value)) in &references.resolved_constants {
+        let info = types.type_info(*type_id).ok_or_else(|| {
+            format!("resolved constant {id:?} has unknown materialized type {type_id}")
+        })?;
+        facts.push(format!(
+            "resolved_constant:{id:?}:{}:{:?}:{:?}:{value:?}",
+            info.name, info.category, info.layout
+        ));
     }
     for signature in &analysis.resolved_extern_signatures {
         if references.calls.contains(&signature.name) {
@@ -292,7 +312,7 @@ fn function_lowering_contract_hash(
     }
 
     facts.sort();
-    hash_text(&facts.join("\n"))
+    Ok(hash_text(&facts.join("\n")))
 }
 
 fn collect_function_lowering_references(
@@ -907,6 +927,7 @@ impl JitProcess {
             .program_snapshot
             .as_ref()
             .is_none_or(|snapshot| snapshot.source_revision() != snapshot_revision);
+        let mut refreshed_function_hirs = None;
         if snapshot_miss {
             let function_hirs = self.compiler.analysis_hirs(&self.required_emit_roots)?;
             let source_function_hirs = self.compiler.source_hirs_with_policy(
@@ -935,7 +956,7 @@ impl JitProcess {
                     }
                     crate::compiler::CompileError::Backend(error)
                 })?;
-            let next_cache = build_compile_analysis_cache_from_resolved_externs(
+            let next_cache = build_compile_analysis_cache_from_resolved_externs_with_index(
                 self.compiler.files(),
                 self.compiler.module_graph(),
                 self.compiler.functions(),
@@ -943,6 +964,7 @@ impl JitProcess {
                 snapshot_revision,
                 resolved_extern_signatures,
                 extern_symbol_addresses,
+                self.compiler.constant_declaration_index(),
             )
             .map_err(crate::compiler::CompileError::Backend)?;
             self.program_snapshot = Some(Arc::new(
@@ -962,6 +984,7 @@ impl JitProcess {
                 )
                 .map_err(crate::compiler::CompileError::Backend)?,
             ));
+            refreshed_function_hirs = Some(function_hirs);
         }
         *self.compiler.types_mut() = analysis_type_table.clone();
         let snapshot = self.program_snapshot.clone().ok_or_else(|| {
@@ -1006,20 +1029,27 @@ impl JitProcess {
             if compiler_layout_changed {
                 lowered_contract_changes.insert(key.clone());
             }
-            if let Some(references) = self.accepted_lowering_references.get(key) {
+            if let Some(previous_references) = self.accepted_lowering_references.get(key) {
+                let references = refreshed_function_hirs
+                    .as_ref()
+                    .and_then(|hirs| hirs.get(function_id))
+                    .map(|hir| collect_function_lowering_references(function, hir))
+                    .unwrap_or_else(|| previous_references.clone());
                 let hash = function_lowering_contract_hash(
-                    references,
+                    &references,
                     &analysis,
                     self.compiler
                         .function_data_flow_summaries()
                         .iter()
                         .find(|summary| summary.internal_function_id == function.storage_index)
                         .map(|summary| summary.parameter_storage_kinds.as_slice()),
-                );
+                    self.compiler.types(),
+                )
+                .map_err(crate::compiler::CompileError::Backend)?;
                 if self.accepted_lowering_contracts.get(key) != Some(&hash) {
                     lowered_contract_changes.insert(key.clone());
                 }
-                lowering_references.insert(key.clone(), references.clone());
+                lowering_references.insert(key.clone(), references);
                 lowering_contracts.insert(key.clone(), hash);
             }
         }
@@ -1164,7 +1194,8 @@ impl JitProcess {
                     &references,
                     &analysis,
                     data_flow_summary.map(|summary| summary.parameter_storage_kinds.as_slice()),
-                );
+                    lowered_types,
+                )?;
                 lowering_references.insert(function_key.clone(), references);
                 lowering_contracts.insert(function_key.clone(), contract_hash);
                 staged_functions.push((
@@ -13651,6 +13682,82 @@ function main(): i32 { batch.update(0); return 0; }
                 .execute_i32_noarg_by_name("main")
                 .expect("execute second"),
             27
+        );
+    }
+
+    #[test]
+    fn jit_process_reemits_reachable_functions_when_imported_group_constant_changes() {
+        let mut process = JitProcess::new();
+        process.set_required_emit_roots(&["main".to_string()]);
+        process.upsert_file(
+            "main.stasis",
+            "import \"constants.stasis\";\n\
+             import \"other.stasis\";\n\
+             function helper(): i32 { return constants.SIZES.USED; }\n\
+             function main(): i32 { return helper(); }\n",
+        );
+        process.upsert_file(
+            "constants.stasis",
+            "const SIZES { USED: i32 = 11; SIBLING: i32 = 101; }\n",
+        );
+        process.upsert_file("other.stasis", "const SIZES { USED: i32 = 201; }\n");
+
+        let first = process.compile().expect("group constant baseline compiles");
+        assert!(first.emit.emitted_functions >= 1);
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(11));
+        let baseline_main = artifact_keys_named(&process, "main");
+        assert_eq!(baseline_main.len(), 1);
+
+        process.upsert_file(
+            "constants.stasis",
+            "const SIZES { USED: i32 = 19; SIBLING: i32 = 101; }\n",
+        );
+        let used_edit = process
+            .compile()
+            .expect("referenced group member edit compiles");
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(19));
+        let metadata = process
+            .generation_metadata()
+            .expect("used-member generation metadata");
+        let emitted_names = metadata_artifact_keys(&process, &metadata.emitted_function_ids)
+            .into_iter()
+            .map(|key| key.name)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            emitted_names.contains("main"),
+            "the group-dependent caller must be re-emitted: {used_edit:?}; {emitted_names:?}"
+        );
+        let used_fingerprint = artifact_fingerprint(&process);
+        let used_main_fingerprint = used_fingerprint
+            .get(baseline_main.iter().next().expect("main artifact"))
+            .expect("main artifact fingerprint")
+            .clone();
+
+        process.upsert_file(
+            "constants.stasis",
+            "const SIZES { USED: i32 = 19; SIBLING: i32 = 202; }\n",
+        );
+        let sibling_edit = process.compile().expect("sibling edit compiles");
+        assert_eq!(sibling_edit.emit.emitted_functions, 0);
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(19));
+        assert_eq!(artifact_keys_named(&process, "main"), baseline_main);
+        assert_eq!(
+            artifact_fingerprint(&process)[baseline_main.iter().next().unwrap()],
+            used_main_fingerprint,
+            "editing an unrelated sibling member reuses main's machine code"
+        );
+
+        process.upsert_file("other.stasis", "const SIZES { USED: i32 = 909; }\n");
+        let other_module_edit = process
+            .compile()
+            .expect("same-spelling other-module edit compiles");
+        assert_eq!(other_module_edit.emit.emitted_functions, 0);
+        assert_eq!(process.execute_i32_noarg_by_name("main"), Ok(19));
+        assert_eq!(artifact_keys_named(&process, "main"), baseline_main);
+        assert_eq!(
+            artifact_fingerprint(&process)[baseline_main.iter().next().unwrap()],
+            used_main_fingerprint,
+            "editing the same-spelled member from another module reuses main's machine code"
         );
     }
 

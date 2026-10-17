@@ -46,8 +46,10 @@ struct EditorFileCatalog {
     module_alias: String,
     exposure: WorkshopExposure,
     imports: Vec<EditorImport>,
+    dependencies: Vec<String>,
     functions: Vec<EditorFunction>,
     types: Vec<EditorType>,
+    const_groups: Vec<EditorConstGroup>,
     values: Vec<EditorValue>,
 }
 
@@ -78,6 +80,18 @@ struct EditorMember {
     name: String,
     type_name: Option<String>,
     kind: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct EditorConstGroup {
+    name: String,
+    members: Vec<EditorConstGroupMember>,
+}
+
+#[derive(Debug, Clone)]
+struct EditorConstGroupMember {
+    name: String,
+    type_name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -375,6 +389,10 @@ fn file_catalog(
         .map(|module| module.imports.iter().map(EditorImport::from).collect())
         .or_else(|| previous.map(|previous| previous.imports.clone()))
         .unwrap_or_default();
+    let dependencies = graph
+        .map(|graph| graph.dependency_closure(&file.path).into_iter().collect())
+        .or_else(|| previous.map(|previous| previous.dependencies.clone()))
+        .unwrap_or_default();
     let module_alias = module
         .map(|module| module.alias.clone())
         .or_else(|| previous.map(|previous| previous.module_alias.clone()))
@@ -405,12 +423,18 @@ fn file_catalog(
             .then_with(|| left.signature.cmp(&right.signature))
     });
 
-    let (types, values) = if let Some(layout) = draft.layout.as_ref() {
+    let (types, const_groups, values) = if let Some(layout) = draft.layout.as_ref() {
         catalog_types_and_values(&file.path, layout)
     } else {
         previous.map_or_else(
-            || (Vec::new(), Vec::new()),
-            |previous| (previous.types.clone(), previous.values.clone()),
+            || (Vec::new(), Vec::new(), Vec::new()),
+            |previous| {
+                (
+                    previous.types.clone(),
+                    previous.const_groups.clone(),
+                    previous.values.clone(),
+                )
+            },
         )
     };
 
@@ -419,8 +443,10 @@ fn file_catalog(
         module_alias,
         exposure: workshop_file_exposure(&file.path),
         imports,
+        dependencies,
         functions,
         types,
+        const_groups,
         values,
     }
 }
@@ -453,8 +479,9 @@ impl EditorFunction {
 fn catalog_types_and_values(
     path: &str,
     layout: &ParsedTypeLayout,
-) -> (Vec<EditorType>, Vec<EditorValue>) {
+) -> (Vec<EditorType>, Vec<EditorConstGroup>, Vec<EditorValue>) {
     let mut types = Vec::new();
+    let mut const_groups = Vec::new();
     let mut values = Vec::new();
     for definition in &layout.structs {
         types.push(EditorType {
@@ -523,9 +550,23 @@ fn catalog_types_and_values(
             detail: format!("const: {}", definition.type_name),
         });
     }
+    for definition in &layout.const_groups {
+        const_groups.push(EditorConstGroup {
+            name: definition.name.clone(),
+            members: definition
+                .members
+                .iter()
+                .map(|member| EditorConstGroupMember {
+                    name: member.name.clone(),
+                    type_name: member.type_name.clone(),
+                })
+                .collect(),
+        });
+    }
     types.sort_by(|left, right| left.name.cmp(&right.name));
+    const_groups.sort_by(|left, right| left.name.cmp(&right.name));
     values.sort_by(|left, right| left.name.cmp(&right.name));
-    (types, values)
+    (types, const_groups, values)
 }
 
 fn format_function_signature(function: &ParsedFunctionSignature, method: bool) -> String {
@@ -989,6 +1030,22 @@ fn complete(
             .flatten();
         if let Some(module) = module_target.and_then(|target| catalog.files.get(target)) {
             add_file_symbols(&mut candidates, module);
+        } else if let Some(group) =
+            (!root_binding_shadows_const_group(draft, active_file, &parts[0], cursor))
+                .then(|| resolve_const_group(catalog, active_path, parts))
+                .flatten()
+        {
+            for member in &group.members {
+                insert_candidate(
+                    &mut candidates,
+                    CompletionCandidate {
+                        label: member.name.clone(),
+                        kind: "constant",
+                        detail: format!("constant: {}", member.type_name),
+                        signature: Some(format!("{}: {}", member.name, member.type_name)),
+                    },
+                );
+            }
         } else if let Some(receiver) =
             resolve_receiver_type(catalog, active_path, draft, parts, cursor)
         {
@@ -1142,6 +1199,17 @@ fn add_file_symbols(
             },
         );
     }
+    for group in &file.const_groups {
+        insert_candidate(
+            candidates,
+            CompletionCandidate {
+                label: group.name.clone(),
+                kind: "namespace",
+                detail: format!("constant namespace {}", group.name),
+                signature: Some(format!("const {}", group.name)),
+            },
+        );
+    }
     for value in &file.values {
         insert_candidate(
             candidates,
@@ -1217,6 +1285,103 @@ fn add_current_bindings(
             },
         );
     }
+}
+
+fn resolve_const_group<'a>(
+    catalog: &'a EditorCatalog,
+    active_path: &str,
+    parts: &[String],
+) -> Option<&'a EditorConstGroup> {
+    let active_file = catalog.files.get(active_path)?;
+    match parts {
+        [name] => {
+            if let Some(local) = active_file
+                .const_groups
+                .iter()
+                .find(|group| group.name == *name)
+            {
+                return Some(local);
+            }
+            let mut visible = active_file
+                .dependencies
+                .iter()
+                .filter(|path| path.as_str() != active_path)
+                .filter_map(|path| catalog.files.get(path))
+                .filter(|file| file.exposure.is_public())
+                .flat_map(|file| {
+                    file.const_groups
+                        .iter()
+                        .map(move |group| (file.path.as_str(), group))
+                })
+                .filter(|(_, group)| group.name == *name)
+                .collect::<Vec<_>>();
+            visible.sort_by(|left, right| left.0.cmp(right.0));
+            visible.dedup_by(|left, right| left.0 == right.0);
+            let [(_, group)] = visible.as_slice() else {
+                return None;
+            };
+            Some(*group)
+        }
+        [alias, name] => {
+            let import = active_file
+                .imports
+                .iter()
+                .find(|import| import.alias == *alias)?;
+            let file = catalog.files.get(&import.target)?;
+            file.exposure
+                .is_public()
+                .then(|| file.const_groups.iter().find(|group| group.name == *name))
+                .flatten()
+        }
+        _ => None,
+    }
+}
+
+fn root_binding_shadows_const_group(
+    draft: &EditorDraft,
+    active_file: Option<&EditorFileCatalog>,
+    name: &str,
+    cursor: usize,
+) -> bool {
+    let active_function = draft.functions.iter().find(|function| {
+        !function.body_range.is_empty()
+            && function.body_range.start <= cursor
+            && cursor <= function.body_range.end
+    });
+    if active_function.is_some_and(|function| {
+        function
+            .params
+            .iter()
+            .any(|parameter| parameter.name == name)
+    }) {
+        return true;
+    }
+    if draft.locals.iter().any(|local| {
+        local.name == name
+            && active_function.is_some_and(|function| local.function_name == function.name)
+            && local.visibility_range.start <= cursor
+            && cursor <= local.visibility_range.end
+    }) || draft.typed_locals.iter().any(|local| {
+        local.name == name
+            && local.visibility_range.start <= cursor
+            && cursor <= local.visibility_range.end
+    }) {
+        return true;
+    }
+    if draft.layout.as_ref().is_some_and(|layout| {
+        layout.globals.iter().any(|global| global.name == name)
+            || layout
+                .global_blocks
+                .iter()
+                .any(|global| global.name == name)
+            || layout
+                .constants
+                .iter()
+                .any(|constant| constant.name == name)
+    }) {
+        return true;
+    }
+    active_file.is_some_and(|file| file.values.iter().any(|value| value.name == name))
 }
 
 fn resolve_receiver_type(
@@ -1592,6 +1757,153 @@ mod tests {
             result["replacementRange"]["end"],
             source[..cursor].encode_utf16().count()
         );
+    }
+
+    #[test]
+    fn constant_groups_complete_as_namespaces_without_bare_members() {
+        let library = file(
+            "src/lib.stasis",
+            "const LIMITS { SMALL: i32 = 2; LARGE: i32 = 8; }\n",
+        );
+
+        let source = "import \"lib.stasis\";\nfunction main(): i32 { lib.LIMITS. }";
+        let cursor = source.find("lib.LIMITS.").unwrap() + "lib.LIMITS.".len();
+        let result = analysis(
+            &request(
+                "src/main.stasis",
+                source,
+                vec![library.clone()],
+                Some(source[..cursor].encode_utf16().count()),
+            ),
+            None,
+        );
+        let suggestions = result["completions"].as_array().unwrap();
+        let small = suggestions
+            .iter()
+            .find(|item| item["label"] == "SMALL")
+            .expect("module constant-group member suggestion");
+        assert_eq!(small["kind"], "constant");
+        assert_eq!(small["detail"], "constant: i32");
+        assert!(!suggestions.iter().any(|item| item["label"] == "LIMITS"));
+
+        let source = "const LIMITS { SMALL: i32 = 2; }\nfunction main(): i32 { return LIM; }";
+        let cursor = source.find("LIM;").unwrap() + "LIM".len();
+        let result = analysis(
+            &request(
+                "src/main.stasis",
+                source,
+                Vec::new(),
+                Some(source[..cursor].encode_utf16().count()),
+            ),
+            None,
+        );
+        assert!(result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "LIMITS" && item["kind"] == "namespace"));
+        assert!(!result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "SMALL"));
+
+        let source = "const LIMITS { SMALL: i32 = 2; }\nfunction main(): i32 { return SMALL; }";
+        let cursor = source.find("SMALL;").unwrap() + "SMALL".len();
+        let result = analysis(
+            &request(
+                "src/main.stasis",
+                source,
+                Vec::new(),
+                Some(source[..cursor].encode_utf16().count()),
+            ),
+            None,
+        );
+        assert!(!result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "SMALL"));
+
+        let library = file(
+            "src/lib.stasis",
+            "const LIMITS { SMALL: i32 = 2; LARGE: i32 = 8; }\n",
+        );
+        let source = "import \"lib.stasis\";\nfunction main(): i32 { return LIMITS.SMALL; }";
+        let cursor = source.find("LIMITS.SMALL").unwrap() + "LIMITS.".len();
+        let result = analysis(
+            &request(
+                "src/main.stasis",
+                source,
+                vec![library],
+                Some(source[..cursor].encode_utf16().count()),
+            ),
+            None,
+        );
+        assert!(result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "SMALL"));
+
+        let one = file("src/one.stasis", "const LIMITS { SMALL: i32 = 2; }\n");
+        let two = file("src/two.stasis", "const LIMITS { SMALL: i32 = 3; }\n");
+        let source = concat!(
+            "import \"one.stasis\"; import \"two.stasis\";\n",
+            "function main(): i32 { return LIMITS.SMALL; }",
+        );
+        let cursor = source.find("LIMITS.SMALL").unwrap() + "LIMITS.".len();
+        let result = analysis(
+            &request(
+                "src/main.stasis",
+                source,
+                vec![one.clone(), two.clone()],
+                Some(source[..cursor].encode_utf16().count()),
+            ),
+            None,
+        );
+        assert!(!result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "SMALL"));
+
+        let source = "import \"one.stasis\"; import \"two.stasis\";\nfunction main(): i32 { return one.LIMITS.SMALL; }";
+        let cursor = source.find("one.LIMITS.").unwrap() + "one.LIMITS.".len();
+        let result = analysis(
+            &request(
+                "src/main.stasis",
+                source,
+                vec![one, two],
+                Some(source[..cursor].encode_utf16().count()),
+            ),
+            None,
+        );
+        assert!(result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "SMALL"));
+
+        let source = concat!(
+            "const LIMITS { SMALL: i32 = 2; }\n",
+            "function main(LIMITS: i32): i32 { return LIMITS.SMALL; }",
+        );
+        let cursor = source.find("LIMITS.SMALL").unwrap() + "LIMITS.".len();
+        let result = analysis(
+            &request(
+                "src/main.stasis",
+                source,
+                Vec::new(),
+                Some(source[..cursor].encode_utf16().count()),
+            ),
+            None,
+        );
+        assert!(!result["completions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["label"] == "SMALL"));
     }
 
     #[test]

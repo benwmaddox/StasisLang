@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use crate::data_flow::{
     build_function_data_flow_summaries, compiler_local_types, validate_effect_contracts,
-    validate_program_semantics, CompilerLocalType, FunctionDataFlowSummary, VisibleCallTarget,
+    validate_program_semantics_with_index, CompilerLocalType, FunctionDataFlowSummary,
+    VisibleCallTarget,
 };
 use crate::frontend::body_parser::parse_simple_statements_with_debug;
 use crate::frontend::indexer::{hash_text, index_file_with_diagnostic, IndexedCallDependency};
@@ -350,6 +351,7 @@ pub struct Compiler {
     project_root: Option<String>,
     pending_path_error: Option<String>,
     module_graph: ModuleGraph,
+    constant_declaration_index: crate::frontend::constant_index::CompileTimeDeclarationIndex,
     module_resolution: ModuleResolutionIndex,
     entry_roots: BTreeSet<String>,
     indexed_file_hashes: BTreeMap<String, u64>,
@@ -430,6 +432,12 @@ impl Compiler {
 
     pub fn module_graph(&self) -> &ModuleGraph {
         &self.module_graph
+    }
+
+    pub(crate) fn constant_declaration_index(
+        &self,
+    ) -> &crate::frontend::constant_index::CompileTimeDeclarationIndex {
+        &self.constant_declaration_index
     }
 
     pub fn refresh_module_graph(&mut self) -> CompileResult<()> {
@@ -529,6 +537,7 @@ impl Compiler {
             &self.files,
             &self.module_graph,
             &mut self.types,
+            &self.constant_declaration_index,
         ) {
             let message = error.message.clone();
             self.last_source_diagnostic = Some(error.to_source_diagnostic());
@@ -562,28 +571,53 @@ impl Compiler {
             return Err(CompileError::Frontend(error));
         }
         self.refresh_module_graph()?;
-        let source_type_origins =
-            crate::frontend::generics::expand_sources(&mut self.files, &self.module_graph)
-                .map_err(|error| {
-                    let diagnostic_file = error
-                        .path
-                        .as_deref()
-                        .and_then(|path| self.files.iter().find(|file| file.path == path))
-                        .or_else(|| self.files.first());
-                    self.last_source_diagnostic = diagnostic_file.map(|file| {
-                        let mut diagnostic = crate::SourceDiagnostic::new(
-                            file.path.clone(),
-                            error.start.min(file.original_content.len()),
-                            error.end.min(file.original_content.len()),
-                            error.symbol.clone(),
-                            error.message.clone(),
-                        )
-                        .with_code(error.code.clone());
-                        diagnostic.related = error.related.clone();
-                        diagnostic
-                    });
-                    CompileError::Frontend(error.message)
+        if let Err((path, range, symbol, message)) =
+            crate::frontend::constant_index::validate_group_declaration_names(&self.files)
+        {
+            self.last_source_diagnostic = Some(crate::SourceDiagnostic::new(
+                path,
+                range.start,
+                range.end,
+                symbol,
+                message.clone(),
+            ));
+            return Err(CompileError::Frontend(message));
+        }
+        let constant_declaration_index =
+            crate::frontend::constant_index::CompileTimeDeclarationIndex::build(&self.files)
+                .map_err(|(path, message)| {
+                    self.last_source_diagnostic = Some(
+                        crate::SourceDiagnostic::new(path, 0, 0, String::new(), message.clone())
+                            .with_code(crate::SourceDiagnosticCode::Parse),
+                    );
+                    CompileError::Frontend(message)
                 })?;
+        self.constant_declaration_index = constant_declaration_index.clone();
+        let source_type_origins = crate::frontend::generics::expand_sources(
+            &mut self.files,
+            &self.module_graph,
+            &constant_declaration_index,
+        )
+        .map_err(|error| {
+            let diagnostic_file = error
+                .path
+                .as_deref()
+                .and_then(|path| self.files.iter().find(|file| file.path == path))
+                .or_else(|| self.files.first());
+            self.last_source_diagnostic = diagnostic_file.map(|file| {
+                let mut diagnostic = crate::SourceDiagnostic::new(
+                    file.path.clone(),
+                    error.start.min(file.original_content.len()),
+                    error.end.min(file.original_content.len()),
+                    error.symbol.clone(),
+                    error.message.clone(),
+                )
+                .with_code(error.code.clone());
+                diagnostic.related = error.related.clone();
+                diagnostic
+            });
+            CompileError::Frontend(error.message)
+        })?;
         self.types.replace_source_type_origins(source_type_origins);
         let changed_paths: Vec<String> = self
             .files
@@ -1032,12 +1066,13 @@ impl Compiler {
         self.statement_cache = next_statement_cache;
         let call_targets =
             visible_call_targets_by_function(&self.files, &self.functions, &self.module_graph);
-        let semantic_validation_error = validate_program_semantics(
+        let semantic_validation_error = validate_program_semantics_with_index(
             &self.files,
             &self.functions,
             &mut self.parsed_statements,
-            &self.types,
+            &mut self.types,
             &self.module_graph,
+            &self.constant_declaration_index,
             &call_targets,
         )
         .err();
@@ -1059,6 +1094,8 @@ impl Compiler {
             &self.parsed_statement_ids,
             &changed_function_ids,
             &self.types,
+            &self.module_graph,
+            &self.constant_declaration_index,
             &self.data_flow_summaries,
             self.data_flow_context_fingerprint,
         )
@@ -2245,7 +2282,8 @@ fn prune_call_sites_to_resolved_hir(function: &mut FunctionMeta, statements: &[S
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
-            | SimpleExpr::Identifier(_) => {}
+            | SimpleExpr::Identifier(_)
+            | SimpleExpr::ResolvedConstant { .. } => {}
         }
     }
 
@@ -2483,7 +2521,8 @@ fn first_unexpanded_mandatory_call(
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
-            | SimpleExpr::Identifier(_) => None,
+            | SimpleExpr::Identifier(_)
+            | SimpleExpr::ResolvedConstant { .. } => None,
         }
     }
 
@@ -2616,7 +2655,8 @@ fn inline_expression_calls(
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
-            | SimpleExpr::Identifier(_) => true,
+            | SimpleExpr::Identifier(_)
+            | SimpleExpr::ResolvedConstant { .. } => true,
             SimpleExpr::IndexedPath {
                 index,
                 nested_index,
@@ -2753,7 +2793,8 @@ fn inline_expression_calls(
             | SimpleExpr::Int(_)
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
-            | SimpleExpr::StringLiteral(_) => {}
+            | SimpleExpr::StringLiteral(_)
+            | SimpleExpr::ResolvedConstant { .. } => {}
         }
     }
 

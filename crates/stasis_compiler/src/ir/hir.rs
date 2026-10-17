@@ -1,7 +1,37 @@
 use std::ops::Range;
 
-use crate::frontend::types::TypeId;
+use crate::frontend::types::{
+    SourceTypeOrigin, TypeId, TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8,
+};
 use crate::identity::FnId;
+
+/// Stable source identity for a compile-time value. `TypeId` is intentionally
+/// kept out of this key because it is local to a compiler run.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct CompileTimeValueId {
+    pub(crate) source_path: String,
+    pub(crate) owner: CompileTimeValueOwner,
+    pub(crate) member: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum CompileTimeValueOwner {
+    Flat,
+    Group(String),
+    Enum(String),
+}
+
+/// Materialized payload carried after semantic name resolution. Scalar bits
+/// retain the declared lane and enum provenance; string groups currently
+/// support literal initializers only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolvedConstantValue {
+    Scalar {
+        bits: u64,
+        nominal_origin: Option<SourceTypeOrigin>,
+    },
+    String(String),
+}
 
 /// Stable identity of a source extern declaration before a backend selects one
 /// physical symbol from its compatibility candidates. This key uses canonical
@@ -197,6 +227,11 @@ pub(crate) enum SimpleExpr {
     Float(f64),
     Bool(bool),
     StringLiteral(String),
+    ResolvedConstant {
+        id: CompileTimeValueId,
+        type_id: TypeId,
+        value: ResolvedConstantValue,
+    },
     Condition(Box<SimpleCondition>),
     Identifier(String),
     IndexedPath {
@@ -282,6 +317,27 @@ impl SimpleExpr {
 pub(crate) fn eval_const_i64(expression: &SimpleExpr) -> Option<i64> {
     match expression {
         SimpleExpr::Int(value) => Some(*value),
+        SimpleExpr::ResolvedConstant {
+            type_id,
+            value:
+                ResolvedConstantValue::Scalar {
+                    bits,
+                    nominal_origin,
+                },
+            ..
+        } => {
+            if nominal_origin.is_some() || *type_id == TYPE_ID_I32 {
+                Some(i64::from(*bits as u32 as i32))
+            } else if *type_id == TYPE_ID_U8 {
+                Some(i64::from(*bits as u8))
+            } else if *type_id == TYPE_ID_U16 {
+                Some(i64::from(*bits as u16))
+            } else if *type_id == TYPE_ID_U32 {
+                Some(i64::from(*bits as u32))
+            } else {
+                None
+            }
+        }
         SimpleExpr::Unary {
             op: ExprUnaryOp::Negate,
             operand,

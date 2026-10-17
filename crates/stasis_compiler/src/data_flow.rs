@@ -9,6 +9,8 @@ use crate::backend::compile_analysis::{
 };
 use crate::compiler::{FunctionId, FunctionMeta, SourceFile};
 use crate::frontend::body_parser::parse_simple_expression;
+use crate::frontend::constant_evaluation::ScalarConstantEvaluator;
+use crate::frontend::constant_index::CompileTimeDeclarationIndex;
 use crate::frontend::module_graph::ModuleGraph;
 use crate::frontend::parser::{parse_top_level_extern_functions, parse_top_level_type_layout};
 use crate::frontend::types::{
@@ -16,8 +18,9 @@ use crate::frontend::types::{
     TYPE_ID_F32, TYPE_ID_F64, TYPE_ID_I32, TYPE_ID_VOID,
 };
 use crate::ir::hir::{
-    eval_const_i64, AssignOp, AssignTarget, ComparisonOp, ConversionKind, ExprBinaryOp,
-    ExprUnaryOp, ResolvedCallTarget, SimpleCondition, SimpleExpr, SimpleStmt,
+    eval_const_i64, AssignOp, AssignTarget, ComparisonOp, CompileTimeValueOwner, ConversionKind,
+    ExprBinaryOp, ExprUnaryOp, ResolvedCallTarget, ResolvedConstantValue, SimpleCondition,
+    SimpleExpr, SimpleStmt,
 };
 
 mod effect_contracts;
@@ -313,6 +316,7 @@ pub(crate) struct VisibleCallTarget {
     pub(crate) return_type: TypeId,
 }
 
+#[cfg(test)]
 pub(crate) fn validate_program_semantics(
     files: &[SourceFile],
     functions: &[FunctionMeta],
@@ -321,9 +325,31 @@ pub(crate) fn validate_program_semantics(
     graph: &ModuleGraph,
     candidate_targets_by_function: &BTreeMap<u32, Arc<BTreeMap<String, Vec<VisibleCallTarget>>>>,
 ) -> Result<(), (u32, String)> {
+    let constant_index = CompileTimeDeclarationIndex::build(files)
+        .map_err(|(path, message)| (0, format!("{path}: {message}")))?;
     let mut semantic_types = types.clone();
+    validate_program_semantics_with_index(
+        files,
+        functions,
+        statements_by_id,
+        &mut semantic_types,
+        graph,
+        &constant_index,
+        candidate_targets_by_function,
+    )
+}
+
+pub(crate) fn validate_program_semantics_with_index(
+    files: &[SourceFile],
+    functions: &[FunctionMeta],
+    statements_by_id: &mut [Vec<SimpleStmt>],
+    types: &mut TypeTable,
+    graph: &ModuleGraph,
+    constant_index: &CompileTimeDeclarationIndex,
+    candidate_targets_by_function: &BTreeMap<u32, Arc<BTreeMap<String, Vec<VisibleCallTarget>>>>,
+) -> Result<(), (u32, String)> {
     for function in functions {
-        if semantic_types.is_typed_collection_type(function.return_type) {
+        if types.is_typed_collection_type(function.return_type) {
             return Err((
                 function.storage_index,
                 format!(
@@ -336,7 +362,7 @@ pub(crate) fn validate_program_semantics(
             .params
             .iter()
             .enumerate()
-            .find(|(_, type_id)| semantic_types.is_typed_collection_type(**type_id))
+            .find(|(_, type_id)| types.is_typed_collection_type(**type_id))
         {
             return Err((
                 function.storage_index,
@@ -347,8 +373,12 @@ pub(crate) fn validate_program_semantics(
             ));
         }
     }
-    let mut context = build_semantic_context(files, functions, &mut semantic_types, Some(graph))
-        .map_err(|message| (0, message))?;
+    let mut context =
+        build_semantic_context(files, functions, types, Some(graph), Some(constant_index))
+            .map_err(|message| (0, message))?;
+    let mut constant_evaluator =
+        ScalarConstantEvaluator::new_with_index(files, graph, context.types, constant_index)
+            .map_err(|message| (0, message))?;
     let empty_visible_targets = BTreeMap::new();
     for function in functions {
         let statements = statements_by_id
@@ -372,11 +402,14 @@ pub(crate) fn validate_program_semantics(
         context.caller_path = files[function.file_id as usize].path.clone();
         context.visible_paths = graph.dependency_closure(&context.caller_path);
         let mut call_resolution_types = initial_local_types.clone();
+        let mut call_resolution_roots = initial_local_types.keys().cloned().collect();
         resolve_visible_calls_in_statements(
             statements,
             &context,
             &mut call_resolution_types,
+            &mut call_resolution_roots,
             visible_targets,
+            &mut constant_evaluator,
         )
         .map_err(|message| (function.storage_index, message))?;
         let mut local_types = initial_local_types;
@@ -399,7 +432,9 @@ fn resolve_visible_calls_in_statements(
     statements: &mut [SimpleStmt],
     context: &AnalysisContext<'_>,
     local_types: &mut BTreeMap<String, TypeId>,
+    local_roots: &mut BTreeSet<String>,
     visible_targets: &BTreeMap<String, Vec<VisibleCallTarget>>,
+    evaluator: &mut ScalarConstantEvaluator<'_>,
 ) -> Result<(), String> {
     for statement in statements {
         match statement {
@@ -413,8 +448,11 @@ fn resolve_visible_calls_in_statements(
                     expression,
                     context,
                     local_types,
+                    local_roots,
                     visible_targets,
+                    evaluator,
                 )?;
+                local_roots.insert(name.clone());
                 if let Some(type_id) = (*type_id)
                     .or_else(|| expression_type(expression, context, local_types, &BTreeMap::new()))
                 {
@@ -428,8 +466,11 @@ fn resolve_visible_calls_in_statements(
                     expression,
                     context,
                     local_types,
+                    local_roots,
                     visible_targets,
+                    evaluator,
                 )?;
+                validate_compile_time_assignment_target(target, context, local_roots, evaluator)?;
                 if let AssignTarget::IndexedPath {
                     index,
                     nested_index,
@@ -440,20 +481,32 @@ fn resolve_visible_calls_in_statements(
                         index,
                         context,
                         local_types,
+                        local_roots,
                         visible_targets,
+                        evaluator,
                     )?;
                     if let Some(nested_index) = nested_index {
                         resolve_visible_calls_in_expression(
                             nested_index,
                             context,
                             local_types,
+                            local_roots,
                             visible_targets,
+                            evaluator,
                         )?;
                     }
                 }
             }
             SimpleStmt::Convert { target, source, .. } => {
-                resolve_visible_calls_in_expression(source, context, local_types, visible_targets)?;
+                resolve_visible_calls_in_expression(
+                    source,
+                    context,
+                    local_types,
+                    local_roots,
+                    visible_targets,
+                    evaluator,
+                )?;
+                validate_compile_time_assignment_target(target, context, local_roots, evaluator)?;
                 if let AssignTarget::IndexedPath {
                     index,
                     nested_index,
@@ -464,14 +517,18 @@ fn resolve_visible_calls_in_statements(
                         index,
                         context,
                         local_types,
+                        local_roots,
                         visible_targets,
+                        evaluator,
                     )?;
                     if let Some(nested_index) = nested_index {
                         resolve_visible_calls_in_expression(
                             nested_index,
                             context,
                             local_types,
+                            local_roots,
                             visible_targets,
+                            evaluator,
                         )?;
                     }
                 }
@@ -485,22 +542,30 @@ fn resolve_visible_calls_in_statements(
                     condition,
                     context,
                     local_types,
+                    local_roots,
                     visible_targets,
+                    evaluator,
                 )?;
                 let mut then_types = local_types.clone();
+                let mut then_roots = local_roots.clone();
                 resolve_visible_calls_in_statements(
                     then_statements,
                     context,
                     &mut then_types,
+                    &mut then_roots,
                     visible_targets,
+                    evaluator,
                 )?;
                 if let Some(else_statements) = else_statements {
                     let mut else_types = local_types.clone();
+                    let mut else_roots = local_roots.clone();
                     resolve_visible_calls_in_statements(
                         else_statements,
                         context,
                         &mut else_types,
+                        &mut else_roots,
                         visible_targets,
+                        evaluator,
                     )?;
                 }
             }
@@ -511,30 +576,40 @@ fn resolve_visible_calls_in_statements(
                 body_statements,
             } => {
                 let mut loop_types = local_types.clone();
+                let mut loop_roots = local_roots.clone();
                 resolve_visible_calls_in_statements(
                     std::slice::from_mut(init.as_mut()),
                     context,
                     &mut loop_types,
+                    &mut loop_roots,
                     visible_targets,
+                    evaluator,
                 )?;
                 resolve_visible_calls_in_condition(
                     condition,
                     context,
                     &mut loop_types,
+                    &mut loop_roots,
                     visible_targets,
+                    evaluator,
                 )?;
                 let mut body_types = loop_types.clone();
+                let mut body_roots = loop_roots.clone();
                 resolve_visible_calls_in_statements(
                     body_statements,
                     context,
                     &mut body_types,
+                    &mut body_roots,
                     visible_targets,
+                    evaluator,
                 )?;
                 resolve_visible_calls_in_statements(
                     std::slice::from_mut(step.as_mut()),
                     context,
                     &mut loop_types,
+                    &mut loop_roots,
                     visible_targets,
+                    evaluator,
                 )?;
             }
             SimpleStmt::Foreach {
@@ -544,20 +619,25 @@ fn resolve_visible_calls_in_statements(
                 body_statements,
             } => {
                 let mut body_types = local_types.clone();
+                let mut body_roots = local_roots.clone();
                 if let Some(element_type) =
                     path_type(collection_path, context, local_types, &BTreeMap::new())
                         .and_then(|collection| context.types.indexed_element_type_id(collection))
                 {
                     body_types.insert(item_name.clone(), element_type);
                 }
+                body_roots.insert(item_name.clone());
                 if let Some(index_name) = index_name {
                     body_types.insert(index_name.clone(), TYPE_ID_I32);
+                    body_roots.insert(index_name.clone());
                 }
                 resolve_visible_calls_in_statements(
                     body_statements,
                     context,
                     &mut body_types,
+                    &mut body_roots,
                     visible_targets,
+                    evaluator,
                 )?;
             }
             SimpleStmt::Expr(expression) | SimpleStmt::Return(expression) => {
@@ -565,7 +645,9 @@ fn resolve_visible_calls_in_statements(
                     expression,
                     context,
                     local_types,
+                    local_roots,
                     visible_targets,
+                    evaluator,
                 )?;
             }
         }
@@ -573,26 +655,107 @@ fn resolve_visible_calls_in_statements(
     Ok(())
 }
 
+fn validate_compile_time_assignment_target(
+    target: &AssignTarget,
+    context: &AnalysisContext<'_>,
+    local_roots: &BTreeSet<String>,
+    evaluator: &ScalarConstantEvaluator<'_>,
+) -> Result<(), String> {
+    let path = match target {
+        AssignTarget::Local(path) | AssignTarget::GlobalPath(path) => path,
+        AssignTarget::IndexedPath {
+            collection_path, ..
+        } => collection_path,
+    };
+    let root = path.split('.').next().unwrap_or(path);
+    let lexical_root_shadowed = shadowed_compile_time_root(root, context, local_roots);
+    if let Some(error) =
+        evaluator.unresolved_group_value_error(&context.caller_path, root, lexical_root_shadowed)
+    {
+        return Err(if path == root {
+            error
+        } else {
+            format!("cannot assign through constant group namespace '{root}'")
+        });
+    }
+    Ok(())
+}
+
+fn shadowed_compile_time_root(
+    root: &str,
+    context: &AnalysisContext<'_>,
+    local_roots: &BTreeSet<String>,
+) -> bool {
+    local_roots.contains(root)
+        || context.globals.contains(root)
+        || context.constant_types.contains_key(root)
+        || context.path_types.contains_key(root)
+}
+
 fn resolve_visible_calls_in_condition(
     condition: &mut SimpleCondition,
     context: &AnalysisContext<'_>,
     local_types: &mut BTreeMap<String, TypeId>,
+    local_roots: &mut BTreeSet<String>,
     visible_targets: &BTreeMap<String, Vec<VisibleCallTarget>>,
+    evaluator: &mut ScalarConstantEvaluator<'_>,
 ) -> Result<(), String> {
     match condition {
         SimpleCondition::Comparison { lhs, rhs, .. } => {
-            resolve_visible_calls_in_expression(lhs, context, local_types, visible_targets)?;
-            resolve_visible_calls_in_expression(rhs, context, local_types, visible_targets)?;
+            resolve_visible_calls_in_expression(
+                lhs,
+                context,
+                local_types,
+                local_roots,
+                visible_targets,
+                evaluator,
+            )?;
+            resolve_visible_calls_in_expression(
+                rhs,
+                context,
+                local_types,
+                local_roots,
+                visible_targets,
+                evaluator,
+            )?;
         }
         SimpleCondition::Expr(expression) => {
-            resolve_visible_calls_in_expression(expression, context, local_types, visible_targets)?;
+            resolve_visible_calls_in_expression(
+                expression,
+                context,
+                local_types,
+                local_roots,
+                visible_targets,
+                evaluator,
+            )?;
         }
         SimpleCondition::And(lhs, rhs) | SimpleCondition::Or(lhs, rhs) => {
-            resolve_visible_calls_in_condition(lhs, context, local_types, visible_targets)?;
-            resolve_visible_calls_in_condition(rhs, context, local_types, visible_targets)?;
+            resolve_visible_calls_in_condition(
+                lhs,
+                context,
+                local_types,
+                local_roots,
+                visible_targets,
+                evaluator,
+            )?;
+            resolve_visible_calls_in_condition(
+                rhs,
+                context,
+                local_types,
+                local_roots,
+                visible_targets,
+                evaluator,
+            )?;
         }
         SimpleCondition::Not(inner) => {
-            resolve_visible_calls_in_condition(inner, context, local_types, visible_targets)?;
+            resolve_visible_calls_in_condition(
+                inner,
+                context,
+                local_types,
+                local_roots,
+                visible_targets,
+                evaluator,
+            )?;
         }
     }
     Ok(())
@@ -847,24 +1010,42 @@ fn resolve_visible_calls_in_expression(
     expression: &mut SimpleExpr,
     context: &AnalysisContext<'_>,
     local_types: &mut BTreeMap<String, TypeId>,
+    local_roots: &mut BTreeSet<String>,
     visible_targets: &BTreeMap<String, Vec<VisibleCallTarget>>,
+    evaluator: &mut ScalarConstantEvaluator<'_>,
 ) -> Result<(), String> {
     match expression {
         SimpleExpr::Condition(condition) => {
-            resolve_visible_calls_in_condition(condition, context, local_types, visible_targets)?;
+            resolve_visible_calls_in_condition(
+                condition,
+                context,
+                local_types,
+                local_roots,
+                visible_targets,
+                evaluator,
+            )?;
         }
         SimpleExpr::IndexedPath {
             index,
             nested_index,
             ..
         } => {
-            resolve_visible_calls_in_expression(index, context, local_types, visible_targets)?;
+            resolve_visible_calls_in_expression(
+                index,
+                context,
+                local_types,
+                local_roots,
+                visible_targets,
+                evaluator,
+            )?;
             if let Some(nested_index) = nested_index {
                 resolve_visible_calls_in_expression(
                     nested_index,
                     context,
                     local_types,
+                    local_roots,
                     visible_targets,
+                    evaluator,
                 )?;
             }
         }
@@ -879,7 +1060,9 @@ fn resolve_visible_calls_in_expression(
                     argument,
                     context,
                     local_types,
+                    local_roots,
                     visible_targets,
+                    evaluator,
                 )?;
             }
             if resolved_target.is_some() {
@@ -1031,18 +1214,56 @@ fn resolve_visible_calls_in_expression(
             }
         }
         SimpleExpr::Unary { operand, .. } => {
-            resolve_visible_calls_in_expression(operand, context, local_types, visible_targets)?;
+            resolve_visible_calls_in_expression(
+                operand,
+                context,
+                local_types,
+                local_roots,
+                visible_targets,
+                evaluator,
+            )?;
         }
         SimpleExpr::Binary { lhs, rhs, .. } => {
-            resolve_visible_calls_in_expression(lhs, context, local_types, visible_targets)?;
-            resolve_visible_calls_in_expression(rhs, context, local_types, visible_targets)?;
+            resolve_visible_calls_in_expression(
+                lhs,
+                context,
+                local_types,
+                local_roots,
+                visible_targets,
+                evaluator,
+            )?;
+            resolve_visible_calls_in_expression(
+                rhs,
+                context,
+                local_types,
+                local_roots,
+                visible_targets,
+                evaluator,
+            )?;
+        }
+        SimpleExpr::Identifier(identifier) => {
+            let root = identifier.split('.').next().unwrap_or(identifier);
+            let lexical_root_shadowed = shadowed_compile_time_root(root, context, local_roots);
+            if let Some((id, type_id, value)) = evaluator.materialize_identifier(
+                &context.caller_path,
+                identifier,
+                lexical_root_shadowed,
+            )? {
+                *expression = SimpleExpr::ResolvedConstant { id, type_id, value };
+            } else if let Some(error) = evaluator.unresolved_group_value_error(
+                &context.caller_path,
+                identifier,
+                lexical_root_shadowed,
+            ) {
+                return Err(error);
+            }
         }
         SimpleExpr::DefaultValue(_)
         | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_)
-        | SimpleExpr::Identifier(_) => {}
+        | SimpleExpr::ResolvedConstant { .. } => {}
     }
     Ok(())
 }
@@ -2231,7 +2452,8 @@ fn collect_internal_calls_in_expression(
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_)
-        | SimpleExpr::Identifier(_) => {}
+        | SimpleExpr::Identifier(_)
+        | SimpleExpr::ResolvedConstant { .. } => {}
     }
 }
 
@@ -2775,7 +2997,8 @@ fn validate_guarded_expression(
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_)
-        | SimpleExpr::Identifier(_) => Ok(()),
+        | SimpleExpr::Identifier(_)
+        | SimpleExpr::ResolvedConstant { .. } => Ok(()),
     }
 }
 
@@ -2802,7 +3025,8 @@ fn safe_requires_expansion_argument(expression: &SimpleExpr) -> bool {
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_)
-        | SimpleExpr::Identifier(_) => true,
+        | SimpleExpr::Identifier(_)
+        | SimpleExpr::ResolvedConstant { .. } => true,
     }
 }
 
@@ -2892,7 +3116,8 @@ fn substitute_required_expression(
         | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
-        | SimpleExpr::StringLiteral(_) => expression.clone(),
+        | SimpleExpr::StringLiteral(_)
+        | SimpleExpr::ResolvedConstant { .. } => expression.clone(),
     }
 }
 
@@ -4096,7 +4321,8 @@ fn validate_expression_access_with_expected(
         | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
-        | SimpleExpr::StringLiteral(_) => Ok(()),
+        | SimpleExpr::StringLiteral(_)
+        | SimpleExpr::ResolvedConstant { .. } => Ok(()),
     }
 }
 
@@ -4223,6 +4449,8 @@ pub(crate) fn build_function_data_flow_summaries(
     included_function_ids: &BTreeSet<u32>,
     changed_function_ids: &BTreeSet<u32>,
     types: &TypeTable,
+    graph: &ModuleGraph,
+    constant_index: &CompileTimeDeclarationIndex,
     previous: &[FunctionDataFlowSummary],
     previous_context_fingerprint: u64,
 ) -> Result<(Option<Vec<FunctionDataFlowSummary>>, u64), String> {
@@ -4280,7 +4508,13 @@ pub(crate) fn build_function_data_flow_summaries(
         })
         .collect();
     let mut semantic_types = types.clone();
-    let context = build_semantic_context(files, functions, &mut semantic_types, None)?;
+    let context = build_semantic_context(
+        files,
+        functions,
+        &mut semantic_types,
+        Some(graph),
+        Some(constant_index),
+    )?;
     let reuse_candidate = previous.len() == included_function_ids.len()
         && previous_context_fingerprint == context.fingerprint;
     let mut direct_by_id = Vec::with_capacity(functions.len());
@@ -4770,6 +5004,32 @@ fn hash_expression_shape(expression: &SimpleExpr, hasher: &mut DefaultHasher) {
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_) => {}
+        SimpleExpr::ResolvedConstant { id, type_id, value } => {
+            id.source_path.hash(hasher);
+            id.owner.hash(hasher);
+            id.member.hash(hasher);
+            type_id.hash(hasher);
+            match value {
+                ResolvedConstantValue::Scalar {
+                    bits,
+                    nominal_origin,
+                } => {
+                    0_u8.hash(hasher);
+                    bits.hash(hasher);
+                    if let Some(origin) = nominal_origin {
+                        1_u8.hash(hasher);
+                        origin.path.hash(hasher);
+                        origin.name.hash(hasher);
+                    } else {
+                        0_u8.hash(hasher);
+                    }
+                }
+                ResolvedConstantValue::String(value) => {
+                    1_u8.hash(hasher);
+                    value.hash(hasher);
+                }
+            }
+        }
         SimpleExpr::Condition(condition) => hash_condition_shape(condition, hasher),
         SimpleExpr::Identifier(path) => path.hash(hasher),
         SimpleExpr::IndexedPath {
@@ -4816,6 +5076,7 @@ fn build_semantic_context<'a>(
     functions: &'a [FunctionMeta],
     types: &'a mut TypeTable,
     graph: Option<&'a ModuleGraph>,
+    constant_index: Option<&CompileTimeDeclarationIndex>,
 ) -> Result<AnalysisContext<'a>, String> {
     // Extern declarations are not indexed as FunctionMeta values, so their
     // text-view parameter types may be the first occurrence of `string` in a
@@ -4844,13 +5105,28 @@ fn build_semantic_context<'a>(
             (name.clone(), type_id)
         })
         .collect();
-    let paths = crate::backend::compile_analysis::collect_global_path_types(
+    let fallback_compile_time_context = if graph.is_none() || constant_index.is_none() {
+        Some(crate::backend::compile_analysis::compile_time_context_for_files(files)?)
+    } else {
+        None
+    };
+    let (source_graph, source_index) = fallback_compile_time_context.as_ref().map_or_else(
+        || (graph.unwrap(), constant_index.unwrap()),
+        |(graph, index)| (graph, index),
+    );
+    let layouts = crate::backend::compile_analysis::normalized_source_type_layouts(
         files,
+        source_graph,
+        source_index,
+        &constant_values,
+    )?;
+    let paths = crate::backend::compile_analysis::collect_global_path_types_internal(
+        &layouts,
         types,
         &constant_values,
     )?;
-    let fields = crate::backend::compile_analysis::collect_named_struct_field_types(
-        files,
+    let fields = crate::backend::compile_analysis::collect_named_struct_field_types_from_layouts(
+        &layouts,
         types,
         &constant_values,
     )?;
@@ -5904,7 +6180,8 @@ fn analyze_expression(
         | SimpleExpr::Int(_)
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
-        | SimpleExpr::StringLiteral(_) => {}
+        | SimpleExpr::StringLiteral(_)
+        | SimpleExpr::ResolvedConstant { .. } => {}
         SimpleExpr::Condition(condition) => {
             analyze_condition(condition, context, locals, local_types, aliases, effects)
         }
@@ -6174,6 +6451,7 @@ fn expression_type(
     aliases: &BTreeMap<String, String>,
 ) -> Option<TypeId> {
     match expression {
+        SimpleExpr::ResolvedConstant { type_id, .. } => Some(*type_id),
         SimpleExpr::DefaultValue(type_id) => Some(*type_id),
         SimpleExpr::Int(_) => Some(TYPE_ID_I32),
         SimpleExpr::Float(_) => Some(TYPE_ID_F32),
@@ -6958,6 +7236,12 @@ fn display_expression(expression: &SimpleExpr) -> String {
         SimpleExpr::Float(value) => value.to_string(),
         SimpleExpr::Bool(value) => value.to_string(),
         SimpleExpr::StringLiteral(_) => "string".to_string(),
+        SimpleExpr::ResolvedConstant { id, .. } => match &id.owner {
+            CompileTimeValueOwner::Flat => format!("{}::{}", id.source_path, id.member),
+            CompileTimeValueOwner::Group(group) | CompileTimeValueOwner::Enum(group) => {
+                format!("{}::{}.{}", id.source_path, group, id.member)
+            }
+        },
         SimpleExpr::Condition(condition) => display_condition(condition),
         SimpleExpr::Identifier(name) => name.clone(),
         SimpleExpr::IndexedPath {
@@ -7242,7 +7526,7 @@ mod tests {
         let enum_type = types
             .resolve_or_intern("AdKind")
             .expect("nominal enum type");
-        let context = build_semantic_context(&files, &[], &mut types, None)
+        let context = build_semantic_context(&files, &[], &mut types, None, None)
             .expect("enum constants should be available to semantic analysis");
         let local_types = BTreeMap::new();
         let variant = crate::frontend::body_parser::parse_value_expression("AdKind.Midgame")

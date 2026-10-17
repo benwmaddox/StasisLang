@@ -1,6 +1,6 @@
 # Spec Implementation Status (Rust Compiler)
 
-Last updated: 2026-09-13
+Last updated: 2026-10-17
 
 This document tracks how much of `docs/spec.md` is implemented in the Rust compiler/runtime pipeline.
 It is intended to be concrete and release-oriented (JIT + AOT).
@@ -29,6 +29,7 @@ Status legend:
 | 6. Declarations and Statements | Partial | `let`, `global`, assignment, `if/else`, `for`, `foreach`, `return`, `continue` are supported in the Rust pipeline. Unsupported shapes fail deterministically; no target substitutes or fallback bodies are emitted. |
 | 6.5.1 `for` loop (required init/condition/step) | Implemented | Omitting any of the three `for` header segments is rejected (init is required, condition is required, step is required). |
 | 6.5.5 `continue` | Implemented | Supported and enforced as loop-only. |
+| 6.7 Compile-Time Constants | Implemented (bounded profile) | Flat constants and one-level typed groups share source-aware resolution. Qualified members work in existing constant contexts across JIT/AOT/Wasm; groups create no runtime storage. Strings retain literal view initializers. Formatter, highlighting, completion, hover, references, and rename support groups. |
 | 7. Functions and Calls | Partial | Function declarations and calls are stable; receiver-form and overload resolution produce exact function-identity graph edges shared by reachability and patch planning. |
 | 8. Enums | Implemented | Enums are used by samples and supported by Rust lowering. |
 | 9. Modules and Imports | Implemented | `import` and project-local module resolution are implemented. |
