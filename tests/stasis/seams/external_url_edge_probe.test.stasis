@@ -10,7 +10,7 @@ function main(): i32 {
     input_testkit_reset();
     input_testkit_set_pointer_count(1);
     external_url_activation_count = 0;
-    external_url_last_result = EXTERNAL_URL_INVALID;
+    external_url_last_result = EXTERNAL_URL_RESULT.INVALID;
     return 0;
 }
 

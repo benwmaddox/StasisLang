@@ -1,6 +1,6 @@
 # Language quick reference
 
-<!-- tags: syntax, types, views, generics, effects, imports -->
+<!-- tags: syntax, types, views, generics, effects, imports, constants -->
 
 The [example](examples/src/feature_reference.stasis) and
 [test](examples/tests/feature_reference.test.stasis) compile with this bundle.
@@ -16,6 +16,26 @@ The [example](examples/src/feature_reference.stasis) and
   named structs cannot be returned by value.
 - Local primitive scalar arrays are zero-initialized when their declaration
   executes. `global` owns persistent state; `let` is local; `const` is constant.
+- Flat constants use `const NAME: Type = expression;`. Grouped constants are
+  typed, compile-time-only names with no runtime storage or type. Keep tunable
+  runtime settings in globals and struct fields; groups do not replace state.
+- Group members require qualification, including sibling references, such as
+  `SCANCODE.B` and `SCANCODE.A + 1`.
+- Scalar struct fields may use compile-time defaults (`health: i32 = 100;`).
+  New global and struct-collection storage uses those values; fields without a
+  default remain zero. A local struct binding is a view and does not replay
+  defaults.
+
+```stasis
+const SCANCODE {
+    A: i32 = 4;
+    B: i32 = SCANCODE.A + 1;
+}
+```
+
+Groups are one-level compile-time namespaces. See the
+[constant group rules](../spec.md#67-compile-time-constants) for supported
+types and name resolution.
 
 Generic parameters belong to structs; functions infer them from their first
 struct parameter. See [bounded collections](bounded-collections.md).
@@ -30,6 +50,34 @@ struct ScoreBuffer<T: type, N: i32> {
 
 global scores: ScoreBuffer<i32, 4>;
 ```
+
+Nested global state and struct-backed collections use the same field defaults
+for their newly created scalar lanes:
+
+```stasis
+struct AgentSettings {
+    health: i32 = 100;
+    speed: f32 = 0.1;
+    enabled: bool = true;
+    retries: i32;
+}
+
+struct Agent {
+    settings: AgentSettings;
+}
+
+global player: Agent;
+global agents: Agent[8];
+```
+
+Defaults cover materialized scalar storage, including nested non-array global
+structs and scalar lanes of struct collections. Defaults inside a nested array
+of structs under an outer collection are rejected when that layout has no lane
+to initialize; an otherwise unused defaulted type remains valid.
+
+Defaults do not reset compatible live state. Explicit migration copies existing
+fields and uses incoming defaults only for newly added fields or collection
+growth.
 
 ## Expressions and calls
 

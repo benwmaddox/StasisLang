@@ -43,9 +43,11 @@ struct TextRun {
     height: f32;
 }
 
-const ANIMATION_PLAYBACK_ONCE: i32 = 0;
-const ANIMATION_PLAYBACK_LOOP: i32 = 1;
-const ANIMATION_PLAYBACK_PING_PONG: i32 = 2;
+const ANIMATION_PLAYBACK_MODE {
+    ONCE: i32 = 0;
+    LOOP: i32 = 1;
+    PING_PONG: i32 = 2;
+}
 
 struct AnimationClip {
     first_frame: i32;
@@ -474,11 +476,11 @@ function animation_frame_at(first_frame: i32, frame_count: i32, ticks_per_frame:
         elapsed = 0;
     }
     let step: i32 = elapsed / ticks_per_frame;
-    if (playback_mode == 0) {
+    if (playback_mode == ANIMATION_PLAYBACK_MODE.ONCE) {
         if (step >= frame_count) {
             step = frame_count - 1;
         }
-    } else if (playback_mode == 1) {
+    } else if (playback_mode == ANIMATION_PLAYBACK_MODE.LOOP) {
         step = step % frame_count;
     } else if (frame_count <= 1) {
         step = 0;
@@ -501,7 +503,7 @@ function animation_finished(frame_count: i32, ticks_per_frame: i32, playback_mod
     if (frame_count <= 0 || ticks_per_frame <= 0) {
         return true;
     }
-    return playback_mode == 0 && elapsed_ticks >= 0 && elapsed_ticks / ticks_per_frame >= frame_count;
+    return playback_mode == ANIMATION_PLAYBACK_MODE.ONCE && elapsed_ticks >= 0 && elapsed_ticks / ticks_per_frame >= frame_count;
 }
 
 function frame_at(self: AnimationClip, elapsed_ticks: i32): i32 {

@@ -1,5 +1,42 @@
 import "../src/feature_reference.stasis";
 
+test `typed constant group members provide integer array indices`(): bool {
+    let slots: i32[6];
+    if (SCANCODE.A != 4 || SCANCODE.B != 5 || SCANCODE.B != SCANCODE.A + 1) {
+        return false;
+    }
+
+    slots[SCANCODE.A] = 41;
+    slots[SCANCODE.B] = 52;
+    return slots[SCANCODE.A] == 41 && slots[SCANCODE.B] == 52;
+}
+
+test `nested settings defaults initialize every owner and collection lane`(): bool {
+    if (player.settings.health != 100 || player.settings.speed != 0.1 || !player.settings.enabled || player.settings.retries != 0) {
+        return false;
+    }
+
+    for (let index: i32 = 0; index < 8; index += 1) {
+        if (
+            agents[index].settings.health != 100
+            || agents[index].settings.speed != 0.1
+            || !agents[index].settings.enabled
+            || agents[index].settings.retries != 0
+        ) {
+            return false;
+        }
+    }
+
+    agents[3].settings.health = 75;
+
+    let explicit_override: bool = agents[3].settings.health == 75;
+    let other_state_unchanged: bool = agents[2].settings.health == 100 && agents[3].settings.enabled && player.settings.health == 100 && player.settings.enabled;
+
+    agents[3].settings.health = 100;
+
+    return explicit_override && other_state_unchanged;
+}
+
 test `generic capacity and queue stop at their bounds`(): bool {
     scores.count = 0;
     recent_scores.clear();

@@ -5,11 +5,14 @@ Import `src/stdlib/external_url.stasis` and call
 keyboard activation. The first consumer can pass `https://www.maddoxlabs.com/`.
 The API has the `platform` effect; games never invoke shells or platform code.
 
-| Result | Meaning |
-| --- | --- |
-| `EXTERNAL_URL_INVALID` (-1) | Invalid handle, encoding, URL, or byte length. No dispatch. |
-| `EXTERNAL_URL_IGNORED` (0) | No input authority, deterministic run, unavailable host, or blocked/refused dispatch. |
-| `EXTERNAL_URL_OPENED` (1) | The platform accepted the browser dispatch. Page loading is outside the contract. |
+`EXTERNAL_URL_RESULT` is a typed compile-time constant group. Use its qualified
+members; the former flat names are removed and have no compatibility aliases.
+
+| Qualified member | Value | Replaces | Meaning |
+| --- | ---: | --- | --- |
+| `EXTERNAL_URL_RESULT.INVALID` | -1 | `EXTERNAL_URL_INVALID` | Invalid handle, encoding, URL, or byte length. No dispatch. |
+| `EXTERNAL_URL_RESULT.IGNORED` | 0 | `EXTERNAL_URL_IGNORED` | No input authority, deterministic run, unavailable host, or blocked/refused dispatch. |
+| `EXTERNAL_URL_RESULT.OPENED` | 1 | `EXTERNAL_URL_OPENED` | The platform accepted the browser dispatch. Page loading is outside the contract. |
 
 Do not branch authoritative gameplay on the result. Browser availability and
 user settings are external state. A recording/headless run validates the same

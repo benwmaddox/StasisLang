@@ -10,7 +10,7 @@ not embed any provider SDK or provider-specific policy in the compiler or runtim
 - Requests contain positive service, action, and request IDs plus a non-empty printable
   ASCII key of at most 128 bytes.
 - At most 16 requests may be outstanding. A duplicate request ID is invalid and a full
-  queue returns `PLATFORM_SERVICE_SUBMIT_BUSY`.
+  queue returns `PLATFORM_SERVICE_SUBMIT_RESULT.BUSY`.
 - Responses are delivered in publication order and contain the correlated IDs, a
   bounded status, one `i32` value, and at most 512 bytes of validated UTF-8 text.
 - Each native request also carries an opaque, process-monotonic dispatch token. Host
@@ -19,8 +19,34 @@ not embed any provider SDK or provider-specific policy in the compiler or runtim
 - Polling is non-blocking. An undersized output buffer returns `-1` without consuming
   the response.
 - A host with no registered adapter accepts the request and queues an explicit
-  `PLATFORM_SERVICE_RESPONSE_UNSUPPORTED` response.
+  `PLATFORM_SERVICE_RESPONSE_STATUS.UNSUPPORTED` response.
 - Queue reset clears outstanding work but preserves the registered host adapter.
+
+## Typed result and field constants
+
+The constants below are typed compile-time `i32` members, not enum values or
+runtime state. Qualify every member with its group. The former flat spellings
+are removed without aliases; each value and its meaning remain unchanged.
+
+| Qualified member | Value | Replaces |
+| --- | ---: | --- |
+| `PLATFORM_SERVICE_SUBMIT_RESULT.INVALID` | -1 | `PLATFORM_SERVICE_SUBMIT_INVALID` |
+| `PLATFORM_SERVICE_SUBMIT_RESULT.BUSY` | 0 | `PLATFORM_SERVICE_SUBMIT_BUSY` |
+| `PLATFORM_SERVICE_SUBMIT_RESULT.ACCEPTED` | 1 | `PLATFORM_SERVICE_SUBMIT_ACCEPTED` |
+| `PLATFORM_SERVICE_RESPONSE_STATUS.OK` | 1 | `PLATFORM_SERVICE_RESPONSE_OK` |
+| `PLATFORM_SERVICE_RESPONSE_STATUS.CANCELLED` | 2 | `PLATFORM_SERVICE_RESPONSE_CANCELLED` |
+| `PLATFORM_SERVICE_RESPONSE_STATUS.UNAVAILABLE` | 3 | `PLATFORM_SERVICE_RESPONSE_UNAVAILABLE` |
+| `PLATFORM_SERVICE_RESPONSE_STATUS.UNSUPPORTED` | 4 | `PLATFORM_SERVICE_RESPONSE_UNSUPPORTED` |
+| `PLATFORM_SERVICE_RESPONSE_STATUS.FAILED` | 5 | `PLATFORM_SERVICE_RESPONSE_FAILED` |
+| `PLATFORM_SERVICE_RESPONSE_FIELD.SERVICE` | 0 | `PLATFORM_SERVICE_RESPONSE_SERVICE` |
+| `PLATFORM_SERVICE_RESPONSE_FIELD.ACTION` | 1 | `PLATFORM_SERVICE_RESPONSE_ACTION` |
+| `PLATFORM_SERVICE_RESPONSE_FIELD.REQUEST_ID` | 2 | `PLATFORM_SERVICE_RESPONSE_REQUEST_ID` |
+| `PLATFORM_SERVICE_RESPONSE_FIELD.STATUS` | 3 | `PLATFORM_SERVICE_RESPONSE_STATUS` |
+| `PLATFORM_SERVICE_RESPONSE_FIELD.VALUE` | 4 | `PLATFORM_SERVICE_RESPONSE_VALUE` |
+| `PLATFORM_SERVICE_RESPONSE_FIELD.COUNT` | 5 | `PLATFORM_SERVICE_RESPONSE_FIELD_COUNT` |
+
+The standalone `PLATFORM_SERVICE_KEY_CAPACITY` and
+`PLATFORM_SERVICE_TEXT_CAPACITY` constants remain unchanged.
 
 Request and response queues are native, bounded, and synchronized for callbacks from a
 platform UI thread. Platform adapters must still marshal UI APIs onto the thread their

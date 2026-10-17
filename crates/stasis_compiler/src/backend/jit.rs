@@ -9212,7 +9212,7 @@ test `boolean fail`(): bool { return false; }
             .join("jit_platform_service_mailbox_sample.stasis");
         process.upsert_file(
             sample_path.to_string_lossy().to_string(),
-            "import \"src/stdlib/platform_services.stasis\";\nglobal key: ascii[16];\nglobal fields: i32[5];\nglobal text: utf8[32];\nfunction main(): i32 {\n    key[0] = 112; key[1] = 111; key[2] = 119; key[3] = 101;\n    key[4] = 114; key[5] = 95; key[6] = 117; key[7] = 112;\n    key.length = 8;\n    if (platform_service_submit(1, 2, 77, key) != PLATFORM_SERVICE_SUBMIT_ACCEPTED) { return 91; }\n    if (platform_service_poll(fields, text) != 1) { return 92; }\n    return fields[PLATFORM_SERVICE_RESPONSE_STATUS];\n}\n",
+            "import \"src/stdlib/platform_services.stasis\";\nglobal key: ascii[16];\nglobal fields: i32[5];\nglobal text: utf8[32];\nfunction main(): i32 {\n    key[0] = 112; key[1] = 111; key[2] = 119; key[3] = 101;\n    key[4] = 114; key[5] = 95; key[6] = 117; key[7] = 112;\n    key.length = 8;\n    if (platform_service_submit(1, 2, 77, key) != PLATFORM_SERVICE_SUBMIT_RESULT.ACCEPTED) { return 91; }\n    if (platform_service_poll(fields, text) != 1) { return 92; }\n    return fields[PLATFORM_SERVICE_RESPONSE_FIELD.STATUS];\n}\n",
         );
         process.compile().expect("compile");
         let value = process

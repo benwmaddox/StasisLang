@@ -68,6 +68,37 @@ const SCREEN {
 }
 "#;
 
+const MIGRATED_STDLIB_MAIN_SOURCE: &str = r#"
+import "../../src/stdlib/graphics.stasis";
+import "../../src/stdlib/external_url.stasis";
+import "../../src/stdlib/platform_services.stasis";
+import "../../src/stdlib/ui_single_pass.stasis";
+
+global response_fields: i32[PLATFORM_SERVICE_RESPONSE_FIELD.COUNT];
+global undersized_fields: i32[PLATFORM_SERVICE_RESPONSE_FIELD.STATUS];
+global response_text: utf8[8];
+global empty_key: ascii[16];
+
+function main(): i32 {
+    if (animation_frame_at(10, 3, 2, ANIMATION_PLAYBACK_MODE.PING_PONG, 4) != 12) { return 1; }
+    if (!animation_finished(3, 2, ANIMATION_PLAYBACK_MODE.ONCE, 6)) { return 2; }
+    if (animation_finished(3, 2, ANIMATION_PLAYBACK_MODE.LOOP, 6)) { return 3; }
+
+    if (open_external_url("invalid") != EXTERNAL_URL_RESULT.INVALID) { return 4; }
+    if (platform_service_submit(0, 1, 1, empty_key) != PLATFORM_SERVICE_SUBMIT_RESULT.INVALID) { return 5; }
+    if (platform_service_poll(undersized_fields, response_text) != PLATFORM_SERVICE_SUBMIT_RESULT.INVALID) { return 6; }
+
+    response_fields[PLATFORM_SERVICE_RESPONSE_FIELD.STATUS] = PLATFORM_SERVICE_RESPONSE_STATUS.UNSUPPORTED;
+    if (response_fields[3] != PLATFORM_SERVICE_RESPONSE_STATUS.UNSUPPORTED) { return 7; }
+
+    ui_layout_begin(0.0, 0.0, 100.0, 100.0);
+    ui_tap(1, 0, 0.0, 0.0, 10.0, 10.0);
+    ui_tap(1, 0, 0.0, 0.0, 10.0, 10.0);
+    if (ui_status() != UI_STATUS_FLAG.BAD_ARGUMENT) { return 8; }
+    return 0;
+}
+"#;
+
 fn configure_jit(process: &mut JitProcess) {
     process.set_required_emit_roots(&["main".to_string()]);
     process.upsert_file("main.stasis", MAIN_SOURCE);
@@ -87,6 +118,28 @@ fn configure_wasm(process: &mut WasmProcess) {
     process.upsert_file("main.stasis", MAIN_SOURCE);
     process.upsert_file("display.stasis", DISPLAY_SOURCE);
     process.upsert_file("controls.stasis", CONTROLS_SOURCE);
+}
+
+fn configure_migrated_jit(process: &mut JitProcess) {
+    process
+        .set_project_root(repository_root().to_string_lossy())
+        .expect("set JIT project root");
+    process.set_required_emit_roots(&["main".to_string()]);
+    process.upsert_file(
+        "tests/stasis/constant_groups_migration_probe.test.stasis",
+        MIGRATED_STDLIB_MAIN_SOURCE,
+    );
+}
+
+fn configure_migrated_aot(process: &mut AotProcess) {
+    process
+        .set_project_root(repository_root().to_string_lossy())
+        .expect("set AOT project root");
+    process.set_required_emit_roots(&["main".to_string()]);
+    process.upsert_file(
+        "tests/stasis/constant_groups_migration_probe.test.stasis",
+        MIGRATED_STDLIB_MAIN_SOURCE,
+    );
 }
 
 fn repository_root() -> PathBuf {
@@ -247,5 +300,29 @@ fn imported_typed_groups_execute_in_linked_native_aot() {
         run_linked_aot(&aot),
         0,
         "linked native AOT executable evaluates imported grouped constants"
+    );
+}
+
+#[test]
+fn migrated_stdlib_groups_execute_in_jit_and_linked_native_aot() {
+    let mut jit = JitProcess::new();
+    configure_migrated_jit(&mut jit);
+    jit.compile()
+        .expect("compile real-stdlib grouped-constant JIT fixture");
+    assert_eq!(
+        jit.execute_i32_noarg_by_name("main")
+            .expect("execute real-stdlib grouped-constant JIT fixture"),
+        0,
+        "real animation, external URL, platform service, and UI paths use grouped constants"
+    );
+
+    let mut aot = AotProcess::new();
+    configure_migrated_aot(&mut aot);
+    aot.compile()
+        .expect("compile real-stdlib grouped-constant AOT fixture");
+    assert_eq!(
+        run_linked_aot(&aot),
+        0,
+        "linked native AOT executes real stdlib grouped-constant behavior"
     );
 }
