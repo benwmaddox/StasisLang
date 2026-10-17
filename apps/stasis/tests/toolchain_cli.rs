@@ -617,6 +617,7 @@ fn assert_generated_knowledge(project: &Path) {
         "semantic-edit-and-validation.md",
         "language-quick-reference.md",
         "graphics-and-assets.md",
+        "sdl-scancodes.md",
         "project-and-cli.md",
         "bounded-collections.md",
         "storage-and-host-services.md",
@@ -640,6 +641,7 @@ fn assert_generated_knowledge(project: &Path) {
         "examples/src/loading_screen.stasis",
         "examples/src/display_spaces.stasis",
         "examples/src/feature_reference.stasis",
+        "examples/src/sdl_keyboard.stasis",
         "examples/assets/hero.svg",
         "examples/assets/music.wav",
         "media/loading-screen/success.mp4",
@@ -657,6 +659,7 @@ fn assert_generated_knowledge(project: &Path) {
         "examples/tests/loading_screen.test.stasis",
         "examples/tests/display_spaces.test.stasis",
         "examples/tests/feature_reference.test.stasis",
+        "examples/tests/sdl_keyboard.test.stasis",
     ];
     for example in knowledge_examples.iter().copied() {
         assert_eq!(

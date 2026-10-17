@@ -1,4 +1,5 @@
 import "/vendor/stasis/stdlib/graphics.stasis";
+import "/vendor/stasis/stdlib/sdl_scancodes.stasis";
 
 const SCREEN_W: f32 = 640.0;
 const SCREEN_H: f32 = 360.0;
@@ -110,13 +111,13 @@ function update_pointer(): void {
             ball_active = true;
         }
     }
-    if (asset_breakout_host_frame.keys[80] != 0) {
+    if (asset_breakout_host_frame.keys[SCANCODE.LEFT] != 0) {
         set_paddle_x(paddle_x - 4.0);
     }
-    if (asset_breakout_host_frame.keys[79] != 0) {
+    if (asset_breakout_host_frame.keys[SCANCODE.RIGHT] != 0) {
         set_paddle_x(paddle_x + 4.0);
     }
-    if (asset_breakout_host_frame.keys[44] != 0) {
+    if (asset_breakout_host_frame.keys[SCANCODE.SPACE] != 0) {
         if (round_done) {
             reset_round();
         }

@@ -220,10 +220,10 @@ function update_input(): void {
 
     // Keyboard input: steer left/right with arrow keys.
     let move: i32 = 0;
-    if (bucket_catcher_host_frame.keys[80] != 0) {
+    if (bucket_catcher_host_frame.keys[SCANCODE.LEFT] != 0) {
         move = move - 1;
     }
-    if (bucket_catcher_host_frame.keys[79] != 0) {
+    if (bucket_catcher_host_frame.keys[SCANCODE.RIGHT] != 0) {
         move = move + 1;
     }
     if (move != 0) {

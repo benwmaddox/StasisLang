@@ -11,6 +11,21 @@ const siteRoot = process.env.STASIS_PLAYGROUND_SITE_ROOT
 const evidence = path.resolve(process.argv[3] || "target/browser-playground-acceptance");
 const browserPath = process.env.STASIS_BROWSER_EXECUTABLE || (process.platform === "win32"
   ? "C:/Program Files/Google/Chrome/Application/chrome.exe" : "google-chrome");
+const bundledStdlib = JSON.parse(await readFile(path.join(bundle, "stdlib.json"), "utf8"));
+const scancodeModule = bundledStdlib.find(file => file.path === "vendor/stasis/stdlib/sdl_scancodes.stasis");
+assert.ok(scancodeModule, "browser bundle includes the shared SDL scancode module");
+const scancodeGroup = scancodeModule.source.match(/const\s+SCANCODE\s*\{([\s\S]*?)\}/)?.[1];
+assert.ok(scancodeGroup, "browser bundle includes the SCANCODE group");
+const bundledScancodes = [...scancodeGroup.matchAll(/^\s*([A-Z][A-Z0-9_]*)\s*:\s*i32\s*=/gm)]
+  .map(match => match[1]);
+assert.equal(bundledScancodes.length, 246, "browser bundle contains every ordinary SDL scancode member");
+assert.equal(new Set(bundledScancodes).size, 246, "browser bundle has no duplicate SCANCODE member names");
+for (const [name, value] of [["W", 26], ["S", 22], ["SPACE", 44], ["UP", 82], ["DOWN", 81], ["LEFT", 80], ["RIGHT", 79], ["RETURN", 40], ["DELETE", 76], ["END", 77], ["DIGIT_1", 30], ["DIGIT_0", 39], ["KP_1", 89]]) {
+  assert.match(scancodeGroup, new RegExp(`\\b${name}:\\s*i32\\s*=\\s*${value};`), `browser bundle maps SCANCODE.${name}`);
+}
+for (const marker of ["UNKNOWN", "RESERVED", "COUNT"]) {
+  assert.doesNotMatch(scancodeGroup, new RegExp(`\\b${marker}:\\s*`), `browser bundle excludes SCANCODE.${marker}`);
+}
 await mkdir(evidence, { recursive: true });
 const profile = await mkdtemp(path.join(evidence, "chrome-"));
 const requests = [];
@@ -124,7 +139,9 @@ try {
   const starterSourceParity = await until(() => evaluate("(() => { const editor = window.STASIS_PLAYGROUND_EDITOR; const textarea = document.getElementById('source-editor').value; const highlight = document.getElementById('source-highlight').textContent; const file = editor.getFile('main.stasis')?.source; const view = editor.getEditorView(); return !view.analysisPending && file === textarea && highlight === textarea ? { textarea, highlight, file } : null; })()"), "starter textarea, highlighting, and project source parity");
   assert.equal(starterSourceParity.textarea, starterSourceParity.highlight);
   assert.equal(starterSourceParity.textarea, starterSourceParity.file);
-  assert.match(starterSourceParity.file, /const SCANCODE\s*\{/);
+  assert.match(starterSourceParity.file, /import "vendor\/stasis\/stdlib\/sdl_scancodes\.stasis";/);
+  assert.doesNotMatch(starterSourceParity.file, /\bconst\s+SCANCODE\s*\{/);
+  assert.match(starterSourceParity.file, /sdl_scancodes\.SCANCODE\.(?:UP|W)/);
   const starterCompilation = await evaluate(`(async () => {
     const result = await window.STASIS_PLAYGROUND_EDITOR.compile();
     return { byteLength: result.gameWasm.byteLength, metadata: result.metadata };
@@ -151,16 +168,26 @@ try {
   await evaluate('document.getElementById("run-button").click()');
   await until(() => evaluate("window.STASIS_PLAYGROUND_EDITOR.getState().running"), "Run button starts Pong");
   await delay(1000);
-  const starterMovement = await evaluate("(async () => { const child = window.STASIS_PLAYGROUND_EDITOR.getIframe().contentWindow; const runtime = child.STASIS_PLAYGROUND; runtime.pause(true); const before = runtime.snapshot(); child.dispatchEvent(new child.KeyboardEvent('keydown', { code: 'ArrowUp', key: 'ArrowUp' })); await runtime.step(); child.dispatchEvent(new child.KeyboardEvent('keyup', { code: 'ArrowUp', key: 'ArrowUp' })); const afterArrow = runtime.snapshot(); child.dispatchEvent(new child.KeyboardEvent('keydown', { code: 'KeyW', key: 'w' })); await runtime.step(); child.dispatchEvent(new child.KeyboardEvent('keyup', { code: 'KeyW', key: 'w' })); return { before, afterArrow, afterW: runtime.snapshot() }; })()");
+  const starterMovement = await evaluate("(async () => { const child = window.STASIS_PLAYGROUND_EDITOR.getIframe().contentWindow; const runtime = child.STASIS_PLAYGROUND; runtime.pause(true); const before = runtime.snapshot(); child.dispatchEvent(new child.KeyboardEvent('keydown', { code: 'ArrowUp', key: 'ArrowUp' })); await runtime.step(); child.dispatchEvent(new child.KeyboardEvent('keyup', { code: 'ArrowUp', key: 'ArrowUp' })); const afterArrowUp = runtime.snapshot(); child.dispatchEvent(new child.KeyboardEvent('keydown', { code: 'KeyW', key: 'w' })); await runtime.step(); child.dispatchEvent(new child.KeyboardEvent('keyup', { code: 'KeyW', key: 'w' })); const afterW = runtime.snapshot(); child.dispatchEvent(new child.KeyboardEvent('keydown', { code: 'KeyS', key: 's' })); await runtime.step(); child.dispatchEvent(new child.KeyboardEvent('keyup', { code: 'KeyS', key: 's' })); const afterS = runtime.snapshot(); child.dispatchEvent(new child.KeyboardEvent('keydown', { code: 'ArrowDown', key: 'ArrowDown' })); await runtime.step(); child.dispatchEvent(new child.KeyboardEvent('keyup', { code: 'ArrowDown', key: 'ArrowDown' })); return { before, afterArrowUp, afterW, afterS, afterArrowDown: runtime.snapshot() }; })()");
   assert.equal(
-    starterValue(starterMovement.afterArrow, "state.player.y"),
+    starterValue(starterMovement.afterArrowUp, "state.player.y"),
     starterValue(starterMovement.before, "state.player.y") - 5,
     "ArrowUp moves the Pong paddle through HostFrame scancode input"
   );
   assert.equal(
     starterValue(starterMovement.afterW, "state.player.y"),
-    starterValue(starterMovement.afterArrow, "state.player.y") - 5,
+    starterValue(starterMovement.afterArrowUp, "state.player.y") - 5,
     "W moves the Pong paddle through its grouped scancode"
+  );
+  assert.equal(
+    starterValue(starterMovement.afterS, "state.player.y"),
+    starterValue(starterMovement.afterW, "state.player.y") + 5,
+    "S moves the Pong paddle through its grouped scancode"
+  );
+  assert.equal(
+    starterValue(starterMovement.afterArrowDown, "state.player.y"),
+    starterValue(starterMovement.afterS, "state.player.y") + 5,
+    "ArrowDown moves the Pong paddle through HostFrame scancode input"
   );
   const starterRender = await evaluate(`(() => {
     const child = window.STASIS_PLAYGROUND_EDITOR.getIframe().contentWindow;
@@ -354,18 +381,19 @@ function @effects(counter) on_code_swap(): void { counter += 100; }
   const spriteExampleSourceParity = await until(() => evaluate("(() => { const editor = window.STASIS_PLAYGROUND_EDITOR; const textarea = document.getElementById('source-editor').value; const highlight = document.getElementById('source-highlight').textContent; const file = editor.getFile('main.stasis')?.source; const view = editor.getEditorView(); return !view.analysisPending && file === textarea && highlight === textarea ? { textarea, highlight, file } : null; })()"), "selectable Sprite Example source parity");
   assert.equal(spriteExampleSourceParity.textarea, spriteExampleSourceParity.highlight);
   assert.equal(spriteExampleSourceParity.textarea, spriteExampleSourceParity.file);
-  assert.match(spriteExampleSourceParity.file, /const SCANCODE\s*\{\s*A: i32 = 4;\s*D: i32 = 7;\s*LEFT: i32 = 80;\s*RIGHT: i32 = 79;/);
+  assert.match(spriteExampleSourceParity.file, /import "vendor\/stasis\/stdlib\/sdl_scancodes\.stasis";/);
+  assert.doesNotMatch(spriteExampleSourceParity.file, /\bconst\s+SCANCODE\s*\{/);
   assert.ok(
     spriteExampleSourceParity.file.includes("state.sample_sprite.load_from(" + JSON.stringify(assetResult.second.path) + ", 96, 96);"),
     "the selected imported asset path is embedded in the generated Sprite Example"
   );
-  assert.match(spriteExampleSourceParity.file, /keys\[SCANCODE\.LEFT\]/);
-  assert.match(spriteExampleSourceParity.file, /keys\[SCANCODE\.A\]/);
+  assert.match(spriteExampleSourceParity.file, /keys\[sdl_scancodes\.SCANCODE\.LEFT\]/);
+  assert.match(spriteExampleSourceParity.file, /keys\[sdl_scancodes\.SCANCODE\.A\]/);
   const spriteExampleCompilation = await evaluate("window.STASIS_PLAYGROUND_EDITOR.compile().then(result => ({ byteLength: result.gameWasm.byteLength, metadata: result.metadata }))");
   assert.ok(spriteExampleCompilation.byteLength > 0, "the selectable Sprite Example must compile with the browser compiler");
   await evaluate('document.getElementById("restart-button").click()');
   await until(() => evaluate("(() => { const editor = window.STASIS_PLAYGROUND_EDITOR; return editor.getState().running && editor.getState().status === 'Fresh game session started.' && editor.getIframe()?.contentWindow?.STASIS_PLAYGROUND ? true : null; })()"), "New session runs the selectable Sprite Example");
-  const spriteExampleMovement = await evaluate("(async () => { const child = window.STASIS_PLAYGROUND_EDITOR.getIframe().contentWindow; const runtime = child.STASIS_PLAYGROUND; runtime.pause(true); const before = runtime.snapshot(); child.dispatchEvent(new child.KeyboardEvent('keydown', { code: 'ArrowLeft', key: 'ArrowLeft' })); await runtime.step(); child.dispatchEvent(new child.KeyboardEvent('keyup', { code: 'ArrowLeft', key: 'ArrowLeft' })); return { before, afterLeft: runtime.snapshot() }; })()");
+  const spriteExampleMovement = await evaluate("(async () => { const child = window.STASIS_PLAYGROUND_EDITOR.getIframe().contentWindow; const runtime = child.STASIS_PLAYGROUND; runtime.pause(true); const before = runtime.snapshot(); child.dispatchEvent(new child.KeyboardEvent('keydown', { code: 'ArrowLeft', key: 'ArrowLeft' })); await runtime.step(); child.dispatchEvent(new child.KeyboardEvent('keyup', { code: 'ArrowLeft', key: 'ArrowLeft' })); const afterLeft = runtime.snapshot(); child.dispatchEvent(new child.KeyboardEvent('keydown', { code: 'ArrowRight', key: 'ArrowRight' })); await runtime.step(); child.dispatchEvent(new child.KeyboardEvent('keyup', { code: 'ArrowRight', key: 'ArrowRight' })); return { before, afterLeft, afterRight: runtime.snapshot() }; })()");
   const spriteExampleX = (snapshot, name) => {
     const entry = spriteExampleCompilation.metadata.replayCompatibility.state_snapshot.entries.find(entry => entry.path === name);
     assert.ok(entry, "missing Sprite Example snapshot field " + name);
@@ -376,6 +404,11 @@ function @effects(counter) on_code_swap(): void { counter += 100; }
     spriteExampleX(spriteExampleMovement.afterLeft, "state.sprite_x"),
     spriteExampleX(spriteExampleMovement.before, "state.sprite_x") - 3,
     "ArrowLeft moves the selected asset through its grouped HostFrame scancode"
+  );
+  assert.equal(
+    spriteExampleX(spriteExampleMovement.afterRight, "state.sprite_x"),
+    spriteExampleX(spriteExampleMovement.afterLeft, "state.sprite_x") + 3,
+    "ArrowRight moves the selected asset through its grouped HostFrame scancode"
   );
   const spriteExampleArchive = await evaluate("(async()=>{const blob=await window.STASIS_PLAYGROUND_EDITOR.exportProject(); const bytes=new Uint8Array(await blob.arrayBuffer()); let text=''; for(let i=0;i<bytes.length;i+=16384)text+=String.fromCharCode(...bytes.subarray(i,i+16384));return btoa(text)})()");
   const spriteExampleArchiveFiles = new Map();
@@ -444,7 +477,7 @@ function render(): i32 { clear(0.04, 0.07, 0.12, 1.0); draw_sprite(uploaded.spri
   assert.deepEqual(failures, []);
   const receipt = {schema:"stasis.browser_playground_acceptance.v1",siteRoot,browser:await call("Browser.getVersion"),
     starterCompilation,starterRender,starterMatch,
-    starterMovement:{beforeY:starterValue(starterMovement.before,"state.player.y"),afterArrowY:starterValue(starterMovement.afterArrow,"state.player.y"),afterWY:starterValue(starterMovement.afterW,"state.player.y")},
+    starterMovement:{beforeY:starterValue(starterMovement.before,"state.player.y"),afterArrowY:starterValue(starterMovement.afterArrowUp,"state.player.y"),afterWY:starterValue(starterMovement.afterW,"state.player.y"),afterSY:starterValue(starterMovement.afterS,"state.player.y"),afterArrowDownY:starterValue(starterMovement.afterArrowDown,"state.player.y")},
     starterSettingsSwaps:{firstMode:starterSettingsSwaps.firstMode,secondMode:starterSettingsSwaps.secondMode,winScore:starterValue(starterSettingsSwaps.afterSecond,"state.settings.win_score"),playerScore:starterValue(starterSettingsSwaps.afterSecond,"state.player.score"),playerY:starterValue(starterSettingsSwaps.afterSecond,"state.player.y")},
     starterFreshSession:{winScore:starterValue(starterFreshSession,"state.settings.win_score"),playerScore:starterValue(starterFreshSession,"state.player.score"),cpuScore:starterValue(starterFreshSession,"state.cpu.score"),gameOver:starterValue(starterFreshSession,"state.game_over"),playerY:starterValue(starterFreshSession,"state.player.y")},
     starterExportState,editorAnalysis,first,snapshots,rollback,overlappingSessions,assets:assetResult,selectableSpriteExample,export:{files:[...exportedFiles.keys()],byteLength:archiveBytes.length,state:exportedState},

@@ -1607,3 +1607,86 @@ contains inspected starter-pong.png, starter-pong-game-over.png and
 starter-pong-restarted.png showing the preserved game and restart sequence.
 Encoded browser.mp4 was inspected through decoded frames at 1, 6 and 12 seconds;
 they show Pong, live compilation/rollback and the imported-asset render sequence.
+
+## 2026-10-17 - MaddoxTasks #845: shared SDL scancode constants
+
+Theory before implementation: SDL scancodes are physical-key slot numbers at the
+HostFrame boundary, not runtime state or a text-input API. The existing typed
+constant/import path can expose the complete table without changing the 512-slot
+host layout. Predict that replacing literal indexes with imported i32 members
+preserves key reads in JIT, linked native AOT, and the browser.
+
+- Added the complete 246-entry SCANCODE group to sdl_scancodes.stasis while
+  retaining the existing Scancode enum. Values and order match the reviewed
+  SDL 3.4.10 header (249 declarations including three excluded markers).
+  UNKNOWN=0, RESERVED=400 and COUNT=512 are not indexable members. DIGIT_0..9
+  are explicit legal names for SDL's numeric suffixes; LANG6..9 remain documented
+  reserved named slots. No HostFrame ABI, input mapping or runtime storage changed.
+- Added a pinned-header generator/checker and independent full-table oracle.
+  Generation rejects changed pins/hash, unknown expressions, conditionals,
+  aliases, mapped-name collisions and marker-value collisions. Its output
+  round-trips through the official formatter. Eleven Python regressions pass.
+- Migrated first-party samples, README, Pong and Sprite starters to shared
+  imports. Kept web_export_smoke keys[9] as its custom host signal and raw ABI
+  probes as independent wire-contract observations. The quick-reference A/B
+  group remains an intentional declaration/sibling-reference language fixture,
+  now explicitly linking the shared keyboard API.
+- Shipped the short SDL guide through docs/knowledge and the actual SDK required
+  document list. Its exact source excerpt has executable backing and a test
+  that writes A, LEFT and neither into the real host-memory seam and calls the
+  actual HostFrame.refresh path. The generated SDK knowledge gate passes.
+- Updated all six existing vendor workspaces through the official CLI, preserving
+  their established tracked/ignored policy. Hash-v2 status verifies current,
+  pin_verified and no local changes with SHA-256
+  0d9cd7a1bab476cdf9abc548ccc6ac570fab6d314093e3b89d77dfb2cd4b1c43.
+  Independent root audit verifies all 80 paths and normalized source bytes in
+  each snapshot; the six workspace suites pass 44 tests in total.
+- Tests-first native fixtures failed on the missing imported SCANCODE owner.
+  After implementation Linux JIT/linked AOT/table tests pass, as do Windows
+  JIT and signed linked AOT. The exact Linux core CI command passes 1,345 tests
+  across 50 targets. Windows full Stasis behavior and generated knowledge gates
+  pass. Rust formatting, workflow-policy tests, ABI981/host1167 and diff checks pass.
+- Real Brickout native AOT compile/two-tick execution tests pass (2), as do the
+  actual web_export_smoke and Brickout web-package tests (1 each). Bucket Catcher
+  compiles through the supported exact-file headless legacy CLI in JIT and AOT;
+  both report one successful compile, zero failures and zero runtime launches,
+  and AOT reports a linked-image activation. Asset Breakout and Brickout Defense
+  prepare/check/test/dev builds pass.
+- Pointer Pong prepare/check/dev build pass. Its extra project suite reports
+  three passing tests and one score-formatting failure. The same fresh CLI and
+  exact pre-task 58b4d830 source reproduce the identical failure; the task source
+  was restored byte-for-byte. That unchanged scoring failure is disclosed and
+  retained, not converted to a pass or repaired as part of this keyboard API task.
+- Browser compiler library tests pass 22/22, source/swap Node tests 25/25, and a
+  fresh locked Wasm build plus official staging and Chrome compiler smoke pass.
+  The engine remains 3,312,948 bytes with SHA-256
+  b666e63974f96fe61166f63b649e03ea754617279079840768400495fae8e87a;
+  the new API is delivered in stdlib.json, whose module exactly matches source.
+- Final real Chrome acceptance passes with 244 captured frames, zero failures,
+  full source/export parity and a 662,334-byte export. ArrowUp/W/S/ArrowDown move
+  y144 ->139 ->134 ->139 ->144. Two swaps retain win6/score2/y130; New session
+  restores win5/zero scores/y144. Space restart and Sprite left/right movement
+  pass. All six independent final reviewer personas are GREEN.
+- StaticWasm/public-site publication remains in blocked #844; this task changes
+  only StasisLang and its SDK/browser delivery, without reapplying that recovery stash.
+
+Theory gained: source tables, SDK documentation, editor project graphs and actual
+host-memory reads are separate contracts. Complete imports and compiled excerpts
+make failures visible; the native, SDK and Chrome observations agree on the same
+physical-key slots. Another host-supported SDL key should use the same namespace
+without changing memory layout or duplicating a game-local table.
+
+Good: independent full-header/source/vendor inventories and actual JIT/AOT/browser
+execution verified the API beyond representative copied constants.
+Bad: an incomplete editor fixture hid its imports; the new guide initially lacked
+compiled backing, and an external WSL auditor initially matched two empty trees.
+Adjustment: validate fixture graph closure, back every shipped guide snippet with
+real checked code, and require existing nonempty inventories and exact file counts
+before accepting cross-platform audit results.
+
+Visual evidence: D:/code/.automation-evidence/nightly-20261017-task845-browser-final2/
+contains inspected starter-pong.png, starter-pong-game-over.png and
+starter-pong-restarted.png showing the preserved game, scoring and restart.
+Encoded browser.mp4 was inspected through decoded frames at 1, 3 and 6 seconds,
+showing Pong movement and the live compile/game transition. Receipt fields prove
+keyboard positions, settings/state preservation, new-session defaults and exports.

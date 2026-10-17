@@ -4,7 +4,7 @@ import "brickout_revenge_v1.stasis";
 test `brickout refresh input model maps testkit snapshot`(): bool {
     input_testkit_reset();
     input_testkit_set_quit_requested(false);
-    input_testkit_set_key_down(41, true);
+    input_testkit_set_key_down(SCANCODE.ESCAPE, true);
     input_testkit_set_pointer_count(1);
     input_testkit_set_pointer(0, 17, true, true, false, 33.5, 44.5);
 

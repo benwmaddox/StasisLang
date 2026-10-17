@@ -37,6 +37,10 @@ Groups are one-level compile-time namespaces. See the
 [constant group rules](../spec.md#67-compile-time-constants) for supported
 types and name resolution.
 
+For keyboard input, import the shared [SDL scancode group](sdl-scancodes.md)
+instead of declaring a local numeric table. The example above demonstrates
+group declarations and sibling references.
+
 Generic parameters belong to structs; functions infer them from their first
 struct parameter. See [bounded collections](bounded-collections.md).
 

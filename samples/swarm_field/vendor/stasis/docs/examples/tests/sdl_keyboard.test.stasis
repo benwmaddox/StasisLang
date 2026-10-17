@@ -1,0 +1,18 @@
+import "../src/sdl_keyboard.stasis";
+import "/vendor/stasis/stdlib/sdl_scancodes.stasis";
+
+test `left movement reads SDL A and LEFT from refreshed host snapshots`(): bool {
+    host_i32[32 + sdl_scancodes.SCANCODE.A] = 1;
+    if (!should_move_left()) {
+        return false;
+    }
+
+    host_i32[32 + sdl_scancodes.SCANCODE.A] = 0;
+    host_i32[32 + sdl_scancodes.SCANCODE.LEFT] = 1;
+    if (!should_move_left()) {
+        return false;
+    }
+
+    host_i32[32 + sdl_scancodes.SCANCODE.LEFT] = 0;
+    return !should_move_left();
+}

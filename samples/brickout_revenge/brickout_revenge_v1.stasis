@@ -2783,7 +2783,7 @@ function compute_delta_ms(): i32 {
 
 function refresh_input_model(): void {
     input_model.quit_requested = brickout_host_frame.quit_requested;
-    input_model.escape_down = brickout_host_frame.keys[41] != 0;
+    input_model.escape_down = brickout_host_frame.keys[SCANCODE.ESCAPE] != 0;
 
     let count: i32 = brickout_host_frame.pointer_count;
     if (count < 0) {

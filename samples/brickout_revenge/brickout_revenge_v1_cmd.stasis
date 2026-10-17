@@ -2824,7 +2824,7 @@ function tick(): i32 {
     state.timers.frame_start = brickout_host_frame.time_ms;
     let bench_start_us: i32 = brickout_host_frame.time_us;
 
-    if (brickout_host_frame.keys[41] != 0) {
+    if (brickout_host_frame.keys[SCANCODE.ESCAPE] != 0) {
         state.running = 0;
     }
 

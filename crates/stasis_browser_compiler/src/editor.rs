@@ -1581,6 +1581,28 @@ mod tests {
         }
     }
 
+    fn assert_editor_module_graph_loads(
+        active_path: &str,
+        active_source: &str,
+        files: &[EditorSourceFile],
+    ) {
+        let mut sources = files
+            .iter()
+            .map(|file| (file.path.clone(), file.source.clone()))
+            .collect::<BTreeMap<_, _>>();
+        sources.insert(active_path.to_string(), active_source.to_string());
+        let roots = sources.keys().cloned().collect::<Vec<_>>();
+        ModuleGraph::load(roots, |path| {
+            sources
+                .get(path)
+                .cloned()
+                .ok_or_else(|| format!("editor source file '{path}' is not loaded"))
+        })
+        .unwrap_or_else(|diagnostic| {
+            panic!("editor completion fixture has an invalid import graph: {diagnostic:?}")
+        });
+    }
+
     fn request(
         path: &str,
         source: &str,
@@ -1616,6 +1638,22 @@ mod tests {
             file(
                 "vendor/stasis/stdlib/asset_tasks.stasis",
                 include_str!("../../../src/stdlib/asset_tasks.stasis"),
+            ),
+            file(
+                "vendor/stasis/stdlib/stdlib.stasis",
+                include_str!("../../../src/stdlib/stdlib.stasis"),
+            ),
+            file(
+                "vendor/stasis/stdlib/memory.stasis",
+                include_str!("../../../src/stdlib/memory.stasis"),
+            ),
+            file(
+                "vendor/stasis/stdlib/internal/host_window_request.stasis",
+                include_str!("../../../src/stdlib/internal/host_window_request.stasis"),
+            ),
+            file(
+                "vendor/stasis/stdlib/internal/host_frame_raw.stasis",
+                include_str!("../../../src/stdlib/internal/host_frame_raw.stasis"),
             ),
             file(
                 "vendor/stasis/stdlib/internal/gfx_cmd.stasis",
@@ -2117,6 +2155,55 @@ mod tests {
         let suggestions = result["completions"].as_array().unwrap();
         assert!(suggestions.iter().any(|item| item["label"] == "Left"));
         assert!(suggestions.iter().any(|item| item["label"] == "Right"));
+
+        let graph_probe = "import \"vendor/stasis/stdlib/sdl_scancodes.stasis\"; function main(): i32 { sdl_scancodes.SCANCODE.W }";
+        assert_editor_module_graph_loads("main.stasis", graph_probe, &files);
+
+        for name in [
+            "W", "S", "SPACE", "UP", "DOWN", "LEFT", "RIGHT", "RETURN", "DELETE", "END", "DIGIT_1",
+            "DIGIT_0", "KP_1",
+        ] {
+            let source = format!(
+                "import \"vendor/stasis/stdlib/sdl_scancodes.stasis\"; function main(): i32 {{ sdl_scancodes.SCANCODE.{name} }}"
+            );
+            let cursor = source.rfind(name).unwrap() + name.len();
+            let result = analysis(
+                &request(
+                    "main.stasis",
+                    &source,
+                    files.clone(),
+                    Some(source[..cursor].encode_utf16().count()),
+                ),
+                None,
+            );
+            let suggestions = result["completions"].as_array().unwrap();
+            let member = suggestions
+                .iter()
+                .find(|item| item["label"] == name)
+                .unwrap_or_else(|| panic!("typed SCANCODE.{name} completion"));
+            assert_eq!(member["kind"], "constant");
+            assert_eq!(member["detail"], "constant: i32");
+        }
+        for name in ["UNKNOWN", "RESERVED", "COUNT"] {
+            let source = format!(
+                "import \"vendor/stasis/stdlib/sdl_scancodes.stasis\"; function main(): i32 {{ sdl_scancodes.SCANCODE.{name} }}"
+            );
+            let cursor = source.rfind(name).unwrap() + name.len();
+            let result = analysis(
+                &request(
+                    "main.stasis",
+                    &source,
+                    files.clone(),
+                    Some(source[..cursor].encode_utf16().count()),
+                ),
+                None,
+            );
+            assert!(!result["completions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["label"] == name));
+        }
 
         let source = "function main(): i32 { return gfx_cmd_construction_; }";
         let cursor = source.find("gfx_cmd_construction_").unwrap() + "gfx_cmd_construction_".len();

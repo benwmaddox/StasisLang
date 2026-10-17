@@ -24,6 +24,8 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
   for (const [index, source] of starterSources().entries()) {
     assert.match(source, /import "vendor\/stasis\/stdlib\/graphics\.stasis";/);
     assert.match(source, /import "vendor\/stasis\/stdlib\/host_frame\.stasis";/);
+    assert.match(source, /import "vendor\/stasis\/stdlib\/sdl_scancodes\.stasis";/);
+    assert.doesNotMatch(source, /\bconst\s+SCANCODE\s*\{/);
     assert.doesNotMatch(source, /@extern\("web_/);
     assert.doesNotMatch(source, /enum_to_i32/);
     assert.match(source, /input_frame: HostFrame;/);
@@ -36,14 +38,10 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
     if (index === 1) {
       assert.match(source, /init_window\(640, 360,/);
       assert.match(source, /input_frame\.pointers\[0\]\.x_logical/);
-      assert.match(source, /input_frame\.keys\[SCANCODE\.LEFT\]/);
-      assert.match(source, /input_frame\.keys\[SCANCODE\.RIGHT\]/);
-      const scancodes = source.match(/const SCANCODE\s*\{([^}]*)\}/)?.[1];
-      assert.ok(scancodes, "Sprite starter declares a typed SCANCODE group");
-      for (const [name, value] of [["A", "4"], ["D", "7"], ["LEFT", "80"], ["RIGHT", "79"]]) {
-        assert.match(scancodes, new RegExp("\\b" + name + ":\\s*i32\\s*=\\s*" + value + ";"));
-      }
-      assert.equal([...scancodes.matchAll(/\b\w+:\s*i32\s*=/g)].length, 4);
+      assert.match(source, /input_frame\.keys\[sdl_scancodes\.SCANCODE\.LEFT\]/);
+      assert.match(source, /input_frame\.keys\[sdl_scancodes\.SCANCODE\.RIGHT\]/);
+      assert.match(source, /input_frame\.keys\[sdl_scancodes\.SCANCODE\.A\]/);
+      assert.match(source, /input_frame\.keys\[sdl_scancodes\.SCANCODE\.D\]/);
       assert.doesNotMatch(source, /\bconst\s+SCANCODE_/);
       assert.match(source, /sample_sprite: Sprite;/);
       assert.match(source, /sample_sprite\.load_from\(/);
@@ -55,18 +53,10 @@ test("playground starters use canonical portable Stasis APIs and types", () => {
       assert.match(source, /cpu: PaddleState;/);
       assert.match(source, /game_over: bool;/);
       assert.doesNotMatch(source, /\b(?:ball_[xy]|ball_v[xy]|(?:player|cpu)_(?:y|score|score_text))\b/);
-      const scancodes = source.match(/const SCANCODE\s*\{([^}]*)\}/)?.[1];
-      assert.ok(scancodes, "Pong starter declares a typed SCANCODE group");
-      for (const [name, value] of [["W", "26"], ["S", "22"], ["SPACE", "44"], ["UP", "82"], ["DOWN", "81"]]) {
-        assert.match(scancodes, new RegExp("\\b" + name + ":\\s*i32\\s*=\\s*" + value + ";"));
-      }
-      assert.equal([...scancodes.matchAll(/\b\w+:\s*i32\s*=/g)].length, 5);
       assert.doesNotMatch(source, /\bconst\s+SCANCODE_/);
-      assert.match(source, /input_frame\.keys\[SCANCODE\.UP\]/);
-      assert.match(source, /input_frame\.keys\[SCANCODE\.W\]/);
-      assert.match(source, /input_frame\.keys\[SCANCODE\.DOWN\]/);
-      assert.match(source, /input_frame\.keys\[SCANCODE\.S\]/);
-      assert.match(source, /input_frame\.keys\[SCANCODE\.SPACE\]/);
+      for (const name of ["UP", "W", "DOWN", "S", "SPACE"]) {
+        assert.match(source, new RegExp("input_frame\\.keys\\[sdl_scancodes\\.SCANCODE\\." + name + "\\]"));
+      }
       assert.match(source, /input_frame\.pointers\[0\]\.y_logical/);
       assert.match(source, /input_frame\.pointers\[0\]\.went_down/);
       assert.match(source, /state\.arena\.load_from\("assets\/pong-arena\.png"/);
