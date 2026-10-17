@@ -1562,3 +1562,48 @@ Adjustment: inspect each workspace manifest and the selected CLI interface befor
 recording validation commands, and use content hashes as vendor provenance evidence.
 
 Visual evidence: not applicable; these API spelling changes preserve runtime behavior.
+
+## 2026-10-17 - MaddoxTasks #844: grouped browser starters
+
+Pong and the selectable Sprite starter use local typed SCANCODE groups with the
+same i32 key slots. Existing PongSettings, state ownership and gameplay remain
+unchanged. The coordinated website change will pin this exact merged source;
+production deployment is tracked separately and is not claimed by this slice.
+
+Validation:
+- Tests-first starter assertions failed against the flat declarations, then all
+  12 playground Node tests passed. JavaScript syntax and final diff checks pass.
+- Fresh browser compiler release build completed in 51.55 seconds; official stage
+  produced 3,312,948 bytes with SHA-256
+  b666e63974f96fe61166f63b649e03ea754617279079840768400495fae8e87a.
+  Real Chrome compiler smoke and the final playground acceptance passed.
+- Final browser run captured 216 frames with no failures. It edited the actual
+  textarea, compared textarea/highlight/editor source, compiled the grouped Pong,
+  and byte-compared exported project/main.stasis with the displayed source.
+  ArrowUp/W moved the paddle from 144 to 139 to 134. Scoring and Space restart passed.
+  Two compatible swaps retained live settings/state (win score 6, player score 2,
+  paddle 130); New session restored source defaults (score target 5, scores 0, y144).
+- The selectable Sprite starter was generated through its real UI for the selected
+  imported SVG, checked for that exact asset path, compiled to 43,950 bytes, and
+  executed ArrowLeft movement 282 to 279 through HostFrame. Its exported source
+  exactly matched the displayed text. Existing PNG/SVG, rollback, concurrent-session
+  and exported-game checks also passed; the main export was 656,071 bytes.
+- Independent final six-persona source review is GREEN. The two starter source
+  changes contain no runtime fallback, aliases, or input/settings redesign.
+
+Theory gained: a source disclosure is an executable contract across textarea,
+highlighting, compiler input and exported project. Real UI edits and byte parity
+checks verify this mapping; inspecting only the editor API can miss a stale view.
+An adjacent starter should use its own compile metadata for state observations.
+
+Good: actual grouped-source compilation and input events cover both changed starters.
+Bad: the initial harness exercised a synthetic asset program rather than the actual
+selectable Sprite starter, leaving the changed starter's execution unproven.
+Adjustment: exercise each changed starter through its existing UI, exact selected
+asset, native source representation and export, then inspect captured media.
+
+Visual evidence: D:/code/.automation-evidence/nightly-20261017-task844-browser-final/
+contains inspected starter-pong.png, starter-pong-game-over.png and
+starter-pong-restarted.png showing the preserved game and restart sequence.
+Encoded browser.mp4 was inspected through decoded frames at 1, 6 and 12 seconds;
+they show Pong, live compilation/rollback and the imported-asset render sequence.

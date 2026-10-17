@@ -2,11 +2,13 @@ export const DEFAULT_PONG_SOURCE = `import "vendor/stasis/stdlib/graphics.stasis
 import "vendor/stasis/stdlib/host_frame.stasis";
 
 // HostFrame.keys uses SDL scancode slots.
-const SCANCODE_W: i32 = 26;
-const SCANCODE_S: i32 = 22;
-const SCANCODE_SPACE: i32 = 44;
-const SCANCODE_UP: i32 = 82;
-const SCANCODE_DOWN: i32 = 81;
+const SCANCODE {
+    W: i32 = 26;
+    S: i32 = 22;
+    SPACE: i32 = 44;
+    UP: i32 = 82;
+    DOWN: i32 = 81;
+}
 
 struct BallState {
     sprite: Sprite;
@@ -97,9 +99,9 @@ function clamp_paddle(y: f32): f32 {
 function move_player(): void {
     if (state.input_frame.pointer_count > 0 && state.input_frame.pointers[0].is_down) {
         state.player.y = state.input_frame.pointers[0].y_logical - state.settings.paddle_height / 2.0;
-    } else if (state.input_frame.keys[SCANCODE_UP] != 0 || state.input_frame.keys[SCANCODE_W] != 0) {
+    } else if (state.input_frame.keys[SCANCODE.UP] != 0 || state.input_frame.keys[SCANCODE.W] != 0) {
         state.player.y -= 5.0;
-    } else if (state.input_frame.keys[SCANCODE_DOWN] != 0 || state.input_frame.keys[SCANCODE_S] != 0) {
+    } else if (state.input_frame.keys[SCANCODE.DOWN] != 0 || state.input_frame.keys[SCANCODE.S] != 0) {
         state.player.y += 5.0;
     }
     state.player.y = clamp_paddle(state.player.y);
@@ -178,7 +180,7 @@ function check_score(): void {
 function tick(): i32 {
     state.input_frame.refresh();
     if (state.game_over) {
-        if (state.input_frame.keys[SCANCODE_SPACE] != 0
+        if (state.input_frame.keys[SCANCODE.SPACE] != 0
             || (state.input_frame.pointer_count > 0 && state.input_frame.pointers[0].went_down)) {
             reset_match();
         }
