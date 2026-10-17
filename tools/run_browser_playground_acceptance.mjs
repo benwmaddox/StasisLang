@@ -119,6 +119,12 @@ try {
   await until(() => evaluate("Boolean(window.STASIS_PLAYGROUND_EDITOR)"), "editor API");
   await evaluate("window.STASIS_PLAYGROUND_EDITOR.ready");
   const readyBoundary = requests.length;
+  await evaluate("(() => { const editor = document.getElementById('source-editor'); editor.focus(); editor.setSelectionRange(editor.value.length, editor.value.length); })()");
+  await call("Input.insertText", { text: "\n// Browser textarea source parity check\n" });
+  const starterSourceParity = await until(() => evaluate("(() => { const editor = window.STASIS_PLAYGROUND_EDITOR; const textarea = document.getElementById('source-editor').value; const highlight = document.getElementById('source-highlight').textContent; const file = editor.getFile('main.stasis')?.source; const view = editor.getEditorView(); return !view.analysisPending && file === textarea && highlight === textarea ? { textarea, highlight, file } : null; })()"), "starter textarea, highlighting, and project source parity");
+  assert.equal(starterSourceParity.textarea, starterSourceParity.highlight);
+  assert.equal(starterSourceParity.textarea, starterSourceParity.file);
+  assert.match(starterSourceParity.file, /const SCANCODE\s*\{/);
   const starterCompilation = await evaluate(`(async () => {
     const result = await window.STASIS_PLAYGROUND_EDITOR.compile();
     return { byteLength: result.gameWasm.byteLength, metadata: result.metadata };
@@ -129,9 +135,33 @@ try {
   assert.ok(!starterCompilation.metadata.replayCompatibility.state_snapshot.entries
     .some(entry => entry.path.startsWith("state.input_frame.")),
   "hot swaps must preserve game state without restoring host input observations");
+  const starterValue = (snapshot, name) => {
+    const entry = starterCompilation.metadata.replayCompatibility.state_snapshot.entries.find(entry => entry.path === name);
+    assert.ok(entry, "missing starter snapshot field " + name);
+    const bytes = Buffer.from(Object.values(snapshot.bytes));
+    if (entry.storage_type === "bool") {
+      assert.equal(entry.element_bytes, 1, "Wasm snapshots store booleans as one byte");
+      return bytes.readUInt8(entry.offset) !== 0;
+    }
+    if (entry.storage_type === "f32") return bytes.readFloatLE(entry.offset);
+    assert.equal(entry.storage_type, "i32", "unsupported starter snapshot lane " + entry.storage_type);
+    return bytes.readInt32LE(entry.offset);
+  };
   await call("Page.startScreencast", { format: "png", maxWidth: 1440, maxHeight: viewportHeight, everyNthFrame: 3 });
-  await evaluate("window.STASIS_PLAYGROUND_EDITOR.run()");
+  await evaluate('document.getElementById("run-button").click()');
+  await until(() => evaluate("window.STASIS_PLAYGROUND_EDITOR.getState().running"), "Run button starts Pong");
   await delay(1000);
+  const starterMovement = await evaluate("(async () => { const child = window.STASIS_PLAYGROUND_EDITOR.getIframe().contentWindow; const runtime = child.STASIS_PLAYGROUND; runtime.pause(true); const before = runtime.snapshot(); child.dispatchEvent(new child.KeyboardEvent('keydown', { code: 'ArrowUp', key: 'ArrowUp' })); await runtime.step(); child.dispatchEvent(new child.KeyboardEvent('keyup', { code: 'ArrowUp', key: 'ArrowUp' })); const afterArrow = runtime.snapshot(); child.dispatchEvent(new child.KeyboardEvent('keydown', { code: 'KeyW', key: 'w' })); await runtime.step(); child.dispatchEvent(new child.KeyboardEvent('keyup', { code: 'KeyW', key: 'w' })); return { before, afterArrow, afterW: runtime.snapshot() }; })()");
+  assert.equal(
+    starterValue(starterMovement.afterArrow, "state.player.y"),
+    starterValue(starterMovement.before, "state.player.y") - 5,
+    "ArrowUp moves the Pong paddle through HostFrame scancode input"
+  );
+  assert.equal(
+    starterValue(starterMovement.afterW, "state.player.y"),
+    starterValue(starterMovement.afterArrow, "state.player.y") - 5,
+    "W moves the Pong paddle through its grouped scancode"
+  );
   const starterRender = await evaluate(`(() => {
     const child = window.STASIS_PLAYGROUND_EDITOR.getIframe().contentWindow;
     child.STASIS_PLAYGROUND.pause(true);
@@ -146,6 +176,12 @@ try {
   const starterArchive = await evaluate(`(async()=>{const blob=await window.STASIS_PLAYGROUND_EDITOR.exportProject(); const bytes=new Uint8Array(await blob.arrayBuffer()); let text=''; for(let i=0;i<bytes.length;i+=16384)text+=String.fromCharCode(...bytes.subarray(i,i+16384));return btoa(text)})()`);
   const starterArchiveBytes = Buffer.from(starterArchive, "base64");
   unpackExport(starterArchiveBytes, starterExportFiles);
+  assert.ok(starterExportFiles.has("project/main.stasis"), "starter export includes the project entry source");
+  assert.equal(
+    starterExportFiles.get("project/main.stasis").toString("utf8"),
+    starterSourceParity.textarea,
+    "exported project/main.stasis exactly matches the textarea, highlighted source, and editor file"
+  );
   assert.ok(starterExportFiles.has("assets/ui.ttf"), "starter export includes its font");
   assert.ok(starterExportFiles.has("assets/OFL.txt"), "starter export includes the font license");
   await writeFile(path.join(evidence, "starter-export.zip"), starterArchiveBytes);
@@ -171,21 +207,28 @@ try {
     return runtime.snapshot();
   })()`);
   const starterMatch = { finished: starterFinished, restarted: starterRestarted };
-  const starterScalar = (snapshot, name) => {
-    const entry = starterCompilation.metadata.replayCompatibility.state_snapshot.entries.find(entry => entry.path === name);
-    assert.ok(entry, `missing starter snapshot field ${name}`);
-    const bytes = Buffer.from(Object.values(snapshot.bytes));
-    if (entry.storage_type === "bool") {
-      assert.equal(entry.element_bytes, 1, "Wasm snapshots store booleans as one byte");
-      return bytes.readUInt8(entry.offset) !== 0;
-    }
-    return bytes.readInt32LE(entry.offset);
-  };
-  assert.equal(starterScalar(starterMatch.finished, "state.cpu.score"), 5);
-  assert.equal(starterScalar(starterMatch.finished, "state.game_over"), true);
-  assert.equal(starterScalar(starterMatch.restarted, "state.cpu.score"), 0);
-  assert.equal(starterScalar(starterMatch.restarted, "state.game_over"), false);
+  assert.equal(starterValue(starterMatch.finished, "state.cpu.score"), 5);
+  assert.equal(starterValue(starterMatch.finished, "state.game_over"), true);
+  assert.equal(starterValue(starterMatch.restarted, "state.cpu.score"), 0);
+  assert.equal(starterValue(starterMatch.restarted, "state.game_over"), false);
   await screenshot("starter-pong-restarted");
+  const starterSettingsSwaps = await evaluate("(async () => { const editor = window.STASIS_PLAYGROUND_EDITOR; const runtime = editor.getIframe().contentWindow.STASIS_PLAYGROUND; const source = editor.getFile('main.stasis').source; editor.setFile('main.stasis', source + '\\nfunction @effects(state) on_code_swap(): void { state.settings.win_score = 6; state.player.score = 2; state.player.y = 129.0; }\\n'); const first = await editor.run(); const afterFirst = runtime.snapshot(); editor.setFile('main.stasis', source + '\\nfunction @effects(state) on_code_swap(): void { state.player.y += 1.0; }\\n'); const second = await editor.run(); return { firstMode: first.mode, secondMode: second.mode, afterFirst, afterSecond: runtime.snapshot() }; })()");
+  assert.equal(starterSettingsSwaps.firstMode, "swapped", "compatible settings edit hot-swaps the running Pong game");
+  assert.equal(starterSettingsSwaps.secondMode, "swapped", "a second compatible edit preserves the live game session");
+  assert.equal(starterValue(starterSettingsSwaps.afterFirst, "state.settings.win_score"), 6);
+  assert.equal(starterValue(starterSettingsSwaps.afterFirst, "state.player.score"), 2);
+  assert.equal(starterValue(starterSettingsSwaps.afterSecond, "state.settings.win_score"), 6, "hot-swap retains live Pong settings");
+  assert.equal(starterValue(starterSettingsSwaps.afterSecond, "state.player.score"), 2, "hot-swap retains live score");
+  assert.equal(starterValue(starterSettingsSwaps.afterSecond, "state.player.y"), 130, "the next hot-swap hook observes the preserved paddle state");
+  await evaluate("window.STASIS_PLAYGROUND_EDITOR.setFile('main.stasis', " + JSON.stringify(starterSourceParity.file) + ")");
+  await evaluate('document.getElementById("restart-button").click()');
+  const starterFreshSession = await until(() => evaluate("(() => { const editor = window.STASIS_PLAYGROUND_EDITOR; const runtime = editor.getIframe()?.contentWindow?.STASIS_PLAYGROUND; return editor.getState().status === 'Fresh game session started.' && runtime ? runtime.snapshot() : null; })()"), "New session starts Pong with starter defaults");
+  assert.equal(starterValue(starterFreshSession, "state.settings.win_score"), 5, "New session restores the starter win-score default");
+  assert.equal(starterValue(starterFreshSession, "state.player.score"), 0);
+  assert.equal(starterValue(starterFreshSession, "state.cpu.score"), 0);
+  assert.equal(starterValue(starterFreshSession, "state.game_over"), false);
+  assert.equal(starterValue(starterFreshSession, "state.player.y"), 144);
+  await screenshot("starter-pong-new-session");
   const editorDraft = 'global score: i32;\nfunction helper(value: i32): i32 { return value; }\nfunction main(): i32 { return hel';
   await evaluate(`(() => { const editor=window.STASIS_PLAYGROUND_EDITOR; editor.setFile("main.stasis",${JSON.stringify(editorDraft)}); editor.setEntry("main.stasis"); const area=document.getElementById("source-editor"); area.focus(); area.setSelectionRange(area.value.length,area.value.length); })()`);
   await call("Input.dispatchKeyEvent", {type:"keyDown",key:" ",code:"Space",modifiers:2});
@@ -302,6 +345,54 @@ function @effects(counter) on_code_swap(): void { counter += 100; }
   })()`);
   assert.equal(assetResult.executed, false);
   assert.ok(assetResult.errors.every(Boolean));
+  assert.equal(
+    await evaluate("document.getElementById('asset-sample-button').dataset.path"),
+    assetResult.second.path,
+    "the imported SVG is selected in the real asset list before loading its example"
+  );
+  await evaluate("document.getElementById('asset-sample-button').click()");
+  const spriteExampleSourceParity = await until(() => evaluate("(() => { const editor = window.STASIS_PLAYGROUND_EDITOR; const textarea = document.getElementById('source-editor').value; const highlight = document.getElementById('source-highlight').textContent; const file = editor.getFile('main.stasis')?.source; const view = editor.getEditorView(); return !view.analysisPending && file === textarea && highlight === textarea ? { textarea, highlight, file } : null; })()"), "selectable Sprite Example source parity");
+  assert.equal(spriteExampleSourceParity.textarea, spriteExampleSourceParity.highlight);
+  assert.equal(spriteExampleSourceParity.textarea, spriteExampleSourceParity.file);
+  assert.match(spriteExampleSourceParity.file, /const SCANCODE\s*\{\s*A: i32 = 4;\s*D: i32 = 7;\s*LEFT: i32 = 80;\s*RIGHT: i32 = 79;/);
+  assert.ok(
+    spriteExampleSourceParity.file.includes("state.sample_sprite.load_from(" + JSON.stringify(assetResult.second.path) + ", 96, 96);"),
+    "the selected imported asset path is embedded in the generated Sprite Example"
+  );
+  assert.match(spriteExampleSourceParity.file, /keys\[SCANCODE\.LEFT\]/);
+  assert.match(spriteExampleSourceParity.file, /keys\[SCANCODE\.A\]/);
+  const spriteExampleCompilation = await evaluate("window.STASIS_PLAYGROUND_EDITOR.compile().then(result => ({ byteLength: result.gameWasm.byteLength, metadata: result.metadata }))");
+  assert.ok(spriteExampleCompilation.byteLength > 0, "the selectable Sprite Example must compile with the browser compiler");
+  await evaluate('document.getElementById("restart-button").click()');
+  await until(() => evaluate("(() => { const editor = window.STASIS_PLAYGROUND_EDITOR; return editor.getState().running && editor.getState().status === 'Fresh game session started.' && editor.getIframe()?.contentWindow?.STASIS_PLAYGROUND ? true : null; })()"), "New session runs the selectable Sprite Example");
+  const spriteExampleMovement = await evaluate("(async () => { const child = window.STASIS_PLAYGROUND_EDITOR.getIframe().contentWindow; const runtime = child.STASIS_PLAYGROUND; runtime.pause(true); const before = runtime.snapshot(); child.dispatchEvent(new child.KeyboardEvent('keydown', { code: 'ArrowLeft', key: 'ArrowLeft' })); await runtime.step(); child.dispatchEvent(new child.KeyboardEvent('keyup', { code: 'ArrowLeft', key: 'ArrowLeft' })); return { before, afterLeft: runtime.snapshot() }; })()");
+  const spriteExampleX = (snapshot, name) => {
+    const entry = spriteExampleCompilation.metadata.replayCompatibility.state_snapshot.entries.find(entry => entry.path === name);
+    assert.ok(entry, "missing Sprite Example snapshot field " + name);
+    assert.equal(entry.storage_type, "f32", "Sprite Example position is a float");
+    return Buffer.from(Object.values(snapshot.bytes)).readFloatLE(entry.offset);
+  };
+  assert.equal(
+    spriteExampleX(spriteExampleMovement.afterLeft, "state.sprite_x"),
+    spriteExampleX(spriteExampleMovement.before, "state.sprite_x") - 3,
+    "ArrowLeft moves the selected asset through its grouped HostFrame scancode"
+  );
+  const spriteExampleArchive = await evaluate("(async()=>{const blob=await window.STASIS_PLAYGROUND_EDITOR.exportProject(); const bytes=new Uint8Array(await blob.arrayBuffer()); let text=''; for(let i=0;i<bytes.length;i+=16384)text+=String.fromCharCode(...bytes.subarray(i,i+16384));return btoa(text)})()");
+  const spriteExampleArchiveFiles = new Map();
+  unpackExport(Buffer.from(spriteExampleArchive, "base64"), spriteExampleArchiveFiles);
+  assert.ok(spriteExampleArchiveFiles.has("project/main.stasis"), "Sprite Example export includes project/main.stasis");
+  assert.equal(
+    spriteExampleArchiveFiles.get("project/main.stasis").toString("utf8"),
+    spriteExampleSourceParity.textarea,
+    "Sprite Example ZIP source matches the textarea, highlight, and editor file"
+  );
+  const selectableSpriteExample = {
+    selectedAsset: assetResult.second.path,
+    compiledBytes: spriteExampleCompilation.byteLength,
+    beforeX: spriteExampleX(spriteExampleMovement.before, "state.sprite_x"),
+    afterLeftX: spriteExampleX(spriteExampleMovement.afterLeft, "state.sprite_x"),
+    exportSourceMatches: true,
+  };
   // Exercise caller-provided graphics libraries and imported images in the same real host.
   const spriteSource = `import "vendor/stasis/stdlib/graphics.stasis";
 global uploaded: Sprite;
@@ -352,7 +443,11 @@ function render(): i32 { clear(0.04, 0.07, 0.12, 1.0); draw_sprite(uploaded.spri
   await screenshot("exported-starter-pong");
   assert.deepEqual(failures, []);
   const receipt = {schema:"stasis.browser_playground_acceptance.v1",siteRoot,browser:await call("Browser.getVersion"),
-    starterCompilation,starterRender,starterMatch,starterExportState,editorAnalysis,first,snapshots,rollback,overlappingSessions,assets:assetResult,export:{files:[...exportedFiles.keys()],byteLength:archiveBytes.length,state:exportedState},
+    starterCompilation,starterRender,starterMatch,
+    starterMovement:{beforeY:starterValue(starterMovement.before,"state.player.y"),afterArrowY:starterValue(starterMovement.afterArrow,"state.player.y"),afterWY:starterValue(starterMovement.afterW,"state.player.y")},
+    starterSettingsSwaps:{firstMode:starterSettingsSwaps.firstMode,secondMode:starterSettingsSwaps.secondMode,winScore:starterValue(starterSettingsSwaps.afterSecond,"state.settings.win_score"),playerScore:starterValue(starterSettingsSwaps.afterSecond,"state.player.score"),playerY:starterValue(starterSettingsSwaps.afterSecond,"state.player.y")},
+    starterFreshSession:{winScore:starterValue(starterFreshSession,"state.settings.win_score"),playerScore:starterValue(starterFreshSession,"state.player.score"),cpuScore:starterValue(starterFreshSession,"state.cpu.score"),gameOver:starterValue(starterFreshSession,"state.game_over"),playerY:starterValue(starterFreshSession,"state.player.y")},
+    starterExportState,editorAnalysis,first,snapshots,rollback,overlappingSessions,assets:assetResult,selectableSpriteExample,export:{files:[...exportedFiles.keys()],byteLength:archiveBytes.length,state:exportedState},
     network:{readyBoundary,requestsAfterReady,requests},frames:frames.length,failures};
   await writeFile(path.join(evidence,"receipt.json"), `${JSON.stringify(receipt,null,2)}\n`);
   console.log(JSON.stringify({status:"passed",receipt:path.join(evidence,"receipt.json"),frames:frames.length,exportBytes:archiveBytes.length}));
