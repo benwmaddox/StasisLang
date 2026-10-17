@@ -814,7 +814,8 @@ fn visit_expr_with_environment(
         | SimpleExpr::Float(_)
         | SimpleExpr::Bool(_)
         | SimpleExpr::StringLiteral(_)
-        | SimpleExpr::Identifier(_) => {}
+        | SimpleExpr::Identifier(_)
+        | SimpleExpr::ResolvedConstant { .. } => {}
     }
 }
 

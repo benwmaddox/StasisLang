@@ -5,10 +5,19 @@
 //! Keeping this pass in the frontend gives every backend the same concrete
 //! fixed-layout input.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Range;
 
 use crate::compiler::SourceFile;
+#[cfg(test)]
+use crate::frontend::constant_index::{
+    ensure_constant_evaluation_steps, MAX_CONSTANT_EVALUATION_STEPS,
+};
+use crate::frontend::constant_index::{
+    evaluate_i32_expression_with_resolver, tokenize_constant_expression,
+    CompileTimeDeclarationIndex, ConstantToken, GenericI32EvaluationState,
+};
 use crate::frontend::indexer::hash_text;
 use crate::frontend::lexer::{lex, TokenKind};
 use crate::frontend::module_graph::ModuleGraph;
@@ -19,12 +28,9 @@ use crate::frontend::parser::{
     ParsedGenericParameterKind, ParsedStructDefinitionRange,
 };
 use crate::frontend::types::{SourceTypeOrigin, TypedCollectionKind};
-use crate::ir::hir::{ExprBinaryOp, ExprUnaryOp};
 
 const MAX_SPECIALIZATIONS: usize = 4096;
 const MAX_INSTANTIATION_DEPTH: usize = 128;
-const MAX_CONSTANT_EVALUATION_STEPS: usize = 10_000;
-const MAX_CONSTANT_DEPENDENCY_DEPTH: usize = 128;
 const MAX_GENERIC_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_EXPANDED_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ELABORATION_WORK_UNITS: usize = 32 * 1024 * 1024;
@@ -98,7 +104,6 @@ struct ConstantDefinition {
     path: String,
     name: String,
     type_name: String,
-    value_text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +175,8 @@ struct Expansion {
     files: Vec<RawFile>,
     input_bytes: usize,
     module_graph: ModuleGraph,
+    constant_index: CompileTimeDeclarationIndex,
+    constant_evaluation: RefCell<GenericI32EvaluationState>,
     generic_structs: BTreeMap<String, GenericStructDefinition>,
     generic_structs_by_name: BTreeMap<String, Vec<String>>,
     generic_functions: Vec<GenericFunctionDefinition>,
@@ -258,6 +265,7 @@ impl From<String> for ExpansionError {
 pub(crate) fn expand_sources(
     files: &mut [SourceFile],
     module_graph: &ModuleGraph,
+    constant_index: &CompileTimeDeclarationIndex,
 ) -> Result<BTreeMap<String, SourceTypeOrigin>, ExpansionError> {
     let input_bytes = files.iter().try_fold(0usize, |total, file| {
         total
@@ -286,7 +294,12 @@ pub(crate) fn expand_sources(
         }
         return Ok(BTreeMap::new());
     }
-    let mut expansion = Expansion::new(raw_files, input_bytes, module_graph.clone())?;
+    let mut expansion = Expansion::new(
+        raw_files,
+        input_bytes,
+        module_graph.clone(),
+        constant_index.clone(),
+    )?;
     expansion.reject_explicit_generic_calls()?;
     if expansion.generic_structs.is_empty() && expansion.generic_functions.is_empty() {
         let source_type_origins = expansion.source_type_origins(false);
@@ -427,6 +440,20 @@ impl Expansion {
         let Some(source_path) = environment.source_path.as_deref() else {
             return Ok(None);
         };
+        if name.contains('.') {
+            let mut state = self.constant_evaluation.borrow_mut();
+            return match self.constant_index.evaluate_generic_i32_with_state(
+                &self.module_graph,
+                source_path,
+                name,
+                &environment.values,
+                &mut state,
+            ) {
+                Ok(value) => Ok(Some(value)),
+                Err(message) if message.starts_with("unknown compile-time i32 value") => Ok(None),
+                Err(message) => Err(message),
+            };
+        }
         let Some(definition) = self.visible_constant_definition(name, source_path)? else {
             return Ok(None);
         };
@@ -441,19 +468,17 @@ impl Expansion {
         source: &str,
         environment: &GenericEnvironment,
     ) -> Result<i32, String> {
-        let mut constants = BTreeMap::new();
-        for token in tokenize_constant_expression(source)? {
-            let ConstantToken::Identifier(identifier) = token else {
-                continue;
-            };
-            if environment.values.contains_key(&identifier) {
-                continue;
-            }
-            if let Some(value) = self.visible_constant_value(&identifier, environment)? {
-                constants.insert(identifier, value);
-            }
-        }
-        evaluate_i32_expression(source, environment, &constants)
+        let Some(source_path) = environment.source_path.as_deref() else {
+            return evaluate_i32_expression(source, environment, &BTreeMap::new());
+        };
+        let mut state = self.constant_evaluation.borrow_mut();
+        self.constant_index.evaluate_generic_i32_with_state(
+            &self.module_graph,
+            source_path,
+            source,
+            &environment.values,
+            &mut state,
+        )
     }
 
     fn local_constant_values(&self, file_index: usize) -> BTreeMap<String, i32> {
@@ -695,6 +720,7 @@ impl Expansion {
         files: Vec<RawFile>,
         input_bytes: usize,
         module_graph: ModuleGraph,
+        constant_index: CompileTimeDeclarationIndex,
     ) -> Result<Self, ExpansionError> {
         let mut generic_structs: BTreeMap<String, GenericStructDefinition> = BTreeMap::new();
         let mut generic_structs_by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -741,6 +767,12 @@ impl Expansion {
                         .constants
                         .iter()
                         .map(|item| ("constant", item.name.as_str())),
+                )
+                .chain(
+                    layout
+                        .const_groups
+                        .iter()
+                        .map(|item| ("constant group", item.name.as_str())),
                 )
             {
                 reject_reserved_declaration_name(&file.path, kind, name)?;
@@ -790,7 +822,6 @@ impl Expansion {
                     path: file.path.clone(),
                     name: constant.name,
                     type_name: constant.type_name,
-                    value_text: constant.value_text,
                 });
             }
             for structure in layout.structs {
@@ -899,18 +930,24 @@ impl Expansion {
         }
 
         let mut constant_values = BTreeMap::new();
-        let mut constant_evaluation_steps = 0;
+        let mut constant_evaluation = GenericI32EvaluationState::default();
         for definition in &constant_definitions {
             if definition.type_name.trim() == "i32" {
-                evaluate_constant_definition(
-                    definition,
-                    &constant_definitions,
-                    &module_graph,
-                    &mut constant_values,
-                    &mut Vec::new(),
-                    &mut constant_evaluation_steps,
-                )
-                .map_err(|message| ExpansionError::for_file(definition.path.clone(), message))?;
+                let declaration_id = crate::ir::hir::CompileTimeValueId {
+                    source_path: definition.path.clone(),
+                    owner: crate::ir::hir::CompileTimeValueOwner::Flat,
+                    member: definition.name.clone(),
+                };
+                let value = constant_index
+                    .evaluate_i32_declaration_with_state(
+                        &module_graph,
+                        &declaration_id,
+                        &mut constant_evaluation,
+                    )
+                    .map_err(|message| {
+                        ExpansionError::for_file(definition.path.clone(), message)
+                    })?;
+                constant_values.insert(constant_definition_identity(definition), value);
             }
         }
 
@@ -918,6 +955,8 @@ impl Expansion {
             files,
             input_bytes,
             module_graph,
+            constant_index,
+            constant_evaluation: RefCell::new(constant_evaluation),
             generic_structs,
             generic_structs_by_name,
             generic_functions,
@@ -4084,26 +4123,6 @@ fn ensure_instantiation_depth(depth: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_constant_evaluation_steps(steps: usize) -> Result<(), String> {
-    if steps > MAX_CONSTANT_EVALUATION_STEPS {
-        return Err(format!(
-            "compile-time expression evaluation exceeded {} steps",
-            MAX_CONSTANT_EVALUATION_STEPS
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_constant_dependency_depth(depth: usize) -> Result<(), String> {
-    if depth >= MAX_CONSTANT_DEPENDENCY_DEPTH {
-        return Err(format!(
-            "constant dependency depth exceeded (maximum {})",
-            MAX_CONSTANT_DEPENDENCY_DEPTH
-        ));
-    }
-    Ok(())
-}
-
 fn elaboration_work_units(
     input_bytes: usize,
     specialization_count: usize,
@@ -5324,10 +5343,11 @@ fn expression_mentions_unbound_value(
         let ConstantToken::Identifier(name) = token else {
             return false;
         };
+        let root = name.split('.').next().unwrap_or(&name);
         parameters.iter().any(|parameter| {
             parameter.kind == ParsedGenericParameterKind::I32
-                && parameter.name == name
-                && !environment.values.contains_key(&name)
+                && parameter.name == root
+                && !environment.values.contains_key(root)
         })
     })
 }
@@ -5588,329 +5608,19 @@ fn sorted_paths<'a>(paths: impl Iterator<Item = &'a str>) -> String {
     paths.join(", ")
 }
 
-fn visible_constant_definition_in<'a>(
-    name: &str,
-    source_path: &str,
-    definitions: &'a [ConstantDefinition],
-    module_graph: &ModuleGraph,
-) -> Result<Option<&'a ConstantDefinition>, String> {
-    let local = definitions
-        .iter()
-        .filter(|definition| {
-            definition.path == source_path
-                && definition.name == name
-                && definition.type_name.trim() == "i32"
-        })
-        .collect::<Vec<_>>();
-    let matches = if local.is_empty() {
-        let visible = module_graph.dependency_closure(source_path);
-        definitions
-            .iter()
-            .filter(|definition| {
-                visible.contains(&definition.path)
-                    && definition.name == name
-                    && definition.type_name.trim() == "i32"
-            })
-            .collect::<Vec<_>>()
-    } else {
-        local
-    };
-    match matches.as_slice() {
-        [] => Ok(None),
-        [definition] => Ok(Some(*definition)),
-        _ => Err(format!(
-            "ambiguous compile-time constant '{}' from '{}': {}",
-            name,
-            source_path,
-            sorted_paths(matches.iter().map(|definition| definition.path.as_str()))
-        )),
-    }
-}
-
-fn evaluate_constant_definition(
-    definition: &ConstantDefinition,
-    definitions: &[ConstantDefinition],
-    module_graph: &ModuleGraph,
-    resolved: &mut BTreeMap<String, i32>,
-    stack: &mut Vec<String>,
-    steps: &mut usize,
-) -> Result<i32, String> {
-    let identity = constant_definition_identity(definition);
-    if let Some(value) = resolved.get(&identity) {
-        return Ok(*value);
-    }
-    if stack.iter().any(|entry| entry == &identity) {
-        let mut chain = stack.clone();
-        chain.push(identity.clone());
-        return Err(format!("constant reference cycle: {}", chain.join(" -> ")));
-    }
-    ensure_constant_dependency_depth(stack.len())?;
-    stack.push(identity.clone());
-    let mut environment = GenericEnvironment::default();
-    environment.source_path = Some(definition.path.clone());
-    let tokens = tokenize_constant_expression(&definition.value_text)?;
-    for token in tokens {
-        let ConstantToken::Identifier(identifier) = token else {
-            continue;
-        };
-        if environment.values.contains_key(&identifier) {
-            continue;
-        }
-        if let Some(candidate) = visible_constant_definition_in(
-            &identifier,
-            &definition.path,
-            definitions,
-            module_graph,
-        )? {
-            let value = evaluate_constant_definition(
-                candidate,
-                definitions,
-                module_graph,
-                resolved,
-                stack,
-                steps,
-            )?;
-            environment.values.insert(identifier, value);
-        }
-    }
-    let value = evaluate_i32_expression_with_steps(
-        &definition.value_text,
-        &environment,
-        &BTreeMap::new(),
-        steps,
-    )?;
-    stack.pop();
-    resolved.insert(identity, value);
-    Ok(value)
-}
-
 fn evaluate_i32_expression(
     source: &str,
     environment: &GenericEnvironment,
     constants: &BTreeMap<String, i32>,
 ) -> Result<i32, String> {
-    let mut steps = 0;
-    evaluate_i32_expression_with_steps(source, environment, constants, &mut steps)
-}
-
-fn evaluate_i32_expression_with_steps(
-    source: &str,
-    environment: &GenericEnvironment,
-    constants: &BTreeMap<String, i32>,
-    steps: &mut usize,
-) -> Result<i32, String> {
-    let mut parser = ConstantParser::new(source, environment, constants, steps)?;
-    let value = parser.parse_expression(0)?;
-    if parser.peek().is_some() {
-        return Err(format!(
-            "unexpected token in compile-time expression '{source}'"
-        ));
-    }
-    Ok(value)
-}
-
-struct ConstantParser<'a> {
-    tokens: Vec<ConstantToken>,
-    cursor: usize,
-    environment: &'a GenericEnvironment,
-    constants: &'a BTreeMap<String, i32>,
-    steps: &'a mut usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ConstantToken {
-    Integer(String),
-    Identifier(String),
-    Operator(ExprBinaryOp),
-    Unary(ExprUnaryOp),
-    Open,
-    Close,
-}
-
-impl<'a> ConstantParser<'a> {
-    fn new(
-        source: &str,
-        environment: &'a GenericEnvironment,
-        constants: &'a BTreeMap<String, i32>,
-        steps: &'a mut usize,
-    ) -> Result<Self, String> {
-        Ok(Self {
-            tokens: tokenize_constant_expression(source)?,
-            cursor: 0,
-            environment,
-            constants,
-            steps,
-        })
-    }
-
-    fn peek(&self) -> Option<&ConstantToken> {
-        self.tokens.get(self.cursor)
-    }
-
-    fn parse_expression(&mut self, min_precedence: u8) -> Result<i32, String> {
-        let mut lhs = self.parse_prefix()?;
-        loop {
-            let Some(ConstantToken::Operator(operator)) = self.peek() else {
-                break;
-            };
-            let precedence = operator.precedence();
-            if precedence < min_precedence {
-                break;
-            }
-            let operator = *operator;
-            self.cursor += 1;
-            let rhs = self.parse_expression(precedence + 1)?;
-            lhs = checked_binary(lhs, operator, rhs)?;
-        }
-        Ok(lhs)
-    }
-
-    fn parse_prefix(&mut self) -> Result<i32, String> {
-        *self.steps = self.steps.saturating_add(1);
-        ensure_constant_evaluation_steps(*self.steps)?;
-        let token = self
-            .tokens
-            .get(self.cursor)
-            .cloned()
-            .ok_or_else(|| "compile-time expression ended unexpectedly".to_string())?;
-        self.cursor += 1;
-        match token {
-            ConstantToken::Integer(text) => {
-                let value = text
-                    .parse::<i64>()
-                    .map_err(|error| format!("invalid compile-time integer '{text}': {error}"))?;
-                i32::try_from(value)
-                    .map_err(|_| format!("compile-time integer '{text}' is outside i32 range"))
-            }
-            ConstantToken::Identifier(name) => self
-                .environment
-                .values
-                .get(&name)
-                .copied()
-                .or_else(|| self.constants.get(&name).copied())
-                .ok_or_else(|| format!("unknown compile-time value '{name}'")),
-            ConstantToken::Operator(ExprBinaryOp::Add) => self.parse_prefix(),
-            ConstantToken::Operator(ExprBinaryOp::Subtract) => {
-                if let Some(ConstantToken::Integer(text)) = self.tokens.get(self.cursor).cloned() {
-                    self.cursor += 1;
-                    let value = text.parse::<i64>().map_err(|error| {
-                        format!("invalid compile-time integer '{text}': {error}")
-                    })?;
-                    return i32::try_from(
-                        value
-                            .checked_neg()
-                            .ok_or_else(|| "compile-time negation overflowed i64".to_string())?,
-                    )
-                    .map_err(|_| format!("compile-time integer '-{text}' is outside i32 range"));
-                }
-                let value = self.parse_prefix()?;
-                value
-                    .checked_neg()
-                    .ok_or_else(|| "compile-time negation overflowed i32".to_string())
-            }
-            ConstantToken::Unary(ExprUnaryOp::BitwiseNot) => Ok(!self.parse_prefix()?),
-            ConstantToken::Unary(ExprUnaryOp::Negate) => self
-                .parse_prefix()?
-                .checked_neg()
-                .ok_or_else(|| "compile-time negation overflowed i32".to_string()),
-            ConstantToken::Open => {
-                let value = self.parse_expression(0)?;
-                match self.tokens.get(self.cursor) {
-                    Some(ConstantToken::Close) => {
-                        self.cursor += 1;
-                        Ok(value)
-                    }
-                    _ => Err("missing ')' in compile-time expression".to_string()),
-                }
-            }
-            other => Err(format!(
-                "unexpected token {other:?} in compile-time expression"
-            )),
-        }
-    }
-}
-
-fn checked_binary(lhs: i32, operator: ExprBinaryOp, rhs: i32) -> Result<i32, String> {
-    let checked = match operator {
-        ExprBinaryOp::Add => lhs.checked_add(rhs),
-        ExprBinaryOp::Subtract => lhs.checked_sub(rhs),
-        ExprBinaryOp::Multiply => lhs.checked_mul(rhs),
-        ExprBinaryOp::Divide => lhs.checked_div(rhs),
-        ExprBinaryOp::Remainder => lhs.checked_rem(rhs),
-        ExprBinaryOp::ShiftLeft => Some(lhs.wrapping_shl((rhs as u32) & 31)),
-        ExprBinaryOp::ShiftRight => Some(lhs.wrapping_shr((rhs as u32) & 31)),
-        ExprBinaryOp::BitAnd => Some(lhs & rhs),
-        ExprBinaryOp::BitXor => Some(lhs ^ rhs),
-        ExprBinaryOp::BitOr => Some(lhs | rhs),
+    let steps = Cell::new(0);
+    let mut resolver = |identifier: &str| {
+        constants
+            .get(identifier)
+            .copied()
+            .ok_or_else(|| format!("unknown compile-time value '{identifier}'"))
     };
-    checked.ok_or_else(|| {
-        format!(
-            "checked compile-time operation '{}' overflowed or divided by zero",
-            operator.spelling()
-        )
-    })
-}
-
-fn tokenize_constant_expression(source: &str) -> Result<Vec<ConstantToken>, String> {
-    let bytes = source.as_bytes();
-    let mut tokens = Vec::new();
-    let mut cursor = 0usize;
-    while cursor < bytes.len() {
-        if bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-            continue;
-        }
-        if bytes[cursor].is_ascii_digit() {
-            let start = cursor;
-            cursor += 1;
-            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
-                cursor += 1;
-            }
-            tokens.push(ConstantToken::Integer(source[start..cursor].to_string()));
-            continue;
-        }
-        if is_identifier_start(bytes[cursor]) {
-            let start = cursor;
-            cursor += 1;
-            while cursor < bytes.len() && is_identifier_char(bytes[cursor]) {
-                cursor += 1;
-            }
-            tokens.push(ConstantToken::Identifier(source[start..cursor].to_string()));
-            continue;
-        }
-        let token = match bytes[cursor] {
-            b'<' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'<' => {
-                cursor += 2;
-                tokens.push(ConstantToken::Operator(ExprBinaryOp::ShiftLeft));
-                continue;
-            }
-            b'>' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'>' => {
-                cursor += 2;
-                tokens.push(ConstantToken::Operator(ExprBinaryOp::ShiftRight));
-                continue;
-            }
-            b'+' => ConstantToken::Operator(ExprBinaryOp::Add),
-            b'-' => ConstantToken::Operator(ExprBinaryOp::Subtract),
-            b'*' => ConstantToken::Operator(ExprBinaryOp::Multiply),
-            b'/' => ConstantToken::Operator(ExprBinaryOp::Divide),
-            b'%' => ConstantToken::Operator(ExprBinaryOp::Remainder),
-            b'&' => ConstantToken::Operator(ExprBinaryOp::BitAnd),
-            b'^' => ConstantToken::Operator(ExprBinaryOp::BitXor),
-            b'|' => ConstantToken::Operator(ExprBinaryOp::BitOr),
-            b'~' => ConstantToken::Unary(ExprUnaryOp::BitwiseNot),
-            b'(' => ConstantToken::Open,
-            b')' => ConstantToken::Close,
-            other => {
-                return Err(format!(
-                    "unsupported token '{}' in compile-time expression",
-                    other as char
-                ))
-            }
-        };
-        tokens.push(token);
-        cursor += 1;
-    }
-    Ok(tokens)
+    evaluate_i32_expression_with_resolver(source, &environment.values, &steps, &mut resolver)
 }
 
 fn rewrite_i32_constants_checked(

@@ -13,7 +13,8 @@ use crate::frontend::types::{
     TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_I32,
 };
 use crate::ir::hir::{
-    AssignOp, AssignTarget, FunctionHIR, SimpleCondition, SimpleExpr, SimpleStmt,
+    AssignOp, AssignTarget, FunctionHIR, ResolvedConstantValue, SimpleCondition, SimpleExpr,
+    SimpleStmt,
 };
 
 const MAX_CALL_DEPTH: usize = 32;
@@ -472,6 +473,7 @@ impl Analyzer<'_> {
             | SimpleExpr::Float(_)
             | SimpleExpr::Bool(_)
             | SimpleExpr::StringLiteral(_)
+            | SimpleExpr::ResolvedConstant { .. }
             | SimpleExpr::Identifier(_) => {}
         }
     }
@@ -524,6 +526,10 @@ impl Analyzer<'_> {
     ) -> TextValue {
         match expression {
             SimpleExpr::StringLiteral(value) => TextValue::literal(value),
+            SimpleExpr::ResolvedConstant {
+                value: ResolvedConstantValue::String(value),
+                ..
+            } => TextValue::literal(value),
             SimpleExpr::Identifier(name) => env
                 .text
                 .get(name)
@@ -666,6 +672,10 @@ impl Analyzer<'_> {
     fn literal_or_constant(&self, expression: &SimpleExpr) -> Option<String> {
         match expression {
             SimpleExpr::StringLiteral(value) => Some(value.clone()),
+            SimpleExpr::ResolvedConstant {
+                value: ResolvedConstantValue::String(value),
+                ..
+            } => Some(value.clone()),
             SimpleExpr::Identifier(name) => match self.analysis.constant_values.get(name) {
                 Some(ConstantValue::String { value, .. }) => Some(value.clone()),
                 _ => None,
@@ -697,6 +707,7 @@ impl Analyzer<'_> {
     fn infer_type(&self, expression: &SimpleExpr, env: &Environment) -> Option<TypeId> {
         match expression {
             SimpleExpr::DefaultValue(type_id) => Some(*type_id),
+            SimpleExpr::ResolvedConstant { type_id, .. } => Some(*type_id),
             SimpleExpr::Int(_) => Some(TYPE_ID_I32),
             SimpleExpr::Float(_) => Some(TYPE_ID_F32),
             SimpleExpr::Bool(_) | SimpleExpr::Condition(_) => Some(TYPE_ID_BOOL),

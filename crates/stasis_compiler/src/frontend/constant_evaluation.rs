@@ -8,15 +8,17 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::compiler::SourceFile;
 use crate::frontend::body_parser::parse_value_expression_at;
+use crate::frontend::constant_index::{CompileTimeDeclarationIndex, IndexedConstantDeclaration};
 use crate::frontend::module_graph::ModuleGraph;
-use crate::frontend::parser::{
-    parse_top_level_type_layout, ParsedConstDefinition, ParsedEnumDefinition,
-};
+use crate::frontend::parser::ParsedEnumDefinition;
 use crate::frontend::types::{
     SourceTypeOrigin, TypeCategory, TypeId, TypeTable, TYPE_ID_BOOL, TYPE_ID_F32, TYPE_ID_F64,
     TYPE_ID_I32, TYPE_ID_U16, TYPE_ID_U32, TYPE_ID_U8,
 };
-use crate::ir::hir::{ExprBinaryOp, ExprUnaryOp, SimpleExpr};
+use crate::ir::hir::{
+    CompileTimeValueId, CompileTimeValueOwner, ExprBinaryOp, ExprUnaryOp, ResolvedConstantValue,
+    SimpleExpr,
+};
 
 const MAX_CONSTANT_RECURSION_DEPTH: usize = 128;
 
@@ -35,12 +37,14 @@ pub(crate) struct EvaluatedScalar {
 struct DeclarationKey {
     path: String,
     name: String,
+    owner: CompileTimeValueOwner,
 }
 
 #[derive(Debug, Clone)]
 struct ConstantDeclaration {
     key: DeclarationKey,
-    definition: ParsedConstDefinition,
+    id: CompileTimeValueId,
+    definition: IndexedConstantDeclaration,
 }
 
 #[derive(Debug, Clone)]
@@ -86,71 +90,87 @@ pub(crate) struct ScalarConstantEvaluator<'a> {
     files: &'a [SourceFile],
     graph: &'a ModuleGraph,
     types: &'a TypeTable,
+    index: CompileTimeDeclarationIndex,
     constants: BTreeMap<DeclarationKey, Vec<ConstantDeclaration>>,
     enums: BTreeMap<DeclarationKey, Vec<EnumDeclaration>>,
-    value_names_by_path: BTreeMap<String, BTreeSet<String>>,
     constant_cache: HashMap<DeclarationKey, EvaluatedScalar>,
     constant_stack: Vec<DeclarationKey>,
 }
 
 impl<'a> ScalarConstantEvaluator<'a> {
+    #[cfg(test)]
     pub(crate) fn new(
         files: &'a [SourceFile],
         graph: &'a ModuleGraph,
         types: &'a TypeTable,
     ) -> Result<Self, String> {
+        let index = CompileTimeDeclarationIndex::build(files).map_err(|(path, error)| {
+            format!("failed parsing scalar declarations in {path}: {error}")
+        })?;
+        Self::new_with_index(files, graph, types, &index)
+    }
+
+    pub(crate) fn new_with_index(
+        files: &'a [SourceFile],
+        graph: &'a ModuleGraph,
+        types: &'a TypeTable,
+        index: &CompileTimeDeclarationIndex,
+    ) -> Result<Self, String> {
         let mut constants = BTreeMap::<DeclarationKey, Vec<ConstantDeclaration>>::new();
         let mut enums = BTreeMap::<DeclarationKey, Vec<EnumDeclaration>>::new();
-        let mut value_names_by_path = BTreeMap::<String, BTreeSet<String>>::new();
-
-        for file in files {
-            // `original_content` is the declaration source of truth. Generic
-            // expansion can append specialized structs to `content`, which
-            // must not duplicate module constants or enum declarations.
-            let layout = parse_top_level_type_layout(&file.original_content).map_err(|error| {
-                format!(
-                    "failed parsing scalar declarations in {}: {error}",
-                    file.path
-                )
-            })?;
-            let value_names = value_names_by_path.entry(file.path.clone()).or_default();
-            value_names.extend(
-                layout
-                    .constants
-                    .iter()
-                    .map(|constant| constant.name.clone()),
-            );
-            value_names.extend(layout.globals.iter().map(|global| global.name.clone()));
-            value_names.extend(layout.global_blocks.iter().map(|block| block.name.clone()));
-            for definition in layout.constants {
-                let key = DeclarationKey {
-                    path: file.path.clone(),
-                    name: definition.name.clone(),
+        for definition in index.all_flat_constants() {
+            let key = DeclarationKey {
+                path: definition.id.source_path.clone(),
+                name: definition.id.member.clone(),
+                owner: CompileTimeValueOwner::Flat,
+            };
+            constants
+                .entry(key.clone())
+                .or_default()
+                .push(ConstantDeclaration {
+                    key,
+                    id: definition.id.clone(),
+                    definition: definition.clone(),
+                });
+        }
+        for definition in index.all_groups() {
+            for member in &definition.members {
+                let member_key = DeclarationKey {
+                    path: member.id.source_path.clone(),
+                    name: member.id.member.clone(),
+                    owner: member.id.owner.clone(),
                 };
                 constants
-                    .entry(key.clone())
+                    .entry(member_key.clone())
                     .or_default()
-                    .push(ConstantDeclaration { key, definition });
+                    .push(ConstantDeclaration {
+                        key: member_key,
+                        id: member.id.clone(),
+                        definition: member.clone(),
+                    });
             }
-            for definition in layout.enums {
-                let key = DeclarationKey {
-                    path: file.path.clone(),
-                    name: definition.name.clone(),
-                };
-                enums
-                    .entry(key.clone())
-                    .or_default()
-                    .push(EnumDeclaration { key, definition });
-            }
+        }
+        // Enum records are retained with their source path by a second index
+        // method, rather than reconstructed from display names.
+        for (path, definition) in index.enum_declarations() {
+            let key = DeclarationKey {
+                path: path.to_string(),
+                name: definition.name.clone(),
+                owner: CompileTimeValueOwner::Enum(definition.name.clone()),
+            };
+            enums.entry(key.clone()).or_default().push(EnumDeclaration {
+                key,
+                definition: definition.clone(),
+            });
         }
 
         Ok(Self {
             files,
             graph,
             types,
+            index: index.clone(),
             constants,
             enums,
-            value_names_by_path,
             constant_cache: HashMap::new(),
             constant_stack: Vec::new(),
         })
@@ -170,6 +190,168 @@ impl<'a> ScalarConstantEvaluator<'a> {
             .map_err(|error| format!("invalid scalar constant expression: {error}"))?;
         let result = self.evaluate_expression(scope_path, &parsed, Some(expected_type))?;
         self.coerce_to_expected(scope_path, result, expected_type)
+    }
+
+    /// Resolve a source identifier into its stable compile-time identity and
+    /// current-run typed payload. Flat constants stay on the existing lowering
+    /// path; grouped members and enum variants are explicitly bound in HIR.
+    pub(crate) fn materialize_identifier(
+        &mut self,
+        scope_path: &str,
+        identifier: &str,
+        lexical_root_shadowed: bool,
+    ) -> Result<Option<(CompileTimeValueId, TypeId, ResolvedConstantValue)>, String> {
+        let Some(id) = self.index.resolve_compile_time_value(
+            self.graph,
+            scope_path,
+            identifier,
+            lexical_root_shadowed,
+        )?
+        else {
+            return Ok(None);
+        };
+        if matches!(id.owner, CompileTimeValueOwner::Flat) {
+            return Ok(None);
+        }
+
+        self.materialize_id(&id).map(Some)
+    }
+
+    /// Validate every group declaration once after type materialization so
+    /// invalid unused initializers cannot hide behind reachability.
+    pub(crate) fn validate_all_group_members(
+        &mut self,
+    ) -> Result<(), (CompileTimeValueId, std::ops::Range<usize>, String)> {
+        let members = self
+            .index
+            .all_groups()
+            .flat_map(|group| group.members.iter().cloned())
+            .collect::<Vec<_>>();
+        for member in members {
+            if let Err(error) = self.materialize_id(&member.id) {
+                let range = member
+                    .name_range
+                    .clone()
+                    .unwrap_or_else(|| member.value_range.clone());
+                return Err((member.id, range, error));
+            }
+        }
+        Ok(())
+    }
+
+    fn materialize_id(
+        &mut self,
+        id: &CompileTimeValueId,
+    ) -> Result<(CompileTimeValueId, TypeId, ResolvedConstantValue), String> {
+        if matches!(id.owner, CompileTimeValueOwner::Group(_)) {
+            let declaration = self
+                .constants
+                .get(&DeclarationKey {
+                    path: id.source_path.clone(),
+                    name: id.member.clone(),
+                    owner: id.owner.clone(),
+                })
+                .into_iter()
+                .flatten()
+                .find(|declaration| declaration.id == *id)
+                .cloned()
+                .ok_or_else(|| format!("missing indexed constant '{}': {id:?}", id.member))?;
+            let type_id = self
+                .types
+                .resolve(&declaration.definition.type_name)
+                .ok_or_else(|| {
+                    format!(
+                        "constant group member '{}.{}' has unresolved type '{}'",
+                        match &id.owner {
+                            CompileTimeValueOwner::Group(group) => group.as_str(),
+                            _ => unreachable!(),
+                        },
+                        id.member,
+                        declaration.definition.type_name
+                    )
+                })?;
+            let type_info = self.types.type_info(type_id).ok_or_else(|| {
+                format!(
+                    "constant group member '{}' has unknown type {type_id}",
+                    id.member
+                )
+            })?;
+            if matches!(
+                type_info.category,
+                TypeCategory::AsciiView | TypeCategory::Utf8View
+            ) {
+                let expression = parse_value_expression_at(&declaration.definition.value_text, 0)
+                    .map_err(|error| {
+                    format!("invalid string initializer for '{}': {error}", id.member)
+                })?;
+                let SimpleExpr::StringLiteral(value) = expression else {
+                    return Err(format!(
+                        "string constant group member '{}.{}' requires a literal string initializer",
+                        match &id.owner {
+                            CompileTimeValueOwner::Group(group) => group.as_str(),
+                            _ => unreachable!(),
+                        },
+                        id.member
+                    ));
+                };
+                validate_group_string_value(&id, type_info.category, &value)?;
+                return Ok((id.clone(), type_id, ResolvedConstantValue::String(value)));
+            }
+            if matches!(
+                type_info.category,
+                TypeCategory::AsciiFixed | TypeCategory::Utf8Fixed
+            ) {
+                return Err(format!(
+                    "constant group member '{}.{}' uses unsupported fixed string type '{}'; use ascii[] or utf8[]",
+                    match &id.owner {
+                        CompileTimeValueOwner::Group(group) => group.as_str(),
+                        _ => unreachable!(),
+                    },
+                    id.member,
+                    type_info.name
+                ));
+            }
+        }
+
+        let evaluated = self.evaluate_identifier_id(&id)?;
+        Ok((
+            id.clone(),
+            evaluated.type_id,
+            ResolvedConstantValue::Scalar {
+                bits: evaluated.bits,
+                nominal_origin: evaluated.nominal_origin,
+            },
+        ))
+    }
+
+    pub(crate) fn unresolved_group_value_error(
+        &self,
+        scope_path: &str,
+        identifier: &str,
+        lexical_root_shadowed: bool,
+    ) -> Option<String> {
+        if lexical_root_shadowed || identifier.contains('.') {
+            return None;
+        }
+        if self
+            .index
+            .has_visible_flat_constant(self.graph, scope_path, identifier)
+        {
+            return None;
+        }
+        if self
+            .index
+            .has_visible_group_namespace(self.graph, scope_path, identifier)
+        {
+            return Some(format!(
+                "constant group '{identifier}' is a namespace and cannot be used as a value"
+            ));
+        }
+        self.index
+            .has_visible_group_member_name(self.graph, scope_path, identifier)
+            .then(|| {
+                format!("constant group member '{identifier}' must be qualified by its group name")
+            })
     }
 
     fn validate_expected_type(&self, scope_path: &str, expected: TypeId) -> Result<(), String> {
@@ -232,6 +414,20 @@ impl<'a> ScalarConstantEvaluator<'a> {
             SimpleExpr::Call { target, .. } => Err(format!(
                 "runtime call '{target}' is not allowed in a scalar compile-time expression"
             )),
+            SimpleExpr::ResolvedConstant { type_id, value, .. } => {
+                let ResolvedConstantValue::Scalar {
+                    bits,
+                    nominal_origin,
+                } = value
+                else {
+                    return Err("string constants are not scalar compile-time values".into());
+                };
+                Ok(EvaluatedScalar {
+                    type_id: *type_id,
+                    bits: *bits,
+                    nominal_origin: nominal_origin.clone(),
+                })
+            }
         }
     }
 
@@ -624,70 +820,85 @@ impl<'a> ScalarConstantEvaluator<'a> {
         scope_path: &str,
         identifier: &str,
     ) -> Result<EvaluatedScalar, String> {
-        let parts = identifier.split('.').collect::<Vec<_>>();
-        match parts.as_slice() {
-            [name] => {
-                let constant = self.resolve_unqualified_constant(scope_path, name)?;
-                self.evaluate_constant(constant)
-            }
-            [module_alias, name] if self.resolve_alias(scope_path, module_alias).is_some() => {
-                self.reject_shadowed_module_alias(scope_path, module_alias, identifier)?;
-                let target = self
-                    .resolve_alias(scope_path, module_alias)
-                    .unwrap()
-                    .to_string();
-                let constant = self.resolve_exact_constant(&target, name)?;
-                self.evaluate_constant(constant)
-            }
-            [type_name, variant] => {
-                let enumeration = self.resolve_unqualified_enum(scope_path, type_name)?;
-                self.evaluate_variant(enumeration, variant)
-            }
-            [module_alias, type_name, variant] => {
-                self.reject_shadowed_module_alias(scope_path, module_alias, identifier)?;
-                let target = self
-                    .resolve_alias(scope_path, module_alias)
-                    .ok_or_else(|| {
-                        format!("module alias '{module_alias}' is not imported in '{scope_path}'")
-                    })?;
-                let enumeration = self.resolve_exact_enum(target, type_name)?;
-                self.evaluate_variant(enumeration, variant)
-            }
-            _ => Err(format!("unsupported scalar constant path '{identifier}'")),
-        }
-    }
-
-    fn reject_shadowed_module_alias(
-        &self,
-        scope_path: &str,
-        alias: &str,
-        identifier: &str,
-    ) -> Result<(), String> {
-        if self.has_visible_value_name(scope_path, alias) {
-            return Err(format!(
-                "value binding '{alias}' shadows the imported module alias in '{identifier}'"
-            ));
-        }
-        Ok(())
-    }
-
-    fn has_visible_value_name(&self, scope_path: &str, name: &str) -> bool {
-        if self
-            .value_names_by_path
-            .get(scope_path)
-            .is_some_and(|names| names.contains(name))
+        if let Some(error) = self
+            .index
+            .imported_alias_shadow_error(self.graph, scope_path, identifier)
         {
-            return true;
+            return Err(error);
         }
-        self.graph
-            .dependency_closure(scope_path)
-            .into_iter()
-            .filter(|path| path != scope_path)
-            .any(|path| {
-                self.value_names_by_path
-                    .get(&path)
-                    .is_some_and(|names| names.contains(name))
-            })
+        let id = match self
+            .index
+            .resolve_compile_time_value(self.graph, scope_path, identifier, false)
+        {
+            Ok(Some(id)) => id,
+            Err(error)
+                if !identifier.contains('.')
+                    && error.starts_with("ambiguous compile-time value '") =>
+            {
+                return Err(format!(
+                    "ambiguous compile-time constant '{identifier}' visible from '{scope_path}'"
+                ));
+            }
+            Err(error) => return Err(error),
+            Ok(None) => {
+                if !identifier.contains('.')
+                    && !self
+                        .index
+                        .has_visible_flat_constant(self.graph, scope_path, identifier)
+                    && self
+                        .index
+                        .has_visible_group_member_name(self.graph, scope_path, identifier)
+                {
+                    return Err(format!(
+                        "constant group member '{identifier}' must be qualified by its group name"
+                    ));
+                }
+
+                let kind = if identifier.contains('.') {
+                    "value"
+                } else {
+                    "constant"
+                };
+                return Err(format!(
+                    "unknown compile-time {kind} '{identifier}' visible from '{scope_path}'"
+                ));
+            }
+        };
+        self.evaluate_identifier_id(&id)
+    }
+
+    fn evaluate_identifier_id(
+        &mut self,
+        id: &CompileTimeValueId,
+    ) -> Result<EvaluatedScalar, String> {
+        match &id.owner {
+            CompileTimeValueOwner::Enum(enum_name) => {
+                let declaration = self
+                    .enums_for_path_name(&id.source_path, enum_name)
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        format!("unknown enum '{}' in '{}'", enum_name, id.source_path)
+                    })?;
+                self.evaluate_variant(declaration, &id.member)
+            }
+            CompileTimeValueOwner::Flat | CompileTimeValueOwner::Group(_) => {
+                let key = DeclarationKey {
+                    path: id.source_path.clone(),
+                    name: id.member.clone(),
+                    owner: id.owner.clone(),
+                };
+                let declaration = self
+                    .constants
+                    .get(&key)
+                    .into_iter()
+                    .flatten()
+                    .find(|declaration| declaration.id == *id)
+                    .cloned()
+                    .ok_or_else(|| format!("unknown constant '{}'", display_value_id(id)))?;
+                self.evaluate_constant(declaration)
+            }
+        }
     }
 
     fn resolve_alias<'b>(&'b self, scope_path: &str, alias: &str) -> Option<&'b str> {
@@ -697,50 +908,6 @@ impl<'a> ScalarConstantEvaluator<'a> {
             }
         }
         self.graph.imported_alias_target(scope_path, alias)
-    }
-
-    fn resolve_unqualified_constant(
-        &self,
-        scope_path: &str,
-        name: &str,
-    ) -> Result<ConstantDeclaration, String> {
-        let local = self.constants_for_path_name(scope_path, name);
-        if !local.is_empty() {
-            return unique_declaration(local, "constant", name, scope_path);
-        }
-        let visible = self
-            .graph
-            .dependency_closure(scope_path)
-            .into_iter()
-            .filter(|path| path != scope_path)
-            .flat_map(|path| self.constants_for_path_name(&path, name))
-            .collect::<Vec<_>>();
-        unique_declaration(visible, "constant", name, scope_path)
-    }
-
-    fn resolve_exact_constant(
-        &self,
-        source_path: &str,
-        name: &str,
-    ) -> Result<ConstantDeclaration, String> {
-        unique_declaration(
-            self.constants_for_path_name(source_path, name),
-            "constant",
-            name,
-            source_path,
-        )
-    }
-
-    fn constants_for_path_name(&self, path: &str, name: &str) -> Vec<ConstantDeclaration> {
-        self.constants
-            .get(&DeclarationKey {
-                path: path.to_string(),
-                name: name.to_string(),
-            })
-            .into_iter()
-            .flatten()
-            .cloned()
-            .collect()
     }
 
     fn resolve_unqualified_enum(
@@ -776,6 +943,7 @@ impl<'a> ScalarConstantEvaluator<'a> {
             .get(&DeclarationKey {
                 path: path.to_string(),
                 name: name.to_string(),
+                owner: CompileTimeValueOwner::Enum(name.to_string()),
             })
             .into_iter()
             .flatten()
@@ -889,7 +1057,7 @@ impl<'a> ScalarConstantEvaluator<'a> {
                 .map_err(|error| {
                     format!(
                         "invalid initializer for constant '{}': {error}",
-                        declaration.definition.name
+                        declaration.id.member
                     )
                 })?;
             let value =
@@ -912,16 +1080,26 @@ impl<'a> ScalarConstantEvaluator<'a> {
             }
         }
         let parts = type_name.split('.').collect::<Vec<_>>();
-        let declaration = match parts.as_slice() {
-            [name] => self.resolve_unqualified_enum(scope_path, name)?,
+        let declaration_result = match parts.as_slice() {
+            [name] => self.resolve_unqualified_enum(scope_path, name),
             [alias, name] => {
                 let target = self.resolve_alias(scope_path, alias).ok_or_else(|| {
                     format!("module alias '{alias}' is not imported in '{scope_path}'")
                 })?;
-                self.resolve_exact_enum(target, name)?
+                self.resolve_exact_enum(target, name)
             }
             _ => return Err(format!("unsupported scalar type name '{type_name}'")),
         };
+        let declaration = declaration_result.map_err(|error| {
+            if error.starts_with("unknown compile-time enum '") {
+                format!(
+                    "type '{}' is not a supported scalar initializer type",
+                    type_name
+                )
+            } else {
+                error
+            }
+        })?;
         self.types
             .resolve(type_name)
             .map(Ok)
@@ -1141,6 +1319,34 @@ impl DeclarationPath for EnumDeclaration {
 
 fn display_declaration_key(key: &DeclarationKey) -> String {
     format!("{}::{}", key.path, key.name)
+}
+
+fn display_value_id(id: &CompileTimeValueId) -> String {
+    let owner = match &id.owner {
+        CompileTimeValueOwner::Flat => String::new(),
+        CompileTimeValueOwner::Group(group) | CompileTimeValueOwner::Enum(group) => {
+            format!("{group}.")
+        }
+    };
+    format!("{}::{owner}{}", id.source_path, id.member)
+}
+
+fn validate_group_string_value(
+    id: &CompileTimeValueId,
+    category: TypeCategory,
+    value: &str,
+) -> Result<(), String> {
+    let group = match &id.owner {
+        CompileTimeValueOwner::Group(group) => group.as_str(),
+        _ => "",
+    };
+    if matches!(category, TypeCategory::AsciiFixed | TypeCategory::AsciiView) && !value.is_ascii() {
+        return Err(format!(
+            "ASCII constant group member '{group}.{}' contains non-ASCII text",
+            id.member
+        ));
+    }
+    Ok(())
 }
 
 fn integer_value(value: EvaluatedScalar, kind: ScalarKind) -> i128 {
@@ -1403,10 +1609,10 @@ mod tests {
             .evaluate("main.stasis", "hidden.SECRET", TYPE_ID_I32)
             .unwrap_err();
         // `hidden.stasis` is present in the test file list but absent from the
-        // module graph. Do not guess that an unimported qualifier names it.
+        // module graph. The source index must not infer a module alias from it.
         assert!(
             hidden_constant_error
-                .contains("unknown compile-time enum 'hidden' visible from 'main.stasis'"),
+                .contains("unknown compile-time value 'hidden.SECRET' visible from 'main.stasis'"),
             "unexpected hidden-constant diagnostic: {hidden_constant_error}"
         );
         let cycle = evaluator

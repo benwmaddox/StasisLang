@@ -159,6 +159,23 @@ pub struct ParsedConstDefinition {
     pub value_range: Range<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedConstGroupMemberDefinition {
+    pub name: String,
+    pub name_range: Range<usize>,
+    pub type_name: String,
+    pub value_text: String,
+    pub value_range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedConstGroupDefinition {
+    pub name: String,
+    pub name_range: Range<usize>,
+    pub definition_range: Range<usize>,
+    pub members: Vec<ParsedConstGroupMemberDefinition>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParsedTypeLayout {
     pub enums: Vec<ParsedEnumDefinition>,
@@ -166,6 +183,7 @@ pub struct ParsedTypeLayout {
     pub globals: Vec<ParsedGlobalDefinition>,
     pub global_blocks: Vec<ParsedGlobalBlockDefinition>,
     pub constants: Vec<ParsedConstDefinition>,
+    pub const_groups: Vec<ParsedConstGroupDefinition>,
 }
 
 pub fn parse_typed_local_bindings(source: &str) -> Result<Vec<ParsedLocalBinding>, String> {
@@ -1510,9 +1528,22 @@ pub fn parse_top_level_type_layout(source: &str) -> Result<ParsedTypeLayout, Str
                     continue;
                 }
                 if keyword == "const" {
-                    let (parsed, next_cursor) = parse_const_definition(source, &tokens, cursor)?;
-                    out.constants.push(parsed);
-                    cursor = next_cursor;
+                    if tokens.get(cursor + 1).is_some_and(|name| {
+                        name.kind == TokenKind::Identifier
+                            && tokens
+                                .get(cursor + 2)
+                                .is_some_and(|token| token.kind == TokenKind::LBrace)
+                    }) {
+                        let (parsed, next_cursor) =
+                            parse_const_group_definition(source, &tokens, cursor)?;
+                        out.const_groups.push(parsed);
+                        cursor = next_cursor;
+                    } else {
+                        let (parsed, next_cursor) =
+                            parse_const_definition(source, &tokens, cursor)?;
+                        out.constants.push(parsed);
+                        cursor = next_cursor;
+                    }
                     continue;
                 }
             }
@@ -1756,6 +1787,108 @@ fn parse_const_definition(
             type_name,
             value_text,
             value_range,
+        },
+        next_cursor,
+    ))
+}
+
+fn parse_const_group_definition(
+    source: &str,
+    tokens: &[Token],
+    cursor: usize,
+) -> Result<(ParsedConstGroupDefinition, usize), String> {
+    let keyword = expect(tokens, cursor, TokenKind::Identifier)?;
+    let name_token = expect(tokens, cursor + 1, TokenKind::Identifier)?;
+    let name = token_text(source, name_token).to_string();
+    expect(tokens, cursor + 2, TokenKind::LBrace)?;
+    let mut members = Vec::new();
+    let mut next_cursor = cursor + 3;
+    while tokens
+        .get(next_cursor)
+        .is_some_and(|token| token.kind != TokenKind::RBrace)
+    {
+        let Some(member_token) = tokens.get(next_cursor).copied() else {
+            return Err(format!("constant group '{name}' is missing '}}'"));
+        };
+        if member_token.kind == TokenKind::Eof {
+            return Err(format!("constant group '{name}' is missing '}}'"));
+        }
+        let member_name_token = expect(tokens, next_cursor, TokenKind::Identifier)?;
+        let member_name = token_text(source, member_name_token).to_string();
+        next_cursor += 1;
+        expect(tokens, next_cursor, TokenKind::Colon)?;
+        next_cursor += 1;
+        let (type_name, after_type) = parse_type_name(source, tokens, next_cursor)?;
+        next_cursor = after_type;
+        let equals = tokens.get(next_cursor).copied().ok_or_else(|| {
+            format!("incomplete member '{member_name}' in constant group '{name}'")
+        })?;
+        if !token_is_other_char(source, equals, b'=') {
+            return Err(format!(
+                "constant group member '{name}.{member_name}' must include an '=' initializer"
+            ));
+        }
+        next_cursor += 1;
+        let value_start = tokens
+            .get(next_cursor)
+            .map_or(equals.end, |token| token.start);
+        let mut semicolon_cursor = next_cursor;
+        while let Some(token) = tokens.get(semicolon_cursor) {
+            if token.kind == TokenKind::Semicolon {
+                break;
+            }
+            if token.kind == TokenKind::Identifier
+                && tokens
+                    .get(semicolon_cursor + 1)
+                    .is_some_and(|next| next.kind == TokenKind::Colon)
+            {
+                return Err(format!(
+                    "constant group member '{name}.{member_name}' initializer is missing ';'"
+                ));
+            }
+            if matches!(token.kind, TokenKind::RBrace | TokenKind::Eof) {
+                return Err(format!(
+                    "constant group member '{name}.{member_name}' initializer is missing ';'"
+                ));
+            }
+            semicolon_cursor += 1;
+        }
+        let semicolon = expect(tokens, semicolon_cursor, TokenKind::Semicolon)?;
+        let value_range = value_start..semicolon.start;
+        let value_text = source
+            .get(value_range.clone())
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if value_text.is_empty() {
+            return Err(format!(
+                "constant group member '{name}.{member_name}' initializer cannot be empty"
+            ));
+        }
+        members.push(ParsedConstGroupMemberDefinition {
+            name: member_name,
+            name_range: member_name_token.start..member_name_token.end,
+            type_name,
+            value_text,
+            value_range,
+        });
+        next_cursor = semicolon_cursor + 1;
+    }
+    let close = expect(tokens, next_cursor, TokenKind::RBrace)?;
+    let definition_range = keyword.start..close.end;
+    next_cursor += 1;
+    if tokens
+        .get(next_cursor)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        next_cursor += 1;
+    }
+    Ok((
+        ParsedConstGroupDefinition {
+            name,
+            name_range: name_token.start..name_token.end,
+            definition_range,
+            members,
         },
         next_cursor,
     ))
@@ -2793,6 +2926,99 @@ function tick(): i32 {
         assert_eq!(parsed.constants[1].name, "BENCH_WARMUP_FRAMES");
         assert_eq!(parsed.constants[1].type_name, "i32");
         assert_eq!(parsed.constants[1].value_text, "200");
+    }
+
+    #[test]
+    fn parses_typed_constant_groups_with_member_ranges() {
+        let source = concat!(
+            "const SCREEN {\n",
+            "    WIDTH: f32 = 640.0;\n",
+            "    HALF_WIDTH: f32 = SCREEN.WIDTH / 2.0;\n",
+            "}\n",
+            "const STANDALONE: i32 = 3;\n",
+        );
+        let parsed = parse_top_level_type_layout(source).expect("parse constant group");
+        assert_eq!(parsed.constants.len(), 1);
+        assert_eq!(parsed.const_groups.len(), 1);
+        let group = &parsed.const_groups[0];
+        assert_eq!(group.name, "SCREEN");
+        assert_eq!(&source[group.name_range.clone()], "SCREEN");
+        assert_eq!(
+            &source[group.definition_range.clone()],
+            "const SCREEN {\n    WIDTH: f32 = 640.0;\n    HALF_WIDTH: f32 = SCREEN.WIDTH / 2.0;\n}"
+        );
+        assert_eq!(group.members.len(), 2);
+        assert_eq!(group.members[0].name, "WIDTH");
+        assert_eq!(&source[group.members[0].name_range.clone()], "WIDTH");
+        assert_eq!(group.members[0].type_name, "f32");
+        assert_eq!(group.members[0].value_text, "640.0");
+        assert_eq!(
+            &source[group.members[1].value_range.clone()],
+            "SCREEN.WIDTH / 2.0"
+        );
+        assert_eq!(group.members[1].value_text, "SCREEN.WIDTH / 2.0");
+    }
+
+    #[test]
+    fn rejects_constant_group_member_without_terminating_semicolon() {
+        let source = "const SCREEN { WIDTH: f32 = 640.0 }";
+        let error = parse_top_level_type_layout(source).expect_err("member semicolon required");
+        assert!(
+            error.contains("constant group member 'SCREEN.WIDTH' initializer is missing ';'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_constant_group_member_initializer() {
+        let source = "const SCREEN { WIDTH: f32 = ; }";
+        let error = parse_top_level_type_layout(source).expect_err("empty initializer");
+        assert!(
+            error.contains("constant group member 'SCREEN.WIDTH' initializer cannot be empty"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_member_semicolon_before_next_member() {
+        let source = "const G { A: i32 = 1 B: i32 = 2; }";
+        let error = parse_top_level_type_layout(source).expect_err("missing member semicolon");
+        assert!(
+            error.contains("constant group member 'G.A' initializer is missing ';'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn retains_duplicate_group_and_member_ranges_for_semantic_diagnostics() {
+        let source = concat!(
+            "const G { VALUE: i32 = 1; VALUE: i32 = 2; }\n",
+            "const G { VALUE: i32 = 3; }\n",
+        );
+        let parsed = parse_top_level_type_layout(source).expect("parse duplicate declarations");
+        assert_eq!(parsed.const_groups.len(), 2);
+        assert_eq!(parsed.const_groups[0].name, parsed.const_groups[1].name);
+        assert_ne!(
+            parsed.const_groups[0].name_range,
+            parsed.const_groups[1].name_range
+        );
+        let members = &parsed.const_groups[0].members;
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].name, members[1].name);
+        assert_ne!(members[0].name_range, members[1].name_range);
+    }
+
+    #[test]
+    fn allows_empty_constant_group_like_other_empty_declaration_blocks() {
+        let parsed = parse_top_level_type_layout("const Empty { }\n").expect("empty group");
+        assert!(parsed.const_groups[0].members.is_empty());
+    }
+
+    #[test]
+    fn rejects_nested_constant_group_syntax() {
+        let source = "const OUTER { const INNER { VALUE: i32 = 1; } }";
+        let error = parse_top_level_type_layout(source).expect_err("nested group syntax");
+        assert!(error.contains("Colon"), "unexpected error: {error}");
     }
 
     #[test]

@@ -7,7 +7,10 @@ use std::path::Path;
 use stasis_compiler::compiler::Compiler;
 use stasis_compiler::frontend::formatter::format_source;
 use stasis_compiler::frontend::lexer::{lex, lex_with_diagnostic, Token, TokenKind};
-use stasis_compiler::frontend::parser::{completion_expected_type, parse_top_level_functions};
+use stasis_compiler::frontend::parser::{
+    completion_expected_type, parse_local_declarations, parse_top_level_functions,
+    parse_top_level_type_layout,
+};
 use stasis_compiler::frontend::workshop::{
     find_workshop_generic_parameter_references_at, find_workshop_references,
     organize_workshop_imports, plan_workshop_rename, prepare_workshop_rename,
@@ -393,6 +396,7 @@ struct LanguageIndex {
 struct WarmDefinitionIndex {
     simple: BTreeMap<String, Vec<WorkshopReference>>,
     qualified: BTreeMap<String, Vec<WorkshopReference>>,
+    scoped_qualified: BTreeMap<(String, String), Vec<WorkshopReference>>,
     root_types: BTreeMap<(String, String), String>,
     root_dependencies: BTreeMap<(String, String), WarmDefinitionDependency>,
     fields: BTreeMap<(String, String), (String, WorkshopReference)>,
@@ -488,14 +492,20 @@ impl WarmDefinitionIndex {
                     Some("global" | "const") => Some(WorkshopSourceItemKind::Globals),
                     _ => None,
                 };
+                let is_const_group_name = previous == Some("const")
+                    && tokens
+                        .get(token_index + 1)
+                        .is_some_and(|next| next.kind == TokenKind::LBrace);
                 if let Some(kind) = simple_kind {
                     if let Some(container) = containing.filter(|item| item.kind == kind) {
                         let reference = definition_reference(file, token, container, name)?;
-                        index
-                            .simple
-                            .entry(name.to_string())
-                            .or_default()
-                            .push(reference.clone());
+                        if !is_const_group_name {
+                            index
+                                .simple
+                                .entry(name.to_string())
+                                .or_default()
+                                .push(reference.clone());
+                        }
                         if matches!(
                             kind,
                             WorkshopSourceItemKind::Function | WorkshopSourceItemKind::Struct
@@ -518,7 +528,7 @@ impl WarmDefinitionIndex {
                                     .push(reference.clone());
                             }
                         }
-                        if kind == WorkshopSourceItemKind::Globals {
+                        if kind == WorkshopSourceItemKind::Globals && !is_const_group_name {
                             index
                                 .root_dependencies
                                 .entry((file.path.clone(), name.to_string()))
@@ -556,6 +566,71 @@ impl WarmDefinitionIndex {
                         }
                     }
                 }
+            }
+
+            let layout = parse_top_level_type_layout(&file.source)?;
+            let group_items = completion_items
+                .iter()
+                .filter(|item| {
+                    item.file == file.path
+                        && matches!(
+                            item.kind.as_str(),
+                            "constant_group" | "constant_group_member"
+                        )
+                        && item
+                            .scope
+                            .as_ref()
+                            .is_some_and(is_const_group_visibility_scope)
+                })
+                .collect::<Vec<_>>();
+            for item in group_items {
+                let group_name = item
+                    .owner
+                    .as_deref()
+                    .unwrap_or_else(|| item.text.rsplit('.').next().unwrap_or(&item.text));
+                let Some(group) = layout
+                    .const_groups
+                    .iter()
+                    .find(|group| group.name == group_name)
+                else {
+                    continue;
+                };
+                let range = if item.kind == "constant_group" {
+                    group.name_range.clone()
+                } else {
+                    let member_name = item.text.rsplit('.').next().unwrap_or(&item.text);
+                    let Some(member) = group
+                        .members
+                        .iter()
+                        .find(|member| member.name == member_name)
+                    else {
+                        continue;
+                    };
+                    member.name_range.clone()
+                };
+                let Some(token) = tokens
+                    .iter()
+                    .copied()
+                    .find(|token| token.start == range.start && token.end == range.end)
+                else {
+                    continue;
+                };
+                let Some(container) = source_items.iter().find(|source_item| {
+                    source_item.file == file.path
+                        && source_item.kind == WorkshopSourceItemKind::Globals
+                        && source_item.source_spans.iter().any(|span| {
+                            span.start as usize <= range.start && range.end <= span.end as usize
+                        })
+                }) else {
+                    continue;
+                };
+                let reference = definition_reference(file, token, container, &item.text)?;
+                let scope = item.scope.as_ref().expect("scoped constant group item");
+                index
+                    .scoped_qualified
+                    .entry((scope.file.clone(), item.text.clone()))
+                    .or_default()
+                    .push(reference);
             }
         }
         for (key, candidates) in field_candidates {
@@ -627,8 +702,24 @@ impl WarmDefinitionIndex {
         Ok(index)
     }
 
-    fn definition(&self, symbol: &str, request_file: &str) -> Option<WarmDefinitionResolution> {
+    fn definition(
+        &self,
+        symbol: &str,
+        request_file: &str,
+        allow_const_group_route: bool,
+    ) -> Option<WarmDefinitionResolution> {
         let segments = symbol.split('.').collect::<Vec<_>>();
+        if allow_const_group_route {
+            if let Some(references) = self
+                .scoped_qualified
+                .get(&(request_file.to_string(), symbol.to_string()))
+            {
+                return Some(WarmDefinitionResolution {
+                    references: references.clone(),
+                    dependencies: Vec::new(),
+                });
+            }
+        }
         if let Some(references) = self.qualified.get(symbol) {
             let dependencies = segments.first().and_then(|root| {
                 self.root_dependencies
@@ -1022,7 +1113,32 @@ impl LanguageService {
             index
                 .workshop_items
                 .iter()
-                .filter(|item| !item.exposure.is_public() && item.file == relative)
+                .filter(|item| {
+                    item.scope.as_ref().is_some_and(|scope| {
+                        is_const_group_visibility_scope(scope) && scope.file == relative
+                    }) && (item.exposure.is_public() || item.file == relative)
+                        && !const_group_member_route_shadowed(
+                            &index.workshop_items,
+                            &relative,
+                            &source,
+                            byte_offset,
+                            &item.text,
+                        )
+                })
+                .map(shared_completion_item),
+        );
+        completion_index.extend(
+            index
+                .workshop_items
+                .iter()
+                .filter(|item| {
+                    !item.exposure.is_public()
+                        && item.file == relative
+                        && !item
+                            .scope
+                            .as_ref()
+                            .is_some_and(is_const_group_visibility_scope)
+                })
                 .map(shared_completion_item),
         );
         completion_index.extend(live_items);
@@ -1131,7 +1247,18 @@ impl LanguageService {
         let mut matches = index
             .workshop_items
             .iter()
-            .filter(|item| item.text == symbol && workshop_completion_visible(item, &context))
+            .filter(|item| {
+                item.text == symbol
+                    && workshop_completion_visible(item, &context)
+                    && (item.kind != "constant_group_member"
+                        || !const_group_member_route_shadowed(
+                            &index.workshop_items,
+                            &relative,
+                            &document.text,
+                            byte_offset,
+                            &symbol,
+                        ))
+            })
             .collect::<Vec<_>>();
         matches.sort_by_key(|item| workshop_completion_specificity(item, &context));
         let Some(primary) = matches.first().map(|item| (*item).clone()) else {
@@ -1240,6 +1367,15 @@ impl LanguageService {
         };
         let project_root = self.project_root.clone();
         let relative = canonical_source_path(Some(&self.project_root), path)?;
+        let cached_group_route_shadowed = self.language_index.as_ref().is_some_and(|index| {
+            const_group_member_route_shadowed(
+                &index.workshop_items,
+                &relative,
+                &document.text,
+                byte_offset,
+                &symbol,
+            )
+        });
         let has_scoped_candidate = self.language_index.as_ref().is_some_and(|index| {
             index.workshop_items.iter().any(|item| {
                 item.text == symbol
@@ -1258,7 +1394,11 @@ impl LanguageService {
                 definition_reference_symbols(&index.workshop_items, &symbol)
                     .into_iter()
                     .find_map(|candidate| {
-                        let resolution = index.definitions.definition(&candidate, &relative)?;
+                        let resolution = index.definitions.definition(
+                            &candidate,
+                            &relative,
+                            !(cached_group_route_shadowed && candidate == symbol),
+                        )?;
                         (resolution.references.len() == 1)
                             .then(|| {
                                 remap_definition_locations(
@@ -1277,6 +1417,13 @@ impl LanguageService {
         let context = self.query_context(&relative, byte_offset, &document.text)?;
         let call = call_context(&document.text, byte_offset)?;
         let index = self.language_index()?;
+        let group_route_shadowed = const_group_member_route_shadowed(
+            &index.workshop_items,
+            &relative,
+            &document.text,
+            byte_offset,
+            &symbol,
+        );
         if let Some(call) = call.as_ref().filter(|call| !call.explicit_generic) {
             let reachable = workshop_reachable_files(&index.files, Path::new(&relative))?
                 .into_iter()
@@ -1328,9 +1475,12 @@ impl LanguageService {
                 definition_reference_symbols(&index.workshop_items, &symbol)
                     .into_iter()
                     .find_map(|candidate| {
+                        if group_route_shadowed && candidate == symbol {
+                            return None;
+                        }
                         index
                             .definitions
-                            .definition(&candidate, &relative)
+                            .definition(&candidate, &relative, true)
                             .and_then(|resolution| {
                                 remap_definition_locations(
                                     &project_root,
@@ -1356,7 +1506,10 @@ impl LanguageService {
             return Ok(vec![location]);
         }
         for candidate in definition_reference_symbols(&index.workshop_items, &symbol) {
-            if let Some(resolution) = index.definitions.definition(&candidate, &relative) {
+            if group_route_shadowed && candidate == symbol {
+                continue;
+            }
+            if let Some(resolution) = index.definitions.definition(&candidate, &relative, true) {
                 if let Some(locations) =
                     remap_definition_locations(&project_root, &snapshot, index, &resolution)
                 {
@@ -1366,6 +1519,9 @@ impl LanguageService {
         }
         let mut locations = Vec::new();
         for candidate in definition_reference_symbols(&index.workshop_items, &symbol) {
+            if group_route_shadowed && candidate == symbol {
+                continue;
+            }
             for reference in find_workshop_references(&index.files, &candidate, 256)? {
                 if reference.kind != WorkshopReferenceKind::Definition {
                     continue;
@@ -2097,7 +2253,13 @@ impl LanguageService {
                     WarmDefinitionIndex::build(&files, &source_items, &workshop_items)?;
                 let completion_items = workshop_items
                     .iter()
-                    .filter(|item| item.exposure.is_public())
+                    .filter(|item| {
+                        item.exposure.is_public()
+                            && !item
+                                .scope
+                                .as_ref()
+                                .is_some_and(is_const_group_visibility_scope)
+                    })
                     .map(shared_completion_item)
                     .collect::<Vec<_>>();
                 let mut completion = CompletionIndex::default();
@@ -2400,7 +2562,11 @@ fn shared_completion_item(item: &WorkshopCompletionItem) -> CompletionItem {
             owner: item.owner.clone(),
             signature: Some(signature.clone()),
         }),
-        scope: item.scope.as_ref().map(shared_completion_scope),
+        scope: item
+            .scope
+            .as_ref()
+            .filter(|scope| !is_const_group_visibility_scope(scope))
+            .map(shared_completion_scope),
     }
 }
 
@@ -2414,7 +2580,15 @@ fn matching_workshop_completion<'a>(
             && item.detail == ranked.detail
             && ranked.source.as_deref() == Some(item.file.as_str())
             && item.type_name == ranked.type_name
-            && item.scope.as_ref().map(shared_completion_scope) == ranked.scope
+            && if item
+                .scope
+                .as_ref()
+                .is_some_and(is_const_group_visibility_scope)
+            {
+                ranked.scope.is_none()
+            } else {
+                item.scope.as_ref().map(shared_completion_scope) == ranked.scope
+            }
     })
 }
 
@@ -2547,6 +2721,10 @@ fn shared_completion_scope(scope: &WorkshopCompletionScope) -> CompletionScope {
     }
 }
 
+fn is_const_group_visibility_scope(scope: &WorkshopCompletionScope) -> bool {
+    scope.owner == "__constant_group_visibility__"
+}
+
 fn overlay_document_completion_items(
     source_items: &[WorkshopSourceItem],
     source_files: &[WorkshopSourceFile],
@@ -2617,14 +2795,16 @@ fn overlay_completion_items(
     })?;
     let span = item.source_spans.first()?;
     let mut files = source_files.to_vec();
-    let source_file = files.iter_mut().find(|source| source.path == file)?;
-    let start = span.start as usize;
-    let end = span.end as usize;
-    if start > end || end > source_file.source.len() {
-        return None;
+    {
+        let source_file = files.iter_mut().find(|source| source.path == file)?;
+        let start = span.start as usize;
+        let end = span.end as usize;
+        if start > end || end > source_file.source.len() {
+            return None;
+        }
+        let overlay = balanced_definition(buffer)?;
+        source_file.source.replace_range(start..end, &overlay);
     }
-    let overlay = balanced_definition(buffer)?;
-    source_file.source.replace_range(start..end, &overlay);
     let mut items = workshop_completion_items(&files).ok()?;
     for completion in &mut items {
         if let Some(scope) = completion
@@ -2635,6 +2815,34 @@ fn overlay_completion_items(
             scope.owner_signature = context.owner_signature.clone();
         }
     }
+    let overlay_source = files
+        .iter()
+        .find(|source| source.path == file)?
+        .source
+        .as_str();
+    let shadowed_group_routes = items
+        .iter()
+        .filter(|completion| {
+            completion.scope.as_ref().is_some_and(|scope| {
+                is_const_group_visibility_scope(scope)
+                    && scope.file == file
+                    && const_group_member_route_shadowed(
+                        &items,
+                        file,
+                        overlay_source,
+                        context.source_offset.unwrap_or(0),
+                        &completion.text,
+                    )
+            })
+        })
+        .map(|completion| completion.text.clone())
+        .collect::<BTreeSet<_>>();
+    items.retain(|completion| {
+        completion.scope.as_ref().is_none_or(|scope| {
+            !is_const_group_visibility_scope(scope)
+                || (scope.file == file && !shadowed_group_routes.contains(&completion.text))
+        })
+    });
     Some(items)
 }
 
@@ -2671,6 +2879,12 @@ fn workshop_completion_visible(item: &WorkshopCompletionItem, context: &Completi
     let Some(scope) = item.scope.as_ref() else {
         return true;
     };
+    if is_const_group_visibility_scope(scope) {
+        return context.file.as_deref() == Some(scope.file.as_str())
+            && context
+                .source_offset
+                .is_some_and(|offset| scope.visible_from <= offset && offset <= scope.visible_to);
+    }
     context.owner.as_deref() == Some(scope.owner.as_str())
         && context.file.as_deref() == Some(scope.file.as_str())
         && context
@@ -2680,6 +2894,71 @@ fn workshop_completion_visible(item: &WorkshopCompletionItem, context: &Completi
         && context
             .source_offset
             .is_some_and(|offset| scope.visible_from <= offset && offset <= scope.visible_to)
+}
+
+fn const_group_member_route_shadowed(
+    items: &[WorkshopCompletionItem],
+    file: &str,
+    source: &str,
+    byte_offset: usize,
+    symbol: &str,
+) -> bool {
+    let segments = symbol.split('.').collect::<Vec<_>>();
+    let [group_name, _member_name] = segments.as_slice() else {
+        return false;
+    };
+    let has_unqualified_group_route = items.iter().any(|item| {
+        item.kind == "constant_group_member"
+            && item.text == symbol
+            && item
+                .scope
+                .as_ref()
+                .is_some_and(|scope| is_const_group_visibility_scope(scope) && scope.file == file)
+    });
+    if !has_unqualified_group_route {
+        return false;
+    }
+    let Ok(layout) = parse_top_level_type_layout(source) else {
+        return false;
+    };
+    if layout
+        .globals
+        .iter()
+        .any(|global| global.name == *group_name)
+        || layout
+            .global_blocks
+            .iter()
+            .any(|global| global.name == *group_name)
+        || layout
+            .constants
+            .iter()
+            .any(|constant| constant.name == *group_name)
+    {
+        return true;
+    }
+    let Ok(functions) = parse_top_level_functions(source) else {
+        return false;
+    };
+    let Some(function) = functions.iter().find(|function| {
+        function.body_range.start <= byte_offset && byte_offset <= function.body_range.end
+    }) else {
+        return false;
+    };
+    if function
+        .params
+        .iter()
+        .any(|parameter| parameter.name == *group_name)
+    {
+        return true;
+    }
+    parse_local_declarations(source).is_ok_and(|locals| {
+        locals.iter().any(|local| {
+            local.function_name == function.name
+                && local.name == *group_name
+                && local.visibility_range.start <= byte_offset
+                && byte_offset <= local.visibility_range.end
+        })
+    })
 }
 
 fn workshop_completion_specificity<'a>(
@@ -5170,6 +5449,90 @@ function main(): i32 {
             service.snapshot().revision(),
             "changing a declaration rebuilds the warm cache for the new revision",
         );
+    }
+
+    #[test]
+    fn constant_group_members_support_module_qualified_hover_and_definition() {
+        let root = std::env::temp_dir().join("stasis-language-service-constant-groups");
+        let api_path = root.join("src/api.stasis");
+        let main_path = root.join("src/main.stasis");
+        let api_path_text = api_path.to_string_lossy().replace('\\', "/");
+        let main_path_text = main_path.to_string_lossy().replace('\\', "/");
+        let api_source = "const LIMITS { SMALL: i32 = 2; LARGE: i32 = 8; }\n";
+        let main_source = "import \"api.stasis\";\nfunction main(): i32 { return api.LIMITS.SMALL + LIMITS.SMALL; }\n";
+        let mut service = LanguageService::new(root.to_string_lossy()).expect("language service");
+        service.set_disk_document(api_path_text.clone(), api_source);
+        service.set_disk_document(main_path_text.clone(), main_source);
+
+        let member_use = main_source.find("api.LIMITS.SMALL").expect("qualified use");
+        let hover = service
+            .hover(&main_path_text, member_use + "api.LIMITS.".len() + 1)
+            .expect("constant-group hover")
+            .expect("member hover info");
+        assert_eq!(hover.symbol, "api.LIMITS.SMALL");
+        assert_eq!(hover.kind, "constant_group_member");
+        assert_eq!(hover.type_name.as_deref(), Some("i32"));
+
+        let definitions = service
+            .definition(&main_path_text, member_use + "api.LIMITS.".len() + 1)
+            .expect("constant-group definition");
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].path, api_path_text);
+        assert_eq!(&api_source[definitions[0].range.clone()], "SMALL");
+
+        let unqualified_use = main_source.rfind("LIMITS.SMALL").expect("unqualified use");
+        let unqualified_hover = service
+            .hover(&main_path_text, unqualified_use + "LIMITS.".len() + 1)
+            .expect("unqualified constant-group hover")
+            .expect("unqualified member hover info");
+        assert_eq!(unqualified_hover.kind, "constant_group_member");
+        let unqualified_definition = service
+            .definition(&main_path_text, unqualified_use + "LIMITS.".len() + 1)
+            .expect("unqualified constant-group definition");
+        assert_eq!(unqualified_definition.len(), 1);
+        assert_eq!(unqualified_definition[0].path, api_path_text);
+        assert_eq!(
+            &api_source[unqualified_definition[0].range.clone()],
+            "SMALL"
+        );
+
+        let cursor =
+            main_source.find("api.LIMITS.").expect("namespace prefix") + "api.LIMITS.".len();
+        let completions = service
+            .completion(&main_path_text, cursor, 32)
+            .expect("constant-group member completion");
+        assert!(completions.items.iter().any(|item| {
+            item.text == "api.LIMITS.SMALL" && item.type_name.as_deref() == Some("i32")
+        }));
+        assert!(!service
+            .language_index()
+            .expect("workshop item index")
+            .workshop_items
+            .iter()
+            .any(|item| item.text == "SMALL"));
+
+        let shadow_path = root.join("src/shadow.stasis");
+        let shadow_path_text = shadow_path.to_string_lossy().replace('\\', "/");
+        let shadow_source =
+            "import \"api.stasis\";\nfunction shadow(LIMITS: i32): i32 { return LIMITS.SMALL; }\n";
+        service.set_disk_document(shadow_path_text.clone(), shadow_source);
+        let shadow_use = shadow_source.find("LIMITS.SMALL").expect("shadowed use");
+        let shadow_cursor = shadow_use + "LIMITS.".len();
+        let shadow_completions = service
+            .completion(&shadow_path_text, shadow_cursor, 32)
+            .expect("shadowed group completion");
+        assert!(!shadow_completions
+            .items
+            .iter()
+            .any(|item| item.text == "LIMITS.SMALL"));
+        assert!(service
+            .hover(&shadow_path_text, shadow_use + "LIMITS.".len() + 1,)
+            .expect("shadowed group hover")
+            .is_none());
+        assert!(service
+            .definition(&shadow_path_text, shadow_use + "LIMITS.".len() + 1,)
+            .expect("shadowed group definition")
+            .is_empty());
     }
 
     #[test]

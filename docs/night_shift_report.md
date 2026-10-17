@@ -1458,3 +1458,61 @@ inspection explicit about each format's available metadata.
 
 Visual evidence: not applicable to this documentation, headless lesson, and test-only
 oracle change. Prior #840 Pong PNG/MP4 acceptance evidence remains recorded above.
+
+## #842: typed compile-time constant groups
+
+One-level `const GROUP { MEMBER: Type = value; }` declarations now resolve through
+qualified local and imported names. Parser-owned source identities feed the shared
+compile-time index, generic evaluation, typed HIR, and exact JIT dependencies.
+Groups create no runtime object or storage. Flat declarations remain supported;
+namespace ambiguity, missing members, value shadowing, duplicates, invalid unused
+initializers, and assignment to members receive deterministic source diagnostics.
+String constants retain literal ASCII/UTF-8 view semantics. Asset discovery consumes
+resolved string operands, including imported groups and receiver-form loader calls.
+Formatter, grammar, browser/workshop tooling, language service, and reference docs
+now agree on group visibility and source ownership.
+
+Validation:
+- Exact Linux CI workspace command: 1341 tests passed across 49 targets; exact CI
+  formatting and diff checks passed. No lingering Linux test executables remained.
+- Real JIT, linked native AOT, and Node/Wasm execution passed on Windows and Linux.
+  Fixtures cover imported array capacity, scalar and enum lanes, strings, unsigned
+  boundaries, and f64 precision. Group semantics: 18 passed. Frontend: 261 passed,
+  including the existing 9999/10000/10001 step and dependency-depth boundaries.
+- Incremental JIT changes execution and recompiles callers for a referenced member;
+  sibling and same-spelling other-module edits reuse code. Asset tests: 17 passed,
+  including source spans, explicit manifest resolution, and JIT/AOT parity.
+- The characterization update changes only Wasm's run-local array TypeId 8 to 10;
+  every other recorded fact, layout, generated-code fact, and result is unchanged.
+- Windows preflight passed ABI 981/host 1167 comparisons, architecture checks, and
+  policy tests. Workspace validation completed in commands bounded to 900 seconds:
+  core 1556 tests across 49 targets (including 998 compiler unit tests); application
+  library 373, CLI 250, and all desktop/mobile seams; CLI integration 46, web package
+  21, web replay 1, desktop adapter 1, and launch matrix 11. The latter builds and
+  executes fresh native packages. The complete Stasis behavior suite also passed.
+- Signed ordinary and isolated presentation-poison runtimes share the documented
+  local source fingerprint; flags, exports, and distinct hashes were verified.
+  Hot swap observed 59 frames with no mixed-generation frames. The existing host
+  SpriteRef extension and duplicate-variant diagnostics retain their semantics.
+- The quick-reference group is an exact excerpt of the shipped, compiler-checked
+  example; its test uses dependent members as real array indices. Generated
+  knowledge integration and Stasis formatting passed.
+- VS Code TypeScript/unit checks passed all 16 tests. Final six-persona review is
+  GREEN. No lingering owned compiler/test processes remained after validation.
+
+Theory gained: stable declaration identities are distinct from run-local TypeIds.
+Resolved HIR must retain the compiler's authoritative type table; real mixed-type
+execution exposed the discarded semantic clone. Long generic constant chains need
+streaming evaluation with a shared declaration budget and fresh expression budgets.
+An adjacent grouped literal should reuse these same identity and evaluation paths.
+Source-owned enum lookup must retain the explicit canonical host extension seam.
+
+Good: execution, exact resource-boundary tests, cache-reuse tests, and manifest
+validation exposed errors before publication.
+Bad: transient semantic types and a new recursive expression tree initially broke
+backend identity and the established evaluation budget.
+Adjustment: retain one type table, reuse streaming evaluation with shared lookup,
+and verify real execution, limit neighbors, and the full Stasis behavior suite after
+resolver changes. Keep documentation fences in shipped, executable examples.
+
+Visual evidence: not applicable to this compiler and headless tooling change.
