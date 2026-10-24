@@ -381,7 +381,8 @@ def build_cmd_invocation(cmd_executable: Path, bridge_path: Path) -> str:
 
 
 def _cmd_executable(environment: Mapping[str, str]) -> Path:
-    system_root = environment.get("SystemRoot") or environment.get("windir")
+    folded_environment = {name.casefold(): value for name, value in environment.items()}
+    system_root = folded_environment.get("systemroot") or folded_environment.get("windir")
     if not system_root:
         raise ValidationSetupError(
             "SystemRoot is unavailable; run canonical Windows validation from Git Bash on Windows"

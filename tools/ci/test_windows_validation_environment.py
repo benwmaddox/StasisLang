@@ -393,6 +393,18 @@ class WindowsValidationEnvironmentTests(unittest.TestCase):
         self.assertIn('exec "$PYTHON" tools/windows/prepare_validation.py --launch', validation)
         self.assertIn('"$PYTHON" tools/ci/run_workspace_tests.py', validation)
 
+    def test_cmd_executable_accepts_uppercase_system_root_from_git_bash(self):
+        with tempfile.TemporaryDirectory(prefix="validation fixture ", dir=TEST_TEMP_ROOT) as temp:
+            system_root = Path(temp) / "Windows"
+            cmd = system_root / "System32" / "cmd.exe"
+            cmd.parent.mkdir(parents=True)
+            cmd.touch()
+
+            self.assertEqual(
+                prepare_validation._cmd_executable({"SYSTEMROOT": str(system_root)}),
+                cmd,
+            )
+
     def test_windows_launcher_preserves_parent_and_process_exit_code(self):
         with tempfile.TemporaryDirectory(prefix="validation fixture ", dir=TEST_TEMP_ROOT) as temp:
             root = Path(temp)
@@ -405,7 +417,7 @@ class WindowsValidationEnvironmentTests(unittest.TestCase):
             cmd.touch()
             env.update(
                 {
-                    "SystemRoot": str(system_root),
+                    "SYSTEMROOT": str(system_root),
                     "CARGO_BUILD_TARGET": GNU_TARGET,
                     "STASIS_SIGNING_CERT_THUMBPRINT": "ABC123",
                     "PATH": "original path",
