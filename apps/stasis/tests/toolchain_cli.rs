@@ -151,6 +151,59 @@ fn json_stderr(output: &Output) -> Value {
     serde_json::from_slice(&output.stderr).expect("single JSON stderr object")
 }
 
+fn assert_test_timing_fields(result: &Value) {
+    let phases = [
+        "timing_discovery_us",
+        "timing_prepare_us",
+        "timing_compile_us",
+        "timing_execute_us",
+    ];
+    let phase_total = phases.iter().fold(0u64, |total, field| {
+        total.saturating_add(
+            result[field]
+                .as_u64()
+                .unwrap_or_else(|| panic!("missing numeric {field}: {result}")),
+        )
+    });
+    let total = result["timing_total_us"]
+        .as_u64()
+        .expect("numeric timing_total_us");
+    assert!(total > 0, "test runner total timing must be positive");
+    assert!(
+        phase_total <= total,
+        "measured phases exceed runner total: phases={phase_total} total={total}"
+    );
+}
+
+fn assert_text_test_timings(output: &str) {
+    let line = output
+        .lines()
+        .find(|line| line.starts_with("timings: "))
+        .expect("human test output includes its timing line");
+    let fields = line
+        .strip_prefix("timings: ")
+        .expect("timing line prefix")
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    assert_eq!(fields.len(), 5, "timing fields: {line}");
+    for (field, label) in fields
+        .iter()
+        .zip(["discovery", "prepare", "compile", "execute", "total"])
+    {
+        let prefix = format!("{label}=");
+        let value = field
+            .strip_prefix(prefix.as_str())
+            .and_then(|value| value.strip_suffix("ms"))
+            .unwrap_or_else(|| panic!("missing {label} millisecond timing in {line}"));
+        let (whole, fractional) = value
+            .split_once('.')
+            .unwrap_or_else(|| panic!("timing has no decimal point: {field}"));
+        assert!(!whole.is_empty() && whole.bytes().all(|byte| byte.is_ascii_digit()));
+        assert_eq!(fractional.len(), 3, "timing needs three decimals: {field}");
+        assert!(fractional.bytes().all(|byte| byte.is_ascii_digit()));
+    }
+}
+
 fn copy_tree(source: &Path, destination: &Path) {
     fs::create_dir_all(destination).expect("create copied tree directory");
     for entry in fs::read_dir(source).expect("read copied tree directory") {
@@ -1979,6 +2032,7 @@ fn audio_device_profiles_fail_abandoned_refusal_and_accept_retries_at_120_and_50
             let receipt: Value = serde_json::from_slice(&output.stdout)
                 .expect("parse audio profile validation JSON");
             assert_eq!(receipt["result"]["audio_health"]["status"], expected_status);
+            assert_eq!(receipt["ok"], true);
             assert!(receipt["result"]["audio_health"]["push_attempts"]
                 .as_u64()
                 .is_some_and(|count| count > 0));
@@ -2104,13 +2158,23 @@ fn usage_compile_test_and_guest_exit_codes_are_stable() {
         .expect("write invalid source");
     let compile = stasis(&["--json", "check"], &project);
     assert_eq!(compile.status.code(), Some(1));
-    assert_eq!(json_stderr(&compile)["code"], "command_failed");
+    let compile_json = json_stderr(&compile);
+    assert_eq!(compile_json["code"], "command_failed");
+    assert!(compile_json.get("result").is_none());
 
     fs::write(
         project.join("tests/main.test.stasis"),
         "test `fails`(): bool {\n    return false;\n}\n",
     )
     .expect("write failing test");
+    let setup_error = stasis(&["--json", "test", "tests/missing"], &project);
+    assert_eq!(setup_error.status.code(), Some(1));
+    let setup_error_json = json_stderr(&setup_error);
+    assert_eq!(setup_error_json["command"], "test");
+    assert_eq!(setup_error_json["code"], "command_failed");
+    assert!(setup_error_json.get("result").is_none());
+    assert!(!setup_error_json.to_string().contains("timing_total_us"));
+
     let tests = stasis(&["--json", "test"], &project);
     assert_eq!(tests.status.code(), Some(1));
     let test_json = json_stderr(&tests);
@@ -2118,7 +2182,56 @@ fn usage_compile_test_and_guest_exit_codes_are_stable() {
     assert!(test_json["message"]
         .as_str()
         .unwrap_or_default()
+        .starts_with("1 test(s) and 0 scenario case(s) failed: "));
+    assert!(test_json["message"]
+        .as_str()
+        .unwrap_or_default()
         .contains("fails"));
+    assert_eq!(test_json["ok"], false);
+    assert_eq!(test_json["result"]["tests_discovered"], 1);
+    assert_eq!(test_json["result"]["tests_run"], 1);
+    assert_eq!(test_json["result"]["tests_failed"], 1);
+    assert!(test_json["result"]["failures"][0]
+        .as_str()
+        .unwrap_or_default()
+        .contains("fails"));
+    assert_test_timing_fields(&test_json["result"]);
+
+    let text_failed = stasis(&["test"], &project);
+    assert_eq!(text_failed.status.code(), Some(1));
+    assert!(text_failed.stdout.is_empty());
+    let text_failed_stderr = String::from_utf8_lossy(&text_failed.stderr);
+    assert!(
+        text_failed_stderr.starts_with("stasis test: 1 test(s) and 0 scenario case(s) failed: ")
+    );
+    assert_text_test_timings(&text_failed_stderr);
+
+    fs::write(
+        project.join("tests/main.test.stasis"),
+        "test `passes`(): bool {\n    return true;\n}\n",
+    )
+    .expect("write passing test");
+    let passed = stasis(&["--json", "test"], &project);
+    assert_eq!(passed.status.code(), Some(0));
+    let passed_json = json_stdout(&passed);
+    assert_eq!(passed_json["ok"], true);
+    assert_eq!(passed_json["result"]["files_discovered"], 1);
+    assert_eq!(passed_json["result"]["files_with_tests"], 1);
+    assert_eq!(passed_json["result"]["tests_discovered"], 1);
+    assert_eq!(passed_json["result"]["tests_run"], 1);
+    assert_eq!(passed_json["result"]["tests_passed"], 1);
+    assert_eq!(passed_json["result"]["tests_failed"], 0);
+    assert_test_timing_fields(&passed_json["result"]);
+
+    let text_passed = stasis(&["test"], &project);
+    assert_eq!(text_passed.status.code(), Some(0));
+    assert!(text_passed.stderr.is_empty());
+    let text_passed_stdout = String::from_utf8_lossy(&text_passed.stdout);
+    assert_eq!(
+        text_passed_stdout.lines().next(),
+        Some("1 test(s) passed in 1 file(s); 0 scenario case(s) passed")
+    );
+    assert_text_test_timings(&text_passed_stdout);
 
     fs::write(
         project.join("src/main.stasis"),
@@ -2134,6 +2247,7 @@ fn usage_compile_test_and_guest_exit_codes_are_stable() {
         String::from_utf8_lossy(&run.stderr)
     );
     let run_json = json_stdout(&run);
+    assert_eq!(run_json["ok"], true);
     assert_eq!(run_json["result"]["exit_code"], 7);
 
     fs::remove_dir_all(&parent).ok();
@@ -2250,6 +2364,22 @@ fn headless_ticks_and_seeded_scenarios_are_deterministic_and_reproducible() {
     .expect("write failing scenario");
     let failed = stasis(&["--json", "test"], &project);
     assert_eq!(failed.status.code(), Some(1));
+    let failed_json = json_stderr(&failed);
+    assert_eq!(failed_json["code"], "command_failed");
+    assert!(failed_json["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("seeded isolation"));
+    assert_eq!(failed_json["result"]["scenario_cases_failed"], 1);
+    assert_test_timing_fields(&failed_json["result"]);
+    let reported_receipts = failed_json["result"]["scenario_failure_receipts"]
+        .as_array()
+        .expect("scenario failure receipts in command result");
+    assert_eq!(reported_receipts.len(), 1);
+    let reported_receipt = reported_receipts[0]
+        .as_str()
+        .expect("scenario receipt path");
+    assert!(project.join(reported_receipt).is_file());
     let receipt_dir = project.join("build/headless-replays");
     let receipts = fs::read_dir(&receipt_dir)
         .expect("read receipt directory")

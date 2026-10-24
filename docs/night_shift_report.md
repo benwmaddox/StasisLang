@@ -1911,3 +1911,72 @@ fresh stamped sibling fixtures for integration tests that launch copied executab
 
 Visual evidence: not applicable; this change affects headless validation tooling and
 test fixture setup with no user-visible graphical behavior.
+
+## 2026-10-24 - Maddox #848 active test phase timings
+
+`stasis test` now exposes the runner's existing discovery, prepare, compile, execute, and total
+durations in JSON integer-microsecond fields (`timing_discovery_us`, `timing_prepare_us`,
+`timing_compile_us`, `timing_execute_us`, and `timing_total_us`) and in text with three decimal
+places in milliseconds. No timing measurement or test-runner behavior changed. Test-summary
+failures retain their existing `command_failed` message and exit code while adding the result;
+pre-summary setup errors retain the generic error envelope without fabricated timing fields.
+The `test_workspace()` error contract remains in place for internal apply/revert rollback callers.
+Guest exit 7 remains an outer `ok: true` result, and fresh-runtime audio exit 1 remains a normal
+result. The documented runner total excludes CLI preflight and later scenario execution.
+
+Validation on frozen source commit 3ade46ac65413dbdab1a2a737ae62dc8d30665b3:
+- `cargo fmt --all -- --check` and `git diff --check` passed.
+- `python tools/cargo_cache.py run -- cargo test -p stasis --test toolchain_cli -- --test-threads=1`
+  passed 46/46, including success/failure text and JSON, generic setup errors, scenario receipts,
+  guest exit 7, fresh-runtime audio, and rollback coverage.
+- `python tools/cargo_cache.py run -- cargo test -p stasis --test windows_desktop_adapter -- --test-threads=1`
+  passed 1/1 in 139.39 seconds using the canonical MSVC validation bridge.
+- The ordinary-shell `C:\Program Files\Git\bin\bash.exe tools/validate_repo.sh` gate passed all
+  checks in 1,522.672 seconds. The four feature-preserving workspace shards passed in 379.453
+  seconds (workspace-core), 371.844 seconds (stasis-integrations), 399.953 seconds
+  (windows-game-launch), and 167.969 seconds (other-integrations); each reported `timed_out=false`.
+  Full log:
+  `D:\code\.automation-evidence\nightly-20261024-task848-r2-final-canonical-shorttemp.log`.
+
+The full R1 run exited 101 after 822.656 seconds when MSBuild's GetOutOfDateItems task hit
+Windows' 260-character path limit while configuring the desktop adapter test. The test itself
+failed after 31.74 seconds; it was not timed out. Its complete log is preserved at
+`D:\code\.automation-evidence\nightly-20261024-task848-r1-pathlength-fail.log`. The isolated
+desktop adapter target then passed with process-local `TEMP`, `TMP`, and `TMPDIR` set to the
+15-character task-owned root `D:\code\.tmp848`, followed by the successful R2 full gate. No
+product code, assertions, or runtime fixtures changed between R1 and R2. Earlier nonpassing setup
+receipts remain separate: the sandbox temp ACL denial
+(D:\code\.automation-evidence\nightly-20261024-task848\focused-test-sandbox-temp-denial.txt),
+the unstamped guest-run attempt
+(D:\code\.automation-evidence\nightly-20261024-task848\focused-test-no-build-fingerprint.txt),
+and the tests-first red result
+(D:\code\.automation-evidence\nightly-20261024-task848\focused-test-tests-first-red.txt).
+
+Fresh ordinary, presentation-poison, and audio runtime fixtures use the explicitly nonpublished
+local identity local-3ade46ac6541, source commit 3ade46ac65413dbdab1a2a737ae62dc8d30665b3,
+and fingerprint 8c75ca2a3bb840ff46c1ea4a459dd9f5c8b1bb5871605a9d8a8e09a1bc155e85. Their DLL
+exports and hashes were rechecked against
+`D:\code\.automation-evidence\nightly-20261024-task848-runtime-fixture-receipt.json`. The
+canonical validation bridge selected the installed Rust MSVC toolchain and Visual Studio tools;
+the only validation-specific environment adjustment was the child-process temp root.
+
+All six review personas are GREEN. Language Designer confirmed no language-semantic change.
+Compiler Architect confirmed the report consumes the existing runner summary and leaves the
+measurement boundary unchanged. Runtime Engineer verified guest exit and audio result behavior
+and internal rollback callers. Code Expert approved explicit test-failure disposition and the
+preserved generic error path. Performance Expert found no new runner work or omitted coverage.
+Human Advocate confirmed text precision, unchanged failure messages, and absence of timings on
+pre-summary errors.
+
+Theory gained: outer command success cannot be inferred from a nonzero guest result code. An
+explicit result disposition preserves that distinction while allowing test-summary failures to
+carry structured details without changing generic command errors. Surfaced timings should also
+name the exact subsystem boundary represented by their total.
+
+Good: tests-first CLI regressions and the full real integration gate checked both additive timing
+output and the existing result, receipt, and rollback contracts. Bad: the first ordinary gate used
+a temp root whose depth exceeded the Windows MSBuild path limit. Adjustment: shorten only the
+process-local temp root, prove the exact failing owner target, and rerun the unchanged canonical
+gate.
+
+Visual evidence: not applicable; this change affects CLI reporting and has no graphical behavior.

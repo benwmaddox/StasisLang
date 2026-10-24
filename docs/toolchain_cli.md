@@ -554,6 +554,20 @@ scenario-path digest so distinct files cannot overwrite each other. General inpu
 `replay`/`verify` commands remain deliberately reserved for the separate replay-runtime slice.
 See `samples/headless_scenario` for an executable fixture.
 
+### Test-run timing output
+
+`stasis test` reports discovery, prepare, compile, execute, and total timings in both text and JSON.
+JSON uses the integer-microsecond fields `timing_discovery_us`, `timing_prepare_us`,
+`timing_compile_us`, `timing_execute_us`, and `timing_total_us`; text prints the same values as
+milliseconds with three decimal places. Test and scenario assertion failures retain the normal
+`command_failed` message and exit code while adding the test counts, failures, scenario receipts,
+and timings under `result`. Workspace/preflight errors that occur before a test summary is produced
+keep the generic error response and do not include timing fields.
+
+These values come from the native test runner. `timing_total_us` covers the runner's discovery,
+test preparation, compilation, execution, and runner bookkeeping; it excludes workspace/preflight
+work in the CLI before the runner starts and headless scenario execution after the runner returns.
+
 Official packaging fails if the installed compiler or renderer sources differ from the release
 manifest. Without an installed release manifest, source-built toolchains generate optimized local
 releases with `build_class: "local_release"` and content-addressed provenance. Pass

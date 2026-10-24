@@ -19,7 +19,7 @@ use stasis::{
     sign_output_artifact_if_configured, signing_status, verify_artifacts,
     DesktopNativeAdapterConfig, DesktopNetworkMode, LiveRunConfig, PlayReplayConfig,
     ProjectCompilationConfiguration, RecordingAudioDeviceSimulation, SigningOptions,
-    StasisTestRunSession,
+    StasisTestRunSession, StasisTestRunSummary,
 };
 use stasis_assets::{
     load_project_asset_manifest, prepare_asset_bundle, resolve_project_asset_paths,
@@ -1721,8 +1721,15 @@ impl Workspace {
 }
 
 #[derive(Debug)]
+enum CommandResultDisposition {
+    Success,
+    TestFailure { message: String },
+}
+
+#[derive(Debug)]
 struct CommandResult {
     code: i32,
+    disposition: CommandResultDisposition,
     human: String,
     data: Value,
 }
@@ -1731,6 +1738,18 @@ impl CommandResult {
     fn success(human: impl Into<String>, data: Value) -> Self {
         Self {
             code: 0,
+            disposition: CommandResultDisposition::Success,
+            human: human.into(),
+            data,
+        }
+    }
+
+    fn test_failure(human: impl Into<String>, message: impl Into<String>, data: Value) -> Self {
+        Self {
+            code: 1,
+            disposition: CommandResultDisposition::TestFailure {
+                message: message.into(),
+            },
             human: human.into(),
             data,
         }
@@ -1830,7 +1849,22 @@ pub(super) fn try_run() -> Option<i32> {
             if let Some(started_at) = started_at {
                 append_elapsed_confirmation(&mut result.human, started_at.elapsed());
             }
-            if parsed.json {
+            if let CommandResultDisposition::TestFailure { message } = &result.disposition {
+                if parsed.json {
+                    eprintln!(
+                        "{}",
+                        json!({
+                            "ok": false,
+                            "command": command_name,
+                            "code": "command_failed",
+                            "message": message,
+                            "result": result.data,
+                        })
+                    );
+                } else {
+                    eprintln!("stasis {command_name}: {}", result.human);
+                }
+            } else if parsed.json {
                 println!(
                     "{}",
                     json!({
@@ -2140,7 +2174,7 @@ fn execute(
                 ToolchainCommand::Check => check_workspace(&workspace),
                 ToolchainCommand::Test { path } => {
                     validate_optional_workspace_path(&workspace, "test path", path.as_deref())?;
-                    test_workspace(&workspace, path.as_deref())
+                    test_workspace_report(&workspace, path.as_deref())
                 }
                 ToolchainCommand::Validate {
                     path,
@@ -4279,6 +4313,7 @@ fn validate_fresh_runtime(
     }
     let result = CommandResult {
         code: i32::from(audio_failed),
+        disposition: CommandResultDisposition::Success,
         human: if audio_failed {
             "fresh runtime audio validation failed".to_string()
         } else {
@@ -4379,6 +4414,17 @@ fn execute_noarg_entry(jit: &JitProcess, name: &str) -> Result<(), String> {
 }
 
 fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandResult, String> {
+    let result = test_workspace_report(workspace, path)?;
+    if let CommandResultDisposition::TestFailure { message } = &result.disposition {
+        return Err(message.clone());
+    }
+    Ok(result)
+}
+
+fn test_workspace_report(
+    workspace: &Workspace,
+    path: Option<&Path>,
+) -> Result<CommandResult, String> {
     let directory = path
         .map(|value| workspace.root.join(value))
         .unwrap_or_else(|| workspace.root.join(&workspace.manifest.tests));
@@ -4421,6 +4467,28 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
         },
     )?;
     let scenarios = headless::run_scenarios(workspace, &directory)?;
+    let failed = summary.tests_failed > 0 || scenarios.cases_failed > 0;
+    let message = format!(
+        "{} test(s) and {} scenario case(s) failed: {}",
+        summary.tests_failed,
+        scenarios.cases_failed,
+        summary
+            .failures
+            .iter()
+            .chain(scenarios.failures.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    let human_summary = if failed {
+        message.clone()
+    } else {
+        format!(
+            "{} test(s) passed in {} file(s); {} scenario case(s) passed",
+            summary.tests_passed, summary.files_with_tests, scenarios.cases_passed
+        )
+    };
+    let human = format!("{human_summary}\n{}", format_test_timing_line(&summary));
     let data = json!({
         "files_discovered": summary.files_discovered,
         "files_with_tests": summary.files_with_tests,
@@ -4436,28 +4504,27 @@ fn test_workspace(workspace: &Workspace, path: Option<&Path>) -> Result<CommandR
         "scenario_cases_failed": scenarios.cases_failed,
         "scenario_failures": scenarios.failures,
         "scenario_failure_receipts": scenarios.failure_receipts,
+        "timing_discovery_us": summary.timing_discovery_us,
+        "timing_prepare_us": summary.timing_prepare_us,
+        "timing_compile_us": summary.timing_compile_us,
+        "timing_execute_us": summary.timing_execute_us,
+        "timing_total_us": summary.timing_total_us,
     });
-    if summary.tests_failed > 0 || scenarios.cases_failed > 0 {
-        return Err(format!(
-            "{} test(s) and {} scenario case(s) failed: {}",
-            summary.tests_failed,
-            scenarios.cases_failed,
-            summary
-                .failures
-                .iter()
-                .chain(scenarios.failures.iter())
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(" | ")
-        ));
+    if failed {
+        return Ok(CommandResult::test_failure(human, message, data));
     }
-    Ok(CommandResult::success(
-        format!(
-            "{} test(s) passed in {} file(s); {} scenario case(s) passed",
-            summary.tests_passed, summary.files_with_tests, scenarios.cases_passed
-        ),
-        data,
-    ))
+    Ok(CommandResult::success(human, data))
+}
+
+fn format_test_timing_line(summary: &StasisTestRunSummary) -> String {
+    format!(
+        "timings: discovery={:.3}ms prepare={:.3}ms compile={:.3}ms execute={:.3}ms total={:.3}ms",
+        summary.timing_discovery_us as f64 / 1000.0,
+        summary.timing_prepare_us as f64 / 1000.0,
+        summary.timing_compile_us as f64 / 1000.0,
+        summary.timing_execute_us as f64 / 1000.0,
+        summary.timing_total_us as f64 / 1000.0,
+    )
 }
 
 fn run_workspace(
@@ -4478,6 +4545,7 @@ fn run_workspace(
     let run = headless::run_ticks(&jit, ticks)?;
     Ok(CommandResult {
         code: guest_exit,
+        disposition: CommandResultDisposition::Success,
         human: format!(
             "program exited with code {guest_exit} after {} headless tick(s)",
             run.ticks_executed
