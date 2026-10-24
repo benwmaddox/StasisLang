@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import heapq
 import json
 import operator
 import os
@@ -153,6 +154,69 @@ ALLOWED_RENDER_LEGACY_TOKENS = {
     JAVA_RENDERER: {"LEGACY_RENDER_VERSION"},
     WEB: {"GFX_CMD_LEGACY_VERSION"},
 }
+
+_LEGACY_RENDER_WORDS = re.compile(r"\w+")
+_LEGACY_RENDER_INDEX_INITIALS = {
+    r"\bSTASIS_RENDER_V[2-6](?:_[A-Z0-9_]+)?\b": frozenset({"S"}),
+    r"\bGFX_CMD_V[2-6](?:_[A-Z0-9_]+)?\b": frozenset({"G"}),
+    r"\b(?:STASIS_RENDER|GFX_CMD)_CURRENT_VERSION\b": frozenset({"S", "G"}),
+    r"\b(?:GFX_CMD|STASIS_RENDER)_(?:LEGACY|OLD)_[A-Z0-9_]+\b": frozenset({"G", "S"}),
+    r"\b(?:LEGACY|OLD)_(?:GFX|RENDER)_[A-Z0-9_]+\b": frozenset({"L", "O"}),
+    r"\bstasis_(?:render|jit_render)_v2_trace(?:_native)?\b": frozenset({"s"}),
+    r"\bstasis_android_bridge_run_tick_frame(?:_v\d+)?\b": frozenset({"s"}),
+    r"\b(?:34608|108676|96388)\b": frozenset({"1", "3", "9"}),
+}
+
+
+def _legacy_render_initials(pattern: re.Pattern[str]) -> frozenset[str] | None:
+    """Return an explicitly audited index hint, else retain the old scan."""
+    if pattern.flags != re.UNICODE:
+        return None
+    return _LEGACY_RENDER_INDEX_INITIALS.get(pattern.pattern)
+
+
+def legacy_render_matches(text: str, allowed: set[str]) -> tuple[str | None, ...]:
+    """Return the first disallowed legacy token for each source pattern.
+
+    The original regex tuple remains authoritative: the index only narrows
+    candidate word tokens, and every candidate is checked with its full regex.
+    Patterns outside the audited hint map retain the previous finditer scan.
+    """
+    tokens_by_initial: dict[str, list[tuple[int, str]]] = {}
+    for token in _LEGACY_RENDER_WORDS.finditer(text):
+        value = token.group(0)
+        tokens_by_initial.setdefault(value[0], []).append((token.start(), value))
+
+    matches: list[str | None] = []
+    for pattern in LEGACY_RENDER_PATTERNS:
+        initials = _legacy_render_initials(pattern)
+        if initials is None:
+            match = next(
+                (
+                    candidate.group(0)
+                    for candidate in pattern.finditer(text)
+                    if candidate.group(0) not in allowed
+                ),
+                None,
+            )
+            matches.append(match)
+            continue
+
+        token_groups = [tokens_by_initial.get(initial, ()) for initial in initials]
+        if len(token_groups) == 1:
+            candidates = token_groups[0]
+        else:
+            candidates = heapq.merge(*token_groups)
+        match = next(
+            (
+                value
+                for _, value in candidates
+                if value not in allowed and pattern.fullmatch(value) is not None
+            ),
+            None,
+        )
+        matches.append(match)
+    return tuple(matches)
 
 
 def repository_stasis_sources(directory: Path) -> list[Path]:
@@ -543,20 +607,12 @@ def check(root: Path = ROOT, overlays: dict[Path, str] | None = None) -> tuple[l
     for consumer in RENDER_DOWNSTREAM:
         text = sources[consumer]
         allowed_legacy_tokens = ALLOWED_RENDER_LEGACY_TOKENS.get(consumer, set())
-        for pattern in LEGACY_RENDER_PATTERNS:
-            match = next(
-                (
-                    candidate
-                    for candidate in pattern.finditer(text)
-                    if candidate.group(0) not in allowed_legacy_tokens
-                ),
-                None,
-            )
+        for match in legacy_render_matches(text, allowed_legacy_tokens):
             checks += 1
             if match:
                 failures.append(Mismatch(
                     label(RENDER_HEADER), label(consumer),
-                    "render_abi.legacy_token", "current-only render ABI", match.group(0),
+                    "render_abi.legacy_token", "current-only render ABI", match,
                 ))
     failures += compare(label(RENDER_HEADER), label(DYNLOAD), render, rust, RENDER_TO_RUST)
     failures += compare(label(RENDER_HEADER), label(JAVA_RENDERER), render, java, RENDER_TO_JAVA)

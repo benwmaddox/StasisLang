@@ -185,12 +185,19 @@ class WindowsSigningPolicyTests(unittest.TestCase):
                 "Number of warnings: 0\r\n"
                 "Number of errors: 1\r\n"
             )
-            environment = os.environ.copy()
-            environment.pop("STASIS_SIGNING_TIMEOUT_SECONDS", None)
-            environment["STASIS_SIGNING_PROFILE"] = "production"
-            environment["STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY"] = "1"
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("STASIS_SIGNING_")
+            }
+            environment.update(
+                {
+                    "STASIS_SIGNING_PROFILE": "production",
+                    "STASIS_SIGNING_ALLOW_PINNED_SELF_SIGNED_VERIFY": "1",
+                }
+            )
 
-            def verify(output):
+            def verify(output, expected_thumbprint="AABBCC"):
                 tool.write_text(
                     "@echo off\r\n"
                     + "".join(f"echo {line}\r\n" for line in output.splitlines())
@@ -205,7 +212,7 @@ class WindowsSigningPolicyTests(unittest.TestCase):
                             [pscustomobject]@{{
                                 Status = [System.Management.Automation.SignatureStatus]::UnknownError
                                 StatusMessage = 'A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider.'
-                                SignerCertificate = $null
+                                SignerCertificate = [pscustomobject]@{{ Thumbprint = 'AABBCC' }}
                             }}
                         }}
                         & '{ROOT / "tools/windows/stasis-signing.ps1"}' verify -Tool '{tool}' -Artifact '{artifact}'
@@ -213,13 +220,20 @@ class WindowsSigningPolicyTests(unittest.TestCase):
                     ),
                     encoding="utf-8",
                 )
+                child_environment = environment.copy()
+                child_environment["STASIS_SIGNING_CERT_THUMBPRINT"] = (
+                    expected_thumbprint
+                )
                 return subprocess.run(
                     [
                         "powershell.exe", "-NoProfile", "-NonInteractive",
                         "-ExecutionPolicy", "Bypass", "-File",
                         str(wrapper),
                     ],
-                    capture_output=True, text=True, env=environment, timeout=30,
+                    capture_output=True,
+                    text=True,
+                    env=child_environment,
+                    timeout=30,
                 )
 
             accepted = verify(expected_output)
@@ -228,6 +242,10 @@ class WindowsSigningPolicyTests(unittest.TestCase):
             rejected = verify(expected_output + "SignTool Error: TRUST_E_BAD_DIGEST (0x80096010)\r\n")
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("signature verification failed", rejected.stderr)
+
+            wrong_thumbprint = verify(expected_output, expected_thumbprint="DDEEFF")
+            self.assertNotEqual(wrong_thumbprint.returncode, 0)
+            self.assertIn("Authenticode signer mismatch", wrong_thumbprint.stderr)
 
     @unittest.skipUnless(os.name == "nt", "PowerShell timestamp retry test")
     def test_powershell_retries_the_next_timestamp_authority(self):

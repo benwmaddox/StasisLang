@@ -9,6 +9,12 @@ Make the next useful change, verify it, and leave the repository in a reviewable
 1. Inspect `git status --short`.
 2. If the tree is dirty because a cross-repo inbox synced tracked docs, either commit that sync first or stop if the state is unsafe to modify.
 3. Run the baseline validation command: `tools/validate_repo.sh`.
+   Its Cargo phase derives four semantic shards from `cargo metadata` and gives
+   each Cargo process a 900-second deadline. The inventory assigns every
+   selectable workspace target exactly once; an unknown target kind or a
+   missing calibrated Windows launch target stops validation with an actionable
+   error instead of silently reducing coverage. Every shard retains workspace
+   package selection so resolver-v2 feature unification stays unchanged.
 4. If validation fails, fix it first or move the task to `NEEDS INPUT FROM USER` with evidence.
 5. Run `tools/install_git_hooks.ps1` once per clone. This repository's pre-commit hook blocks noncanonical staged Stasis source. Run the Android Workshop JIT render-parity emulator gate explicitly for rendering changes; the arm64 release shell has its own package-content and device gates.
 6. Codex and other automation must invoke Cargo through `python tools/cargo_cache.py run -- cargo ...`. This shares one repository-owned cache across linked worktrees and disables incremental artifacts only for the child Cargo process. See `docs/cargo_cache_policy.md` for measurement and safe cleanup.

@@ -45,11 +45,13 @@ class CargoCacheTests(unittest.TestCase):
 
     def test_repository_validation_routes_cargo_through_shared_policy(self) -> None:
         validation = (ROOT / "tools" / "validate_repo.sh").read_text(encoding="utf-8")
-
-        self.assertIn(
-            '"$PYTHON" tools/cargo_cache.py run -- cargo test --workspace --all-targets',
-            validation,
+        workspace_runner = (ROOT / "tools" / "ci/run_workspace_tests.py").read_text(
+            encoding="utf-8"
         )
+
+        self.assertIn('"$PYTHON" tools/ci/run_workspace_tests.py', validation)
+        self.assertIn('str(root / "tools/cargo_cache.py")', workspace_runner)
+        self.assertNotIn("subprocess.run([\"cargo\"", workspace_runner)
 
     def test_precommit_routes_cargo_through_shared_policy(self) -> None:
         hook = (ROOT / ".githooks" / "pre-commit.ps1").read_text(encoding="utf-8")

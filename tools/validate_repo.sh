@@ -44,6 +44,7 @@ fi
 "$PYTHON" -m unittest tools.ci.test_runtime_abi_contract
 "$PYTHON" -m unittest tools.ci.test_host_runtime_contract
 "$PYTHON" -m unittest tools.ci.test_cargo_cache
+"$PYTHON" -m unittest tools.ci.test_run_workspace_tests
 "$PYTHON" -m unittest tools.ci.test_pr_ci_cargo_policy
 "$PYTHON" -m unittest tools.ci.test_unsafe_boundaries
 "$PYTHON" -m unittest tools.ci.test_desktop_network_diagnostics
@@ -87,4 +88,4 @@ elif [[ $ignored_status -ne 1 ]]; then
   exit "$ignored_status"
 fi
 
-"$PYTHON" tools/cargo_cache.py run -- cargo test --workspace --all-targets -- --test-threads=1
+"$PYTHON" tools/ci/run_workspace_tests.py
