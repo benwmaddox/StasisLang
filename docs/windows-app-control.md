@@ -89,13 +89,22 @@ publisher still need a trusted production certificate accepted by that policy.
 
 Run `bash -l tools/validate_repo.sh` from Git Bash on Windows. The canonical validator
 uses the configured signer through the repository Cargo wrapper and test runner.
+Before validation, it verifies an installed x64 Windows MSVC Rust toolchain and finds
+Visual Studio 2022 or 2026 with the VC x64 build tools through `vswhere.exe`. It
+loads the selected `vcvars64.bat` in a child process, re-enters the exact Git Bash
+executable, then restores the selected Rust toolchain and target and prepends that
+installation's x64 compiler/linker after Bash login startup. This ensures Git's
+unrelated `usr/bin/link.exe` cannot shadow MSVC's linker. A valid caller-pinned MSVC
+Rust version is preserved; a GNU Rust host selects the installed stable MSVC
+toolchain, and a GNU `CARGO_BUILD_TARGET` is normalized to MSVC in the child process.
+With `CARGO_BUILD_TARGET` unset, the selected x64 MSVC host remains the Cargo target.
+Missing Rust or Visual Studio components produce install guidance; the validator
+does not install tools or persist environment changes. Non-Windows validation keeps
+its existing path.
+
 If overriding `CARGO_TARGET_DIR` for Windows CMD execution, use native backslash
 separators (for example, `D:\checkout\target\validation`). A forward-slash override
 can make CMD interpret Cargo's relative executable path as a command switch.
-Run native C integration checks with the MSVC developer environment loaded. Ensure
-MSVC's bin directory precedes Git's `usr/bin` after Bash startup: Git supplies an
-unrelated `link.exe` that cannot link Rust/MSVC outputs. Automatic MSVC environment
-selection is tracked separately from signer configuration.
 Keep `STASIS_SIGNING_MODE=required` (or `STASIS_REQUIRE_SIGNED_EXECUTION=1`) set on a
 machine that requires signatures. Required signing failures stop execution. An
 unconfigured environment that does not require signing retains unsigned operation.

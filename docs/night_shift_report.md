@@ -1,5 +1,73 @@
 # Night Shift Report
 
+## 2026-10-24 - Maddox #277 ordinary-shell Windows validation
+
+The canonical `tools/validate_repo.sh` now prepares Windows validation when
+started from ordinary Git Bash. A Python helper selects and verifies supported
+Visual Studio 17/18 x64 VC tools and the installed Rust MSVC toolchain/target,
+uses a temporary CMD bridge for `vcvars64`, and rechecks `cl.exe`, `link.exe`,
+and Rust target state after Bash login. It preserves a valid explicit MSVC
+toolchain, normalizes a GNU target against that toolchain, reports missing
+components with install guidance, and leaves the non-Windows path unchanged.
+Focused tests cover selection policy, environment paths with spaces, re-entry,
+missing tools/targets, subprocess output and status, and the uppercase Windows
+environment keys exposed by Git Bash. Contributor and Windows validation docs
+describe the ordinary-shell workflow.
+
+The first ordinary-shell full run stopped before workspace tests with exit 2
+after 0.812 seconds: Git Bash exposed `SYSTEMROOT` and `WINDIR` in uppercase,
+while the Python environment lookup was case-sensitive. The uppercase-key
+regression failed before the fix and passed after matching environment names
+case-insensitively; the focused environment suite passed 19/19. That first-run
+failure is retained at
+`D:/code/.automation-evidence/nightly-20261024-task277-final-canonical-r1-systemroot-fail.log`.
+
+The final canonical run used an ordinary non-Developer shell with no external
+Visual Studio, linker, Rust toolchain, target, or linker override preloaded.
+It passed all checks with process exit 0 in 1,573.984 seconds. The four
+feature-preserving workspace shards passed in 395.781 seconds (`workspace-core`),
+377.000 seconds (`stasis-integrations`), 412.438 seconds
+(`windows-game-launch`), and 167.015 seconds (`other-integrations`); each
+reported `timed_out=false`. The full log is
+`D:/code/.automation-evidence/nightly-20261024-task277-final-canonical.log`.
+
+Fresh ordinary, presentation-poison, and audio runtime fixtures were built and
+checked against source commit `cc2aa22e6bc9d1cd29627f2085a6ca6dcd99c52a`,
+release `local-cc2aa22e6bc9`, and fingerprint
+`b0b9cb5136bfa55a8787a70ad36aee3901eb94c121824eeaabbb7f8368085550`. The
+first sandbox-started fixture build stalled during CMake glob checking; its
+owned process tree was stopped and verified gone, then the same fresh build
+completed on the host. The final fixture receipt records the build commands,
+exported identities, and artifact hashes at
+`D:/code/.automation-evidence/nightly-20261024-task277-runtime-fixture-receipt.json`.
+Signing used the existing vault-backed ephemeral process fixture without
+certificate-store mutation or secret output.
+
+All six review personas are GREEN. Language Designer found no language change;
+Compiler Architect and Code Expert approved the helper boundary, tests, and
+canonical entrypoint wiring; Runtime Engineer confirmed post-login tool
+verification and unchanged non-Windows behavior; Performance Expert found no
+coverage reduction or tool installation; Human Advocate found the failed first
+run, successful retry, fixture provenance, and shell requirements explicit.
+
+Theory gained: a selected Rust MSVC target does not prove that Cargo and raw
+linking will use the matching Visual Studio linker after shell startup. Git Bash
+login can reorder `PATH`, so toolchain selection and compiler/linker verification
+must run at the canonical process boundary and be checked again after login. An
+adjacent GNU target override should normalize to the selected MSVC toolchain
+without replacing a valid pinned MSVC version.
+
+Good: tests-first environment fixtures caught the uppercase Git Bash environment
+case that only appeared in the ordinary-shell integration path. Bad: the first
+implementation assumed Windows environment names retained their conventional
+capitalization when exposed to Python. Adjustment: compare environment keys
+case-insensitively and keep the launcher regression tied to the real Git Bash
+boundary; retain the initial failure and sandbox build stall as non-passing
+evidence.
+
+Visual evidence: not applicable; this change affects validation tooling and
+headless test setup, with no user-visible graphical behavior.
+
 ## 2026-10-09 - Maddox #638 supervised live authority
 
 Added an opt-in Windows supervisor mode that launches the existing Stasis CLI as

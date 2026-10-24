@@ -17,6 +17,32 @@ if [[ -f "$HOME/.cargo/env" ]]; then
   source "$HOME/.cargo/env"
 fi
 
+if [[ "${OS:-}" == Windows_NT ]]; then
+  if [[ "${STASIS_VALIDATE_REENTRY:-}" != 1 ]]; then
+    bash_executable="$(cygpath -aw "${BASH:?Git Bash must provide BASH}")"
+    validation_script="$(cygpath -aw "$ROOT/tools/validate_repo.sh")"
+    exec "$PYTHON" tools/windows/prepare_validation.py --launch \
+      --bash-exe "$bash_executable" --script "$validation_script"
+  fi
+
+  export RUSTUP_TOOLCHAIN="${STASIS_VALIDATE_RUSTUP_TOOLCHAIN:?MSVC Rust selection is missing}"
+  case "${STASIS_VALIDATE_TARGET_MODE:-}" in
+    set)
+      export CARGO_BUILD_TARGET="${STASIS_VALIDATE_CARGO_BUILD_TARGET:?MSVC target selection is missing}"
+      ;;
+    unset)
+      unset CARGO_BUILD_TARGET
+      ;;
+    *)
+      printf 'Windows validation setup failed: MSVC target selection mode is missing or invalid.\n' >&2
+      exit 2
+      ;;
+  esac
+  msvc_bin="$(cygpath -u "${STASIS_VALIDATE_MSVC_BIN:?MSVC linker path is missing}")"
+  export PATH="$msvc_bin:$PATH"
+  "$PYTHON" tools/windows/prepare_validation.py --verify-reentry
+fi
+
 "$PYTHON" tools/ci/check_stasis_src_layout.py
 "$PYTHON" tools/ci/check_action_versions.py
 "$PYTHON" -m unittest tools.ci.test_action_versions
@@ -44,6 +70,7 @@ fi
 "$PYTHON" -m unittest tools.ci.test_runtime_abi_contract
 "$PYTHON" -m unittest tools.ci.test_host_runtime_contract
 "$PYTHON" -m unittest tools.ci.test_cargo_cache
+"$PYTHON" -m unittest tools.ci.test_windows_validation_environment
 "$PYTHON" -m unittest tools.ci.test_run_workspace_tests
 "$PYTHON" -m unittest tools.ci.test_pr_ci_cargo_policy
 "$PYTHON" -m unittest tools.ci.test_unsafe_boundaries
