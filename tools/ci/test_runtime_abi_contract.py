@@ -1,9 +1,26 @@
 import copy
+import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tools.ci import check_runtime_abi_contract as contract
+
+
+def legacy_render_matches_reference(text, allowed):
+    """Keep the pre-index scan as an equivalence oracle for the optimized helper."""
+    return tuple(
+        next(
+            (
+                candidate.group(0)
+                for candidate in pattern.finditer(text)
+                if candidate.group(0) not in allowed
+            ),
+            None,
+        )
+        for pattern in contract.LEGACY_RENDER_PATTERNS
+    )
 
 
 class RuntimeAbiContractTests(unittest.TestCase):
@@ -40,6 +57,167 @@ class RuntimeAbiContractTests(unittest.TestCase):
         self.assertEqual("IT-001", evidence["test_id"])
         self.assertEqual("passed", evidence["status"])
         self.assertGreater(evidence["checks"], 100)
+
+    def test_legacy_render_matcher_matches_reference_for_canonical_sources(self):
+        for consumer in contract.RENDER_DOWNSTREAM:
+            with self.subTest(consumer=consumer):
+                text = self.sources[consumer]
+                allowed = contract.ALLOWED_RENDER_LEGACY_TOKENS.get(consumer, set())
+                self.assertEqual(
+                    legacy_render_matches_reference(text, allowed),
+                    contract.legacy_render_matches(text, allowed),
+                )
+
+        with mock.patch.object(
+            contract, "legacy_render_matches", legacy_render_matches_reference
+        ):
+            expected_failures, expected_evidence = contract.check(overlays=self.sources)
+        actual_failures, actual_evidence = contract.check(overlays=self.sources)
+        self.assertEqual(expected_failures, actual_failures)
+        self.assertEqual(expected_evidence, actual_evidence)
+
+    def test_legacy_render_matcher_preserves_boundaries_allowlists_and_unicode(self):
+        allowed = {
+            "GFX_CMD_LEGACY_VERSION",
+            "STASIS_RENDER_LEGACY_VERSION",
+        }
+        overlapping = (
+            "// STASIS_RENDER_V2_STASIS_RENDER_V3 "
+            "GFX_CMD_V2_GFX_CMD_V4 GFX_CMD_V3_TAIL "
+            "STASIS_RENDER_CURRENT_VERSION "
+            "GFX_CMD_LEGACY_VERSION GFX_CMD_LEGACY_VERSION_EXTRA "
+            "OLD_GFX_SYMBOL LEGACY_RENDER_VERSION "
+            "stasis_jit_render_v2_trace_native "
+            "stasis_android_bridge_run_tick_frame_v2 "
+            "stasis_android_bridge_run_tick_frame_v\u0662 "
+            "34608 108676 96388"
+        )
+        expected = legacy_render_matches_reference(overlapping, allowed)
+        self.assertEqual(expected, contract.legacy_render_matches(overlapping, allowed))
+        self.assertEqual("STASIS_RENDER_V2_STASIS_RENDER_V3", expected[0])
+        self.assertEqual("GFX_CMD_V2_GFX_CMD_V4", expected[1])
+        self.assertEqual("GFX_CMD_LEGACY_VERSION_EXTRA", expected[3])
+        self.assertEqual("OLD_GFX_SYMBOL", expected[4])
+        self.assertEqual("stasis_jit_render_v2_trace_native", expected[5])
+        self.assertEqual("stasis_android_bridge_run_tick_frame_v2", expected[6])
+        self.assertEqual("34608", expected[7])
+
+        unicode_android = "stasis_android_bridge_run_tick_frame_v\u0662"
+        expected_unicode = legacy_render_matches_reference(unicode_android, set())
+        self.assertEqual(
+            expected_unicode,
+            contract.legacy_render_matches(unicode_android, set()),
+        )
+        self.assertEqual(unicode_android, expected_unicode[6])
+
+        boundaries = (
+            "\u00e9STASIS_RENDER_V5 STASIS_RENDER_V6\u00e9 "
+            "x_GFX_CMD_V2 GFX_CMD_V3_suffix STASIS_RENDER_V\u0662"
+        )
+        expected_boundaries = legacy_render_matches_reference(boundaries, set())
+        self.assertEqual(
+            expected_boundaries,
+            contract.legacy_render_matches(boundaries, set()),
+        )
+        self.assertEqual((None,) * len(contract.LEGACY_RENDER_PATTERNS), expected_boundaries)
+
+    def test_legacy_render_matcher_hints_cover_each_source_alternative(self):
+        cases = (
+            (0, "STASIS_RENDER_V2"),
+            (1, "GFX_CMD_V2"),
+            (2, "STASIS_RENDER_CURRENT_VERSION"),
+            (2, "GFX_CMD_CURRENT_VERSION"),
+            (3, "GFX_CMD_LEGACY_VERSION"),
+            (3, "STASIS_RENDER_OLD_VERSION"),
+            (4, "LEGACY_GFX_SYMBOL"),
+            (4, "OLD_RENDER_SYMBOL"),
+            (5, "stasis_render_v2_trace"),
+            (5, "stasis_jit_render_v2_trace_native"),
+            (6, "stasis_android_bridge_run_tick_frame_v\u0662"),
+            (7, "34608"),
+            (7, "108676"),
+            (7, "96388"),
+        )
+        for pattern_index, token in cases:
+            with self.subTest(pattern=pattern_index, token=token):
+                expected = legacy_render_matches_reference(token, set())
+                actual = contract.legacy_render_matches(token, set())
+                self.assertEqual(expected, actual)
+                self.assertEqual(token, actual[pattern_index])
+
+    def test_legacy_render_matcher_falls_back_for_punctuation_patterns(self):
+        unsupported = (
+            (r"\bA\+B\b", " A+B "),
+            (r"\bA|B\b", " B "),
+            (r"\bA?BC\b", " BC "),
+        )
+        for source, text in unsupported:
+            pattern = re.compile(source)
+            with self.subTest(pattern=source):
+                self.assertIsNone(contract._legacy_render_initials(pattern))
+                with mock.patch.object(contract, "LEGACY_RENDER_PATTERNS", (pattern,)):
+                    self.assertEqual(
+                        legacy_render_matches_reference(text, set()),
+                        contract.legacy_render_matches(text, set()),
+                    )
+
+        ascii_pattern = re.compile(
+            contract.LEGACY_RENDER_PATTERNS[0].pattern, re.ASCII
+        )
+        ascii_boundary_text = "\u00e9STASIS_RENDER_V2"
+        self.assertIsNone(contract._legacy_render_initials(ascii_pattern))
+        with mock.patch.object(
+            contract, "LEGACY_RENDER_PATTERNS", (ascii_pattern,)
+        ):
+            self.assertEqual(
+                legacy_render_matches_reference(ascii_boundary_text, set()),
+                contract.legacy_render_matches(ascii_boundary_text, set()),
+            )
+
+    def test_legacy_render_matcher_preserves_path_allowlists_and_failure_order(self):
+        overlays = copy.deepcopy(self.sources)
+        allowlisted = "STASIS_RENDER_LEGACY_VERSION"
+        overlays[contract.DYNLOAD] = f"// {allowlisted}\n" + overlays[contract.DYNLOAD]
+        injected = (
+            "stasis_android_bridge_run_tick_frame_v\u0662 "
+            "STASIS_RENDER_V2_STASIS_RENDER_V3 "
+            "GFX_CMD_V2_GFX_CMD_V4 34608"
+        )
+        overlays[contract.RENDER_PARITY_TRACE] = (
+            f"// {allowlisted} {injected}\n" + overlays[contract.RENDER_PARITY_TRACE]
+        )
+
+        with mock.patch.object(
+            contract, "legacy_render_matches", legacy_render_matches_reference
+        ):
+            expected_failures, expected_evidence = contract.check(overlays=overlays)
+        failures, evidence = contract.check(overlays=overlays)
+        self.assertEqual(expected_failures, failures)
+        self.assertEqual(expected_evidence, evidence)
+        legacy_failures = [
+            failure for failure in failures if failure.field == "render_abi.legacy_token"
+        ]
+        expected_tokens = legacy_render_matches_reference(
+            f"{allowlisted} {injected}", set()
+        )
+        expected = [
+            (contract.label(contract.RENDER_PARITY_TRACE), token)
+            for token in expected_tokens
+            if token is not None
+        ]
+        actual = [(failure.consumer, failure.actual) for failure in legacy_failures]
+        self.assertEqual(expected, actual)
+        self.assertNotIn(
+            (contract.label(contract.DYNLOAD), allowlisted), actual,
+        )
+        self.assertEqual(
+            [str(failure) for failure in legacy_failures],
+            [
+                message
+                for message in evidence["failures"]
+                if "render_abi.legacy_token" in message
+            ],
+        )
 
     def test_downstream_legacy_render_token_is_rejected(self):
         failures, _ = self.run_with(

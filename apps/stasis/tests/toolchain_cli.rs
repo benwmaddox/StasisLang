@@ -1909,7 +1909,16 @@ fn audio_device_profiles_fail_abandoned_refusal_and_accept_retries_at_120_and_50
         return;
     }
     let staged_cli = cli_dir.join(built_cli.file_name().expect("built CLI filename"));
-    fs::copy(&built_cli, &staged_cli).expect("stage CLI without a sibling runtime");
+    fs::copy(&built_cli, &staged_cli).expect("stage CLI for audio device profile validation");
+    let runtime_name = if cfg!(windows) {
+        "stasis_graphics.dll"
+    } else if cfg!(target_os = "macos") {
+        "libstasis_graphics.dylib"
+    } else {
+        "libstasis_graphics.so"
+    };
+    fs::copy(&runtime, cli_dir.join(runtime_name))
+        .expect("stage verified audio graphics runtime beside CLI");
     let built_cli_dir = built_cli.parent().expect("built CLI directory");
     let bridge_name = format!(
         "{}stasis_dynload{}",

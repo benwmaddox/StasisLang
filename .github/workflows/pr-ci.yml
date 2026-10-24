@@ -67,6 +67,7 @@ jobs:
           python tools/ci/check_runtime_abi_contract.py
           python tools/ci/check_host_runtime_contract.py
           python -m unittest tools.ci.test_cargo_cache
+          python -m unittest tools.ci.test_run_workspace_tests
           python -m unittest tools.ci.test_pr_ci_cargo_policy
           python -m unittest tools.ci.test_android_emulator_seams tools.ci.test_materialize_android_test_signing tools.ci.test_verify_android_test_signer
           python -m unittest tools.ci.test_generate_asset_load_fixture

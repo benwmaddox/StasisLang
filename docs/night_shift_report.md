@@ -1737,3 +1737,109 @@ The post-activation smoke copies the nine tracked fixture inputs into a confined
 **Bad:** The first real integration attempt failed before promotion because the long disposable root exceeded Windows PowerShell 5's MAX_PATH. This was harness path length, not cache isolation.
 
 **Adjustment:** Shortened only the driver root to `target/local-it-<8 hex>`; fresh-build integration then passed. Tests-first chronology: the initial static contract check was RED on the canonical sample path; behavioral coverage followed and passed. All post-change quality gates passed. The full validation entrypoint policy/Python/Node/architecture phase returned 0. Cargo targets were split into four bounded groups: `python tools/cargo_cache.py run -- cargo test --workspace --lib --bins --examples -- --test-threads=1`; 19 app integration targets; all 11 Windows launch/recording tests; and the remaining 33 integration targets. All returned 0 in 556.02, 436.36, 645.84, 230.05 seconds. Exact commands and receipts are in `D:\code\.automation-evidence\nightly-20261017-task647-post-cargo-manifest.json`. The implementation was tested on clean `025cd8dc`; this follow-up adds only this report, with identical installer/test blobs.
+
+## 2026-10-24 - MaddoxTasks #830: routine validation performance
+
+The canonical validator now discovers all Cargo targets from `cargo metadata` and
+runs four bounded, serial test commands. Every command keeps `--workspace`
+selection, so resolver-v2 feature unification is the same as the former
+`cargo test --workspace --all-targets` command: workspace core (`--lib --bins
+--examples --benches`), 19 Stasis integration targets, the Windows launch target,
+and 33 remaining integration targets. New or unknown target kinds, missing required
+targets, and duplicate global integration target names fail with an actionable
+diagnostic. Each Cargo child has a 900-second deadline, owns its process tree, and
+reports its result and elapsed time. PR and nightly preflight both exercise the
+sharder unit tests.
+
+The runtime ABI checker now indexes the eight audited legacy-render token patterns
+by possible first character, while retaining the original full regular expression
+as the authority and falling back to the original scan for any unknown pattern or
+flags. Consumer order, pattern order, the first non-allowlisted match, exact token
+allowlists, Unicode word boundaries, comments and strings, and overlapping tokens
+remain unchanged.
+
+Validation and timing evidence:
+- The pre-change ABI module took 321.049 seconds for 34 tests. The final canonical
+  run passed 39 tests in 74.136 seconds. An isolated alternating same-process
+  benchmark over 37 preloaded consumers, eight patterns, and 15 paired samples
+  measured a median 0.797015 seconds for the reference loop and 0.258905 seconds
+  for the indexed matcher (3.08x for the isolated scan). Equality was asserted for
+  every sample; this is a scan result, not a claim about total validator speed.
+- The pre-change monolithic command reached the 900-second process limit after
+  about 875 seconds of test execution and before the remaining targets, proving
+  the technical need for bounded orchestration but not a passing baseline. A later
+  1,471.19-second sum from package-selected diagnostics is also nonqualifying
+  because those commands did not preserve workspace feature unification. The final
+  feature-preserving canonical run supplies the complete coverage: it passed all
+  policy, Python, Node, ABI, signing, and Cargo checks in 1,570.078 seconds total.
+  Its four Cargo commands passed in 392.532, 366.187, 429.609, and 172.454 seconds;
+  each reported `timed_out=false` and retained `--test-threads=1`.
+- The final four-command `--no-run` oracle matched the original command's complete
+  compiler-artifact signatures: all 342 dependency and workspace artifacts and
+  all 87 workspace artifacts, with no missing or extra entries. Signatures include
+  activated features, package, target kind/name/crate types, required features,
+  complete test profile, and executable presence. Warm order-sensitive timings
+  were 56.219 seconds for the monolith and 103.609 seconds summed across the four
+  commands. The bounded orchestration is a reliability tradeoff, not a build-speed
+  improvement. An earlier six-package-shard name-only comparison (about 110 versus
+  335 seconds) was rejected because it changed workspace feature unification and
+  did not prove coverage.
+- Immutable GitHub run 37348785313 recorded release Cargo builds of 481 seconds on
+  Windows, 470 on macOS, and 326 on Linux. The run is completed with a cancelled
+  aggregate conclusion, but those individual build steps completed successfully.
+  Backlog #849 owns attribution of cold dependency, build, link, and signing setup
+  before any cache change. Referenced PR run 37347750450 recorded the Linux
+  workspace Cargo step at 137 seconds, Stasis build/unit/main at 47/43/111 seconds,
+  architecture characterization at 62 seconds, the layout check at 119 seconds,
+  and the complete preflight job in 153 seconds.
+- Whole healthy suites may exceed 120 seconds. The final fresh Windows desktop
+  package lifecycle case itself took 151.78 seconds; held #795 remains its specific
+  follow-up owner. No tests, signing checks, ABI checks, or engine triggers were
+  removed to meet a stopwatch target.
+
+Fresh local fixture provenance used source commit
+`2e1bb9ec853d341e71030ce8d3ffb007c7d03b55`, fingerprint
+`cea3cedff14be5ef96438739a4920714586b4f022840a4becd036b78ae480525`, and
+the explicitly nonpublished local-test identity `nightly-20261024-830`. SHA-256:
+ordinary runtime `136B68FD7CD42025BC9DD2A1BFE5A43D3CBF58B8157D25C204AB8B84BE451050`,
+import library `EB1E35C4718A5ACDA03B8F99FEDAD13EF06FF3625C5DA5ED6BE3163050B26BCB`,
+runner `81D625BA446A8BA01B93D38D5363B3B488AF684BF381154BA7B307D553CCD993`,
+presentation-poison runtime
+`74A4E754E4BBE944053E8C7DE2E839FF1F1FDA34C9556D5B2117122F16A7569D`,
+and audio runtime `0210F3A536C8C414CB0017C8E5AF2976E43A85497C8D566BBC918321FC2B8F01`.
+The audio fixture was rebuilt with that exact identity. The stamped audio profile
+test then passed both focused and inside the full canonical run. The test harness
+stages this verified audio DLL beside its isolated stamped CLI; it retains the
+explicit library override and all audio behavior assertions.
+
+Failed receipts remain part of the record: a stale ambient runtime, absent poison
+fixture, sandbox loopback restriction, absent signing configuration, Git Bash
+linker shadowing, inherited signing-fixture credentials, the rejected six-package
+feature plan, and the unstamped/empty-fingerprint audio fixture. None is counted as
+a pass. The final run used the existing vault-backed ephemeral signing path without
+store mutation or logged secrets. The implementation and artifact signature oracle
+were frozen before the successful gate; all 12 reviewed blobs remained identical.
+
+All six final personas are GREEN. Language and compiler reviewers found no language
+or compiler behavior change. Runtime review confirmed process-tree cleanup,
+feature-preserving workspace selection, fresh fixture identity, and unchanged
+signing/ABI enforcement. Code review found the metadata planner, fallback matcher,
+and tests direct and maintainable. Performance review accepted the measured matcher
+gain and the disclosed sharding overhead. Human review found the command boundaries,
+exceptions, failed attempts, and follow-up ownership explicit.
+
+Theory gained: Cargo target selection and Cargo feature selection are separate
+contracts. A bounded test plan preserves the old command only when every target and
+the resolved feature/profile artifact graph agree. An adjacent target kind should
+either map exactly once to an existing semantic shard or stop validation until its
+coverage is designed.
+
+Good: an executable artifact-signature oracle caught a feature-unification error
+that a target-name inventory missed, and the final gate exercised every real fixture.
+Bad: the first six-shard design appeared complete by target name while changing
+resolver behavior; a development-cache artifact also hid the stamped audio mismatch.
+Adjustment: compare resolved features and profiles before timing shards, and require
+fresh stamped sibling fixtures for integration tests that launch copied executables.
+
+Visual evidence: not applicable; this change affects headless validation tooling and
+test fixture setup with no user-visible graphical behavior.

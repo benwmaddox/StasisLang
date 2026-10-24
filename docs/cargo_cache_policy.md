@@ -10,7 +10,16 @@ The policy separates those cases:
 - Codex and other automation use `python tools/cargo_cache.py run -- cargo ...`.
 - The wrapper derives `build/codex-cargo-target` from Git's common directory, so every linked worktree of the same repository resolves the same cache even when the worktrees live outside the main checkout.
 - The wrapper sets `CARGO_INCREMENTAL=0` only in the Cargo child environment. An explicit `CARGO_TARGET_DIR` remains authoritative for tests or platform builds that require isolation.
-- The noninteractive `tools/validate_repo.sh` gate routes its Cargo phase through the same wrapper, preventing mandatory validation in each worktree from rebuilding a private target.
+- The noninteractive `tools/validate_repo.sh` gate derives four complete semantic
+  shards from `cargo metadata` and routes every shard through the same wrapper.
+  This keeps each Cargo child within the 900-second automation process limit,
+  prints a duration for each shard, and prevents mandatory validation in each
+  worktree from rebuilding a private target. Target classification is strict:
+  every selectable target is assigned exactly once, explicit benches and the
+  implicit lib/bin benchmark modes stay in the owning core shard, and
+  unfamiliar target kinds or duplicate integration target names fail before
+  tests start. Every shard keeps the full workspace selected so Cargo resolver
+  feature unification matches `--workspace --all-targets`.
 - The repository pre-commit hook uses the wrapper to force-format staged Stasis paths. It blocks when formatting fails or changes files that must be reviewed and staged; compiler-backed checks belong in explicit validation and CI rather than the commit hook.
 - CI sets `CARGO_INCREMENTAL=0` because hosted runners are ephemeral and do not reuse local incremental state.
 
