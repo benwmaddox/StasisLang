@@ -1980,3 +1980,15 @@ process-local temp root, prove the exact failing owner target, and rerun the unc
 gate.
 
 Visual evidence: not applicable; this change affects CLI reporting and has no graphical behavior.
+
+## 2026-10-25 - PR #927 current-main refresh
+
+Rebased the existing two CSS commits onto current `main` at 18b23d6f. The desktop workbench row remains bounded to the available viewport, and a populated sidebar scrolls without moving the diagnostics or preview footer. Mobile remains stacked, and source, editor, and completion text disable ligatures.
+
+Validation: browser compiler Rust tests passed 22/22; focused playground/runtime Node tests passed 25/25; fresh release Wasm build and staging passed; Chromium playground acceptance passed. A populated 16-image sidebar at 1024x600 scrolled to its footer while both panel footers remained at y=600. At 390x844, the workbench stayed one column without horizontal overflow. Computed styles showed `font-variant-ligatures: none` and `liga`/`calt` disabled on all three editor layers. The required `tools/validate_repo.sh` baseline stopped in shard 2/4 at `apps/stasis/tests/desktop_display_metrics_seam.rs:189`: native display event injection returned 0 instead of 1. The isolated test rerun failed identically after a fresh native build. Shards 3/4 were not run. This native display seam failure is unrelated to the CSS-only PR changes; it has not been verified against main.
+
+All six review personas are GREEN. The code review found no desktop/mobile layout regressions, compiler/runtime boundary changes, or performance path changes. Human Advocate confirmed the PR text and evidence describe only the current CSS behavior.
+
+Theory gained: desktop grid rows need a zeroable minimum when a viewport must contain fixed panel controls; placing the sidebar's overflow on the independent column preserves those controls while its children retain their full size. The 16-image, 1024x600 Chromium probe showed the sidebar scroll height at 654px within a 536px workbench row and kept both footers at y=600. This predicts that additional file/asset content will add sidebar scroll range without expanding the workbench; mobile remains outside the desktop media query and uses page scrolling.
+
+Visual evidence: inspected `D:/code/StasisLang/target/browser-playground-layout-acceptance/starter-pong.png` (game and editor at 1440x960), `D:/code/StasisLang/target/browser-playground-layout-acceptance/1024x600-populated-sidebar-scrolled.png` (sidebar scroll, diagnostics, and preview footer), `D:/code/StasisLang/target/browser-playground-layout-acceptance/390x844-mobile-top.png` (mobile stacked flow), and `D:/code/StasisLang/target/browser-playground-layout-acceptance/390x844-mobile-literal-operators.png` (literal `!=` and `>=` in editor).
