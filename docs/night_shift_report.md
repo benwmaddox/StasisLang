@@ -1992,3 +1992,19 @@ All six review personas are GREEN. The code review found no desktop/mobile layou
 Theory gained: desktop grid rows need a zeroable minimum when a viewport must contain fixed panel controls; placing the sidebar's overflow on the independent column preserves those controls while its children retain their full size. The 16-image, 1024x600 Chromium probe showed the sidebar scroll height at 654px within a 536px workbench row and kept both footers at y=600. This predicts that additional file/asset content will add sidebar scroll range without expanding the workbench; mobile remains outside the desktop media query and uses page scrolling.
 
 Visual evidence: inspected `D:/code/StasisLang/target/browser-playground-layout-acceptance/starter-pong.png` (game and editor at 1440x960), `D:/code/StasisLang/target/browser-playground-layout-acceptance/1024x600-populated-sidebar-scrolled.png` (sidebar scroll, diagnostics, and preview footer), `D:/code/StasisLang/target/browser-playground-layout-acceptance/390x844-mobile-top.png` (mobile stacked flow), and `D:/code/StasisLang/target/browser-playground-layout-acceptance/390x844-mobile-literal-operators.png` (literal `!=` and `>=` in editor).
+
+## 2026-10-26 - Maddox #853: name the web fullscreen scancode
+
+`web_export_smoke` uses `SCANCODE.F` (HostFrame slot 9). A stateless key-view helper returns 0, 1, or 2; `main` retains every existing global and applies flags/sequence only for a request.
+
+The focused test drives input_testkit through `HostFrame.refresh` and checks flags 0/2/0/0/0/1. It does not call `tick()` or inspect `host_req_seq`; main wiring was reviewed separately. The native runner cannot call `tick()` because its browser-only `web_begin_frame` extern is unresolved.
+
+Validation: focused test 1/1, fresh #416 web package, formatting, diff check, and maintained-sample numeric-key scan passed. The package retains all `host_req_*` globals and `main`/`tick`/`render` exports. The clean pre-change baseline passed all four shards; immutable identity and logs are in `D:/code/.automation-evidence/nightly-20261026-task846-release416/immutable-baseline-625498f6/`. See the Maddox #853 final commit/PR receipt for implementation identity and final full-gate evidence.
+
+All six review personas are GREEN. No language, compiler, runtime ABI, or global state ownership changed; the HostFrame view adds no allocation.
+
+Theory gained: HostFrame keyboard slots are SDL physical scancodes. F is slot 9; a held key emits one request until release clears the latch. New sample key handlers should use named scancodes and preserve that edge behavior.
+
+Good: testkit input reaches the shared production decision through `HostFrame.refresh`. Bad: the native runner cannot resolve the browser render extern through `tick()`. Adjustment: test the key-view decision directly while keeping existing state globals in `main`.
+
+Visual evidence: not applicable; output pixels are unchanged.
