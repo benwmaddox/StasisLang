@@ -1,0 +1,59 @@
+import "../src/fullscreen_toggle.stasis";
+import "/.stasis_cache/toolchain/src/stdlib/host_frame.stasis";
+import "/.stasis_cache/toolchain/src/stdlib/testing/input_testkit.stasis";
+import "/.stasis_cache/toolchain/src/stdlib/sdl_scancodes.stasis";
+
+global fullscreen_test_frame: HostFrame;
+
+test `F scancode toggles fullscreen once per press`(): bool {
+    input_testkit_reset();
+    let request_flags: i32 = 0;
+
+    input_testkit_set_key_down(SCANCODE.SPACE, true);
+    host_frame.refresh(fullscreen_test_frame);
+    request_flags = fullscreen_request_flags(fullscreen_test_frame.keys, false, false);
+    if (request_flags != 0) {
+        return false;
+    }
+
+    input_testkit_set_key_down(SCANCODE.F, true);
+    host_frame.refresh(fullscreen_test_frame);
+    request_flags = fullscreen_request_flags(fullscreen_test_frame.keys, false, false);
+    if (request_flags != 2) {
+        return false;
+    }
+
+    host_frame.refresh(fullscreen_test_frame);
+    request_flags = fullscreen_request_flags(fullscreen_test_frame.keys, true, true);
+    if (request_flags != 0) {
+        return false;
+    }
+
+    input_testkit_set_key_down(SCANCODE.F, false);
+    host_frame.refresh(fullscreen_test_frame);
+    request_flags = fullscreen_request_flags(fullscreen_test_frame.keys, true, true);
+    if (request_flags != 0) {
+        return false;
+    }
+
+    host_frame.refresh(fullscreen_test_frame);
+    request_flags = fullscreen_request_flags(fullscreen_test_frame.keys, false, true);
+    if (request_flags != 0) {
+        return false;
+    }
+
+    input_testkit_set_key_down(SCANCODE.F, true);
+    host_frame.refresh(fullscreen_test_frame);
+    request_flags = fullscreen_request_flags(fullscreen_test_frame.keys, false, true);
+    if (request_flags != 1) {
+        return false;
+    }
+
+    input_testkit_reset();
+    host_frame.refresh(fullscreen_test_frame);
+    if (fullscreen_test_frame.keys[SCANCODE.F] != 0 || fullscreen_test_frame.keys[SCANCODE.SPACE] != 0) {
+        return false;
+    }
+
+    return true;
+}

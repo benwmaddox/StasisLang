@@ -1,6 +1,7 @@
 import "/.stasis_cache/toolchain/src/stdlib/host_frame.stasis";
 import "/.stasis_cache/toolchain/src/stdlib/audio.stasis";
 import "/.stasis_cache/toolchain/src/stdlib/sdl_scancodes.stasis";
+import "fullscreen_toggle.stasis";
 
 const SCREEN_WIDTH: i32 = 640;
 const PLAYER_WIDTH: i32 = 64;
@@ -49,20 +50,12 @@ function main(): i32 {
 function tick(): i32 {
     host_frame.refresh(web_host_frame);
     audio.refresh(web_audio_stream);
-    if (web_host_frame.keys[9] != 0) {
-        if (!fullscreen_latched) {
-            if (fullscreen_enabled) {
-                fullscreen_enabled = false;
-                host_req_flags = 1;
-            } else {
-                fullscreen_enabled = true;
-                host_req_flags = 2;
-            }
-            host_req_seq = host_req_seq + 1;
-            fullscreen_latched = true;
-        }
-    } else {
-        fullscreen_latched = false;
+    let request_flags: i32 = fullscreen_request_flags(web_host_frame.keys, fullscreen_latched, fullscreen_enabled);
+    fullscreen_latched = web_host_frame.keys[SCANCODE.F] != 0;
+    if (request_flags != 0) {
+        fullscreen_enabled = request_flags == 2;
+        host_req_flags = request_flags;
+        host_req_seq = host_req_seq + 1;
     }
     if (web_host_frame.pointer_count > 0 && web_host_frame.pointers[0].is_down) {
         let pointer_x: i32 = 0;

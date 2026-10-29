@@ -1,0 +1,13 @@
+import "/.stasis_cache/toolchain/src/stdlib/sdl_scancodes.stasis";
+
+function fullscreen_request_flags(keys: i32[], latched: bool, enabled: bool): i32 {
+    if (keys[SCANCODE.F] != 0) {
+        if (!latched) {
+            if (enabled) {
+                return 1;
+            }
+            return 2;
+        }
+    }
+    return 0;
+}
