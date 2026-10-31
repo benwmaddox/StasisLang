@@ -30,6 +30,28 @@ window, graphics, or audio resource, update that resource through its normal lif
    `stasis check`, and `stasis test`; add fresh runtime validation when observable
    behavior changes.
 
+## Touch and pointer input
+
+- Refresh `HostFrame` once per tick. Select the primary pointer with
+  `primary_pointer_index()` and check for `-1` before indexing `pointers`.
+- On native SDL, treat slot 0 as mouse input that may mirror mobile touch.
+  Slots 1+ are SDL touch-event slots, not guaranteed physical fingers.
+- The current Web host reports only slot 0, which can represent mouse or touch
+  input; it does not publish multi-touch slots.
+- Use `touch_pair(pair_result)` and
+  `pinch(minimum_native_surface_px, pair_result, sample_result)` instead of
+  assuming `pointers[0]` and `pointers[1]` are a pinch pair. Check pair and
+  sample validity, compare both pair IDs across frames, and reset gesture
+  baselines whenever either output is invalid or either ID changes.
+- The pair and sample outputs are caller-owned and rewritten on every call. A
+  pair can be valid while its sample is invalid because it is below the minimum
+  spread; check each `valid` field before reading its other fields.
+- Keep pointer points, midpoint, and logical spread in logical units. Name
+  native surface pixels and drawable backing pixels separately; convert a
+  native-surface touch target or gesture slop with
+  `native_surface_px_to_logical()` (48 native-surface pixels is a starting
+  touch-target size, not a physical-panel guarantee).
+
 For related edits, use `stasis symbol apply --request REQUEST.json`. This v2 example uses
 the `symbol_id` and hash returned by `symbol read tick --kind function --file src/main.stasis`.
 Adapt the full replacement to preserve the existing declaration, including attached comments and

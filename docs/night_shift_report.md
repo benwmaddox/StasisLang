@@ -2008,3 +2008,48 @@ Theory gained: HostFrame keyboard slots are SDL physical scancodes. F is slot 9;
 Good: testkit input reaches the shared production decision through `HostFrame.refresh`. Bad: the native runner cannot resolve the browser render extern through `tick()`. Adjustment: test the key-view decision directly while keeping existing state globals in `main`.
 
 Visual evidence: not applicable; output pixels are unchanged.
+
+## 2026-10-31 - Maddox #864: shared touch helpers
+
+Added shared `primary_pointer_index`, `touch_pair`, `pinch`, and native-surface/drawable
+pixel conversions. The generated display example and new-project checklist explain native SDL
+slot semantics, Web's single slot, SDL's pinned trackpad behavior, iOS indirect-input defaults,
+pair IDs, minimum spread, and invalid-output baseline resets. `touch_pair` is the sole pair
+selection policy; no host ABI or compiler semantics changed.
+
+Validation: the clean baseline at `0ea91d5dcdb5f36923eb53a25f0e921661e187f9` passed the full
+canonical gate in 1,995.797 seconds. The focused generated-knowledge example test and generated
+AGENTS checklist test each passed 1/1. Stasis format check, `cargo fmt --all -- --check`, and
+`git diff --check` passed. The generated Android project copied the helper byte-for-byte from
+the frozen stdlib source and its root AGENTS prefix matched the source guide; project format,
+check, and four tests passed. It built a native x86_64 APK (`com.stasislang.task864input`, API 35)
+and ran on emulator `emulator-5554` using the existing vault-origin debug signing key.
+
+The emulator witness checked a single contact mirrored in mouse slot 0 and touch slot 1: the pair
+was invalid and primary selection returned 0. A second contact 200 ms later produced pair slots
+1 and 2, a valid pinch, stable IDs as spread changed, passing native-unit conversion, and primary
+selection of slot 2 for the new press. Root inspected
+`D:/code/.automation-evidence/nightly-20261031-864-device/task864_touch_mirror_staggered.png`
+and `D:/code/.automation-evidence/nightly-20261031-864-device/task864_touch_pair_pinch_staggered.png`.
+The 10.85-second `task864_touch_witness_final2.mp4` and decoded frames show movement, but its
+success flags were pre-latched: frames 4 and 10 are black and frame 9 is partial. The PNGs are the
+primary state evidence; the video does not independently prove the transition. No physical iOS
+device or physical-phone ergonomics test was performed.
+
+All six source-review personas are GREEN. Final committed implementation validation and
+release/consumer outcomes are recorded in the Maddox #864 commit/PR receipts; the clean baseline
+alone does not qualify the changed tree.
+
+Theory gained: pointer slots identify host event streams, not guaranteed physical fingers. Stable
+pair IDs plus explicit invalid transitions prevent a mirrored mouse event or a replacement contact
+from reusing an old gesture baseline; native-surface distance must be converted using drawable
+width, content scale, and native surface width.
+
+Good: generated examples, generated instructions, and an emulator mirror/pinch witness cover the
+shared contract. Bad: the final video capture has pre-latched success flags and incomplete frames.
+Adjustment: use the inspected PNGs as state proof and treat the MP4 only as motion evidence; rerun
+the canonical full validator on the implementation commit before release or downstream migration.
+
+Visual evidence: inspected the two PNGs listed above for the single-contact invalid pair and the
+two-contact valid pinch. The 10.85-second MP4 was decoded and inspected only for movement; its
+black and partial frames limit it as state evidence.

@@ -896,6 +896,22 @@ fn generated_project_contains_container_geometry_guidance() {
     );
     assert!(agent_guide.starts_with(workflow_guide));
     for rule in [
+        "## Touch and pointer input",
+        "Refresh `HostFrame` once per tick",
+        "`primary_pointer_index()` and check for `-1`",
+        "On native SDL, treat slot 0",
+        "Slots 1+ are SDL",
+        "not guaranteed physical fingers",
+        "The current Web host reports only slot 0",
+        "which can represent mouse or touch",
+        "`touch_pair(pair_result)` and",
+        "`pinch(minimum_native_surface_px, pair_result, sample_result)`",
+        "compare both pair IDs across frames",
+        "baselines whenever either output is invalid",
+        "pair and sample outputs are caller-owned and rewritten on every call",
+        "pair can be valid while its sample is invalid",
+        "`native_surface_px_to_logical()`",
+        "48 native-surface pixels is a starting",
         "## Container-derived UI geometry",
         "real safe/current container",
         "`ui_begin_frame`",

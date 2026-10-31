@@ -11,6 +11,9 @@ global display_frame: HostFrame;
 global button_rect: DisplayRect;
 global button_pressed: bool;
 global button_presentation: PresentationList;
+global primary_pointer_slot: i32;
+global display_touch_pair: TouchPair;
+global display_pinch_sample: PinchSample;
 
 // A 360 x 720 authored page is optionally contained inside the host's safe
 // logical viewport. The result is still a logical-canvas rectangle.
@@ -48,10 +51,14 @@ function on_code_swap(): void {
 function tick(): i32 {
     display_frame.refresh();
     resolve_button();
+    primary_pointer_slot = display_frame.primary_pointer_index();
     button_pressed = false;
-    if (display_frame.pointer_count > 0) {
-        button_pressed = display_frame.pointers[0].went_down && pointer_hits_button(display_frame.pointers[0]);
+    if (primary_pointer_slot >= 0) {
+        button_pressed = display_frame.pointers[primary_pointer_slot].went_down && pointer_hits_button(display_frame.pointers[primary_pointer_slot]);
     }
+    // Use only down touch-event slots 1+ for multi-touch. Slot 0 can mirror a
+    // mobile finger as mouse input; 48 is a native-surface-pixel minimum.
+    display_frame.pinch(48.0, display_touch_pair, display_pinch_sample);
     return 0;
 }
 

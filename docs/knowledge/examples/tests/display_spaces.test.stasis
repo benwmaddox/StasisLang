@@ -7,6 +7,38 @@ function set_safe_viewport(): void {
     display_frame.display.safe_y = 11.0;
     display_frame.display.safe_width = 379.0;
     display_frame.display.safe_height = 700.0;
+    display_frame.display.native_width_px = 400;
+    display_frame.display.native_height_px = 720;
+    display_frame.display.drawable_width_px = 400;
+    display_frame.display.drawable_height_px = 720;
+    display_frame.display.content_scale = 1.0;
+}
+
+function clear_pointers(count: i32): void {
+    display_frame.pointer_count = count;
+    for (let index: i32 = 0; index < 8; index += 1) {
+        display_frame.pointers[index].id = index;
+        display_frame.pointers[index].is_down = false;
+        display_frame.pointers[index].went_down = false;
+        display_frame.pointers[index].went_up = false;
+        display_frame.pointers[index].x_logical = 0.0;
+        display_frame.pointers[index].y_logical = 0.0;
+    }
+}
+
+function set_pointer(index: i32, id: i32, down: bool, went_down: bool, went_up: bool, x: f32, y: f32): void {
+    display_frame.pointers[index].id = id;
+    display_frame.pointers[index].is_down = down;
+    display_frame.pointers[index].went_down = went_down;
+    display_frame.pointers[index].went_up = went_up;
+    display_frame.pointers[index].x_logical = x;
+    display_frame.pointers[index].y_logical = y;
+}
+
+function set_touch_metrics(native_width: i32, drawable_width: i32, content_scale: f32): void {
+    display_frame.display.native_width_px = native_width;
+    display_frame.display.drawable_width_px = drawable_width;
+    display_frame.display.content_scale = content_scale;
 }
 
 test `drawable and density changes preserve logical button geometry`(): bool {
@@ -64,4 +96,182 @@ test `logical pointer hit survives backing changes`(): bool {
     display_frame.display.raster_scale = 3.0;
     resolve_button();
     return initial_hit && pointer_hits_button(display_frame.pointers[0]);
+}
+
+test `primary pointer prefers a new press then held or released input`(): bool {
+    clear_pointers(4);
+    set_pointer(0, 10, true, false, false, 10.0, 10.0);
+    set_pointer(1, 11, true, true, false, 20.0, 20.0);
+    set_pointer(2, 12, true, true, false, 30.0, 30.0);
+    if (display_frame.primary_pointer_index() != 1) {
+        return false;
+    }
+    display_frame.pointers[1].went_down = false;
+    display_frame.pointers[2].went_down = false;
+    if (display_frame.primary_pointer_index() != 0) {
+        return false;
+    }
+    display_frame.pointers[0].is_down = false;
+    display_frame.pointers[1].is_down = false;
+    display_frame.pointers[2].is_down = false;
+    display_frame.pointers[2].went_up = true;
+    if (display_frame.primary_pointer_index() != 2) {
+        return false;
+    }
+    clear_pointers(0);
+    if (display_frame.primary_pointer_index() != -1) {
+        return false;
+    }
+    clear_pointers(4);
+    if (display_frame.primary_pointer_index() != 0) {
+        return false;
+    }
+    display_frame.pointer_count = -4;
+    return display_frame.primary_pointer_index() == -1;
+}
+
+test `one mirrored phone finger is not a touch pair or pinch`(): bool {
+    set_safe_viewport();
+    set_touch_metrics(200, 200, 1.0);
+    clear_pointers(2);
+    // SDL emits the same contact through the virtual mouse and touch streams.
+    set_pointer(0, 0, true, true, false, 100.0, 200.0);
+    set_pointer(1, 1, true, true, false, 100.0, 200.0);
+    display_frame.touch_pair(display_touch_pair);
+    display_frame.pinch(48.0, display_touch_pair, display_pinch_sample);
+    return !display_touch_pair.valid && display_touch_pair.first_index == -1 && display_touch_pair.second_index == -1 && !display_pinch_sample.valid && display_pinch_sample.spread_logical == 0.0;
+}
+
+test `touch pair skips holes and clamps the reported count`(): bool {
+    set_safe_viewport();
+    clear_pointers(99);
+    set_pointer(0, 0, true, false, false, 10.0, 10.0);
+    set_pointer(2, 22, true, false, false, 100.0, 200.0);
+    set_pointer(4, 44, true, false, false, 160.0, 200.0);
+    set_pointer(7, 77, true, false, false, 220.0, 200.0);
+    display_frame.touch_pair(display_touch_pair);
+    if (
+        !display_touch_pair.valid
+        || display_touch_pair.first_index != 2
+        || display_touch_pair.second_index != 4
+        || display_touch_pair.first_id != 22
+        || display_touch_pair.second_id != 44
+    ) {
+        return false;
+    }
+    clear_pointers(99);
+    set_pointer(7, 77, true, false, false, 220.0, 200.0);
+    display_frame.touch_pair(display_touch_pair);
+    if (display_touch_pair.valid || display_touch_pair.first_index != -1 || display_touch_pair.second_index != -1) {
+        return false;
+    }
+    clear_pointers(1);
+    display_touch_pair.valid = true;
+    display_touch_pair.first_index = 4;
+    display_frame.touch_pair(display_touch_pair);
+    return !display_touch_pair.valid && display_touch_pair.first_index == -1 && display_touch_pair.second_index == -1 && display_touch_pair.first_id == -1 && display_touch_pair.second_id == -1;
+}
+
+test `two touch slots measure pinch midpoint and spread`(): bool {
+    set_safe_viewport();
+    set_touch_metrics(200, 200, 1.0);
+    clear_pointers(3);
+    set_pointer(0, 0, true, true, false, 100.0, 200.0);
+    set_pointer(1, 1, true, true, false, 100.0, 200.0);
+    set_pointer(2, 2, true, true, false, 160.0, 200.0);
+    display_frame.pinch(48.0, display_touch_pair, display_pinch_sample);
+    return display_touch_pair.valid && display_touch_pair.first_index == 1 && display_touch_pair.second_index == 2 && display_touch_pair.first_id == 1 && display_touch_pair.second_id == 2 && display_pinch_sample.valid && display_pinch_sample.midpoint_x_logical == 130.0 && display_pinch_sample.midpoint_y_logical == 200.0 && display_pinch_sample.spread_logical == 60.0 && display_pinch_sample.spread_native_surface_px == 60.0;
+}
+
+test `pinch minimum spread accepts equality and rejects zero distance`(): bool {
+    set_safe_viewport();
+    set_touch_metrics(100, 200, 4.0);
+    clear_pointers(3);
+    set_pointer(1, 1, true, false, false, 100.0, 200.0);
+    set_pointer(2, 2, true, false, false, 123.5, 200.0);
+    display_frame.pinch(48.0, display_touch_pair, display_pinch_sample);
+    if (
+        display_pinch_sample.valid
+        || !display_touch_pair.valid
+        || display_pinch_sample.midpoint_x_logical != 0.0
+        || display_pinch_sample.spread_logical != 0.0
+    ) {
+        return false;
+    }
+    display_frame.pointers[2].x_logical = 124.0;
+    display_frame.pinch(48.0, display_touch_pair, display_pinch_sample);
+    if (!display_pinch_sample.valid || display_pinch_sample.spread_logical != 24.0 || display_pinch_sample.spread_native_surface_px != 48.0) {
+        return false;
+    }
+    display_frame.pointers[2].x_logical = 124.5;
+    display_frame.pinch(48.0, display_touch_pair, display_pinch_sample);
+    if (!display_pinch_sample.valid || display_pinch_sample.spread_native_surface_px != 49.0) {
+        return false;
+    }
+    set_touch_metrics(100, 400, 8.0);
+    display_frame.pinch(48.0, display_touch_pair, display_pinch_sample);
+    if (!display_pinch_sample.valid || display_pinch_sample.spread_native_surface_px != 49.0) {
+        return false;
+    }
+    display_frame.pinch(-1.0, display_touch_pair, display_pinch_sample);
+    if (display_pinch_sample.valid || !display_touch_pair.valid || display_pinch_sample.spread_logical != 0.0) {
+        return false;
+    }
+    display_frame.pointers[2].x_logical = 100.0;
+    display_frame.pinch(0.0, display_touch_pair, display_pinch_sample);
+    return !display_pinch_sample.valid && display_touch_pair.valid && display_pinch_sample.midpoint_x_logical == 0.0 && display_pinch_sample.spread_logical == 0.0;
+}
+
+test `native and drawable pixel conversions keep separate units`(): bool {
+    set_safe_viewport();
+    set_touch_metrics(1280, 2560, 4.0);
+    let native_logical: f32 = display_frame.display.native_surface_px_to_logical(48.0);
+    let drawable_logical: f32 = display_frame.display.drawable_px_to_logical(48.0);
+    set_touch_metrics(1280, 5120, 8.0);
+    let denser_native_logical: f32 = display_frame.display.native_surface_px_to_logical(48.0);
+    display_frame.display.logical_width = 0.0;
+    display_frame.display.logical_height = 0.0;
+    let native_without_logical_extent: f32 = display_frame.display.native_surface_px_to_logical(48.0);
+    set_touch_metrics(0, 0, 4.0);
+    let drawable_without_surface_extent: f32 = display_frame.display.drawable_px_to_logical(48.0);
+    set_touch_metrics(1280, 0, 4.0);
+    let native_without_drawable_width: f32 = display_frame.display.native_surface_px_to_logical(48.0);
+    let drawable_without_drawable_width: f32 = display_frame.display.drawable_px_to_logical(48.0);
+    set_touch_metrics(1280, 2560, 0.0);
+    let native_without_content_scale: f32 = display_frame.display.native_surface_px_to_logical(48.0);
+    let drawable_without_content_scale: f32 = display_frame.display.drawable_px_to_logical(48.0);
+    return native_logical == 24.0 && drawable_logical == 12.0 && denser_native_logical == native_logical && native_without_logical_extent == native_logical && drawable_without_surface_extent == 12.0 && native_without_drawable_width == 0.0 && drawable_without_drawable_width == 12.0 && native_without_content_scale == 0.0 && drawable_without_content_scale == 0.0 && display_frame.display.native_surface_px_to_logical(
+        48.0
+    ) == 0.0;
+}
+
+test `pinch clears previous values after touch loss or invalid metrics`(): bool {
+    set_safe_viewport();
+    set_touch_metrics(200, 200, 1.0);
+    clear_pointers(3);
+    set_pointer(1, 1, true, true, false, 100.0, 200.0);
+    set_pointer(2, 2, true, true, false, 160.0, 200.0);
+    display_frame.pinch(48.0, display_touch_pair, display_pinch_sample);
+    if (!display_pinch_sample.valid) {
+        return false;
+    }
+    clear_pointers(2);
+    set_pointer(1, 1, true, false, false, 100.0, 200.0);
+    display_frame.pinch(48.0, display_touch_pair, display_pinch_sample);
+    if (
+        display_pinch_sample.valid
+        || display_touch_pair.valid
+        || display_pinch_sample.midpoint_x_logical != 0.0
+        || display_pinch_sample.spread_logical != 0.0
+    ) {
+        return false;
+    }
+    clear_pointers(3);
+    set_pointer(1, 1, true, false, false, 100.0, 200.0);
+    set_pointer(2, 2, true, false, false, 160.0, 200.0);
+    set_touch_metrics(0, 200, 1.0);
+    display_frame.pinch(48.0, display_touch_pair, display_pinch_sample);
+    return !display_pinch_sample.valid && display_touch_pair.valid && display_pinch_sample.midpoint_x_logical == 0.0 && display_pinch_sample.spread_native_surface_px == 0.0 && display_frame.display.native_surface_px_to_logical(
+        48.0
+    ) == 0.0;
 }

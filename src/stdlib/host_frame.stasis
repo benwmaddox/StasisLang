@@ -1,5 +1,9 @@
 import "internal/host_frame_raw.stasis";
 
+// A host pointer record in logical-canvas coordinates. On native SDL hosts,
+// slot 0 carries mouse input and slots 1+ carry touch events; mobile SDL may
+// also mirror touch as mouse input in slot 0. Web publishes only slot 0, which
+// can represent mouse or touch. IDs identify host slots, not physical fingers.
 struct HostPointerFrame {
     id: i32;
     is_down: bool;

@@ -9,6 +9,7 @@
 // The remaining `extern` functions are intended for startup/asset loading (not per-tick).
 
 import "host_frame.stasis";
+import "ui_pointer.stasis";
 import "internal/gfx_cmd.stasis";
 import "internal/host_window_request.stasis";
 import "asset_tasks.stasis";
