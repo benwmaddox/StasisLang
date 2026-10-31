@@ -2008,3 +2008,63 @@ Theory gained: HostFrame keyboard slots are SDL physical scancodes. F is slot 9;
 Good: testkit input reaches the shared production decision through `HostFrame.refresh`. Bad: the native runner cannot resolve the browser render extern through `tick()`. Adjustment: test the key-view decision directly while keeping existing state globals in `main`.
 
 Visual evidence: not applicable; output pixels are unchanged.
+
+## 2026-10-31 - Maddox #864: shared touch helpers
+
+Added shared `primary_pointer_index`, `touch_pair`, `pinch`, and native-surface/drawable
+pixel conversions. The generated display example and new-project checklist explain native SDL
+slot semantics, Web's single slot, SDL's pinned trackpad behavior, iOS indirect-input defaults,
+pair IDs, minimum spread, and invalid-output baseline resets. `touch_pair` is the sole pair
+selection policy; no host ABI or compiler semantics changed.
+
+The first changed-tree AOT gate exposed that importing the helper from the compiler-owned
+`graphics.stasis` made older embedded graphics copies fail its exact-source ownership guard.
+`ui_pointer.stasis` remains a separate explicit import, keeping the graphics implementation
+byte-identical while leaving the pointer API available to projects that request it.
+
+Validation: the focused Android Pong and iOS AOT bundle regressions, generated knowledge example,
+and generated AGENTS checklist each passed 1/1. `cargo fmt --all -- --check` and `git diff --check`
+passed. The generated Android project copied the helper byte-for-byte from the frozen stdlib
+source and its root AGENTS prefix matched the source guide; project `fmt --check`, `check`, and
+four tests passed. A native x86_64 APK (`com.stasislang.task864input`, API 35) ran on emulator
+`emulator-5554` with the existing vault-origin debug signing key.
+
+The final witness showed one contact mirrored in mouse slot 0 and touch slot 1, with no valid pair
+and primary selection 0. A second contact 200 ms later produced a valid slots 1 and 2 pair and
+pinch; IDs stayed stable as separation changed from 120 to 180 native surface pixels, conversion
+passed, and the new press selected primary slot 2. The 10.672-second current13 video starts with
+fresh waiting flags and shows the initial screen, single-contact movement, mirror state, two live
+contacts, and completed pinch. Root inspected decoded frames 01, 02, 03, 05, and 07 individually.
+Frames 03/04 and 06-11 are repeated, fully rendered states; the earlier black/partial appearance
+was a multi-image preview artifact. The older final2 clip did begin with success panels latched,
+so it does not independently prove the full transition. No physical iOS device or physical-phone
+ergonomics test was performed.
+
+The canonical full validator passed on clean source commit `13db4e3e30eb5154b53c6303600e2a5eec6866b1`:
+`C:\Program Files\Git\bin\bash.exe tools/validate_repo.sh` exited 0 at 2026-10-31T08:34:27Z in
+2,224.640 seconds. All four shards passed with `timed_out=false`: workspace-core 671.141s,
+stasis-integrations 432.359s, windows-game-launch 550.344s, and other-integrations 191.015s. The
+receipt is `D:/code/.automation-evidence/nightly-20261031-864-final/validation-runs/final-gate-13db-20261031T075723Z-b71be96e/validation-run.json`;
+the full log is `D:/code/.automation-evidence/nightly-20261031-864-final/validation-runs/final-gate-13db-20261031T075723Z-b71be96e/validate_repo.log`.
+
+All six source-review personas are GREEN. The upstream helper implementation is validated; Maddox
+#864 still requires the helper-bearing official Stasis release and the Gerbal Tower and Maddox
+Marble Run consumer migrations.
+
+Theory gained: pointer slots identify host event streams, not guaranteed physical fingers. Stable
+pair IDs plus explicit invalid transitions prevent a mirrored mouse event or a replacement contact
+from reusing an old gesture baseline; native-surface distance must be converted using drawable
+width, content scale, and native surface width.
+
+Good: shared helpers, generated guidance, focused AOT regressions, and the emulator witness cover
+the slot-selection and pinch contracts. Bad: the old final2 recording began with success panels
+already latched, so it could not establish the full transition. Adjustment: use the fresh current13
+recording and individually inspected, hash-verified frames; do not carry the preview artifact's
+black/partial interpretation into the evidence.
+
+Visual evidence: inspected
+`D:/code/.automation-evidence/nightly-20261031-864-device/task864_touch_mirror_current13.png`,
+`D:/code/.automation-evidence/nightly-20261031-864-device/task864_touch_pair_pinch_current13.png`,
+and decoded frames from
+`D:/code/.automation-evidence/nightly-20261031-864-device/task864_touch_witness_current13_final.mp4`.
+The individual frames show the mirror/no-pair case, the two-contact pinch, and the completed state.

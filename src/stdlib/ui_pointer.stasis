@@ -1,0 +1,153 @@
+import "host_frame.stasis";
+import "math.stasis";
+
+// Caller-owned result for the first two active SDL touch-event slots.
+struct TouchPair {
+    valid: bool;
+    first_index: i32;
+    second_index: i32;
+    first_id: i32;
+    second_id: i32;
+}
+
+// A valid pinch has a distinct down pair and a spread at or above its native
+// surface-pixel minimum. Pair identity stays in the separate TouchPair output.
+// Distances and midpoint coordinates are logical except spread_native_surface_px.
+struct PinchSample {
+    valid: bool;
+    midpoint_x_logical: f32;
+    midpoint_y_logical: f32;
+    spread_logical: f32;
+    spread_native_surface_px: f32;
+}
+
+function @internal @effects() pointer_frame_count(self: HostFrame): i32 {
+    let count: i32 = self.pointer_count;
+    if (count < 0) {
+        return 0;
+    }
+    if (count > 8) {
+        return 8;
+    }
+    return count;
+}
+
+function @internal clear_touch_pair(result: TouchPair): void {
+    result.valid = false;
+    result.first_index = -1;
+    result.second_index = -1;
+    result.first_id = -1;
+    result.second_id = -1;
+}
+
+function @internal clear_pinch_sample(result: PinchSample): void {
+    result.valid = false;
+    result.midpoint_x_logical = 0.0;
+    result.midpoint_y_logical = 0.0;
+    result.spread_logical = 0.0;
+    result.spread_native_surface_px = 0.0;
+}
+
+// The native window/surface uses native surface units; drawable pixels name
+// the renderer backing. Invalid metrics have a deterministic zero conversion.
+function @internal @effects() logical_per_native_surface_pixel(native_width_px: i32, drawable_width_px: i32, content_scale: f32): f32 {
+    if (!(native_width_px > 0 && drawable_width_px > 0 && content_scale > 0.0)) {
+        return 0.0;
+    }
+    return i32_to_f32(drawable_width_px) /(content_scale * i32_to_f32(native_width_px));
+}
+
+function @effects() native_surface_px_to_logical(self: HostDisplayFrame, native_surface_px: f32): f32 {
+    return native_surface_px * logical_per_native_surface_pixel(self.native_width_px, self.drawable_width_px, self.content_scale);
+}
+
+function @effects() drawable_px_to_logical(self: HostDisplayFrame, drawable_px: f32): f32 {
+    if (!(self.content_scale > 0.0)) {
+        return 0.0;
+    }
+    return drawable_px / self.content_scale;
+}
+
+// Prefer a new press, then the first held or just-released slot, then slot 0
+// if the host reported any pointers. An empty frame returns -1.
+function @effects() primary_pointer_index(self: HostFrame): i32 {
+    let count: i32 = pointer_frame_count(self);
+    for (let index: i32 = 0; index < count; index += 1) {
+        if (self.pointers[index].went_down) {
+            return index;
+        }
+    }
+    for (let index: i32 = 0; index < count; index += 1) {
+        if (self.pointers[index].is_down || self.pointers[index].went_up) {
+            return index;
+        }
+    }
+    if (count > 0) {
+        return 0;
+    }
+    return -1;
+}
+
+// Fills caller-owned storage with the first two down touch-event slots. Slot
+// 0 is omitted because SDL can mirror a mobile touch as a mouse event there.
+// These are SDL touch slots, not a guarantee of two physical fingers.
+function touch_pair(self: HostFrame, result: TouchPair): void {
+    clear_touch_pair(result);
+    let count: i32 = pointer_frame_count(self);
+    let first_index: i32 = -1;
+    for (let index: i32 = 1; index < count; index += 1) {
+        if (self.pointers[index].is_down) {
+            if (first_index < 0) {
+                first_index = index;
+            } else {
+                result.valid = true;
+                result.first_index = first_index;
+                result.second_index = index;
+                result.first_id = self.pointers[first_index].id;
+                result.second_id = self.pointers[index].id;
+                return;
+            }
+        }
+    }
+}
+
+// Measures the current touch pair. A spread exactly equal to the minimum is
+// valid; a zero spread is always invalid. Invalid input clears every result
+// field so callers cannot accidentally reuse a previous pinch sample. The
+// separate pair output always describes the current frame, even below threshold.
+function pinch(self: HostFrame, minimum_native_surface_px: f32, pair_result: TouchPair, result: PinchSample): void {
+    clear_pinch_sample(result);
+    self.touch_pair(pair_result);
+    if (!(minimum_native_surface_px >= 0.0)) {
+        return;
+    }
+    if (!pair_result.valid) {
+        return;
+    }
+
+    let logical_per_native_px: f32 = logical_per_native_surface_pixel(
+        self.display.native_width_px,
+        self.display.drawable_width_px,
+        self.display.content_scale
+    );
+    if (logical_per_native_px <= 0.0) {
+        clear_pinch_sample(result);
+        return;
+    }
+
+    let first: i32 = pair_result.first_index;
+    let second: i32 = pair_result.second_index;
+    let dx: f32 = self.pointers[second].x_logical - self.pointers[first].x_logical;
+    let dy: f32 = self.pointers[second].y_logical - self.pointers[first].y_logical;
+    let spread: f32 = math_sqrt(dx * dx + dy * dy);
+    if (!(spread > 0.0) || spread < minimum_native_surface_px * logical_per_native_px) {
+        clear_pinch_sample(result);
+        return;
+    }
+
+    result.valid = true;
+    result.midpoint_x_logical =(self.pointers[first].x_logical + self.pointers[second].x_logical) * 0.5;
+    result.midpoint_y_logical =(self.pointers[first].y_logical + self.pointers[second].y_logical) * 0.5;
+    result.spread_logical = spread;
+    result.spread_native_surface_px = spread / logical_per_native_px;
+}
