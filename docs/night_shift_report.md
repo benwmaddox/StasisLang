@@ -2017,6 +2017,11 @@ slot semantics, Web's single slot, SDL's pinned trackpad behavior, iOS indirect-
 pair IDs, minimum spread, and invalid-output baseline resets. `touch_pair` is the sole pair
 selection policy; no host ABI or compiler semantics changed.
 
+The first changed-tree AOT gate exposed that importing the helper from the compiler-owned
+`graphics.stasis` made older embedded graphics copies fail its exact-source ownership guard.
+`ui_pointer.stasis` remains a separate explicit import, keeping the graphics implementation
+byte-identical while leaving the pointer API available to projects that request it.
+
 Validation: the clean baseline at `0ea91d5dcdb5f36923eb53a25f0e921661e187f9` passed the full
 canonical gate in 1,995.797 seconds. The focused generated-knowledge example test and generated
 AGENTS checklist test each passed 1/1. Stasis format check, `cargo fmt --all -- --check`, and

@@ -897,6 +897,7 @@ fn generated_project_contains_container_geometry_guidance() {
     assert!(agent_guide.starts_with(workflow_guide));
     for rule in [
         "## Touch and pointer input",
+        "Import `/vendor/stasis/stdlib/ui_pointer.stasis` directly",
         "Refresh `HostFrame` once per tick",
         "`primary_pointer_index()` and check for `-1`",
         "On native SDL, treat slot 0",

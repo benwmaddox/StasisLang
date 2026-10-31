@@ -32,6 +32,8 @@ window, graphics, or audio resource, update that resource through its normal lif
 
 ## Touch and pointer input
 
+- Import `/vendor/stasis/stdlib/ui_pointer.stasis` directly in source that uses
+  the pointer helpers; do not rely on importing `graphics.stasis` to load them.
 - Refresh `HostFrame` once per tick. Select the primary pointer with
   `primary_pointer_index()` and check for `-1` before indexing `pointers`.
 - On native SDL, treat slot 0 as mouse input that may mirror mobile touch.

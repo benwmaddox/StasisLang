@@ -8,6 +8,11 @@ and uses the same f32 rectangle in its public presentation command and pointer h
 [tests](examples/tests/display_spaces.test.stasis) exercise density changes
 and a fractional safe-area fit.
 
+The example imports `/vendor/stasis/stdlib/graphics.stasis` for drawing and
+host types, and imports `/vendor/stasis/stdlib/ui_pointer.stasis` directly for
+pointer helpers. Keep this helper module an explicit import wherever its API is
+used.
+
 ## Space and transform owners
 
 | Space | Units and purpose | Transform owner |
