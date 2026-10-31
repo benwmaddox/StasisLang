@@ -2022,39 +2022,49 @@ The first changed-tree AOT gate exposed that importing the helper from the compi
 `ui_pointer.stasis` remains a separate explicit import, keeping the graphics implementation
 byte-identical while leaving the pointer API available to projects that request it.
 
-Validation: the clean baseline at `0ea91d5dcdb5f36923eb53a25f0e921661e187f9` passed the full
-canonical gate in 1,995.797 seconds. The focused generated-knowledge example test and generated
-AGENTS checklist test each passed 1/1. Stasis format check, `cargo fmt --all -- --check`, and
-`git diff --check` passed. The generated Android project copied the helper byte-for-byte from
-the frozen stdlib source and its root AGENTS prefix matched the source guide; project format,
-check, and four tests passed. It built a native x86_64 APK (`com.stasislang.task864input`, API 35)
-and ran on emulator `emulator-5554` using the existing vault-origin debug signing key.
+Validation: the focused Android Pong and iOS AOT bundle regressions, generated knowledge example,
+and generated AGENTS checklist each passed 1/1. `cargo fmt --all -- --check` and `git diff --check`
+passed. The generated Android project copied the helper byte-for-byte from the frozen stdlib
+source and its root AGENTS prefix matched the source guide; project `fmt --check`, `check`, and
+four tests passed. A native x86_64 APK (`com.stasislang.task864input`, API 35) ran on emulator
+`emulator-5554` with the existing vault-origin debug signing key.
 
-The emulator witness checked a single contact mirrored in mouse slot 0 and touch slot 1: the pair
-was invalid and primary selection returned 0. A second contact 200 ms later produced pair slots
-1 and 2, a valid pinch, stable IDs as spread changed, passing native-unit conversion, and primary
-selection of slot 2 for the new press. Root inspected
-`D:/code/.automation-evidence/nightly-20261031-864-device/task864_touch_mirror_staggered.png`
-and `D:/code/.automation-evidence/nightly-20261031-864-device/task864_touch_pair_pinch_staggered.png`.
-The 10.85-second `task864_touch_witness_final2.mp4` and decoded frames show movement, but its
-success flags were pre-latched: frames 4 and 10 are black and frame 9 is partial. The PNGs are the
-primary state evidence; the video does not independently prove the transition. No physical iOS
-device or physical-phone ergonomics test was performed.
+The final witness showed one contact mirrored in mouse slot 0 and touch slot 1, with no valid pair
+and primary selection 0. A second contact 200 ms later produced a valid slots 1 and 2 pair and
+pinch; IDs stayed stable as separation changed from 120 to 180 native surface pixels, conversion
+passed, and the new press selected primary slot 2. The 10.672-second current13 video starts with
+fresh waiting flags and shows the initial screen, single-contact movement, mirror state, two live
+contacts, and completed pinch. Root inspected decoded frames 01, 02, 03, 05, and 07 individually.
+Frames 03/04 and 06-11 are repeated, fully rendered states; the earlier black/partial appearance
+was a multi-image preview artifact. The older final2 clip did begin with success panels latched,
+so it does not independently prove the full transition. No physical iOS device or physical-phone
+ergonomics test was performed.
 
-All six source-review personas are GREEN. Final committed implementation validation and
-release/consumer outcomes are recorded in the Maddox #864 commit/PR receipts; the clean baseline
-alone does not qualify the changed tree.
+The canonical full validator passed on clean source commit `13db4e3e30eb5154b53c6303600e2a5eec6866b1`:
+`C:\Program Files\Git\bin\bash.exe tools/validate_repo.sh` exited 0 at 2026-10-31T08:34:27Z in
+2,224.640 seconds. All four shards passed with `timed_out=false`: workspace-core 671.141s,
+stasis-integrations 432.359s, windows-game-launch 550.344s, and other-integrations 191.015s. The
+receipt is `D:/code/.automation-evidence/nightly-20261031-864-final/validation-runs/final-gate-13db-20261031T075723Z-b71be96e/validation-run.json`;
+the full log is `D:/code/.automation-evidence/nightly-20261031-864-final/validation-runs/final-gate-13db-20261031T075723Z-b71be96e/validate_repo.log`.
+
+All six source-review personas are GREEN. The upstream helper implementation is validated; Maddox
+#864 still requires the helper-bearing official Stasis release and the Gerbal Tower and Maddox
+Marble Run consumer migrations.
 
 Theory gained: pointer slots identify host event streams, not guaranteed physical fingers. Stable
 pair IDs plus explicit invalid transitions prevent a mirrored mouse event or a replacement contact
 from reusing an old gesture baseline; native-surface distance must be converted using drawable
 width, content scale, and native surface width.
 
-Good: generated examples, generated instructions, and an emulator mirror/pinch witness cover the
-shared contract. Bad: the final video capture has pre-latched success flags and incomplete frames.
-Adjustment: use the inspected PNGs as state proof and treat the MP4 only as motion evidence; rerun
-the canonical full validator on the implementation commit before release or downstream migration.
+Good: shared helpers, generated guidance, focused AOT regressions, and the emulator witness cover
+the slot-selection and pinch contracts. Bad: the old final2 recording began with success panels
+already latched, so it could not establish the full transition. Adjustment: use the fresh current13
+recording and individually inspected, hash-verified frames; do not carry the preview artifact's
+black/partial interpretation into the evidence.
 
-Visual evidence: inspected the two PNGs listed above for the single-contact invalid pair and the
-two-contact valid pinch. The 10.85-second MP4 was decoded and inspected only for movement; its
-black and partial frames limit it as state evidence.
+Visual evidence: inspected
+`D:/code/.automation-evidence/nightly-20261031-864-device/task864_touch_mirror_current13.png`,
+`D:/code/.automation-evidence/nightly-20261031-864-device/task864_touch_pair_pinch_current13.png`,
+and decoded frames from
+`D:/code/.automation-evidence/nightly-20261031-864-device/task864_touch_witness_current13_final.mp4`.
+The individual frames show the mirror/no-pair case, the two-contact pinch, and the completed state.
